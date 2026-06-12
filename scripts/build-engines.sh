@@ -32,6 +32,9 @@ CMAKE_FLAGS=(
     -DGGML_METAL_EMBED_LIBRARY=ON
     -DGGML_NATIVE=OFF
     -DCMAKE_OSX_ARCHITECTURES="$ARCH"
+    # The server binds to localhost only; skip OpenSSL so static cross-builds
+    # don't pick up host-arch Homebrew libraries on CI runners.
+    -DLLAMA_OPENSSL=OFF
 )
 
 cmake -B build-static "${CMAKE_FLAGS[@]}"
