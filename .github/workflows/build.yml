@@ -1,0 +1,82 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ToshLLM (x86_64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: vendor/llama.cpp
+          key: llama-${{ hashFiles('patches/*.patch', 'scripts/build-engines.sh') }}
+
+      - name: Run unit tests
+        run: swift test
+
+      - name: Build inference engines (x86_64)
+        run: ARCH=x86_64 ./scripts/build-engines.sh
+
+      - name: Build app (x86_64)
+        run: TOSH_ARCH=x86_64 ./make-app.sh
+
+      # Optional Developer ID signing + notarization. Runs only when the
+      # repository secrets are configured; otherwise releases stay ad-hoc
+      # signed and users must approve the app once in System Settings.
+      - name: Sign and notarize (if secrets configured)
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "No signing secrets — keeping ad-hoc signature"
+            exit 0
+          fi
+          echo "$CERT_P12" | base64 -d > /tmp/cert.p12
+          security create-keychain -p ci tosh.keychain
+          security default-keychain -s tosh.keychain
+          security unlock-keychain -p ci tosh.keychain
+          security import /tmp/cert.p12 -k tosh.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci tosh.keychain
+          IDENTITY=$(security find-identity -v -p codesigning tosh.keychain | grep -oE '"Developer ID Application:[^"]+"' | head -1 | tr -d '"')
+          codesign --force --options runtime --deep -s "$IDENTITY" dist/ToshLLM.app
+          ditto -c -k --keepParent dist/ToshLLM.app /tmp/ToshLLM.zip
+          xcrun notarytool submit /tmp/ToshLLM.zip \
+            --apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_PASSWORD" --wait
+          xcrun stapler staple dist/ToshLLM.app
+
+      - name: Package DMG
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          [[ "$VERSION" == v* ]] || VERSION="dev-${GITHUB_SHA::7}"
+          ./scripts/make-dmg.sh "$VERSION"
+          echo "DMG=$(ls dist/*.dmg)" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ToshLLM-dmg
+          path: dist/*.dmg
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true

@@ -1,0 +1,85 @@
+name: Bump inference engines
+
+# Weekly: bumps the pinned llama.cpp commit, verifies the AMD patches still
+# apply, builds, runs a real inference smoke test, and opens a PR if everything
+# passes. Nothing merges without human review.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve latest llama.cpp commit
+        id: upstream
+        run: |
+          SHA=$(git ls-remote https://github.com/ggml-org/llama.cpp HEAD | cut -c1-7)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          CURRENT=$(grep -oE 'LLAMA_COMMIT:-[a-f0-9]+' scripts/build-engines.sh | cut -d- -f2)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+      - name: Stop if already up to date
+        if: steps.upstream.outputs.sha == steps.upstream.outputs.current
+        run: echo "Already up to date" && exit 0
+
+      - name: Pin new commit
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
+        run: |
+          sed -i '' "s/LLAMA_COMMIT:-[a-f0-9]*/LLAMA_COMMIT:-${{ steps.upstream.outputs.sha }}/" scripts/build-engines.sh
+
+      - name: Build engines with patches (native arch, for smoke test)
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
+        run: ./scripts/build-engines.sh
+
+      - name: Smoke test — real inference on CPU
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
+        run: |
+          BIN=vendor/llama.cpp/build-static/bin/llama-server
+          "$BIN" --version
+          # small model to validate load + end-to-end generation
+          curl -sL -o /tmp/tiny.gguf \
+            "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+          "$BIN" -m /tmp/tiny.gguf -ngl 0 -c 512 --port 8088 --host 127.0.0.1 &
+          SERVER=$!
+          for i in $(seq 1 60); do
+            curl -s http://127.0.0.1:8088/health | grep -q ok && break
+            sleep 2
+          done
+          RESPONSE=$(curl -s http://127.0.0.1:8088/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{"messages":[{"role":"user","content":"Say OK"}],"max_tokens":20}')
+          kill $SERVER || true
+          echo "$RESPONSE" | grep -q '"content"' || { echo "smoke test FAILED"; exit 1; }
+          echo "smoke test OK"
+
+      - name: Run app unit tests
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
+        run: swift test
+
+      - name: Open pull request
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: bump/llama-cpp
+          title: "Bump llama.cpp to ${{ steps.upstream.outputs.sha }}"
+          commit-message: "Bump pinned llama.cpp commit to ${{ steps.upstream.outputs.sha }}"
+          body: |
+            Automated inference engine update.
+
+            - AMD patches: apply cleanly ✅
+            - Static build: OK ✅
+            - Smoke test (model load + real inference): OK ✅
+            - Unit tests: OK ✅
+
+            Review and merge manually.
+          add-paths: scripts/build-engines.sh

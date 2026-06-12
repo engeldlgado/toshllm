@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qwen3 · RX 6700 XT</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #e8556d; --accent2: #58a6ff;
+    --user-bubble: #1f2937; --ai-bubble: #161b22;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 18px; background: var(--panel);
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  header .badge {
+    font-size: 11px; padding: 2px 9px; border-radius: 999px;
+    background: rgba(232,85,109,.15); color: var(--accent);
+    border: 1px solid rgba(232,85,109,.4);
+  }
+  #model-name { color: var(--accent2); font-size: 12px; }
+  header .spacer { flex: 1; }
+  #stats { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 20px;
+    display: flex; flex-direction: column; gap: 14px;
+    max-width: 900px; width: 100%; margin: 0 auto;
+  }
+  .msg { display: flex; flex-direction: column; max-width: 85%; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.ai   { align-self: flex-start; align-items: flex-start; }
+  .msg .who { font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+  .msg .bubble {
+    padding: 10px 14px; border-radius: 12px; white-space: pre-wrap;
+    word-wrap: break-word; border: 1px solid var(--border);
+  }
+  .msg.user .bubble { background: var(--user-bubble); border-bottom-right-radius: 4px; }
+  .msg.ai   .bubble { background: var(--ai-bubble);  border-bottom-left-radius: 4px; }
+  .bubble code {
+    background: #21262d; padding: 1px 5px; border-radius: 4px;
+    font: 13px ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .bubble pre {
+    background: #21262d; padding: 10px 12px; border-radius: 8px;
+    overflow-x: auto; margin: 6px 0; white-space: pre;
+  }
+  .bubble pre code { background: none; padding: 0; }
+  details.think {
+    margin-bottom: 8px; font-size: 13px; color: var(--dim);
+    border-left: 3px solid var(--border); padding-left: 10px;
+  }
+  details.think summary { cursor: pointer; user-select: none; color: var(--accent2); }
+  .cursor::after { content: "▋"; animation: blink 1s infinite; color: var(--accent); }
+  @keyframes blink { 50% { opacity: 0; } }
+  footer {
+    background: var(--panel); border-top: 1px solid var(--border);
+    padding: 12px 18px;
+  }
+  .controls {
+    display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+    max-width: 900px; margin: 0 auto 10px;
+    font-size: 12px; color: var(--dim);
+  }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls input[type=range] { width: 90px; accent-color: var(--accent); }
+  .controls input[type=number] {
+    width: 70px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px;
+  }
+  .controls button {
+    background: none; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 12px;
+  }
+  .controls button:hover { color: var(--text); border-color: var(--dim); }
+  .input-row { display: flex; gap: 10px; max-width: 900px; margin: 0 auto; }
+  #prompt {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 11px 14px; font: inherit; resize: none; min-height: 46px; max-height: 160px;
+  }
+  #prompt:focus { outline: none; border-color: var(--accent2); }
+  #send {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px;
+    padding: 0 22px; font: 600 14px inherit; cursor: pointer;
+  }
+  #send:disabled { opacity: .45; cursor: not-allowed; }
+  #send.stop { background: #6e2630; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Qwen3 local</h1>
+  <span class="badge">RX 6700 XT · Metal</span>
+  <span id="model-name">conectando…</span>
+  <span class="spacer"></span>
+  <span id="stats"></span>
+</header>
+
+<div id="chat"></div>
+
+<footer>
+  <div class="controls">
+    <label>Temp <input type="range" id="temp" min="0" max="1.5" step="0.05" value="0.7">
+      <span id="temp-val">0.7</span></label>
+    <label>Máx. tokens <input type="number" id="max-tokens" value="1024" min="16" step="64"></label>
+    <button id="clear">Limpiar chat</button>
+  </div>
+  <div class="input-row">
+    <textarea id="prompt" placeholder="Escribe tu mensaje… (Enter envía, Shift+Enter salto de línea)"></textarea>
+    <button id="send">Enviar</button>
+  </div>
+</footer>
+
+<script>
+const chatEl   = document.getElementById("chat");
+const promptEl = document.getElementById("prompt");
+const sendBtn  = document.getElementById("send");
+const statsEl  = document.getElementById("stats");
+const tempEl   = document.getElementById("temp");
+
+let messages = [];
+let aborter  = null;
+
+tempEl.oninput = () => document.getElementById("temp-val").textContent = tempEl.value;
+
+document.getElementById("clear").onclick = () => {
+  messages = []; chatEl.innerHTML = ""; statsEl.textContent = "";
+};
+
+fetch("/v1/models").then(r => r.json()).then(d => {
+  const id = d.data?.[0]?.id || "modelo desconocido";
+  document.getElementById("model-name").textContent = id.split("/").pop();
+}).catch(() => {
+  document.getElementById("model-name").textContent = "servidor no disponible";
+});
+
+// Render minimalista: separa <think>, escapa HTML y aplica negritas/código
+function render(el, raw, streaming) {
+  let think = null, body = raw;
+  const m = raw.match(/^<think>([\s\S]*?)(<\/think>|$)/);
+  if (m) { think = m[1].trim(); body = raw.slice(m[0].length); }
+
+  const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const md  = s => esc(s)
+    .replace(/```(\w*)\n([\s\S]*?)(```|$)/g, (_,l,c) => `<pre><code>${c}</code></pre>`)
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+
+  let html = "";
+  if (think) {
+    const open = streaming && !raw.includes("</think>") ? " open" : "";
+    html += `<details class="think"${open}><summary>Razonamiento</summary>${esc(think)}</details>`;
+  }
+  html += md(body.replace(/^\s+/, ""));
+  el.innerHTML = html + (streaming ? '<span class="cursor"></span>' : "");
+}
+
+function addMsg(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + (role === "user" ? "user" : "ai");
+  div.innerHTML = `<div class="who">${role === "user" ? "Tú" : "Qwen3"}</div><div class="bubble"></div>`;
+  const bubble = div.querySelector(".bubble");
+  if (text !== undefined) bubble.textContent = text;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  return bubble;
+}
+
+async function send() {
+  if (aborter) { aborter.abort(); return; }
+  const text = promptEl.value.trim();
+  if (!text) return;
+
+  promptEl.value = "";
+  addMsg("user", text);
+  messages.push({ role: "user", content: text });
+
+  const bubble = addMsg("ai");
+  bubble.innerHTML = '<span class="cursor"></span>';
+
+  sendBtn.textContent = "Detener";
+  sendBtn.classList.add("stop");
+  aborter = new AbortController();
+
+  let full = "", nTokens = 0;
+  const t0 = performance.now();
+  let tFirst = null;
+
+  try {
+    const res = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: aborter.signal,
+      body: JSON.stringify({
+        messages,
+        stream: true,
+        temperature: parseFloat(tempEl.value),
+        max_tokens: parseInt(document.getElementById("max-tokens").value, 10),
+      }),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") continue;
+        const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
+        if (!delta) continue;
+        if (tFirst === null) tFirst = performance.now();
+        full += delta; nTokens++;
+        render(bubble, full, true);
+        const dt = (performance.now() - tFirst) / 1000;
+        if (dt > 0.3) statsEl.textContent =
+          `${nTokens} tokens · ${(nTokens / dt).toFixed(1)} t/s · primera resp. ${((tFirst - t0) / 1000).toFixed(2)}s`;
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") full += `\n\n[Error: ${e.message} — ¿está corriendo llama-server?]`;
+  }
+
+  render(bubble, full, false);
+  // No guardar el razonamiento en el historial: ahorra contexto
+  messages.push({ role: "assistant", content: full.replace(/^<think>[\s\S]*?<\/think>\s*/, "") });
+  aborter = null;
+  sendBtn.textContent = "Enviar";
+  sendBtn.classList.remove("stop");
+  promptEl.focus();
+}
+
+sendBtn.onclick = send;
+promptEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+promptEl.focus();
+</script>
+</body>
+</html>
