@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Cache llama.cpp build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: vendor/llama.cpp
           key: llama-${{ hashFiles('patches/*.patch', 'scripts/build-engines.sh') }}
@@ -78,7 +78,7 @@ jobs:
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.dmg
           generate_release_notes: true

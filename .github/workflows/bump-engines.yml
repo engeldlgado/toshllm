@@ -68,7 +68,7 @@ jobs:
 
       - name: Open pull request
         if: steps.upstream.outputs.sha != steps.upstream.outputs.current
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           branch: bump/llama-cpp
           title: "Bump llama.cpp to ${{ steps.upstream.outputs.sha }}"

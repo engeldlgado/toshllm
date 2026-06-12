@@ -1,0 +1,36 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. 14.5 / 26.5"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and VRAM
+      placeholder: "e.g. RX 6700 XT 12 GB"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and quantization
+      placeholder: "e.g. Qwen3.6-35B-A3B UD-Q4_K_S"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Server log
+      description: Settings → Server log (paste the relevant part)
+      render: text
