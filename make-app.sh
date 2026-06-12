@@ -4,6 +4,23 @@
 set -e
 cd "$(dirname "$0")"
 
+# Version: the VERSION file is the single source of truth. Each packaging
+# build bumps the last component automatically (0.81.1 -> 0.81.2). For a
+# minor/major release set it explicitly: TOSH_VERSION=0.82 ./make-app.sh
+# CI builds (CI=true) and TOSH_NO_BUMP=1 use the committed version as-is.
+if [ -n "$TOSH_VERSION" ]; then
+    VERSION="$TOSH_VERSION"
+    echo "$VERSION" > VERSION
+elif [ -z "$CI" ] && [ "$TOSH_NO_BUMP" != "1" ]; then
+    VERSION=$(<VERSION)
+    VERSION="${VERSION%.*}.$(( ${VERSION##*.} + 1 ))"
+    echo "$VERSION" > VERSION
+else
+    VERSION=$(<VERSION)
+fi
+sed -i '' -E "s/static let version = \"[^\"]*\"/static let version = \"$VERSION\"/" Sources/AboutTab.swift
+echo "version: $VERSION"
+
 if [ "$TOSH_ARCH" = "universal" ]; then
     swift build -c release --arch x86_64 --arch arm64
     SWIFT_BIN=".build/apple/Products/Release/ToshLLM"
@@ -50,7 +67,7 @@ if [ -x "$TURBO_STATIC/llama-server" ]; then
     echo "bundled TurboQuant engine (experimental)"
 fi
 
-cat > "$APP/Contents/Info.plist" <<'EOF'
+cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -59,8 +76,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key>     <string>ToshLLM</string>
     <key>CFBundleIdentifier</key>      <string>dev.engel.toshllm</string>
     <key>CFBundleExecutable</key>      <string>ToshLLM</string>
-    <key>CFBundleVersion</key>         <string>0.81.1</string>
-    <key>CFBundleShortVersionString</key> <string>0.81.1</string>
+    <key>CFBundleVersion</key>         <string>$VERSION</string>
+    <key>CFBundleShortVersionString</key> <string>$VERSION</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>  <string>14.0</string>
     <key>NSHighResolutionCapable</key> <true/>

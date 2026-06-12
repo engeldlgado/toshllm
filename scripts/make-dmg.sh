@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-VERSION="${1:-dev}"
+VERSION="${1:-v$(<VERSION)}"
 APP="dist/ToshLLM.app"
 DMG="dist/ToshLLM-$VERSION.dmg"
 
