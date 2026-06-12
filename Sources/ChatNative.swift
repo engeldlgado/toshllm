@@ -29,15 +29,29 @@ struct Conversation: Identifiable, Codable {
     var updated = Date()
 }
 
+struct StreamError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 // MARK: - Store with persistence and streaming
+
+/// High-frequency streaming state, isolated from ChatStore so per-flush
+/// updates re-render only the views that observe it (the streaming bubble
+/// and the speed badge), never the sidebar or the rest of the transcript.
+@MainActor
+final class LiveStream: ObservableObject {
+    @Published var text = ""
+    @Published var speed: Double?
+}
 
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var currentID: UUID?
     @Published var generating = false
-    @Published var liveSpeed: Double?
     @Published var lastError: String?
+    let live = LiveStream()
     /// Tokens of context consumed by the last exchange (prompt + completion),
     /// reported by the server. Drives the context-usage bar.
     @Published var contextUsed: Int?
@@ -105,7 +119,11 @@ final class ChatStore: ObservableObject {
 
     private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
         generating = true
-        liveSpeed = nil
+        live.text = ""
+        live.speed = nil
+        // The user can switch or delete conversations mid-stream; the result
+        // must land in the one this request started from, found by id.
+        let convID = conversations[i].id
 
         // History without reasoning blocks (saves context)
         var history: [[String: String]] = []
@@ -118,11 +136,15 @@ final class ChatStore: ObservableObject {
 
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
 
-        task = Task { [weak self] in
+        // Detached: SSE parsing must stay off the main actor, otherwise UI
+        // rendering throttles token consumption on long responses and the
+        // measured t/s drops even though the server keeps generating.
+        task = Task.detached(priority: .userInitiated) { [weak self] in
             var nTokens = 0
             var tFirst: Date?
-            // Local accumulation; the UI is updated at ~25 Hz instead of per
-            // token, so long responses don't re-render thousands of times.
+            // Token arrival times within the last seconds; drives the live
+            // t/s as an instantaneous reading instead of a cumulative average.
+            var stamps: [Date] = []
             var reasoning = ""
             var visible = ""
             var lastFlush = Date.distantPast
@@ -133,14 +155,28 @@ final class ChatStore: ObservableObject {
                 return "<think>" + reasoning + (visible.isEmpty ? "" : "</think>" + visible)
             }
 
-            @MainActor func flush(force: Bool = false) {
+            // Publishes a snapshot to the UI at ~12 Hz; accumulation between
+            // flushes happens locally so the UI never re-renders per token.
+            func flush(force: Bool = false) async {
                 let now = Date()
-                guard force || now.timeIntervalSince(lastFlush) > 0.04 else { return }
+                guard force || now.timeIntervalSince(lastFlush) > 0.08 else { return }
                 lastFlush = now
-                self?.setLast(composed())
-                if let start = tFirst {
-                    let dt = now.timeIntervalSince(start)
-                    if dt > 0.4 { self?.liveSpeed = Double(nTokens) / dt }
+                if let cut = stamps.firstIndex(where: { now.timeIntervalSince($0) < 3 }) {
+                    stamps.removeFirst(cut)
+                } else {
+                    stamps.removeAll()
+                }
+                var speed: Double?
+                if let first = stamps.first, stamps.count > 4 {
+                    let dt = now.timeIntervalSince(first)
+                    if dt > 0.3 { speed = Double(stamps.count - 1) / dt }
+                }
+                let text = composed()
+                let newSpeed = speed
+                let store = self
+                await MainActor.run {
+                    store?.live.text = text
+                    if let newSpeed { store?.live.speed = newSpeed }
                 }
             }
 
@@ -168,8 +204,16 @@ final class ChatStore: ObservableObject {
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                 let (bytes, response) = try await URLSession.shared.bytes(for: req)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    throw URLError(.badServerResponse)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard status == 200 else {
+                    // The error body explains the cause (e.g. context overflow);
+                    // surface it instead of a generic "bad server response".
+                    var raw = ""
+                    for try await line in bytes.lines {
+                        raw += line
+                        if raw.count > 4000 { break }
+                    }
+                    throw StreamError(message: Self.describeServerError(status: status, body: raw))
                 }
 
                 for try await line in bytes.lines {
@@ -200,51 +244,71 @@ final class ChatStore: ObservableObject {
                         got = true
                     }
                     guard got else { continue }
-                    if tFirst == nil { tFirst = Date() }
+                    let now = Date()
+                    if tFirst == nil { tFirst = now }
                     nTokens += 1
+                    stamps.append(now)
                     await flush()
                 }
             } catch {
                 if !(error is CancellationError) {
                     AppLog.chat.error("stream failed: \(error.localizedDescription)")
-                    await MainActor.run { self?.lastError = error.localizedDescription }
+                    let store = self
+                    let message = error.localizedDescription
+                    await MainActor.run { store?.lastError = message }
                 }
             }
 
-            await flush(force: true)
             let finalSpeed: Double? = tFirst.flatMap { start in
                 let dt = Date().timeIntervalSince(start)
                 return dt > 0.4 && nTokens > 1 ? Double(nTokens) / dt : nil
             }
+            let finalText = composed()
             let finalUsage = usage
+            let store = self
             await MainActor.run {
-                if let finalUsage { self?.contextUsed = finalUsage.prompt + finalUsage.completion }
-                self?.finish(speed: finalSpeed)
+                if let finalUsage { store?.contextUsed = finalUsage.prompt + finalUsage.completion }
+                store?.finish(conversation: convID, text: finalText, speed: finalSpeed)
             }
         }
     }
 
-    private func setLast(_ content: String) {
-        guard let i = currentIndex, let j = conversations[i].messages.indices.last,
-              conversations[i].messages[j].role == "assistant" else { return }
-        conversations[i].messages[j].content = content
-    }
-
-    private func finish(speed: Double?) {
+    /// Writes the completed response into its conversation and clears the
+    /// live-streaming state. The conversation may no longer be the current
+    /// one, or may have been deleted, hence the lookup by id.
+    private func finish(conversation id: UUID, text: String, speed: Double?) {
         generating = false
-        liveSpeed = nil
+        live.text = ""
+        live.speed = nil
         task = nil
-        guard let i = currentIndex else { return }
+        guard let i = conversations.firstIndex(where: { $0.id == id }) else { return }
         if let j = conversations[i].messages.indices.last,
            conversations[i].messages[j].role == "assistant" {
-            if conversations[i].messages[j].content.isEmpty {
+            if text.isEmpty {
                 conversations[i].messages.removeLast()
             } else {
+                conversations[i].messages[j].content = text
                 conversations[i].messages[j].genSpeed = speed
             }
         }
         conversations[i].updated = Date()
         save()
+    }
+
+    /// Maps llama-server HTTP errors ({"error":{"message":…}}) to readable,
+    /// actionable text, following the same bilingual style as Server.diagnose.
+    nonisolated private static func describeServerError(status: Int, body: String) -> String {
+        var message = body
+        if let data = body.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let err = obj["error"] as? [String: Any],
+           let m = err["message"] as? String {
+            message = m
+        }
+        if message.lowercased().contains("context") {
+            return "Contexto lleno: inicia una conversación nueva o sube el contexto en Ajustes / context full: start a new chat or raise the context size in Settings"
+        }
+        return "HTTP \(status): \(message.prefix(300))"
     }
 
     func stop() { task?.cancel() }
@@ -270,9 +334,17 @@ final class ChatStore: ObservableObject {
         conversations = list
     }
 
+    // Serial queue: keeps writes ordered while encoding off the main thread,
+    // since the full history JSON grows with use and would cause hitches.
+    private static let saveQueue = DispatchQueue(label: "dev.engel.toshllm.chat-save", qos: .utility)
+
     func save() {
-        guard let data = try? JSONEncoder().encode(conversations) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        let snapshot = conversations
+        let url = fileURL
+        Self.saveQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     func exportText(_ c: Conversation) -> String {
@@ -383,27 +455,36 @@ struct NativeChatView: View {
                             .padding(.top, 60)
                     }
                     ForEach(chat.current?.messages ?? []) { msg in
+                        let isLast = msg.id == chat.current?.messages.last?.id
                         let isLastUser = msg.role == "user"
                             && msg.id == chat.current?.messages.last(where: { $0.role == "user" })?.id
-                        MessageBubble(
-                            message: msg,
-                            streaming: chat.generating && msg.id == chat.current?.messages.last?.id,
-                            liveSpeed: chat.liveSpeed,
-                            isLastAssistant: msg.role == "assistant" && msg.id == chat.current?.messages.last?.id,
-                            isLastUser: isLastUser,
-                            canRegenerate: !chat.generating,
-                            onRegenerate: {
-                                chat.regenerate(port: port, temperature: temperature,
-                                                maxTokens: maxTokens, system: systemPrompt,
-                                                thinking: thinkingEnabled)
-                            },
-                            onEdit: {
-                                if let text = chat.popLastExchange() {
-                                    draft = text
-                                    inputFocused = true
-                                }
-                            })
+                        if chat.generating && isLast && msg.role == "assistant" {
+                            StreamingBubble(live: chat.live, message: msg) {
+                                proxy.scrollTo("chatBottom", anchor: .bottom)
+                            }
                             .id(msg.id)
+                        } else {
+                            MessageBubble(
+                                message: msg,
+                                streaming: false,
+                                liveSpeed: nil,
+                                isLastAssistant: msg.role == "assistant" && isLast,
+                                isLastUser: isLastUser,
+                                canRegenerate: !chat.generating,
+                                onRegenerate: {
+                                    chat.regenerate(port: port, temperature: temperature,
+                                                    maxTokens: maxTokens, system: systemPrompt,
+                                                    thinking: thinkingEnabled)
+                                },
+                                onEdit: {
+                                    if let text = chat.popLastExchange() {
+                                        draft = text
+                                        inputFocused = true
+                                    }
+                                })
+                                .equatable()
+                                .id(msg.id)
+                        }
                     }
                     if let err = chat.lastError {
                         Label(err, systemImage: "exclamationmark.triangle")
@@ -495,11 +576,7 @@ struct NativeChatView: View {
                                 "Context tokens used by the last turn. When full, the server forgets the start of the conversation."))
                 }
 
-                if let speed = chat.liveSpeed {
-                    Text(String(format: "%.1f t/s", speed))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.pink)
-                }
+                LiveSpeedBadge(live: chat.live)
             }
 
             HStack(alignment: .bottom, spacing: 8) {
@@ -548,7 +625,7 @@ struct NativeChatView: View {
 
 // MARK: - Message bubble
 
-struct MessageBubble: View {
+struct MessageBubble: View, Equatable {
     let message: ChatMessage
     let streaming: Bool
     let liveSpeed: Double?
@@ -557,6 +634,15 @@ struct MessageBubble: View {
     let canRegenerate: Bool
     let onRegenerate: () -> Void
     let onEdit: () -> Void
+
+    // Skips re-rendering finished bubbles while another one streams; without
+    // this every visible bubble re-parses its markdown on each flush. The
+    // closures are excluded: their behavior never varies for a given message.
+    static func == (a: MessageBubble, b: MessageBubble) -> Bool {
+        a.message == b.message && a.streaming == b.streaming
+            && a.liveSpeed == b.liveSpeed && a.isLastAssistant == b.isLastAssistant
+            && a.isLastUser == b.isLastUser && a.canRegenerate == b.canRegenerate
+    }
 
     @EnvironmentObject var loc: Localizer
     @State private var thinkExpanded = false
@@ -671,26 +757,56 @@ struct MessageBubble: View {
     }
 }
 
+/// Hosts the in-progress assistant bubble: the only transcript view that
+/// observes LiveStream, so per-flush updates re-render just this subtree.
+private struct StreamingBubble: View {
+    @ObservedObject var live: LiveStream
+    let message: ChatMessage
+    let onGrow: () -> Void
+
+    private var liveMessage: ChatMessage {
+        var m = message
+        m.content = live.text
+        return m
+    }
+
+    var body: some View {
+        MessageBubble(
+            message: liveMessage,
+            streaming: true,
+            liveSpeed: live.speed,
+            isLastAssistant: true,
+            isLastUser: false,
+            canRegenerate: false,
+            onRegenerate: {},
+            onEdit: {})
+            .onChange(of: live.text) { _, _ in onGrow() }
+    }
+}
+
+/// Observes LiveStream on its own so the t/s readout updates per flush
+/// without re-evaluating the whole input bar.
+private struct LiveSpeedBadge: View {
+    @ObservedObject var live: LiveStream
+
+    var body: some View {
+        if let speed = live.speed {
+            Text(String(format: "%.1f t/s", speed))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.pink)
+        }
+    }
+}
+
 // MARK: - Markdown rendering
 
-private enum MDBlock: Identifiable {
+private enum MDBlock {
     case paragraph(String)
     case header(Int, String)
     case bullet([String])
     case numbered([String])
     case code(String, String)   // language, content
     case quote(String)
-
-    var id: String {
-        switch self {
-        case .paragraph(let s): return "p" + s
-        case .header(let l, let s): return "h\(l)" + s
-        case .bullet(let i): return "b" + i.joined()
-        case .numbered(let i): return "n" + i.joined()
-        case .code(let l, let c): return "c" + l + c
-        case .quote(let s): return "q" + s
-        }
-    }
 }
 
 struct RichText: View {
@@ -699,7 +815,9 @@ struct RichText: View {
     var body: some View {
         let blocks = Self.parse(text)
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(blocks) { block in
+            // Positional identity: content-derived ids would change on every
+            // streamed token, tearing the last block's views down each flush.
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .paragraph(let s):
                     Text(Self.inline(s)).textSelection(.enabled)
