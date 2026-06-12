@@ -77,6 +77,17 @@ struct ServerSettings {
 
     static var defaultConcurrencyDisable: Bool { !isAppleSilicon }
 
+    /// Kills engine processes left behind by a previous app instance that did
+    /// not shut down cleanly (e.g. force quit), so their VRAM is released.
+    nonisolated static func reapOrphanedEngines() {
+        guard let resources = Bundle.main.resourceURL?.path else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        p.arguments = ["-f", resources + "/bin"]
+        try? p.run()
+        p.waitUntilExit()
+    }
+
     /// Default engine: the one bundled with the app (portable); falls back to the dev checkout.
     static var defaultBinary: String {
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/llama-server").path,

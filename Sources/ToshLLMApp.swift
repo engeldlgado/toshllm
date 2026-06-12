@@ -1,6 +1,21 @@
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var sigtermSource: DispatchSourceSignal?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Shut the engine down cleanly on SIGTERM (pkill, logout, system
+        // shutdown); otherwise the child would be orphaned holding VRAM.
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            ServerController.shared.stop()
+            NSApp.terminate(nil)
+        }
+        source.resume()
+        sigtermSource = source
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         ServerController.shared.stop()
     }
@@ -20,6 +35,9 @@ struct ToshLLMApp: App {
     @AppStorage("menuBarIcon") private var menuBarIcon = true
 
     init() {
+        // Release VRAM held by engines orphaned by a previous force-quit.
+        ServerSettings.reapOrphanedEngines()
+
         // Heal the stored engine path: legacy builds or paths from another machine
         // fall back to the bundled engine.
         let defaults = UserDefaults.standard
