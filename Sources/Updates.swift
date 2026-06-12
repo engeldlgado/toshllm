@@ -1,8 +1,13 @@
 import Foundation
 import AppKit
 
-/// Checks GitHub Releases for a newer published version.
-/// Dependency-free: it notifies and links the download; installing is up to the user.
+struct UpdateError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// Checks GitHub Releases for a newer published version and installs it:
+/// verified download, mount, copy into /Applications and relaunch.
 @MainActor
 final class UpdateChecker: ObservableObject {
     @Published var latestVersion: String?
@@ -44,10 +49,15 @@ final class UpdateChecker: ObservableObject {
     }
 
     /// Downloads the release DMG to ~/Downloads, verifies it against the
-    /// published checksums, and opens it for the user to install.
+    /// published checksums, installs the app into place and relaunches it.
     func downloadAndInstall() async {
-        guard let dmgURL, !installing else {
-            if dmgURL == nil, let releaseURL { NSWorkspace.shared.open(releaseURL) }
+        guard !installing else { return }
+        // The DMG asset may not have been uploaded yet when the release was
+        // first detected (CI uploads it after creating the release); refresh
+        // before giving up and sending the user to the website.
+        if dmgURL == nil { await check() }
+        guard let dmgURL else {
+            if let releaseURL { NSWorkspace.shared.open(releaseURL) }
             return
         }
         installing = true
@@ -74,10 +84,90 @@ final class UpdateChecker: ObservableObject {
                     return
                 }
             }
-            NSWorkspace.shared.open(dest)
+
+            let installed = try await Task.detached { try Self.install(dmgAt: dest) }.value
+            relaunch(installed)
         } catch {
             installError = error.localizedDescription
         }
+    }
+
+    /// Mounts the DMG, copies the app bundle into place (the running bundle's
+    /// location when it lives in /Applications, /Applications otherwise) and
+    /// unmounts. The old copy is moved aside first so the running process is
+    /// never half-overwritten, and restored if the copy fails.
+    nonisolated private static func install(dmgAt dmg: URL) throws -> URL {
+        let plist = try run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-readonly", "-plist"])
+        guard let data = plist.data(using: .utf8),
+              let obj = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let entities = obj["system-entities"] as? [[String: Any]],
+              let mount = entities.compactMap({ $0["mount-point"] as? String }).first else {
+            throw UpdateError(message: "No se pudo montar el DMG / could not mount the DMG")
+        }
+        defer { _ = try? run("/usr/bin/hdiutil", ["detach", mount, "-force"]) }
+
+        let fm = FileManager.default
+        guard let appName = try fm.contentsOfDirectory(atPath: mount).first(where: { $0.hasSuffix(".app") }) else {
+            throw UpdateError(message: "El DMG no contiene una app / the DMG contains no app")
+        }
+        let source = mount + "/" + appName
+
+        let bundle = Bundle.main.bundleURL
+        let target = bundle.path.hasPrefix("/Applications/")
+            ? bundle
+            : URL(fileURLWithPath: "/Applications").appendingPathComponent(appName)
+
+        if fm.fileExists(atPath: target.path) {
+            let aside = target.deletingPathExtension().appendingPathExtension("old.app")
+            try? fm.removeItem(at: aside)
+            try fm.moveItem(at: target, to: aside)
+            do {
+                try copyStripped(source: source, target: target)
+            } catch {
+                try? fm.removeItem(at: target)
+                try? fm.moveItem(at: aside, to: target)
+                throw error
+            }
+            try? fm.removeItem(at: aside)
+        } else {
+            try copyStripped(source: source, target: target)
+        }
+        return target
+    }
+
+    nonisolated private static func copyStripped(source: String, target: URL) throws {
+        _ = try run("/usr/bin/ditto", [source, target.path])
+        // The app's own downloads are not quarantined, but strip the attribute
+        // defensively so Gatekeeper never flags the checksum-verified copy.
+        _ = try? run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", target.path])
+    }
+
+    nonisolated private static func run(_ tool: String, _ args: [String]) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: tool)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            let output = String(data: data, encoding: .utf8) ?? ""
+            throw UpdateError(message: URL(fileURLWithPath: tool).lastPathComponent + ": "
+                + (output.isEmpty ? "error \(p.terminationStatus)" : String(output.suffix(300))))
+        }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// Launches the freshly installed copy and quits this one. The engine is
+    /// stopped by applicationWillTerminate on the way out.
+    private func relaunch(_ url: URL) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 1; /usr/bin/open \"\(url.path)\""]
+        try? p.run()
+        NSApp.terminate(nil)
     }
 
     /// Numeric per-component comparison (0.81.1 < 0.82 < 1.0).

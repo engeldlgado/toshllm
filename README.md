@@ -9,12 +9,15 @@ Native macOS app · Metal acceleration · No cloud, no accounts, no per-token co
 [![Build & Release](https://github.com/engeldlgado/toshllm/actions/workflows/build.yml/badge.svg)](https://github.com/engeldlgado/toshllm/actions/workflows/build.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20(Intel%20%2B%20AMD%20GPU)-lightgrey)](#requirements)
+[![Status: Beta](https://img.shields.io/badge/status-beta-orange)](https://github.com/engeldlgado/toshllm/issues)
 
 *[Versión en español más abajo](#toshllm-en-español)*
 
 </div>
 
 ---
+
+> **Project status: beta.** ToshLLM is under active development. It works for daily use, but you may still hit bugs and rough edges. Please report anything you find in [Issues](https://github.com/engeldlgado/toshllm/issues) — diagnostics can be exported from Settings → Server log.
 
 ## Why ToshLLM?
 
@@ -130,6 +133,8 @@ If ToshLLM is useful to you:
 ---
 
 ## ToshLLM en español
+
+> **Estado del proyecto: beta.** ToshLLM está en desarrollo activo. Funciona para uso diario, pero todavía pueden aparecer errores y detalles por pulir. Reporta cualquier problema en [Issues](https://github.com/engeldlgado/toshllm/issues) — puedes exportar un diagnóstico desde Ajustes → Registro del servidor.
 
 **Ejecuta modelos de lenguaje localmente en Macs Intel con GPU AMD**, con aceleración Metal. Sin nube, sin cuentas, sin costos por token.
 

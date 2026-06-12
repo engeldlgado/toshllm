@@ -43,17 +43,19 @@ struct DashboardView: View {
                 }
                 if updates.installing {
                     ProgressView().controlSize(.small)
-                    Text(loc.t("Descargando…", "Downloading…")).font(.caption).foregroundStyle(.secondary)
+                    Text(loc.t("Actualizando…", "Updating…")).font(.caption).foregroundStyle(.secondary)
                 } else {
                     Button(loc.t("Notas", "Notes")) {
                         if let url = updates.releaseURL { NSWorkspace.shared.open(url) }
                     }
+                    .help(loc.t("Abre las notas de la versión en GitHub.",
+                                "Opens the release notes on GitHub."))
                     Button(loc.t("Descargar e instalar", "Download and install")) {
                         Task { await updates.downloadAndInstall() }
                     }
                     .buttonStyle(.borderedProminent)
-                    .help(loc.t("Descarga el DMG verificando su checksum y lo abre para instalar.",
-                                "Downloads the DMG, verifies its checksum, and opens it to install."))
+                    .help(loc.t("Descarga el DMG, verifica su checksum, instala la nueva versión en Aplicaciones y reinicia la app.",
+                                "Downloads the DMG, verifies its checksum, installs the new version into Applications and relaunches the app."))
                 }
             }
             .padding(12)

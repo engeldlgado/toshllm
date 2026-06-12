@@ -184,6 +184,7 @@ final class ServerController: ObservableObject {
 
     private var process: Process?
     private var healthTask: Task<Void, Never>?
+    private var lastStoppedPID: Int32?
     private var currentPort = 8080
     private let fileLog = RotatingFileLog(name: "server.log")
 
@@ -215,6 +216,25 @@ final class ServerController: ObservableObject {
         genHistory = []
         requestCount = 0
         currentPort = settings.port
+        state = .starting
+
+        // A stopped engine can take seconds to die (SIGTERM mid-generation)
+        // and meanwhile still holds the port; launching too early fails with
+        // a bind error. Wait for the previous PID to actually exit first.
+        let previousPID = lastStoppedPID
+        lastStoppedPID = nil
+        Task { [weak self] in
+            if let pid = previousPID {
+                for _ in 0..<24 where kill(pid, 0) == 0 {
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            self?.launch(settings)
+        }
+    }
+
+    private func launch(_ settings: ServerSettings) {
+        guard state == .starting else { return }   // user hit Stop meanwhile
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: settings.serverBinary)
@@ -232,6 +252,9 @@ final class ServerController: ObservableObject {
         p.terminationHandler = { [weak self] proc in
             Task { @MainActor in
                 guard let self else { return }
+                // A process we already replaced (stop → start) must not touch
+                // the new engine's state, health watch or PID lockfile.
+                guard self.process === proc else { return }
                 self.healthTask?.cancel()
                 EngineLock.clear()
                 if case .failed = self.state { return }
@@ -248,7 +271,6 @@ final class ServerController: ObservableObject {
             try p.run()
             process = p
             EngineLock.write(pid: p.processIdentifier)
-            state = .starting
             watchHealth(port: settings.port)
         } catch {
             state = .failed("No se pudo lanzar: \(error.localizedDescription)")
@@ -261,7 +283,7 @@ final class ServerController: ObservableObject {
         if tail.contains("unknown model architecture") || tail.contains("unknown architecture") {
             return "Arquitectura no soportada por este motor / model architecture not supported by this engine"
         }
-        if tail.contains("address already in use") {
+        if tail.contains("address already in use") || tail.contains("couldn't bind") {
             return "Puerto ocupado: cambia el puerto en Ajustes / port busy: change it in Settings"
         }
         if tail.contains("out of memory") || tail.contains("failed to allocate")
@@ -285,6 +307,7 @@ final class ServerController: ObservableObject {
         healthTask?.cancel()
         if let p = process {
             let pid = p.processIdentifier
+            lastStoppedPID = pid
             p.terminate()
             // SIGTERM can stall mid-generation; make sure the engine (and its
             // multi-GB working set) actually exits and frees the memory. The
