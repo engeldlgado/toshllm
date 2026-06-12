@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
     @AppStorage(SettingsKeys.ctx) private var ctx = 16384
+    @AppStorage(SettingsKeys.chatAutoCompact) private var chatAutoCompact = true
     @AppStorage(SettingsKeys.threads) private var threads = 6
     @AppStorage(SettingsKeys.flashAttn) private var flashAttn = "auto"
     @AppStorage(SettingsKeys.noMmap) private var noMmap = true
@@ -157,6 +158,9 @@ struct SettingsView: View {
                 }
                 .help(loc.t("Tamaño máximo de la conversación en tokens. Más contexto = más memoria para el KV cache (mira los tipos de abajo para compensar).",
                             "Maximum conversation size in tokens. More context = more KV cache memory (see the types below to compensate)."))
+                Toggle(loc.t("Autocompactar conversaciones largas", "Auto-compact long conversations"), isOn: $chatAutoCompact)
+                    .help(loc.t("Al superar ~70% del contexto, el chat resume los mensajes antiguos con el propio modelo y envía solo el resumen + los mensajes recientes. La conversación completa sigue visible y guardada.",
+                                "Past ~70% of the context, the chat summarizes older messages with the model itself and sends only the summary + recent messages. The full conversation stays visible and saved."))
                 Picker(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)"), selection: $cacheTypeK) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }

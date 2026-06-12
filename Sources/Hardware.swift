@@ -78,10 +78,31 @@ struct MemoryEstimate {
 }
 
 enum Estimator {
+    /// Estimate using the user's current context size and KV quantization.
+    static func estimateCurrent(spec: ModelSpec, hw: HardwareInfo) -> MemoryEstimate {
+        let d = UserDefaults.standard
+        let ctx = d.object(forKey: SettingsKeys.ctx) == nil ? 16384 : d.integer(forKey: SettingsKeys.ctx)
+        let scale = (kvTypeScale(d.string(forKey: SettingsKeys.cacheTypeK) ?? "f16")
+                   + kvTypeScale(d.string(forKey: SettingsKeys.cacheTypeV) ?? "f16")) / 2
+        return estimate(spec: spec, hw: hw, ctx: ctx, kvScale: scale)
+    }
+
+    /// KV cache size of a quantization type relative to f16.
+    static func kvTypeScale(_ type: String) -> Double {
+        switch type {
+        case "f16": return 1.0
+        case "q8_0": return 0.53
+        case "q5_1": return 0.38
+        case "q5_0": return 0.36
+        case "q4_1": return 0.32
+        default: return 0.30      // q4_0, iq4_nl and turbo* sub-byte types
+        }
+    }
+
     /// Estimates required VRAM/RAM and suggested configuration for a model on this machine.
-    static func estimate(spec: ModelSpec, hw: HardwareInfo, ctx: Int = 16384) -> MemoryEstimate {
+    static func estimate(spec: ModelSpec, hw: HardwareInfo, ctx: Int = 16384, kvScale: Double = 1.0) -> MemoryEstimate {
         let vramBudget = hw.vramGB - 1.0          // driver reserve
-        let kvGB = kvCache(spec: spec, ctx: ctx)
+        let kvGB = kvCache(spec: spec, ctx: ctx) * kvScale
         let computeGB = 0.9 + spec.paramsB * 0.012
 
         if !spec.isMoE {

@@ -33,6 +33,7 @@ enum SettingsKeys {
     static let chatMaxTokens = "chatMaxTokens"
     static let chatSystem = "chatSystem"
     static let chatThinking = "chatThinking"
+    static let chatAutoCompact = "chatAutoCompact"
     static let onboardingDone = "onboardingDone"
 }
 

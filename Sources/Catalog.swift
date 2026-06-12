@@ -74,7 +74,7 @@ enum Catalog {
     /// Best catalog model that runs well on this hardware.
     static func recommended(for hw: HardwareInfo) -> (CatalogModel, MemoryEstimate)? {
         models
-            .map { ($0, Estimator.estimate(spec: $0.spec, hw: hw)) }
+            .map { ($0, Estimator.estimateCurrent(spec: $0.spec, hw: hw)) }
             .filter { $0.1.level >= .good }
             .max { a, b in
                 a.0.spec.paramsB == b.0.spec.paramsB

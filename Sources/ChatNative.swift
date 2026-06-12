@@ -27,6 +27,12 @@ struct Conversation: Identifiable, Codable {
     var messages: [ChatMessage] = []
     var created = Date()
     var updated = Date()
+    // Auto-compaction: rolling summary of the oldest turns and how many
+    // leading messages it covers. Those messages stay visible and persisted;
+    // they are just no longer sent verbatim with each request. Optionals keep
+    // pre-compaction JSON decodable.
+    var summary: String?
+    var summarizedCount: Int?
 }
 
 struct StreamError: LocalizedError {
@@ -50,6 +56,7 @@ final class ChatStore: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var currentID: UUID?
     @Published var generating = false
+    @Published var compacting = false
     @Published var lastError: String?
     let live = LiveStream()
     /// Tokens of context consumed by the last exchange (prompt + completion),
@@ -125,14 +132,10 @@ final class ChatStore: ObservableObject {
         // must land in the one this request started from, found by id.
         let convID = conversations[i].id
 
-        // History without reasoning blocks (saves context)
-        var history: [[String: String]] = []
-        if !system.trimmingCharacters(in: .whitespaces).isEmpty {
-            history.append(["role": "system", "content": system])
-        }
-        history += conversations[i].messages.map { m in
-            ["role": m.role, "content": m.role == "assistant" ? m.parts.body : m.content]
-        }
+        let history = Self.requestHistory(system: system,
+                                          summary: conversations[i].summary,
+                                          messages: conversations[i].messages,
+                                          from: conversations[i].summarizedCount ?? 0)
 
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
 
@@ -269,6 +272,7 @@ final class ChatStore: ObservableObject {
             await MainActor.run {
                 if let finalUsage { store?.contextUsed = finalUsage.prompt + finalUsage.completion }
                 store?.finish(conversation: convID, text: finalText, speed: finalSpeed)
+                store?.compactIfNeeded(conversation: convID, port: port)
             }
         }
     }
@@ -293,6 +297,119 @@ final class ChatStore: ObservableObject {
         }
         conversations[i].updated = Date()
         save()
+    }
+
+    // MARK: auto-compaction
+
+    /// Builds the wire history: system prompt with the rolling summary of
+    /// compacted turns folded in, then the messages that remain uncompacted,
+    /// stripped of reasoning blocks (saves context).
+    nonisolated static func requestHistory(system: String, summary: String?,
+                                           messages: [ChatMessage], from start: Int) -> [[String: String]] {
+        var history: [[String: String]] = []
+        var sys = system.trimmingCharacters(in: .whitespaces)
+        if let summary, !summary.isEmpty {
+            sys += (sys.isEmpty ? "" : "\n\n")
+                + "Summary of the earlier part of this conversation:\n" + summary
+        }
+        if !sys.isEmpty { history.append(["role": "system", "content": sys]) }
+        let safeStart = min(max(0, start), messages.count)
+        history += messages[safeStart...].map { m in
+            ["role": m.role, "content": m.role == "assistant" ? m.parts.body : m.content]
+        }
+        return history
+    }
+
+    /// Index up to which messages can be folded into the summary: keeps the
+    /// most recent exchanges verbatim and lands on a user message so the
+    /// remaining history starts a full turn. Nil when too little would be
+    /// gained over what is already compacted.
+    nonisolated static func compactionCutoff(messages: [ChatMessage], alreadyCompacted: Int) -> Int? {
+        var cutoff = messages.count - 4
+        while cutoff > 0 && messages[cutoff].role != "user" { cutoff -= 1 }
+        guard cutoff >= alreadyCompacted + 2 else { return nil }
+        return cutoff
+    }
+
+    /// Once the last exchange used over 70% of the configured context,
+    /// summarize the older turns with the model itself; future requests send
+    /// the summary plus the recent messages. The full transcript stays
+    /// visible and persisted.
+    private func compactIfNeeded(conversation id: UUID, port: Int) {
+        let d = UserDefaults.standard
+        let enabled = d.object(forKey: SettingsKeys.chatAutoCompact) == nil
+            ? true : d.bool(forKey: SettingsKeys.chatAutoCompact)
+        let limit = d.object(forKey: SettingsKeys.ctx) == nil
+            ? 16384 : d.integer(forKey: SettingsKeys.ctx)
+        guard enabled, !generating, !compacting, limit > 0,
+              let used = contextUsed, Double(used) / Double(limit) > 0.7,
+              let i = conversations.firstIndex(where: { $0.id == id }) else { return }
+        let start = conversations[i].summarizedCount ?? 0
+        guard let cutoff = Self.compactionCutoff(messages: conversations[i].messages,
+                                                 alreadyCompacted: start) else { return }
+
+        var prompt = ""
+        if let prior = conversations[i].summary, !prior.isEmpty {
+            prompt += "Previous summary:\n" + prior + "\n\n"
+        }
+        prompt += "Conversation to summarize:\n\n"
+        for m in conversations[i].messages[start..<cutoff] {
+            prompt += (m.role == "user" ? "User: " : "Assistant: ")
+                + (m.role == "assistant" ? m.parts.body : m.content) + "\n\n"
+        }
+
+        compacting = true
+        AppLog.chat.info("compacting conversation: \(used)/\(limit) tokens, cutoff \(cutoff)")
+        Task.detached(priority: .utility) { [weak self] in
+            let summary = await Self.summarize(prompt: prompt, port: port)
+            let store = self
+            await MainActor.run {
+                store?.applyCompaction(conversation: id, cutoff: cutoff, summary: summary)
+            }
+        }
+    }
+
+    private func applyCompaction(conversation id: UUID, cutoff: Int, summary: String?) {
+        compacting = false
+        guard let summary, let i = conversations.firstIndex(where: { $0.id == id }),
+              cutoff <= conversations[i].messages.count else { return }
+        conversations[i].summary = summary
+        conversations[i].summarizedCount = cutoff
+        save()
+    }
+
+    /// Non-streamed completion that condenses old turns. Returns nil on any
+    /// failure; compaction is then retried after the next exchange.
+    nonisolated private static func summarize(prompt: String, port: Int) async -> String? {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let key = ServerSettings.activeAPIKey() {
+            req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+        }
+        let instructions = "You summarize conversations. Write a compact summary (at most ~250 words) of the conversation below, in the same language the conversation itself uses. Preserve key facts, decisions, names, numbers, code references and pending questions. Reply with the summary only."
+        let body: [String: Any] = [
+            "messages": [["role": "system", "content": instructions],
+                         ["role": "user", "content": prompt]],
+            "stream": false,
+            "temperature": 0.3,
+            "max_tokens": 512,
+            "chat_template_kwargs": ["enable_thinking": false],
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = obj["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            AppLog.chat.error("compaction summarize request failed")
+            return nil
+        }
+        // Reasoning models may emit a think block anyway; keep only the body.
+        let text = ChatMessage(role: "assistant",
+                               content: content.trimmingCharacters(in: .whitespacesAndNewlines)).parts.body
+        return text.isEmpty ? nil : text
     }
 
     /// Maps llama-server HTTP errors ({"error":{"message":…}}) to readable,
@@ -370,6 +487,7 @@ struct NativeChatView: View {
     @State private var draft = ""
     @State private var searchText = ""
     @State private var showSystem = false
+    @State private var pinnedToBottom = true
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -442,8 +560,17 @@ struct NativeChatView: View {
         }
     }
 
+    /// First message not covered by the compaction summary; the transcript
+    /// shows a marker above it.
+    private var compactionBoundaryID: UUID? {
+        guard let c = chat.current, c.summary != nil,
+              let n = c.summarizedCount, n > 0, n < c.messages.count else { return nil }
+        return c.messages[n].id
+    }
+
     private var messagesScroll: some View {
-        ScrollViewReader { proxy in
+        GeometryReader { viewport in
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 14) {
                     if chat.current?.messages.isEmpty ?? true {
@@ -458,9 +585,17 @@ struct NativeChatView: View {
                         let isLast = msg.id == chat.current?.messages.last?.id
                         let isLastUser = msg.role == "user"
                             && msg.id == chat.current?.messages.last(where: { $0.role == "user" })?.id
+                        if msg.id == compactionBoundaryID {
+                            Label(loc.t("Mensajes anteriores resumidos para liberar contexto",
+                                        "Earlier messages summarized to free context"),
+                                  systemImage: "archivebox")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .help(loc.t("Lo anterior a esta marca se envía al modelo como un resumen automático; aquí sigue visible íntegro.",
+                                            "History above this mark is sent to the model as an automatic summary; it remains fully visible here."))
+                        }
                         if chat.generating && isLast && msg.role == "assistant" {
                             StreamingBubble(live: chat.live, message: msg) {
-                                proxy.scrollTo("chatBottom", anchor: .bottom)
+                                if pinnedToBottom { proxy.scrollTo("chatBottom", anchor: .bottom) }
                             }
                             .id(msg.id)
                         } else {
@@ -472,6 +607,7 @@ struct NativeChatView: View {
                                 isLastUser: isLastUser,
                                 canRegenerate: !chat.generating,
                                 onRegenerate: {
+                                    pinnedToBottom = true
                                     chat.regenerate(port: port, temperature: temperature,
                                                     maxTokens: maxTokens, system: systemPrompt,
                                                     thinking: thinkingEnabled)
@@ -491,14 +627,27 @@ struct NativeChatView: View {
                             .font(.caption).foregroundStyle(.red)
                     }
                     Color.clear.frame(height: 1).id("chatBottom")
+                        .background(GeometryReader { g in
+                            Color.clear.preference(key: BottomMarkerKey.self,
+                                                   value: g.frame(in: .named("chatScroll")).minY)
+                        })
                 }
                 .padding()
             }
+            .coordinateSpace(name: "chatScroll")
+            // Follow the stream only while the user is already at the bottom;
+            // scrolling up to read pauses the auto-follow until they return.
+            .onPreferenceChange(BottomMarkerKey.self) { y in
+                let pinned = y <= viewport.size.height + 120
+                if pinned != pinnedToBottom { pinnedToBottom = pinned }
+            }
             .onChange(of: chat.current?.messages.last?.content) { _, _ in
-                proxy.scrollTo("chatBottom", anchor: .bottom)
+                if pinnedToBottom { proxy.scrollTo("chatBottom", anchor: .bottom) }
             }
             .onChange(of: chat.currentID) { _, _ in
+                pinnedToBottom = true
                 proxy.scrollTo("chatBottom", anchor: .bottom)
+            }
             }
         }
     }
@@ -561,6 +710,16 @@ struct NativeChatView: View {
 
                 Spacer()
 
+                if chat.compacting {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.mini)
+                        Text(loc.t("Compactando…", "Compacting…"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .help(loc.t("Resumiendo los mensajes antiguos con el modelo para liberar contexto.",
+                                "Summarizing older messages with the model to free context."))
+                }
+
                 if let used = chat.contextUsed, contextLimit > 0 {
                     let fraction = Double(used) / Double(contextLimit)
                     HStack(spacing: 5) {
@@ -618,6 +777,7 @@ struct NativeChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !chat.generating else { return }
         draft = ""
+        pinnedToBottom = true
         chat.send(text: text, port: port, temperature: temperature,
                   maxTokens: maxTokens, system: systemPrompt, thinking: thinkingEnabled)
     }
@@ -755,6 +915,14 @@ struct MessageBubble: View, Equatable {
         }
         .onHover { hovering = $0 }
     }
+}
+
+/// Position of the transcript's bottom sentinel within the scroll viewport,
+/// used to detect whether the user is at the bottom (auto-follow) or reading
+/// older messages (no scroll hijacking).
+private struct BottomMarkerKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 /// Hosts the in-progress assistant bubble: the only transcript view that

@@ -50,6 +50,16 @@ final class EstimatorTests: XCTestCase {
         XCTAssertEqual(spec.fileGB, 4.66, accuracy: 0.05)
         XCTAssertGreaterThan(spec.paramsB, 5)
     }
+
+    func testKVQuantizationShrinksTheEstimate() {
+        let spec = ModelSpec(fileGB: 4.7, paramsB: 8.2, layers: 36, isMoE: false)
+        let f16 = Estimator.estimate(spec: spec, hw: referenceHW, ctx: 32768)
+        let quant = Estimator.estimate(spec: spec, hw: referenceHW, ctx: 32768,
+                                       kvScale: Estimator.kvTypeScale("q8_0"))
+        XCTAssertLessThan(quant.vramGB, f16.vramGB)
+        XCTAssertEqual(Estimator.kvTypeScale("f16"), 1.0)
+        XCTAssertEqual(Estimator.kvTypeScale("q8_0"), 0.53, accuracy: 0.01)
+    }
 }
 
 // MARK: - Server configuration
@@ -136,6 +146,60 @@ final class ChatMessageTests: XCTestCase {
         let back = try JSONDecoder().decode([Conversation].self, from: data)
         XCTAssertEqual(back.first?.messages.count, 2)
         XCTAssertEqual(back.first?.messages.last?.genSpeed, 25.7)
+    }
+
+    func testLegacyConversationWithoutCompactionFieldsDecodes() throws {
+        var conv = Conversation(title: "Vieja")
+        conv.messages.append(ChatMessage(role: "user", content: "hola"))
+        // Simulate JSON saved before the summary fields existed.
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(conv)) as! [String: Any]
+        json.removeValue(forKey: "summary")
+        json.removeValue(forKey: "summarizedCount")
+        let data = try JSONSerialization.data(withJSONObject: json)
+        let back = try JSONDecoder().decode(Conversation.self, from: data)
+        XCTAssertNil(back.summary)
+        XCTAssertNil(back.summarizedCount)
+    }
+}
+
+// MARK: - Auto-compaction
+
+final class CompactionTests: XCTestCase {
+    private func makeMessages(_ turns: Int) -> [ChatMessage] {
+        (0..<turns).flatMap { i in
+            [ChatMessage(role: "user", content: "pregunta \(i)"),
+             ChatMessage(role: "assistant", content: "respuesta \(i)")]
+        }
+    }
+
+    func testCutoffLandsOnUserMessageAndKeepsRecentTurns() {
+        let messages = makeMessages(6)   // 12 messages
+        let cutoff = ChatStore.compactionCutoff(messages: messages, alreadyCompacted: 0)
+        XCTAssertEqual(cutoff, 8, "debe conservar los 2 últimos intercambios completos")
+        XCTAssertEqual(messages[cutoff!].role, "user")
+    }
+
+    func testCutoffNilWhenTooLittleWouldBeGained() {
+        XCTAssertNil(ChatStore.compactionCutoff(messages: makeMessages(2), alreadyCompacted: 0))
+        XCTAssertNil(ChatStore.compactionCutoff(messages: makeMessages(6), alreadyCompacted: 8))
+    }
+
+    func testRequestHistoryFoldsSummaryIntoSystemAndSkipsCompactedMessages() {
+        let messages = makeMessages(6)
+        let history = ChatStore.requestHistory(system: "Eres útil.", summary: "Hablamos de A y B.",
+                                               messages: messages, from: 8)
+        XCTAssertEqual(history.count, 5)   // system + 4 recent messages
+        XCTAssertEqual(history.first?["role"], "system")
+        XCTAssertTrue(history.first!["content"]!.contains("Eres útil."))
+        XCTAssertTrue(history.first!["content"]!.contains("Hablamos de A y B."))
+        XCTAssertEqual(history[1]["content"], "pregunta 4")
+    }
+
+    func testRequestHistoryWithoutSummaryOrSystemHasNoSystemMessage() {
+        let history = ChatStore.requestHistory(system: "  ", summary: nil,
+                                               messages: makeMessages(2), from: 0)
+        XCTAssertEqual(history.count, 4)
+        XCTAssertEqual(history.first?["role"], "user")
     }
 }
 

@@ -27,7 +27,7 @@ struct ModelsView: View {
             Section(loc.t("Catálogo — estimaciones para tu equipo",
                           "Catalog — estimates for your machine")) {
                 ForEach(Catalog.models) { m in
-                    let est = Estimator.estimate(spec: m.spec, hw: hardware)
+                    let est = Estimator.estimateCurrent(spec: m.spec, hw: hardware)
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
@@ -52,7 +52,7 @@ struct ModelsView: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(models.models) { m in
-                    let est = Estimator.estimate(spec: Catalog.spec(forLocal: m), hw: hardware)
+                    let est = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: m), hw: hardware)
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
@@ -170,7 +170,7 @@ struct HFSearchSection: View {
                                     .font(.caption).foregroundStyle(.secondary).padding(.leading, 18)
                             }
                             ForEach(files) { f in
-                                let est = Estimator.estimate(
+                                let est = Estimator.estimateCurrent(
                                     spec: .estimated(fileBytes: f.sizeBytes, isMoE: f.isMoE), hw: hardware)
                                 HStack {
                                     VStack(alignment: .leading, spacing: 2) {
