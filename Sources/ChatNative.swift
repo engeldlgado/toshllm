@@ -82,24 +82,24 @@ final class ChatStore: ObservableObject {
 
     // MARK: sending
 
-    func send(text: String, port: Int, temperature: Double, maxTokens: Int, system: String) {
+    func send(text: String, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
         guard !generating, let i = currentIndex else { return }
         lastError = nil
         conversations[i].messages.append(ChatMessage(role: "user", content: text))
         if conversations[i].title.isEmpty {
             conversations[i].title = String(text.prefix(40))
         }
-        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system)
+        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system, thinking: thinking)
     }
 
-    func regenerate(port: Int, temperature: Double, maxTokens: Int, system: String) {
+    func regenerate(port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
         guard !generating, let i = currentIndex,
               conversations[i].messages.last?.role == "assistant" else { return }
         conversations[i].messages.removeLast()
-        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system)
+        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system, thinking: thinking)
     }
 
-    private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int, system: String) {
+    private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
         generating = true
         liveSpeed = nil
 
@@ -121,12 +121,19 @@ final class ChatStore: ObservableObject {
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.httpBody = try JSONSerialization.data(withJSONObject: [
+                var body: [String: Any] = [
                     "messages": history,
                     "stream": true,
                     "temperature": temperature,
                     "max_tokens": maxTokens,
-                ])
+                    // Reuse the server-side KV cache for the unchanged history
+                    // prefix so each turn only processes the new tokens.
+                    "cache_prompt": true,
+                ]
+                if !thinking {
+                    body["chat_template_kwargs"] = ["enable_thinking": false]
+                }
+                req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                 let (bytes, response) = try await URLSession.shared.bytes(for: req)
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else {
@@ -223,6 +230,7 @@ struct NativeChatView: View {
     @AppStorage("chatTemp") private var temperature = 0.7
     @AppStorage("chatMaxTokens") private var maxTokens = 2048
     @AppStorage("chatSystem") private var systemPrompt = ""
+    @AppStorage("chatThinking") private var thinkingEnabled = true
     @AppStorage("port") private var port = 8080
     @State private var draft = ""
     @State private var showSystem = false
@@ -306,7 +314,8 @@ struct NativeChatView: View {
                             canRegenerate: !chat.generating,
                             onRegenerate: {
                                 chat.regenerate(port: port, temperature: temperature,
-                                                maxTokens: maxTokens, system: systemPrompt)
+                                                maxTokens: maxTokens, system: systemPrompt,
+                                                thinking: thinkingEnabled)
                             })
                             .id(msg.id)
                     }
@@ -357,6 +366,14 @@ struct NativeChatView: View {
                     }
                     .padding(12)
                 }
+
+                Toggle(isOn: $thinkingEnabled) {
+                    Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
+                        .font(.caption)
+                }
+                .toggleStyle(.checkbox)
+                .help(loc.t("Los modelos razonadores piensan antes de responder (más calidad, ~30-60 s extra de espera). Desactívalo para respuestas inmediatas.",
+                            "Reasoning models think before answering (better quality, ~30-60 s extra wait). Turn off for instant responses."))
 
                 HStack(spacing: 6) {
                     Text("Temp").font(.caption).foregroundStyle(.secondary)
@@ -415,7 +432,7 @@ struct NativeChatView: View {
         guard !text.isEmpty, !chat.generating else { return }
         draft = ""
         chat.send(text: text, port: port, temperature: temperature,
-                  maxTokens: maxTokens, system: systemPrompt)
+                  maxTokens: maxTokens, system: systemPrompt, thinking: thinkingEnabled)
     }
 }
 
@@ -486,15 +503,22 @@ struct MessageBubble: View {
                 // body
                 VStack(alignment: .leading, spacing: 6) {
                     let parts = message.parts
+                    let isThinkingLive = streaming && parts.body.isEmpty && parts.thinking != nil
                     if let think = parts.thinking, !think.isEmpty {
                         DisclosureGroup(isExpanded: $thinkExpanded) {
                             Text(think)
                                 .font(.caption).foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                         } label: {
-                            Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
+                            Label(isThinkingLive ? loc.t("Razonando…", "Thinking…")
+                                                 : loc.t("Razonamiento", "Reasoning"),
+                                  systemImage: "brain")
                                 .font(.caption).foregroundStyle(.blue)
                         }
+                        .onChange(of: isThinkingLive) { _, live in
+                            thinkExpanded = live
+                        }
+                        .onAppear { if isThinkingLive { thinkExpanded = true } }
                     }
                     if !parts.body.isEmpty || parts.thinking == nil {
                         RichText(text: isUser ? message.content : parts.body)
