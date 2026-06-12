@@ -34,6 +34,9 @@ final class BenchmarkController: ObservableObject {
     @Published var running = false
     @Published var output = ""
     @Published var history: [BenchResult] = []
+    @Published var sweeping = false
+    @Published var sweepStatus = ""
+    @Published var sweepBest: Int?
 
     private var process: Process?
     private let storeKey = "benchHistory"
@@ -121,6 +124,99 @@ final class BenchmarkController: ObservableObject {
                            at: 0)
             save()
         }
+    }
+
+    /// Runs llama-bench to completion and returns the parsed speeds.
+    private func runOnce(settings: ServerSettings) async -> (pp: Double, tg: Double)? {
+        let benchPath = URL(fileURLWithPath: settings.serverBinary)
+            .deletingLastPathComponent().appendingPathComponent("llama-bench").path
+        guard FileManager.default.fileExists(atPath: benchPath) else { return nil }
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: benchPath)
+        var args = ["-m", settings.modelPath, "-ngl", String(settings.ngl), "--mmap", "0", "-r", "2"]
+        if settings.ncmoe > 0 { args += ["-ncmoe", String(settings.ncmoe)] }
+        if settings.cacheTypeK != "f16" { args += ["-ctk", settings.cacheTypeK] }
+        if settings.cacheTypeV != "f16" { args += ["-ctv", settings.cacheTypeV] }
+        if settings.flashAttn == "on" || settings.cacheTypeV != "f16" { args += ["-fa", "1"] }
+        p.arguments = args
+        p.environment = settings.environment
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+
+        let text: String = await withCheckedContinuation { continuation in
+            p.terminationHandler = { _ in
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
+            }
+            do { try p.run(); self.process = p } catch { continuation.resume(returning: "") }
+        }
+        process = nil
+
+        func speed(_ test: String) -> Double? {
+            for line in text.split(separator: "\n") where line.contains(" \(test) ") {
+                if let r = line.range(of: #"([0-9]+\.[0-9]+) ±"#, options: .regularExpression) {
+                    return Double(line[r].split(separator: " ")[0])
+                }
+            }
+            return nil
+        }
+        guard let pp = speed("pp512"), let tg = speed("tg128") else { return nil }
+        return (pp, tg)
+    }
+
+    /// Finds the best `--n-cpu-moe` automatically: starts at the configured
+    /// value and walks down (more experts on GPU) until VRAM saturation makes
+    /// performance collapse, recording every run in the history.
+    func sweep(settings base: ServerSettings) {
+        guard !running, !sweeping, base.ncmoe > 0 else { return }
+        sweeping = true
+        sweepBest = nil
+
+        Task {
+            var best: (ncmoe: Int, tg: Double)?
+            var candidate = base.ncmoe
+            let floorValue = max(0, base.ncmoe - 8)
+            let name = URL(fileURLWithPath: base.modelPath).lastPathComponent
+
+            while candidate >= floorValue {
+                var settings = base
+                settings.ncmoe = candidate
+                sweepStatus = "ncmoe \(candidate)…"
+
+                guard let result = await runOnce(settings: settings) else { break }
+                let engine = settings.serverBinary == ServerSettings.defaultBinary ? "bundled"
+                    : settings.serverBinary == ServerSettings.turboBinary ? "turbo" : "externo"
+                history.insert(BenchResult(date: .now, model: name, ncmoe: candidate,
+                                           pp: result.pp, tg: result.tg,
+                                           ctk: settings.cacheTypeK, ctv: settings.cacheTypeV,
+                                           engine: engine), at: 0)
+                save()
+
+                if let current = best {
+                    // VRAM saturation shows up as a sharp drop; stop one step late.
+                    if result.tg < current.tg * 0.90 || result.pp < 1 {
+                        break
+                    }
+                    if result.tg > current.tg { best = (candidate, result.tg) }
+                } else {
+                    best = (candidate, result.tg)
+                }
+                candidate -= 2
+            }
+
+            sweepBest = best?.ncmoe
+            sweepStatus = best.map { String(format: "Óptimo: ncmoe %d (%.1f t/s)", $0.ncmoe, $0.tg) }
+                ?? "Sweep sin resultados / sweep produced no results"
+            sweeping = false
+        }
+    }
+
+    func cancelSweep() {
+        process?.terminate()
+        sweeping = false
+        sweepStatus = ""
     }
 
     func delete(_ result: BenchResult) {

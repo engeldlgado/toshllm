@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+private func defaultsMigrationExtraArgs() -> String? {
+    UserDefaults.standard.string(forKey: SettingsKeys.extraArgs)
+}
+
 @main
 struct ToshLLMApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -32,11 +36,19 @@ struct ToshLLMApp: App {
     @StateObject private var search = SearchStore()
     @StateObject private var profiles = ProfileStore()
     @StateObject private var updates = UpdateChecker()
-    @AppStorage("menuBarIcon") private var menuBarIcon = true
+    @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
 
     init() {
-        // Release VRAM held by engines orphaned by a previous force-quit.
-        ServerSettings.reapOrphanedEngines()
+        // Release VRAM held by an engine orphaned by a previous force-quit.
+        EngineLock.reapOrphan()
+
+        // Migrate the legacy raw flag into the dedicated MTP toggle.
+        if var extra = defaultsMigrationExtraArgs(), extra.contains("--spec-type draft-mtp") {
+            extra = extra.replacingOccurrences(of: "--spec-type draft-mtp", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            UserDefaults.standard.set(extra, forKey: SettingsKeys.extraArgs)
+            UserDefaults.standard.set(true, forKey: SettingsKeys.specMTP)
+        }
 
         // Heal the stored engine path: legacy builds or paths from another machine
         // fall back to the bundled engine.

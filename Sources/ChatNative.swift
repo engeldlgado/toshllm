@@ -38,6 +38,9 @@ final class ChatStore: ObservableObject {
     @Published var generating = false
     @Published var liveSpeed: Double?
     @Published var lastError: String?
+    /// Tokens of context consumed by the last exchange (prompt + completion),
+    /// reported by the server. Drives the context-usage bar.
+    @Published var contextUsed: Int?
 
     private var task: Task<Void, Never>?
 
@@ -62,6 +65,7 @@ final class ChatStore: ObservableObject {
         conversations.insert(c, at: 0)
         currentID = c.id
         lastError = nil
+        contextUsed = nil
     }
 
     func delete(_ c: Conversation) {
@@ -117,10 +121,36 @@ final class ChatStore: ObservableObject {
         task = Task { [weak self] in
             var nTokens = 0
             var tFirst: Date?
+            // Local accumulation; the UI is updated at ~25 Hz instead of per
+            // token, so long responses don't re-render thousands of times.
+            var reasoning = ""
+            var visible = ""
+            var lastFlush = Date.distantPast
+            var usage: (prompt: Int, completion: Int)?
+
+            func composed() -> String {
+                guard !reasoning.isEmpty else { return visible }
+                return "<think>" + reasoning + (visible.isEmpty ? "" : "</think>" + visible)
+            }
+
+            @MainActor func flush(force: Bool = false) {
+                let now = Date()
+                guard force || now.timeIntervalSince(lastFlush) > 0.04 else { return }
+                lastFlush = now
+                self?.setLast(composed())
+                if let start = tFirst {
+                    let dt = now.timeIntervalSince(start)
+                    if dt > 0.4 { self?.liveSpeed = Double(nTokens) / dt }
+                }
+            }
+
             do {
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                if let key = ServerSettings.activeAPIKey() {
+                    req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+                }
                 var body: [String: Any] = [
                     "messages": history,
                     "stream": true,
@@ -129,6 +159,8 @@ final class ChatStore: ObservableObject {
                     // Reuse the server-side KV cache for the unchanged history
                     // prefix so each turn only processes the new tokens.
                     "cache_prompt": true,
+                    // Ask for a final usage chunk to drive the context meter.
+                    "stream_options": ["include_usage": true],
                 ]
                 if !thinking {
                     body["chat_template_kwargs"] = ["enable_thinking": false]
@@ -146,39 +178,56 @@ final class ChatStore: ObservableObject {
                     let payload = String(line.dropFirst(6))
                     if payload == "[DONE]" { break }
                     guard let data = payload.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let choices = obj["choices"] as? [[String: Any]],
-                          let delta = choices.first?["delta"] as? [String: Any],
-                          let piece = delta["content"] as? String, !piece.isEmpty else { continue }
+                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+
+                    if let u = obj["usage"] as? [String: Any],
+                       let p = u["prompt_tokens"] as? Int, let c = u["completion_tokens"] as? Int {
+                        usage = (p, c)
+                    }
+
+                    guard let choices = obj["choices"] as? [[String: Any]],
+                          let delta = choices.first?["delta"] as? [String: Any] else { continue }
+
+                    var got = false
+                    // Some server configurations emit the reasoning in a
+                    // dedicated field instead of inline <think> tags.
+                    if let r = delta["reasoning_content"] as? String, !r.isEmpty {
+                        reasoning += r
+                        got = true
+                    }
+                    if let piece = delta["content"] as? String, !piece.isEmpty {
+                        visible += piece
+                        got = true
+                    }
+                    guard got else { continue }
                     if tFirst == nil { tFirst = Date() }
                     nTokens += 1
-                    let speed = tFirst.map { start -> Double? in
-                        let dt = Date().timeIntervalSince(start)
-                        return dt > 0.4 ? Double(nTokens) / dt : nil
-                    } ?? nil
-                    await MainActor.run {
-                        self?.appendToLast(piece)
-                        if let speed { self?.liveSpeed = speed }
-                    }
+                    await flush()
                 }
             } catch {
                 if !(error is CancellationError) {
+                    AppLog.chat.error("stream failed: \(error.localizedDescription)")
                     await MainActor.run { self?.lastError = error.localizedDescription }
                 }
             }
 
+            await flush(force: true)
             let finalSpeed: Double? = tFirst.flatMap { start in
                 let dt = Date().timeIntervalSince(start)
                 return dt > 0.4 && nTokens > 1 ? Double(nTokens) / dt : nil
             }
-            await MainActor.run { self?.finish(speed: finalSpeed) }
+            let finalUsage = usage
+            await MainActor.run {
+                if let finalUsage { self?.contextUsed = finalUsage.prompt + finalUsage.completion }
+                self?.finish(speed: finalSpeed)
+            }
         }
     }
 
-    private func appendToLast(_ piece: String) {
+    private func setLast(_ content: String) {
         guard let i = currentIndex, let j = conversations[i].messages.indices.last,
               conversations[i].messages[j].role == "assistant" else { return }
-        conversations[i].messages[j].content += piece
+        conversations[i].messages[j].content = content
     }
 
     private func finish(speed: Double?) {
@@ -199,6 +248,19 @@ final class ChatStore: ObservableObject {
     }
 
     func stop() { task?.cancel() }
+
+    /// Removes the last user message (and its response, if any) so it can be
+    /// edited and resent. Returns the removed user text.
+    func popLastExchange() -> String? {
+        guard !generating, let i = currentIndex else { return nil }
+        if conversations[i].messages.last?.role == "assistant" {
+            conversations[i].messages.removeLast()
+        }
+        guard conversations[i].messages.last?.role == "user" else { return nil }
+        let text = conversations[i].messages.removeLast().content
+        save()
+        return text
+    }
 
     // MARK: persistence
 
@@ -227,12 +289,14 @@ struct NativeChatView: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var loc: Localizer
     @StateObject private var chat = ChatStore()
-    @AppStorage("chatTemp") private var temperature = 0.7
-    @AppStorage("chatMaxTokens") private var maxTokens = 2048
-    @AppStorage("chatSystem") private var systemPrompt = ""
-    @AppStorage("chatThinking") private var thinkingEnabled = true
-    @AppStorage("port") private var port = 8080
+    @AppStorage(SettingsKeys.chatTemp) private var temperature = 0.7
+    @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = 2048
+    @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
+    @AppStorage(SettingsKeys.chatThinking) private var thinkingEnabled = true
+    @AppStorage(SettingsKeys.port) private var port = 8080
+    @AppStorage(SettingsKeys.ctx) private var contextLimit = 16384
     @State private var draft = ""
+    @State private var searchText = ""
     @State private var showSystem = false
     @FocusState private var inputFocused: Bool
 
@@ -261,8 +325,13 @@ struct NativeChatView: View {
             .keyboardShortcut("n", modifiers: .command)
             .padding(10)
 
+            TextField(loc.t("Buscar…", "Search…"), text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+
             List(selection: $chat.currentID) {
-                ForEach(chat.conversations) { c in
+                ForEach(filteredConversations) { c in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(chat.displayTitle(c)).lineLimit(1)
                         Text(c.updated.formatted(.relative(presentation: .named)))
@@ -273,6 +342,14 @@ struct NativeChatView: View {
                         Button(loc.t("Copiar conversación", "Copy conversation")) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(chat.exportText(c), forType: .string)
+                        }
+                        Button(loc.t("Exportar a Markdown…", "Export to Markdown…")) {
+                            let panel = NSSavePanel()
+                            panel.nameFieldStringValue = chat.displayTitle(c)
+                                .replacingOccurrences(of: "/", with: "-") + ".md"
+                            if panel.runModal() == .OK, let url = panel.url {
+                                try? chat.exportText(c).write(to: url, atomically: true, encoding: .utf8)
+                            }
                         }
                         Button(loc.t("Eliminar", "Delete"), role: .destructive) { chat.delete(c) }
                     }
@@ -306,16 +383,25 @@ struct NativeChatView: View {
                             .padding(.top, 60)
                     }
                     ForEach(chat.current?.messages ?? []) { msg in
+                        let isLastUser = msg.role == "user"
+                            && msg.id == chat.current?.messages.last(where: { $0.role == "user" })?.id
                         MessageBubble(
                             message: msg,
                             streaming: chat.generating && msg.id == chat.current?.messages.last?.id,
                             liveSpeed: chat.liveSpeed,
                             isLastAssistant: msg.role == "assistant" && msg.id == chat.current?.messages.last?.id,
+                            isLastUser: isLastUser,
                             canRegenerate: !chat.generating,
                             onRegenerate: {
                                 chat.regenerate(port: port, temperature: temperature,
                                                 maxTokens: maxTokens, system: systemPrompt,
                                                 thinking: thinkingEnabled)
+                            },
+                            onEdit: {
+                                if let text = chat.popLastExchange() {
+                                    draft = text
+                                    inputFocused = true
+                                }
                             })
                             .id(msg.id)
                     }
@@ -394,6 +480,21 @@ struct NativeChatView: View {
 
                 Spacer()
 
+                if let used = chat.contextUsed, contextLimit > 0 {
+                    let fraction = Double(used) / Double(contextLimit)
+                    HStack(spacing: 5) {
+                        Text(loc.t("Contexto", "Context")).font(.caption).foregroundStyle(.secondary)
+                        ProgressView(value: min(fraction, 1))
+                            .frame(width: 70)
+                            .tint(fraction > 0.9 ? .red : fraction > 0.8 ? .orange : .accentColor)
+                        Text("\(used / 1000)k / \(contextLimit / 1000)k")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(fraction > 0.8 ? .orange : .secondary)
+                    }
+                    .help(loc.t("Tokens de contexto usados en el último turno. Al llenarse, el servidor olvida el inicio de la conversación.",
+                                "Context tokens used by the last turn. When full, the server forgets the start of the conversation."))
+                }
+
                 if let speed = chat.liveSpeed {
                     Text(String(format: "%.1f t/s", speed))
                         .font(.system(.caption, design: .monospaced))
@@ -427,6 +528,15 @@ struct NativeChatView: View {
         .background(.bar)
     }
 
+    private var filteredConversations: [Conversation] {
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return chat.conversations }
+        return chat.conversations.filter { c in
+            chat.displayTitle(c).localizedCaseInsensitiveContains(query) ||
+            c.messages.contains { $0.content.localizedCaseInsensitiveContains(query) }
+        }
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !chat.generating else { return }
@@ -443,8 +553,10 @@ struct MessageBubble: View {
     let streaming: Bool
     let liveSpeed: Double?
     let isLastAssistant: Bool
+    let isLastUser: Bool
     let canRegenerate: Bool
     let onRegenerate: () -> Void
+    let onEdit: () -> Void
 
     @EnvironmentObject var loc: Localizer
     @State private var thinkExpanded = false
@@ -496,6 +608,13 @@ struct MessageBubble: View {
                             }
                             .buttonStyle(.borderless)
                             .help(loc.t("Regenerar respuesta", "Regenerate response"))
+                        }
+                        if isLastUser && canRegenerate {
+                            Button(action: onEdit) {
+                                Image(systemName: "pencil").font(.system(size: 10))
+                            }
+                            .buttonStyle(.borderless)
+                            .help(loc.t("Editar y reenviar", "Edit and resend"))
                         }
                     }
                 }

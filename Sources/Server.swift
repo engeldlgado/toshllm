@@ -26,6 +26,10 @@ struct ServerSettings {
     var cacheTypeK: String     // f16 | q8_0 | q5_x | q4_x | iq4_nl
     var cacheTypeV: String
     var mlock: Bool
+    var apiKeyEnabled: Bool = false
+    /// MTP self-speculative decoding (+30% generation). Only applied when the
+    /// selected GGUF actually ships the MTP head; silently skipped otherwise.
+    var specMTP: Bool = false
 
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
 
@@ -45,9 +49,12 @@ struct ServerSettings {
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if mlock { args.append("--mlock") }
+        if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
+        if specMTP && Self.modelHasMTP(at: modelPath) {
+            args += ["--spec-type", "draft-mtp"]
+        }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
-        let extra = extraArgs.split(separator: " ").map(String.init)
-        args += extra
+        args += ShellWords.split(extraArgs)
         return args
     }
 
@@ -77,16 +84,6 @@ struct ServerSettings {
 
     static var defaultConcurrencyDisable: Bool { !isAppleSilicon }
 
-    /// Kills engine processes left behind by a previous app instance that did
-    /// not shut down cleanly (e.g. force quit), so their VRAM is released.
-    nonisolated static func reapOrphanedEngines() {
-        guard let resources = Bundle.main.resourceURL?.path else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        p.arguments = ["-f", resources + "/bin"]
-        try? p.run()
-        p.waitUntilExit()
-    }
 
     /// Default engine: the one bundled with the app (portable); falls back to the dev checkout.
     static var defaultBinary: String {
@@ -115,23 +112,49 @@ struct ServerSettings {
         func int(_ key: String, _ def: Int) -> Int { d.object(forKey: key) == nil ? def : d.integer(forKey: key) }
         func bool(_ key: String, _ def: Bool) -> Bool { d.object(forKey: key) == nil ? def : d.bool(forKey: key) }
         return ServerSettings(
-            serverBinary: d.string(forKey: "serverBinary") ?? defaultBinary,
-            modelPath: d.string(forKey: "modelPath") ?? "",
-            port: int("port", 8080),
-            ngl: int("ngl", 99),
-            ncmoe: int("ncmoe", 0),
-            ctx: int("ctx", 16384),
-            threads: int("threads", 6),
-            flashAttn: d.string(forKey: "flashAttn") ?? "auto",
-            noMmap: bool("noMmap", true),
-            jinja: bool("jinja", true),
-            concurrencyDisable: bool("concurrencyDisable", defaultConcurrencyDisable),
-            vramReserveMB: int("vramReserve", 1024),
-            gpuIndex: int("gpuIndex", -1),
-            extraArgs: d.string(forKey: "extraArgs") ?? "",
-            cacheTypeK: d.string(forKey: "cacheTypeK") ?? "f16",
-            cacheTypeV: d.string(forKey: "cacheTypeV") ?? "f16",
-            mlock: bool("mlock", false))
+            serverBinary: d.string(forKey: SettingsKeys.serverBinary) ?? defaultBinary,
+            modelPath: d.string(forKey: SettingsKeys.modelPath) ?? "",
+            port: int(SettingsKeys.port, 8080),
+            ngl: int(SettingsKeys.ngl, 99),
+            ncmoe: int(SettingsKeys.ncmoe, 0),
+            ctx: int(SettingsKeys.ctx, 16384),
+            threads: int(SettingsKeys.threads, 6),
+            flashAttn: d.string(forKey: SettingsKeys.flashAttn) ?? "auto",
+            noMmap: bool(SettingsKeys.noMmap, true),
+            jinja: bool(SettingsKeys.jinja, true),
+            concurrencyDisable: bool(SettingsKeys.concurrencyDisable, defaultConcurrencyDisable),
+            vramReserveMB: int(SettingsKeys.vramReserve, 1024),
+            gpuIndex: int(SettingsKeys.gpuIndex, -1),
+            extraArgs: d.string(forKey: SettingsKeys.extraArgs) ?? "",
+            cacheTypeK: d.string(forKey: SettingsKeys.cacheTypeK) ?? "f16",
+            cacheTypeV: d.string(forKey: SettingsKeys.cacheTypeV) ?? "f16",
+            mlock: bool(SettingsKeys.mlock, false),
+            apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),
+            specMTP: bool(SettingsKeys.specMTP, false))
+    }
+
+    /// Whether a GGUF ships the MTP (multi-token prediction) head, detected by
+    /// scanning the metadata section for the `nextn` tensor markers. Cached per
+    /// path+size so repeated calls are free.
+    nonisolated static func modelHasMTP(at path: String) -> Bool {
+        struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0)
+        if let cached = Cache.store[key] { return cached }
+
+        var found = false
+        if let handle = FileHandle(forReadingAtPath: path),
+           let head = try? handle.read(upToCount: 32 * 1024 * 1024) {
+            found = head.range(of: Data("nextn_predict_layers".utf8)) != nil
+            try? handle.close()
+        }
+        Cache.store[key] = found
+        return found
+    }
+
+    /// The API key the chat must send, when protection is enabled in Settings.
+    static func activeAPIKey() -> String? {
+        UserDefaults.standard.bool(forKey: SettingsKeys.apiKeyEnabled) ? Keychain.apiKey() : nil
     }
 }
 
@@ -151,6 +174,9 @@ final class ServerController: ObservableObject {
     private var process: Process?
     private var healthTask: Task<Void, Never>?
     private var currentPort = 8080
+    private let fileLog = RotatingFileLog(name: "server.log")
+
+    var logFileURL: URL { fileLog.fileURL }
 
     var serverURL: URL { URL(string: "http://127.0.0.1:\(currentPort)/")! }
 
@@ -196,16 +222,21 @@ final class ServerController: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.healthTask?.cancel()
+                EngineLock.clear()
                 if case .failed = self.state { return }
-                self.state = proc.terminationStatus == 0 || proc.terminationStatus == 15
-                    ? .stopped
-                    : .failed("El servidor terminó con código \(proc.terminationStatus)")
+                if proc.terminationStatus == 0 || proc.terminationStatus == 15 {
+                    self.state = .stopped
+                } else {
+                    AppLog.server.error("engine exited with status \(proc.terminationStatus)")
+                    self.state = .failed(Self.diagnose(self.log, exitCode: proc.terminationStatus))
+                }
             }
         }
 
         do {
             try p.run()
             process = p
+            EngineLock.write(pid: p.processIdentifier)
             state = .starting
             watchHealth(port: settings.port)
         } catch {
@@ -213,10 +244,37 @@ final class ServerController: ObservableObject {
         }
     }
 
+    /// Maps known engine failure patterns to actionable, bilingual messages.
+    static func diagnose(_ log: String, exitCode: Int32) -> String {
+        let tail = log.suffix(6000).lowercased()
+        if tail.contains("unknown model architecture") || tail.contains("unknown architecture") {
+            return "Arquitectura no soportada por este motor / model architecture not supported by this engine"
+        }
+        if tail.contains("address already in use") {
+            return "Puerto ocupado: cambia el puerto en Ajustes / port busy: change it in Settings"
+        }
+        if tail.contains("out of memory") || tail.contains("failed to allocate")
+            || tail.contains("insufficient memory") || tail.contains("kiogpucommandbuffercallbackerroroutofmemory") {
+            return "Memoria insuficiente: sube 'Expertos MoE en CPU' o reduce el contexto / out of memory: raise 'MoE experts on CPU' or reduce context"
+        }
+        if tail.contains("quantized v cache") {
+            return "Valores KV cuantizados requieren Flash Attention 'on' / quantized V cache requires Flash Attention 'on'"
+        }
+        if tail.contains("nextn") || tail.contains("draft-mtp") || tail.contains("mtp") {
+            return "Este modelo no trae cabezal MTP: desactiva 'Aceleración MTP' o descarga la variante -MTP- / model has no MTP head: disable 'MTP acceleration' or download the -MTP- variant"
+        }
+        if tail.contains("invalid magic") || tail.contains("failed to load model")
+            || tail.contains("error loading model") {
+            return "Modelo dañado o incompleto: vuelve a descargarlo / model file damaged or incomplete: re-download it"
+        }
+        return "El motor terminó con código \(exitCode) — revisa el registro en Ajustes / engine exited with code \(exitCode) — see the log in Settings"
+    }
+
     func stop() {
         healthTask?.cancel()
         process?.terminate()
         process = nil
+        EngineLock.clear()
         state = .stopped
     }
 
@@ -245,6 +303,7 @@ final class ServerController: ObservableObject {
     private func consume(_ text: String) {
         log += text
         if log.count > 120_000 { log = String(log.suffix(80_000)) }
+        fileLog.append(text)
 
         for line in text.split(separator: "\n") {
             guard line.contains("tokens per second"), line.contains("eval time") else { continue }

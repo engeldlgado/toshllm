@@ -17,6 +17,10 @@ open dist/ToshLLM.app
 Requirements: macOS 14+, Xcode Command Line Tools, CMake. No Xcode project —
 the app is plain Swift Package Manager (`swift build`).
 
+> **Note on tests:** Command Line Tools do not ship XCTest, so `swift test`
+> requires a full Xcode install (or just rely on CI, which runs the suite on
+> every push and pull request).
+
 ## Project layout
 
 | Path | Purpose |

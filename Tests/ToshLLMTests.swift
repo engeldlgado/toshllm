@@ -85,9 +85,17 @@ final class ServerSettingsTests: XCTestCase {
 
     func testExtraArgsAreAppended() {
         var s = makeSettings()
-        s.extraArgs = "--spec-type draft-mtp"
+        s.extraArgs = #"--override-kv key=str:"two words""#
         let args = s.arguments
-        XCTAssertEqual(args[args.firstIndex(of: "--spec-type")! + 1], "draft-mtp")
+        XCTAssertTrue(args.contains("key=str:two words"))
+    }
+
+    func testMTPIsSkippedForModelsWithoutTheHead() {
+        var s = makeSettings()
+        s.specMTP = true
+        s.modelPath = "/tmp/definitely-not-a-model.gguf"
+        XCTAssertFalse(s.arguments.contains("--spec-type"),
+                       "MTP must be silently skipped when the GGUF lacks the head")
     }
 
     func testStabilityEnvironment() {
@@ -189,6 +197,29 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(loc.t("hola", "hello"), "hola")
         loc.isSpanish = false
         XCTAssertEqual(loc.t("hola", "hello"), "hello")
+    }
+}
+
+// MARK: - Shell-words parsing
+
+final class ShellWordsTests: XCTestCase {
+    func testPlainSplit() {
+        XCTAssertEqual(ShellWords.split("-a 1  -b 2"), ["-a", "1", "-b", "2"])
+    }
+
+    func testQuotedArgumentsStayTogether() {
+        XCTAssertEqual(ShellWords.split(#"--system "hola mundo" -x"#),
+                       ["--system", "hola mundo", "-x"])
+        XCTAssertEqual(ShellWords.split("--name 'San Juan' x"),
+                       ["--name", "San Juan", "x"])
+    }
+
+    func testEmptyQuotesProduceEmptyArgument() {
+        XCTAssertEqual(ShellWords.split(#"-p """#), ["-p", ""])
+    }
+
+    func testEmptyInput() {
+        XCTAssertEqual(ShellWords.split("   "), [])
     }
 }
 

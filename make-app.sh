@@ -4,7 +4,10 @@
 set -e
 cd "$(dirname "$0")"
 
-if [ -n "$TOSH_ARCH" ]; then
+if [ "$TOSH_ARCH" = "universal" ]; then
+    swift build -c release --arch x86_64 --arch arm64
+    SWIFT_BIN=".build/apple/Products/Release/ToshLLM"
+elif [ -n "$TOSH_ARCH" ]; then
     swift build -c release --arch "$TOSH_ARCH"
     SWIFT_BIN=".build/$TOSH_ARCH-apple-macosx/release/ToshLLM"
 else

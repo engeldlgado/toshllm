@@ -7,6 +7,7 @@
 # Usage:
 #   ./scripts/build-engines.sh                  # host architecture, both engines
 #   ARCH=x86_64 ./scripts/build-engines.sh      # cross-compile (CI on arm64 runners)
+#   ARCH=universal ./scripts/build-engines.sh   # x86_64 + arm64 fat binaries (experimental)
 #   SKIP_TURBO=1 ./scripts/build-engines.sh     # official engine only
 set -e
 cd "$(dirname "$0")/.."
@@ -15,6 +16,30 @@ ROOT="$PWD"
 LLAMA_COMMIT="${LLAMA_COMMIT:-1593d56}"   # llama.cpp commit validated against the patches
 TURBO_COMMIT="${TURBO_COMMIT:-a3e3638}"   # head of llama.cpp PR 23962 (TurboQuant KV cache)
 ARCH="${ARCH:-$(uname -m)}"
+if [ "$ARCH" = "universal" ]; then
+    # Build each slice separately (ggml has per-arch sources) and lipo them.
+    for slice in x86_64 arm64; do
+        ARCH="$slice" SKIP_TURBO="$SKIP_TURBO" "$0"
+        for dir in vendor/llama.cpp vendor/llama.cpp-turbo; do
+            [ -d "$dir/build-static/bin" ] || continue
+            for tool in llama-server llama-bench; do
+                mv "$dir/build-static/bin/$tool" "$dir/build-static/bin/$tool.$slice" 2>/dev/null || true
+            done
+        done
+    done
+    for dir in vendor/llama.cpp vendor/llama.cpp-turbo; do
+        [ -d "$dir/build-static/bin" ] || continue
+        for tool in llama-server llama-bench; do
+            if [ -f "$dir/build-static/bin/$tool.x86_64" ] && [ -f "$dir/build-static/bin/$tool.arm64" ]; then
+                lipo -create -output "$dir/build-static/bin/$tool" \
+                    "$dir/build-static/bin/$tool.x86_64" "$dir/build-static/bin/$tool.arm64"
+                rm "$dir/build-static/bin/$tool".{x86_64,arm64}
+            fi
+        done
+    done
+    echo "universal engines ready"
+    exit 0
+fi
 
 CMAKE_FLAGS=(
     -DCMAKE_BUILD_TYPE=Release

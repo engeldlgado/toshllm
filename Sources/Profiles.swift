@@ -20,6 +20,7 @@ struct Profile: Codable, Identifiable {
     var cacheTypeV: String
     var mlock: Bool
     var port: Int
+    var specMTP: Bool? = nil
     // "bundled" | "turbo" | absolute path. Optional for backward compatibility.
     var engine: String?
 }
@@ -46,7 +47,7 @@ final class ProfileStore: ObservableObject {
                         noMmap: s.noMmap, jinja: s.jinja, concurrencyDisable: s.concurrencyDisable,
                         vramReserve: s.vramReserveMB, gpuIndex: s.gpuIndex, extraArgs: s.extraArgs,
                         cacheTypeK: s.cacheTypeK, cacheTypeV: s.cacheTypeV, mlock: s.mlock, port: s.port,
-                        engine: engine)
+                        specMTP: s.specMTP, engine: engine)
         profiles.removeAll { $0.name == name }
         profiles.append(p)
         save()
@@ -54,26 +55,27 @@ final class ProfileStore: ObservableObject {
 
     func apply(_ p: Profile) {
         let d = UserDefaults.standard
-        d.set(p.modelPath, forKey: "modelPath")
-        d.set(p.ngl, forKey: "ngl")
-        d.set(p.ncmoe, forKey: "ncmoe")
-        d.set(p.ctx, forKey: "ctx")
-        d.set(p.threads, forKey: "threads")
-        d.set(p.flashAttn, forKey: "flashAttn")
-        d.set(p.noMmap, forKey: "noMmap")
-        d.set(p.jinja, forKey: "jinja")
-        d.set(p.concurrencyDisable, forKey: "concurrencyDisable")
-        d.set(p.vramReserve, forKey: "vramReserve")
-        d.set(p.gpuIndex, forKey: "gpuIndex")
-        d.set(p.extraArgs, forKey: "extraArgs")
-        d.set(p.cacheTypeK, forKey: "cacheTypeK")
-        d.set(p.cacheTypeV, forKey: "cacheTypeV")
-        d.set(p.mlock, forKey: "mlock")
-        d.set(p.port, forKey: "port")
+        d.set(p.modelPath, forKey: SettingsKeys.modelPath)
+        d.set(p.ngl, forKey: SettingsKeys.ngl)
+        d.set(p.ncmoe, forKey: SettingsKeys.ncmoe)
+        d.set(p.ctx, forKey: SettingsKeys.ctx)
+        d.set(p.threads, forKey: SettingsKeys.threads)
+        d.set(p.flashAttn, forKey: SettingsKeys.flashAttn)
+        d.set(p.noMmap, forKey: SettingsKeys.noMmap)
+        d.set(p.jinja, forKey: SettingsKeys.jinja)
+        d.set(p.concurrencyDisable, forKey: SettingsKeys.concurrencyDisable)
+        d.set(p.vramReserve, forKey: SettingsKeys.vramReserve)
+        d.set(p.gpuIndex, forKey: SettingsKeys.gpuIndex)
+        d.set(p.extraArgs, forKey: SettingsKeys.extraArgs)
+        d.set(p.cacheTypeK, forKey: SettingsKeys.cacheTypeK)
+        d.set(p.cacheTypeV, forKey: SettingsKeys.cacheTypeV)
+        d.set(p.mlock, forKey: SettingsKeys.mlock)
+        d.set(p.port, forKey: SettingsKeys.port)
+        if let mtp = p.specMTP { d.set(mtp, forKey: SettingsKeys.specMTP) }
         switch p.engine {
-        case "bundled": d.set(ServerSettings.defaultBinary, forKey: "serverBinary")
-        case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: "serverBinary")
-        case let .some(path) where !path.isEmpty: d.set(path, forKey: "serverBinary")
+        case "bundled": d.set(ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
+        case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
+        case let .some(path) where !path.isEmpty: d.set(path, forKey: SettingsKeys.serverBinary)
         default: break
         }
     }
