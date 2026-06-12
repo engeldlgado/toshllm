@@ -1,29 +1,20 @@
 #!/bin/zsh
-# Builds the inference engine (llama.cpp + AMD patches) reproducibly.
-# Output: vendor/llama.cpp/build-static/bin/{llama-server,llama-bench}
+# Builds the inference engines reproducibly:
+#   1. Official llama.cpp + AMD patches  -> vendor/llama.cpp/build-static/bin
+#   2. TurboQuant engine (llama.cpp PR 23962 + repair patches, optional)
+#                                        -> vendor/llama.cpp-turbo/build-static/bin
 #
 # Usage:
-#   ./scripts/build-engines.sh                  # host architecture
+#   ./scripts/build-engines.sh                  # host architecture, both engines
 #   ARCH=x86_64 ./scripts/build-engines.sh      # cross-compile (CI on arm64 runners)
+#   SKIP_TURBO=1 ./scripts/build-engines.sh     # official engine only
 set -e
 cd "$(dirname "$0")/.."
+ROOT="$PWD"
 
 LLAMA_COMMIT="${LLAMA_COMMIT:-1593d56}"   # llama.cpp commit validated against the patches
+TURBO_COMMIT="${TURBO_COMMIT:-a3e3638}"   # head of llama.cpp PR 23962 (TurboQuant KV cache)
 ARCH="${ARCH:-$(uname -m)}"
-VENDOR="vendor/llama.cpp"
-
-if [ ! -d "$VENDOR/.git" ]; then
-    git clone --filter=blob:none https://github.com/ggml-org/llama.cpp "$VENDOR"
-fi
-cd "$VENDOR"
-git fetch --depth 1 origin "$LLAMA_COMMIT" 2>/dev/null || git fetch origin
-git checkout -q "$LLAMA_COMMIT"
-
-# Patch: chunked staging transfers for AMD drivers that cap host-visible
-# allocations (required on discrete AMD GPUs).
-git checkout -- ggml/src/ggml-metal/ggml-metal-device.m 2>/dev/null || true
-git apply ../../patches/0001-metal-amd-staging-transfers.patch
-echo "AMD patch applied"
 
 CMAKE_FLAGS=(
     -DCMAKE_BUILD_TYPE=Release
@@ -37,7 +28,36 @@ CMAKE_FLAGS=(
     -DLLAMA_OPENSSL=OFF
 )
 
-cmake -B build-static "${CMAKE_FLAGS[@]}"
-cmake --build build-static --config Release -j "$(sysctl -n hw.ncpu)" -t llama-server llama-bench
+build_engine() {
+    local vendor="$1" ref="$2" fetch_ref="$3"
+    shift 3
+    local patches=("$@")
 
-echo "engines ready at $PWD/build-static/bin (arch: $ARCH)"
+    if [ ! -d "$vendor/.git" ]; then
+        git clone --filter=blob:none https://github.com/ggml-org/llama.cpp "$vendor"
+    fi
+    cd "$vendor"
+    git fetch origin "$fetch_ref" 2>/dev/null || git fetch origin
+    git checkout -qf "$ref"
+    git checkout -- . 2>/dev/null || true
+
+    for patch in "${patches[@]}"; do
+        git apply "$ROOT/patches/$patch"
+        echo "applied $patch"
+    done
+
+    cmake -B build-static "${CMAKE_FLAGS[@]}"
+    cmake --build build-static --config Release -j "$(sysctl -n hw.ncpu)" -t llama-server llama-bench
+    echo "engine ready at $PWD/build-static/bin (arch: $ARCH)"
+    cd "$ROOT"
+}
+
+# 1. Official engine
+build_engine vendor/llama.cpp "$LLAMA_COMMIT" "$LLAMA_COMMIT" \
+    0001-metal-amd-staging-transfers.patch
+
+# 2. TurboQuant engine (from the upstream PR ref; skip with SKIP_TURBO=1)
+if [ -z "$SKIP_TURBO" ]; then
+    build_engine vendor/llama.cpp-turbo "$TURBO_COMMIT" "refs/pull/23962/head" \
+        0002-turboquant-pr-fixes.patch
+fi

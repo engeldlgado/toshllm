@@ -1,0 +1,317 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 693e2ff..2ac557b 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1759,6 +1759,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+ }
+ 
+ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
++    if (size == 0) {
++        return;
++    }
++
+     if (buf->is_shared) {
+         memcpy((char *) tensor->data + offset, data, size);
+         return;
+@@ -1772,12 +1776,52 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+                                                               options:MTLResourceStorageModeShared
+                                                           deallocator:nil];
+ 
+-        GGML_ASSERT(buf_src);
+-
+         // dst
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
+         bid_dst.offs += offset;
+ 
++        if (buf_src == nil) {
++            // newBufferWithBytesNoCopy requires page-aligned data, and some drivers cap the size of
++            // host-visible allocations; copy through a small staging buffer in chunks instead
++            size_t stage_size = MIN(size, (size_t) 8*1024*1024);
++            id<MTLBuffer> buf_stage = nil;
++            while (stage_size > 0) {
++                buf_stage = [buf->dev->mtl_device newBufferWithLength:stage_size options:MTLResourceStorageModeShared];
++                if (buf_stage != nil) {
++                    break;
++                }
++                stage_size /= 2;
++            }
++            GGML_ASSERT(buf_stage);
++
++            for (size_t done = 0; done < size;) {
++                const size_t n = MIN(stage_size, size - done);
++
++                memcpy(buf_stage.contents, (const char *) data + done, n);
++
++                id<MTLCommandBuffer> cmd_buf = [buf->dev->mtl_queue commandBufferWithUnretainedReferences];
++
++                {
++                    id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
++
++                    [encoder copyFromBuffer:buf_stage
++                               sourceOffset:0
++                                   toBuffer:bid_dst.metal
++                          destinationOffset:bid_dst.offs + done
++                                       size:n];
++
++                    [encoder endEncoding];
++                }
++
++                [cmd_buf commit];
++                [cmd_buf waitUntilCompleted];
++
++                done += n;
++            }
++
++            return;
++        }
++
+         // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
+         //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
+         dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
+@@ -1813,6 +1857,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+ }
+ 
+ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
++    if (size == 0) {
++        return;
++    }
++
+     if (buf->is_shared) {
+         memcpy(data, (const char *) tensor->data + offset, size);
+         return;
+@@ -1829,24 +1877,64 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+                                                               options:MTLResourceStorageModeShared
+                                                           deallocator:nil];
+ 
+-        GGML_ASSERT(buf_dst);
++        if (buf_dst != nil) {
++            id<MTLCommandBuffer> cmd_buf = [buf->dev->mtl_queue commandBufferWithUnretainedReferences];
+ 
+-        id<MTLCommandBuffer> cmd_buf = [buf->dev->mtl_queue commandBufferWithUnretainedReferences];
++            {
++                id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+-        {
+-            id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
++                [encoder copyFromBuffer:bid_src.metal
++                           sourceOffset:bid_src.offs
++                               toBuffer:buf_dst
++                      destinationOffset:0
++                                   size:size];
+ 
+-            [encoder copyFromBuffer:bid_src.metal
+-                       sourceOffset:bid_src.offs
+-                           toBuffer:buf_dst
+-                  destinationOffset:0
+-                               size:size];
++                [encoder endEncoding];
++            }
+ 
+-            [encoder endEncoding];
++            [cmd_buf commit];
++            [cmd_buf waitUntilCompleted];
++
++            return;
+         }
+ 
+-        [cmd_buf commit];
+-        [cmd_buf waitUntilCompleted];
++        // newBufferWithBytesNoCopy requires page-aligned data, and some drivers cap the size of
++        // host-visible allocations; copy through a small staging buffer in chunks instead
++        size_t stage_size = MIN(size, (size_t) 8*1024*1024);
++        id<MTLBuffer> buf_stage = nil;
++        while (stage_size > 0) {
++            buf_stage = [buf->dev->mtl_device newBufferWithLength:stage_size options:MTLResourceStorageModeShared];
++            if (buf_stage != nil) {
++                break;
++            }
++            stage_size /= 2;
++        }
++        GGML_ASSERT(buf_stage);
++
++        for (size_t done = 0; done < size;) {
++            const size_t n = MIN(stage_size, size - done);
++
++            id<MTLCommandBuffer> cmd_buf = [buf->dev->mtl_queue commandBufferWithUnretainedReferences];
++
++            {
++                id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
++
++                [encoder copyFromBuffer:bid_src.metal
++                           sourceOffset:bid_src.offs + done
++                               toBuffer:buf_stage
++                      destinationOffset:0
++                                   size:n];
++
++                [encoder endEncoding];
++            }
++
++            [cmd_buf commit];
++            [cmd_buf waitUntilCompleted];
++
++            memcpy((char *) data + done, buf_stage.contents, n);
++
++            done += n;
++        }
+     }
+ }
+ 
+diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
+index fa49cc8..799c2f6 100644
+--- a/src/llama-quant.cpp
++++ b/src/llama-quant.cpp
+@@ -455,7 +455,7 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type
+                 new_type = GGML_TYPE_Q5_K;
+             }
+             else if (ftype == LLAMA_FTYPE_MOSTLY_AKQ_G2Q6) {
+-                new_type GGML_TYPE_Q8_K
++                new_type = GGML_TYPE_Q8_K;
+             }
+             else if (new_type != GGML_TYPE_Q8_0) {
+                 new_type = GGML_TYPE_Q6_K;
+@@ -634,7 +634,7 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type
+             new_type = ftype == LLAMA_FTYPE_MOSTLY_Q4_0 ? GGML_TYPE_Q4_1 : GGML_TYPE_Q5_1;
+         }
+         else if (ftype == LLAMA_FTYPE_MOSTLY_AKQ_G2Q3) {
+-            new_type = GGML_TYPE_IQ3_XS;
++            new_type = GGML_TYPE_IQ3_S;
+         }
+         else if (ftype == LLAMA_FTYPE_MOSTLY_AKQ_G2Q6) {
+             new_type = GGML_TYPE_Q6_K;
+@@ -655,7 +655,7 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type
+                 else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M ) new_type = GGML_TYPE_Q4_K;
+                 else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L ) new_type = GGML_TYPE_Q5_K;
+                 else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_M || ftype == LLAMA_FTYPE_MOSTLY_AKQ_G2Q3) new_type = GGML_TYPE_IQ4_XS;
+-                else if (ftype == LLAMA_FTYPE_MOSTLY_AKQ_G2Q6) new_type GGML_TYPE_Q8_K;
++                else if (ftype == LLAMA_FTYPE_MOSTLY_AKQ_G2Q6) new_type = GGML_TYPE_Q8_K;
+             }
+         } else {
+             if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) new_type = GGML_TYPE_Q4_K;
+diff --git a/tools/ui/CMakeLists.txt b/tools/ui/CMakeLists.txt
+index e77b39c..60d9020 100644
+--- a/tools/ui/CMakeLists.txt
++++ b/tools/ui/CMakeLists.txt
+@@ -66,123 +66,6 @@ else()
+         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+     )
+     set(LLAMA_UI_EMBED_EXE "$<TARGET_FILE:llama-ui-embed>")
+-if(LLAMA_BUILD_UI)
+-    set(PUBLIC_ASSETS
+-        index.html
+-        bundle.js
+-        bundle.css
+-        loading.html
+-    )
+-
+-    # Determine source of UI assets (priority: local > HF Bucket)
+-    set(UI_SOURCE "")
+-    set(UI_SOURCE_DIR "")
+-
+-    # Priority 1: Check for local build output
+-    set(LOCAL_UI_DIR "${PROJECT_SOURCE_DIR}/build/tools/ui/dist")
+-
+-    # Verify all required assets exist before declaring local source valid
+-    set(ALL_ASSETS_PRESENT TRUE)
+-    foreach(asset ${PUBLIC_ASSETS})
+-        if(NOT EXISTS "${LOCAL_UI_DIR}/${asset}")
+-            set(ALL_ASSETS_PRESENT FALSE)
+-            break()
+-        endif()
+-    endforeach()
+-
+-    if(ALL_ASSETS_PRESENT)
+-        set(UI_SOURCE "local")
+-        set(UI_SOURCE_DIR "${LOCAL_UI_DIR}")
+-        message(STATUS "UI: using local build from ${UI_SOURCE_DIR}")
+-    endif()
+-
+-    # Priority 2: Build-time asset provisioning (npm build → HF Bucket fallback)
+-    if(NOT UI_SOURCE_DIR)
+-        # Environment variable takes precedence (e.g., from CI workflows)
+-        # Deprecated: use HF_UI_VERSION instead
+-        if(DEFINED ENV{HF_WEBUI_VERSION})
+-            set(HF_UI_VERSION "$ENV{HF_WEBUI_VERSION}")
+-            message(DEPRECATION "HF_WEBUI_VERSION env var is deprecated, use HF_UI_VERSION instead")
+-            if(NOT HF_UI_VERSION MATCHES "^[A-Za-z0-9._-]+$")
+-                message(FATAL_ERROR "UI: invalid HF_WEBUI_VERSION='${HF_UI_VERSION}' - must match ^[A-Za-z0-9._-]+$")
+-            endif()
+-        elseif(DEFINED ENV{HF_UI_VERSION})
+-            set(HF_UI_VERSION "$ENV{HF_UI_VERSION}")
+-            if(NOT HF_UI_VERSION MATCHES "^[A-Za-z0-9._-]+$")
+-                message(FATAL_ERROR "UI: invalid HF_UI_VERSION='${HF_UI_VERSION}' - must match ^[A-Za-z0-9._-]+$")
+-            endif()
+-        elseif(DEFINED LLAMA_BUILD_NUMBER)
+-            set(HF_UI_VERSION "b${LLAMA_BUILD_NUMBER}")
+-            message(STATUS "UI: derived HF_UI_VERSION=b${LLAMA_BUILD_NUMBER}")
+-        else()
+-            set(HF_UI_VERSION "")
+-            message(STATUS "UI: version not specified (will use HF 'latest')")
+-        endif()
+-
+-        if("${HF_UI_VERSION}" STREQUAL "")
+-            set(UI_VERSION_TAG "provisioned")
+-        else()
+-            set(UI_VERSION_TAG "${HF_UI_VERSION}")
+-        endif()
+-        set(UI_STAMP "${CMAKE_CURRENT_BINARY_DIR}/.ui-${UI_VERSION_TAG}.stamp")
+-
+-        string(REPLACE ";" "+" PUBLIC_ASSETS_JOINED "${PUBLIC_ASSETS}")
+-
+-        add_custom_command(
+-            OUTPUT ${UI_STAMP}
+-            COMMAND ${CMAKE_COMMAND}
+-                "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+-                "-DPUBLIC_DIR=${PROJECT_SOURCE_DIR}/build/tools/ui/dist"
+-                "-DHF_BUCKET=${LLAMA_UI_HF_BUCKET}"
+-                "-DHF_VERSION=${HF_UI_VERSION}"
+-                "-DHF_ENABLED=${LLAMA_USE_PREBUILT_UI}"
+-                "-DASSETS=${PUBLIC_ASSETS_JOINED}"
+-                "-DSTAMP_FILE=${UI_STAMP}"
+-                "-DNPM_DIR=${PROJECT_SOURCE_DIR}/tools/ui"
+-                -P ${PROJECT_SOURCE_DIR}/scripts/ui-download.cmake
+-            COMMENT "Building/provisioning UI assets (npm build -> HF Bucket fallback)"
+-        )
+-
+-        set(UI_SOURCE "provisioned")
+-        set(UI_SOURCE_DIR "${PROJECT_SOURCE_DIR}/build/tools/ui/dist")
+-    endif()
+-
+-    # Process assets from the determined source
+-    if(UI_SOURCE_DIR)
+-        foreach(asset ${PUBLIC_ASSETS})
+-            set(input "${UI_SOURCE_DIR}/${asset}")
+-            set(output "${CMAKE_CURRENT_BINARY_DIR}/${asset}.hpp")
+-            list(APPEND TARGET_SRCS ${output})
+-
+-            if(UI_SOURCE STREQUAL "local")
+-                if(NOT EXISTS "${input}")
+-                    message(FATAL_ERROR "UI asset not found: ${input}")
+-                endif()
+-                set(dependency "${input}")
+-            else()
+-                set(dependency "${UI_STAMP}")
+-            endif()
+-
+-            add_custom_command(
+-                DEPENDS ${dependency}
+-                OUTPUT "${output}"
+-                COMMAND "${CMAKE_COMMAND}" "-DINPUT=${input}" "-DOUTPUT=${output}" -P "${PROJECT_SOURCE_DIR}/scripts/xxd.cmake"
+-            )
+-            set_source_files_properties(${output} PROPERTIES GENERATED TRUE)
+-        endforeach()
+-
+-        list(APPEND UI_COMPILE_DEFS
+-            LLAMA_BUILD_UI
+-            LLAMA_UI_DEFAULT_ENABLED=1
+-        )
+-        message(STATUS "UI: embedded with source: ${UI_SOURCE}")
+-    else()
+-        message(WARNING "UI: no source available. Neither local build (build/tools/ui/dist/) nor HF Bucket download succeeded.")
+-        message(WARNING "UI: building server without embedded UI. Set LLAMA_BUILD_UI=OFF to suppress this warning.")
+-        list(APPEND UI_COMPILE_DEFS LLAMA_UI_DEFAULT_ENABLED=0)
+-    endif()
+-else()
+-    list(APPEND UI_COMPILE_DEFS LLAMA_UI_DEFAULT_ENABLED=0)
+ endif()
+ 
+ # Run the provisioning script every build so source changes in tools/ui/ are

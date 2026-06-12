@@ -19,11 +19,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Cache llama.cpp build
+      - name: Cache engine builds
         uses: actions/cache@v5
         with:
-          path: vendor/llama.cpp
-          key: llama-${{ hashFiles('patches/*.patch', 'scripts/build-engines.sh') }}
+          path: vendor
+          key: engines-${{ hashFiles('patches/*.patch', 'scripts/build-engines.sh') }}
 
       - name: Run unit tests
         run: swift test

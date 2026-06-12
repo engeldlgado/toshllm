@@ -39,7 +39,8 @@ cp Assets/test-ui/index.html "$APP/Contents/Resources/test-ui/"
 [ -f Assets/binance-qr.png ] && cp Assets/binance-qr.png "$APP/Contents/Resources/binance-qr.png"
 
 # Experimental TurboQuant engine (optional)
-TURBO_STATIC="$HOME/dev/repositorios/llama.cpp-turboquant/build-static/bin"
+TURBO_STATIC="vendor/llama.cpp-turbo/build-static/bin"
+[ -x "$TURBO_STATIC/llama-server" ] || TURBO_STATIC="$HOME/dev/repositorios/llama.cpp-turboquant/build-static/bin"
 if [ -x "$TURBO_STATIC/llama-server" ]; then
     mkdir -p "$APP/Contents/Resources/bin-turbo"
     cp "$TURBO_STATIC/llama-server" "$TURBO_STATIC/llama-bench" "$APP/Contents/Resources/bin-turbo/"
