@@ -10,7 +10,7 @@ Native macOS app · Metal acceleration · No cloud, no accounts, no per-token co
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20(Intel%20%2B%20AMD%20GPU)-lightgrey)](#requirements)
 
-*[Versión en español más abajo](#-toshllm-en-español)*
+*[Versión en español más abajo](#toshllm-en-español)*
 
 </div>
 
@@ -24,21 +24,21 @@ ToshLLM fixes this. It bundles **llama.cpp** built with AMD-specific patches and
 
 | | Stock llama.cpp on AMD dGPU | ToshLLM |
 |---|---|---|
-| Output | garbage text | ✅ correct |
+| Output | corrupted | correct |
 | Qwen3-8B generation | 0.6–2.6 t/s | **~57 t/s** |
 | Qwen3.6-35B (MoE) generation | unusable | **~26 t/s** (with MTP) |
 
 ## Features
 
-- 💬 **Native chat** — multiple persistent conversations, full Markdown with code-copy, regenerate, system prompt, live tokens/sec
-- 📦 **Model manager** — curated catalog with **per-model VRAM/RAM estimates for *your* hardware**, Hugging Face search, downloads with progress, one-click delete
-- 🧠 **MoE-aware** — automatic `--n-cpu-moe` calculation so 35B-class Mixture-of-Experts models run well on 12 GB GPUs
-- ⚡ **MTP speculative decoding** — +34% generation speed with compatible models, zero quality loss
-- 🚀 **Dual engines** — official llama.cpp + experimental TurboQuant engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM)
-- 📊 **Benchmarks** — measure prompt/generation speed per configuration, with history and comparison charts
-- 🌐 **OpenAI-compatible API** — use it from any client or library at `http://127.0.0.1:8080`
-- 🛠 **Every parameter explained** — bilingual tooltips and built-in documentation (English/Spanish)
-- 👤 **Profiles, menu bar mode, auto-start** — save full configurations and switch with one click
+- **Native chat** — multiple persistent conversations, full Markdown with code-copy, regenerate, system prompt, live tokens/sec
+- **Model manager** — curated catalog with **per-model VRAM/RAM estimates for *your* hardware**, Hugging Face search, downloads with progress, one-click delete
+- **MoE-aware** — automatic `--n-cpu-moe` calculation so 35B-class Mixture-of-Experts models run well on 12 GB GPUs
+- **MTP speculative decoding** — +34% generation speed with compatible models, zero quality loss
+- **Dual engines** — official llama.cpp + experimental TurboQuant engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM)
+- **Benchmarks** — measure prompt/generation speed per configuration, with history and comparison charts
+- **OpenAI-compatible API** — use it from any client or library at `http://127.0.0.1:8080`
+- **Every parameter explained** — bilingual tooltips and built-in documentation (English/Spanish)
+- **Profiles, menu bar mode, auto-start** — save full configurations and switch with one click
 
 ## Requirements
 
@@ -120,7 +120,7 @@ turned into closed-source commercial software.
 - [iRon-Llama](https://github.com/Basten7/iRon-Llama-RC1) (Basten7) — Metal-on-AMD research for Intel Macs
 - Developed by **Engelbert Delgado** ([@engeldlgado](https://github.com/engeldlgado))
 
-## Support the project ❤️
+## Support the project
 
 If ToshLLM is useful to you:
 
@@ -129,7 +129,7 @@ If ToshLLM is useful to you:
 
 ---
 
-## 🇪🇸 ToshLLM en español
+## ToshLLM en español
 
 **Ejecuta modelos de lenguaje localmente en Macs Intel con GPU AMD**, con aceleración Metal. Sin nube, sin cuentas, sin costos por token.
 

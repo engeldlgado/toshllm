@@ -29,7 +29,7 @@ final class UpdateChecker: ObservableObject {
     }
 
     /// Numeric per-component comparison (0.81.1 < 0.82 < 1.0).
-    static func isVersion(_ a: String, newerThan b: String) -> Bool {
+    nonisolated static func isVersion(_ a: String, newerThan b: String) -> Bool {
         let pa = a.split(separator: ".").map { Int($0) ?? 0 }
         let pb = b.split(separator: ".").map { Int($0) ?? 0 }
         for i in 0..<max(pa.count, pb.count) {
