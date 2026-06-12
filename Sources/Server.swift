@@ -26,6 +26,13 @@ struct ServerSettings {
     var cacheTypeK: String     // f16 | q8_0 | q5_x | q4_x | iq4_nl
     var cacheTypeV: String
     var mlock: Bool
+    /// Host-RAM prompt cache cap in MiB (0 disables). llama-server defaults to
+    /// 8192 MiB, which next to a large model pushes 32 GB machines into swap
+    /// and progressively degrades generation speed.
+    var cacheRAM: Int = 2048
+    /// Emit reasoning inline in `content` (<think>…) instead of the separate
+    /// `reasoning_content` field, for external clients that ignore the latter.
+    var reasoningInline: Bool = false
     var apiKeyEnabled: Bool = false
     /// MTP self-speculative decoding (+30% generation). Only applied when the
     /// selected GGUF actually ships the MTP head; silently skipped otherwise.
@@ -49,6 +56,8 @@ struct ServerSettings {
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if mlock { args.append("--mlock") }
+        args += ["--cache-ram", String(cacheRAM)]
+        if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         if specMTP && Self.modelHasMTP(at: modelPath) {
             args += ["--spec-type", "draft-mtp"]
@@ -129,6 +138,8 @@ struct ServerSettings {
             cacheTypeK: d.string(forKey: SettingsKeys.cacheTypeK) ?? "f16",
             cacheTypeV: d.string(forKey: SettingsKeys.cacheTypeV) ?? "f16",
             mlock: bool(SettingsKeys.mlock, false),
+            cacheRAM: int(SettingsKeys.cacheRAM, 2048),
+            reasoningInline: bool(SettingsKeys.reasoningInline, false),
             apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),
             specMTP: bool(SettingsKeys.specMTP, false))
     }
@@ -272,9 +283,20 @@ final class ServerController: ObservableObject {
 
     func stop() {
         healthTask?.cancel()
-        process?.terminate()
+        if let p = process {
+            let pid = p.processIdentifier
+            p.terminate()
+            // SIGTERM can stall mid-generation; make sure the engine (and its
+            // multi-GB working set) actually exits and frees the memory. The
+            // lockfile is cleared by the termination handler on real exit, so
+            // an engine that survives until app quit is reaped on next launch.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) {
+                if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            }
+        } else {
+            EngineLock.clear()
+        }
         process = nil
-        EngineLock.clear()
         state = .stopped
     }
 

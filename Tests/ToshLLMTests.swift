@@ -80,6 +80,18 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertTrue(args.contains("--n-cpu-moe"))
         XCTAssertFalse(args.contains("-ctk"), "f16 no debe emitir -ctk")
         XCTAssertFalse(args.contains("--mlock"))
+        // The engine's 8 GiB host prompt cache must always be capped.
+        XCTAssertEqual(args[args.firstIndex(of: "--cache-ram")! + 1], "2048")
+        XCTAssertFalse(args.contains("--reasoning-format"), "inline reasoning is opt-in")
+    }
+
+    func testPromptCacheAndReasoningArguments() {
+        var s = makeSettings()
+        s.cacheRAM = 0
+        s.reasoningInline = true
+        let args = s.arguments
+        XCTAssertEqual(args[args.firstIndex(of: "--cache-ram")! + 1], "0")
+        XCTAssertEqual(args[args.firstIndex(of: "--reasoning-format")! + 1], "none")
     }
 
     func testKVQuantAndMlockArguments() {

@@ -23,6 +23,9 @@ struct Profile: Codable, Identifiable {
     var specMTP: Bool? = nil
     // "bundled" | "turbo" | absolute path. Optional for backward compatibility.
     var engine: String?
+    // Optionals for backward compatibility with profiles saved by older builds.
+    var cacheRAM: Int? = nil
+    var reasoningInline: Bool? = nil
 }
 
 @MainActor
@@ -47,7 +50,8 @@ final class ProfileStore: ObservableObject {
                         noMmap: s.noMmap, jinja: s.jinja, concurrencyDisable: s.concurrencyDisable,
                         vramReserve: s.vramReserveMB, gpuIndex: s.gpuIndex, extraArgs: s.extraArgs,
                         cacheTypeK: s.cacheTypeK, cacheTypeV: s.cacheTypeV, mlock: s.mlock, port: s.port,
-                        specMTP: s.specMTP, engine: engine)
+                        specMTP: s.specMTP, engine: engine,
+                        cacheRAM: s.cacheRAM, reasoningInline: s.reasoningInline)
         profiles.removeAll { $0.name == name }
         profiles.append(p)
         save()
@@ -72,6 +76,8 @@ final class ProfileStore: ObservableObject {
         d.set(p.mlock, forKey: SettingsKeys.mlock)
         d.set(p.port, forKey: SettingsKeys.port)
         if let mtp = p.specMTP { d.set(mtp, forKey: SettingsKeys.specMTP) }
+        if let cram = p.cacheRAM { d.set(cram, forKey: SettingsKeys.cacheRAM) }
+        if let inline = p.reasoningInline { d.set(inline, forKey: SettingsKeys.reasoningInline) }
         switch p.engine {
         case "bundled": d.set(ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
         case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)

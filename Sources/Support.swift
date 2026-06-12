@@ -25,6 +25,8 @@ enum SettingsKeys {
     static let cacheTypeK = "cacheTypeK"
     static let cacheTypeV = "cacheTypeV"
     static let mlock = "mlock"
+    static let cacheRAM = "cacheRAM"
+    static let reasoningInline = "reasoningInline"
     static let specMTP = "specMTP"
     static let apiKeyEnabled = "apiKeyEnabled"
     static let menuBarIcon = "menuBarIcon"

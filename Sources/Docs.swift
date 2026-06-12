@@ -156,6 +156,12 @@ Endpoints útiles:
 - `GET /health` — estado del servidor
 
 También hay un chat web minimalista en la raíz (`http://127.0.0.1:8080`) para usar desde el navegador.
+
+**Conectar VS Code y asistentes de código** (Continue, Cline, Copilot con modelo propio…):
+- URL base: `http://127.0.0.1:8080/v1` · nombre de modelo: cualquiera · clave API: la de Ajustes solo si activaste la protección.
+- **Sube el Contexto a 32k o más**: estos clientes envían prompts enormes (instrucciones + archivos abiertos) y con 16k el servidor rechaza la petición. Compensa la memoria cuantizando las claves del KV cache a `q8_0`.
+- Los modelos razonadores "piensan" antes de responder y muchos clientes no muestran esa fase: parece que **se quedó colgado** cuando en realidad está generando. Activa "Razonamiento como texto" en Ajustes → Inferencia, o usa un modelo no razonador para código.
+- La **primera respuesta tarda**: procesar un prompt de 15k tokens lleva 1-2 minutos en un MoE grande. Si el cliente corta antes, sube su timeout.
 """),
         DocSection(title: "Rendimiento de referencia", icon: "gauge.high", body: """
 Números medidos en el equipo de desarrollo (RX 6700 XT 12 GB, DDR4, macOS):
@@ -183,6 +189,10 @@ La generación de modelos MoE híbridos está limitada por el ancho de banda de 
 **Error con valores de KV cuantizados** — Cuantizar valores requiere Flash Attention en `on`. En GPU AMD eso reduce la velocidad; valora si lo necesitas.
 
 **El servidor no responde tras cambiar ajustes** — Los cambios aplican al reiniciar el servidor (Detener → Iniciar).
+
+**La velocidad se degrada con el uso / el motor llega a 25-30 GB de RAM** — Dos causas se suman: el contexto crece con la conversación (normal, la autocompactación lo mitiga) y el motor guarda una caché de prompts en RAM que crece con el uso. Limita "Caché de prompts en RAM" en Ajustes (2 GB por defecto) y, si tienes margen, activa --mlock para que el modelo no caiga a swap.
+
+**Desde VS Code u otro cliente se queda "pensando"** — El modelo está razonando o procesando un prompt enorme; el cliente no muestra esa fase. Ver la sección "API para desarrolladores".
 """),
         DocSection(title: "Créditos y licencias", icon: "heart", body: """
 ToshLLM es desarrollado por **Engelbert Delgado** ([@engeldlgado](https://github.com/engeldlgado)).
@@ -313,6 +323,12 @@ Useful endpoints:
 - `GET /health` — server status
 
 There's also a minimal web chat at the root (`http://127.0.0.1:8080`) for browser use.
+
+**Connecting VS Code and coding assistants** (Continue, Cline, Copilot with a custom model…):
+- Base URL: `http://127.0.0.1:8080/v1` · model name: anything · API key: the one in Settings only if you enabled protection.
+- **Raise Context to 32k or more**: these clients send huge prompts (instructions + open files) and at 16k the server rejects the request. Offset the memory by quantizing KV cache keys to `q8_0`.
+- Reasoning models "think" before answering and many clients don't display that phase: it **looks hung** while it's actually generating. Enable "Reasoning as plain text" in Settings → Inference, or use a non-reasoning model for coding.
+- The **first response takes a while**: processing a 15k-token prompt takes 1-2 minutes on a large MoE. If the client gives up earlier, raise its timeout.
 """),
         DocSection(title: "Reference performance", icon: "gauge.high", body: """
 Numbers measured on the development machine (RX 6700 XT 12 GB, DDR4, macOS):
@@ -340,6 +356,10 @@ Hybrid MoE generation is RAM-bandwidth-bound: a faster GPU won't improve it, but
 **Error with quantized KV values** — Quantized values require Flash Attention `on`. On AMD GPUs that reduces speed; consider whether you need it.
 
 **Server ignores new settings** — Changes apply on server restart (Stop → Start).
+
+**Speed degrades over time / the engine reaches 25-30 GB of RAM** — Two causes add up: context grows with the conversation (normal, auto-compaction mitigates it) and the engine keeps a prompt cache in RAM that grows with use. Cap "Prompt cache in RAM" in Settings (2 GB by default) and, if you have headroom, enable --mlock so the model never falls into swap.
+
+**It hangs "thinking" from VS Code or another client** — The model is reasoning or processing a huge prompt; the client doesn't display that phase. See the "API for developers" section.
 """),
         DocSection(title: "Credits & licenses", icon: "heart", body: """
 ToshLLM is developed by **Engelbert Delgado** ([@engeldlgado](https://github.com/engeldlgado)).

@@ -25,6 +25,8 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.cacheTypeK) private var cacheTypeK = "f16"
     @AppStorage(SettingsKeys.cacheTypeV) private var cacheTypeV = "f16"
     @AppStorage(SettingsKeys.mlock) private var mlock = false
+    @AppStorage(SettingsKeys.cacheRAM) private var cacheRAM = 2048
+    @AppStorage(SettingsKeys.reasoningInline) private var reasoningInline = false
     @AppStorage(SettingsKeys.specMTP) private var specMTP = false
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
@@ -150,6 +152,15 @@ struct SettingsView: View {
                 Toggle(loc.t("Bloquear modelo en RAM (--mlock)", "Lock model in RAM (--mlock)"), isOn: $mlock)
                     .help(loc.t("Impide que macOS mueva el modelo a swap o lo comprima: estabilidad de velocidad constante. Útil con modelos MoE grandes; requiere RAM suficiente.",
                                 "Prevents macOS from swapping or compressing the model: consistent speed. Useful with large MoE models; requires enough free RAM."))
+                Picker(loc.t("Caché de prompts en RAM", "Prompt cache in RAM"), selection: $cacheRAM) {
+                    Text(loc.t("Desactivada", "Disabled")).tag(0)
+                    Text("1 GB").tag(1024)
+                    Text("2 GB").tag(2048)
+                    Text("4 GB").tag(4096)
+                    Text("8 GB").tag(8192)
+                }
+                .help(loc.t("RAM extra donde el motor recuerda conversaciones recientes para no reprocesarlas al cambiar de chat o cliente. Sin límite el motor usa hasta 8 GB: junto a un modelo grande lleva al equipo a swap y la velocidad se degrada con el uso. 2 GB es un buen equilibrio.",
+                            "Extra RAM where the engine remembers recent conversations to avoid reprocessing them when switching chats or clients. Unlimited, the engine uses up to 8 GB: next to a large model that pushes the machine into swap and speed degrades over time. 2 GB is a good balance."))
             }
 
             Section(loc.t("Inferencia y contexto", "Inference & context")) {
@@ -189,6 +200,10 @@ struct SettingsView: View {
                           systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.orange)
                 }
+                Toggle(loc.t("Razonamiento como texto (clientes externos)",
+                             "Reasoning as plain text (external clients)"), isOn: $reasoningInline)
+                    .help(loc.t("Envía el razonamiento dentro de la respuesta (<think>…) en vez del campo aparte reasoning_content. Actívalo si un cliente externo (VS Code, plugins) se queda 'pensando' sin mostrar nada. El chat de la app entiende ambos formatos.",
+                                "Sends the reasoning inline in the response (<think>…) instead of the separate reasoning_content field. Enable it if an external client (VS Code, plugins) appears stuck 'thinking' showing nothing. The in-app chat understands both formats."))
                 Toggle(loc.t("Plantilla de chat (--jinja)", "Chat template (--jinja)"), isOn: $jinja)
                     .help(loc.t("Usa la plantilla de chat oficial del modelo (formato de mensajes, herramientas). Déjalo activado salvo problemas con un modelo concreto.",
                                 "Uses the model's official chat template (message format, tools). Keep it on unless a specific model misbehaves."))
