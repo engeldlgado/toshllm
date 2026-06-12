@@ -47,8 +47,47 @@ struct StreamError: LocalizedError {
 /// and the speed badge), never the sidebar or the rest of the transcript.
 @MainActor
 final class LiveStream: ObservableObject {
-    @Published var text = ""
+    @Published var visibleText = ""
+    @Published var displayedReasoning = ""
+    @Published var hasReasoning = false
+    @Published var reasoningExpanded = false
     @Published var speed: Double?
+
+    private var latestReasoning = ""
+    private var lastReasoningPublish = Date.distantPast
+    private let reasoningPublishInterval: TimeInterval = 0.5
+
+    func reset() {
+        visibleText = ""
+        displayedReasoning = ""
+        hasReasoning = false
+        reasoningExpanded = false
+        latestReasoning = ""
+        lastReasoningPublish = .distantPast
+        speed = nil
+    }
+
+    func update(reasoning: String, visible: String, speed: Double?, now: Date = Date()) {
+        latestReasoning = reasoning
+        if hasReasoning != !reasoning.isEmpty { hasReasoning = !reasoning.isEmpty }
+        // Rendering a growing reasoning transcript is expensive. Keep the
+        // answer stream responsive at ~12 Hz, but refresh expanded reasoning
+        // in larger chunks at 2 Hz.
+        if reasoningExpanded,
+           now.timeIntervalSince(lastReasoningPublish) >= reasoningPublishInterval,
+           displayedReasoning != reasoning {
+            displayedReasoning = reasoning
+            lastReasoningPublish = now
+        }
+        if visibleText != visible { visibleText = visible }
+        if let speed { self.speed = speed }
+    }
+
+    func setReasoningExpanded(_ expanded: Bool, now: Date = Date()) {
+        reasoningExpanded = expanded
+        displayedReasoning = expanded ? latestReasoning : ""
+        lastReasoningPublish = expanded ? now : .distantPast
+    }
 }
 
 @MainActor
@@ -126,8 +165,7 @@ final class ChatStore: ObservableObject {
 
     private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
         generating = true
-        live.text = ""
-        live.speed = nil
+        live.reset()
         // The user can switch or delete conversations mid-stream; the result
         // must land in the one this request started from, found by id.
         let convID = conversations[i].id
@@ -152,6 +190,9 @@ final class ChatStore: ObservableObject {
             var visible = ""
             var lastFlush = Date.distantPast
             var usage: (prompt: Int, completion: Int)?
+            var finishReason: String?
+            var cancelled = false
+            var reportedError = false
 
             func composed() -> String {
                 guard !reasoning.isEmpty else { return visible }
@@ -174,12 +215,14 @@ final class ChatStore: ObservableObject {
                     let dt = now.timeIntervalSince(first)
                     if dt > 0.3 { speed = Double(stamps.count - 1) / dt }
                 }
-                let text = composed()
+                let reasoningSnapshot = reasoning
+                let visibleSnapshot = visible
                 let newSpeed = speed
                 let store = self
                 await MainActor.run {
-                    store?.live.text = text
-                    if let newSpeed { store?.live.speed = newSpeed }
+                    store?.live.update(reasoning: reasoningSnapshot,
+                                       visible: visibleSnapshot,
+                                       speed: newSpeed)
                 }
             }
 
@@ -220,12 +263,19 @@ final class ChatStore: ObservableObject {
                 }
 
                 for try await line in bytes.lines {
-                    if Task.isCancelled { break }
+                    if Task.isCancelled {
+                        cancelled = true
+                        break
+                    }
                     guard line.hasPrefix("data: ") else { continue }
                     let payload = String(line.dropFirst(6))
                     if payload == "[DONE]" { break }
                     guard let data = payload.data(using: .utf8),
                           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+
+                    if let message = Self.streamedError(from: obj) {
+                        throw StreamError(message: message)
+                    }
 
                     if let u = obj["usage"] as? [String: Any],
                        let p = u["prompt_tokens"] as? Int, let c = u["completion_tokens"] as? Int {
@@ -233,28 +283,41 @@ final class ChatStore: ObservableObject {
                     }
 
                     guard let choices = obj["choices"] as? [[String: Any]],
-                          let delta = choices.first?["delta"] as? [String: Any] else { continue }
+                          let choice = choices.first else { continue }
+                    if let reason = choice["finish_reason"] as? String, !reason.isEmpty {
+                        finishReason = reason
+                    }
 
                     var got = false
                     // Some server configurations emit the reasoning in a
                     // dedicated field instead of inline <think> tags.
-                    if let r = delta["reasoning_content"] as? String, !r.isEmpty {
-                        reasoning += r
-                        got = true
+                    if let delta = choice["delta"] as? [String: Any] {
+                        if let r = delta["reasoning_content"] as? String, !r.isEmpty {
+                            reasoning += r
+                            got = true
+                        }
+                        if let piece = delta["content"] as? String, !piece.isEmpty {
+                            visible += piece
+                            got = true
+                        }
                     }
-                    if let piece = delta["content"] as? String, !piece.isEmpty {
-                        visible += piece
-                        got = true
+                    if got {
+                        let now = Date()
+                        if tFirst == nil { tFirst = now }
+                        nTokens += 1
+                        stamps.append(now)
+                        await flush()
                     }
-                    guard got else { continue }
-                    let now = Date()
-                    if tFirst == nil { tFirst = now }
-                    nTokens += 1
-                    stamps.append(now)
-                    await flush()
+                    // Keep consuming after finish_reason: llama-server sends
+                    // the final usage counters in a later SSE event before
+                    // [DONE]. Those counters drive the context meter and
+                    // automatic compaction.
                 }
             } catch {
-                if !(error is CancellationError) {
+                if error is CancellationError {
+                    cancelled = true
+                } else {
+                    reportedError = true
                     AppLog.chat.error("stream failed: \(error.localizedDescription)")
                     let store = self
                     let message = error.localizedDescription
@@ -266,10 +329,21 @@ final class ChatStore: ObservableObject {
                 let dt = Date().timeIntervalSince(start)
                 return dt > 0.4 && nTokens > 1 ? Double(nTokens) / dt : nil
             }
-            let finalText = composed()
+            // A reasoning-only turn is not a usable assistant response. Drop
+            // it instead of persisting an apparently duplicated empty bubble
+            // and sending an empty assistant message in the next request.
+            let hasVisibleAnswer = !visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let finalText = hasVisibleAnswer ? composed() : ""
             let finalUsage = usage
+            let finalFinishReason = finishReason
+            let wasCancelled = cancelled
+            let didReportError = reportedError
+            let hadReasoning = !reasoning.isEmpty
             let store = self
             await MainActor.run {
+                if !wasCancelled && !didReportError && hadReasoning && !hasVisibleAnswer {
+                    store?.lastError = Self.emptyResponseMessage(finishReason: finalFinishReason)
+                }
                 if let finalUsage { store?.contextUsed = finalUsage.prompt + finalUsage.completion }
                 store?.finish(conversation: convID, text: finalText, speed: finalSpeed)
                 store?.compactIfNeeded(conversation: convID, port: port)
@@ -281,21 +355,23 @@ final class ChatStore: ObservableObject {
     /// live-streaming state. The conversation may no longer be the current
     /// one, or may have been deleted, hence the lookup by id.
     private func finish(conversation id: UUID, text: String, speed: Double?) {
-        generating = false
-        live.text = ""
-        live.speed = nil
-        task = nil
-        guard let i = conversations.firstIndex(where: { $0.id == id }) else { return }
-        if let j = conversations[i].messages.indices.last,
-           conversations[i].messages[j].role == "assistant" {
-            if text.isEmpty {
-                conversations[i].messages.removeLast()
-            } else {
-                conversations[i].messages[j].content = text
-                conversations[i].messages[j].genSpeed = speed
+        if let i = conversations.firstIndex(where: { $0.id == id }) {
+            if let j = conversations[i].messages.indices.last,
+               conversations[i].messages[j].role == "assistant" {
+                if text.isEmpty {
+                    conversations[i].messages.removeLast()
+                } else {
+                    conversations[i].messages[j].content = text
+                    conversations[i].messages[j].genSpeed = speed
+                }
             }
+            conversations[i].updated = Date()
         }
-        conversations[i].updated = Date()
+        // Publish the completed transcript before replacing StreamingBubble.
+        // Otherwise SwiftUI can briefly create and retain an empty bubble.
+        generating = false
+        live.reset()
+        task = nil
         save()
     }
 
@@ -314,8 +390,11 @@ final class ChatStore: ObservableObject {
         }
         if !sys.isEmpty { history.append(["role": "system", "content": sys]) }
         let safeStart = min(max(0, start), messages.count)
-        history += messages[safeStart...].map { m in
-            ["role": m.role, "content": m.role == "assistant" ? m.parts.body : m.content]
+        history += messages[safeStart...].compactMap { m in
+            let content = m.role == "assistant" ? m.parts.body : m.content
+            guard m.role != "assistant"
+                    || !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return ["role": m.role, "content": content]
         }
         return history
     }
@@ -347,7 +426,30 @@ final class ChatStore: ObservableObject {
         let start = conversations[i].summarizedCount ?? 0
         guard let cutoff = Self.compactionCutoff(messages: conversations[i].messages,
                                                  alreadyCompacted: start) else { return }
+        compact(conversation: id, index: i, from: start, through: cutoff, port: port)
+    }
 
+    /// Manually summarizes every completed exchange. This is useful on
+    /// backends without Flash Attention, where generation can slow down well
+    /// before the context is close to full.
+    func compactCurrent(port: Int) {
+        guard !generating, !compacting, let i = currentIndex,
+              conversations[i].messages.last?.role == "assistant" else { return }
+        let start = conversations[i].summarizedCount ?? 0
+        let cutoff = conversations[i].messages.count
+        guard cutoff > start else { return }
+        compact(conversation: conversations[i].id, index: i,
+                from: start, through: cutoff, port: port)
+    }
+
+    var canCompactCurrent: Bool {
+        guard !generating, !compacting, let i = currentIndex,
+              conversations[i].messages.last?.role == "assistant" else { return false }
+        return conversations[i].messages.count > (conversations[i].summarizedCount ?? 0)
+    }
+
+    private func compact(conversation id: UUID, index i: Int,
+                         from start: Int, through cutoff: Int, port: Int) {
         var prompt = ""
         if let prior = conversations[i].summary, !prior.isEmpty {
             prompt += "Previous summary:\n" + prior + "\n\n"
@@ -359,7 +461,7 @@ final class ChatStore: ObservableObject {
         }
 
         compacting = true
-        AppLog.chat.info("compacting conversation: \(used)/\(limit) tokens, cutoff \(cutoff)")
+        AppLog.chat.info("compacting conversation through message \(cutoff)")
         Task.detached(priority: .utility) { [weak self] in
             let summary = await Self.summarize(prompt: prompt, port: port)
             let store = self
@@ -428,6 +530,26 @@ final class ChatStore: ObservableObject {
         return "HTTP \(status): \(message.prefix(300))"
     }
 
+    /// Streaming APIs can report a compute failure inside an HTTP 200 SSE
+    /// response. Surface it instead of silently treating the partial text as
+    /// a completed assistant message.
+    nonisolated static func streamedError(from object: [String: Any]) -> String? {
+        guard let error = object["error"] else { return nil }
+        if let details = error as? [String: Any],
+           let message = details["message"] as? String, !message.isEmpty {
+            return message
+        }
+        if let message = error as? String, !message.isEmpty { return message }
+        return "El motor interrumpió la respuesta / the engine interrupted the response"
+    }
+
+    nonisolated static func emptyResponseMessage(finishReason: String?) -> String {
+        if finishReason == "length" {
+            return "El modelo agotó el máximo de tokens durante el razonamiento; aumenta Máx. o desactiva Razonamiento / the model used all max tokens while reasoning; raise Max or disable Reasoning"
+        }
+        return "El modelo terminó el razonamiento sin producir una respuesta visible; intenta regenerar o desactiva Razonamiento / the model finished reasoning without a visible answer; regenerate or disable Reasoning"
+    }
+
     func stop() { task?.cancel() }
 
     /// Removes the last user message (and its response, if any) so it can be
@@ -489,6 +611,21 @@ struct NativeChatView: View {
     @State private var showSystem = false
     @State private var pinnedToBottom = true
     @FocusState private var inputFocused: Bool
+
+    private var maxTokenOptions: [Int] {
+        [512, 1024, 2048, 4096, 8192, 16384].filter { $0 < contextLimit }
+    }
+
+    private var maxTokensIsLarge: Bool {
+        contextLimit > 0 && Double(maxTokens) / Double(contextLimit) > 0.5
+    }
+
+    private var contextMaySlowGeneration: Bool {
+        guard !ServerSettings.isAppleSilicon, let used = chat.contextUsed, contextLimit > 0 else {
+            return false
+        }
+        return Double(used) / Double(contextLimit) >= 0.15
+    }
 
     var body: some View {
         HSplitView {
@@ -554,10 +691,33 @@ struct NativeChatView: View {
 
     private var chatColumn: some View {
         VStack(spacing: 0) {
+            quickChatNotice
+            Divider()
             messagesScroll
             Divider()
             inputArea
         }
+    }
+
+    private var quickChatNotice: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "bolt.circle.fill")
+                .foregroundStyle(.orange)
+            Text(loc.t(
+                "Chat de pruebas rápidas. En sesiones largas, el contexto acumulado reduce progresivamente la velocidad; usa «Recuperar velocidad» o inicia una conversación nueva.",
+                "Quick testing chat. In long sessions, accumulated context progressively reduces speed; use “Recover speed” or start a new conversation."
+            ))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.orange.opacity(0.08))
+        .help(loc.t(
+            "El chat completo permanece guardado, pero los modelos locales generan más lento cuanto mayor es el contexto procesado.",
+            "The full chat remains saved, but local models generate more slowly as the processed context grows."
+        ))
     }
 
     /// First message not covered by the compaction summary; the transcript
@@ -597,7 +757,11 @@ struct NativeChatView: View {
                             StreamingBubble(live: chat.live, message: msg) {
                                 if pinnedToBottom { proxy.scrollTo("chatBottom", anchor: .bottom) }
                             }
-                            .id(msg.id)
+                            // StreamingBubble and the completed MessageBubble
+                            // must not share identity. Reusing the streaming
+                            // subtree after live.text is cleared leaves an
+                            // empty spinner even though the answer was saved.
+                            .id("streaming-\(msg.id.uuidString)")
                         } else {
                             MessageBubble(
                                 message: msg,
@@ -619,7 +783,7 @@ struct NativeChatView: View {
                                     }
                                 })
                                 .equatable()
-                                .id(msg.id)
+                                .id("finished-\(msg.id.uuidString)")
                         }
                     }
                     if let err = chat.lastError {
@@ -656,87 +820,7 @@ struct NativeChatView: View {
 
     private var inputArea: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 16) {
-                Button {
-                    showSystem.toggle()
-                } label: {
-                    Label(loc.t("Sistema", "System"),
-                          systemImage: systemPrompt.isEmpty ? "gearshape" : "gearshape.fill")
-                        .foregroundStyle(systemPrompt.isEmpty ? .secondary : Color.accentColor)
-                }
-                .buttonStyle(.borderless).font(.caption)
-                .help(loc.t("Prompt de sistema: instrucciones permanentes para el modelo.",
-                            "System prompt: permanent instructions for the model."))
-                .popover(isPresented: $showSystem, arrowEdge: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(loc.t("Prompt de sistema", "System prompt")).font(.headline)
-                        TextEditor(text: $systemPrompt)
-                            .font(.system(size: 12))
-                            .frame(width: 380, height: 110)
-                            .scrollContentBackground(.hidden)
-                            .padding(6)
-                            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
-                        Text(loc.t("Se aplica a los mensajes nuevos de todas las conversaciones.",
-                                   "Applies to new messages in all conversations."))
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                    .padding(12)
-                }
-
-                Toggle(isOn: $thinkingEnabled) {
-                    Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
-                        .font(.caption)
-                }
-                .toggleStyle(.checkbox)
-                .help(loc.t("Los modelos razonadores piensan antes de responder (más calidad, ~30-60 s extra de espera). Desactívalo para respuestas inmediatas.",
-                            "Reasoning models think before answering (better quality, ~30-60 s extra wait). Turn off for instant responses."))
-
-                HStack(spacing: 6) {
-                    Text("Temp").font(.caption).foregroundStyle(.secondary)
-                    Slider(value: $temperature, in: 0...1.5).frame(width: 80)
-                    Text(String(format: "%.2f", temperature))
-                        .font(.system(.caption, design: .monospaced)).frame(width: 32)
-                }
-                .help(loc.t("Creatividad: 0 = determinista, 1+ = más variado.",
-                            "Creativity: 0 = deterministic, 1+ = more varied."))
-
-                HStack(spacing: 6) {
-                    Text(loc.t("Máx.", "Max")).font(.caption).foregroundStyle(.secondary)
-                    TextField("", value: $maxTokens, format: .number)
-                        .frame(width: 60).textFieldStyle(.roundedBorder)
-                }
-                .help(loc.t("Longitud máxima de cada respuesta en tokens.",
-                            "Maximum response length in tokens."))
-
-                Spacer()
-
-                if chat.compacting {
-                    HStack(spacing: 5) {
-                        ProgressView().controlSize(.mini)
-                        Text(loc.t("Compactando…", "Compacting…"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    .help(loc.t("Resumiendo los mensajes antiguos con el modelo para liberar contexto.",
-                                "Summarizing older messages with the model to free context."))
-                }
-
-                if let used = chat.contextUsed, contextLimit > 0 {
-                    let fraction = Double(used) / Double(contextLimit)
-                    HStack(spacing: 5) {
-                        Text(loc.t("Contexto", "Context")).font(.caption).foregroundStyle(.secondary)
-                        ProgressView(value: min(fraction, 1))
-                            .frame(width: 70)
-                            .tint(fraction > 0.9 ? .red : fraction > 0.8 ? .orange : .accentColor)
-                        Text("\(used / 1000)k / \(contextLimit / 1000)k")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(fraction > 0.8 ? .orange : .secondary)
-                    }
-                    .help(loc.t("Tokens de contexto usados en el último turno. Al llenarse, el servidor olvida el inicio de la conversación.",
-                                "Context tokens used by the last turn. When full, the server forgets the start of the conversation."))
-                }
-
-                LiveSpeedBadge(live: chat.live)
-            }
+            chatControls
 
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(loc.t("Escribe tu mensaje…", "Type your message…"),
@@ -762,6 +846,157 @@ struct NativeChatView: View {
         }
         .padding(12)
         .background(.bar)
+    }
+
+    private var chatControls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                primaryControls
+                Spacer(minLength: 8)
+                chatStatus
+            }
+            VStack(spacing: 8) {
+                HStack(spacing: 14) {
+                    primaryControls
+                    Spacer(minLength: 0)
+                }
+                HStack {
+                    chatStatus
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private var primaryControls: some View {
+        HStack(spacing: 14) {
+            Button {
+                showSystem.toggle()
+            } label: {
+                Label(loc.t("Sistema", "System"),
+                      systemImage: systemPrompt.isEmpty ? "gearshape" : "gearshape.fill")
+                    .foregroundStyle(systemPrompt.isEmpty ? .secondary : Color.accentColor)
+            }
+            .buttonStyle(.borderless)
+            .popover(isPresented: $showSystem, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(loc.t("Prompt de sistema", "System prompt")).font(.headline)
+                    TextEditor(text: $systemPrompt)
+                        .font(.system(size: 12))
+                        .frame(width: 380, height: 110)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
+                    Text(loc.t("Se aplica a los mensajes nuevos de todas las conversaciones.",
+                               "Applies to new messages in all conversations."))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(12)
+            }
+            .help(loc.t("Prompt de sistema: instrucciones permanentes para el modelo.",
+                        "System prompt: permanent instructions for the model."))
+
+            Toggle(isOn: $thinkingEnabled) {
+                Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
+            }
+            .toggleStyle(.checkbox)
+            .help(loc.t("Los modelos razonadores piensan antes de responder. Estos tokens también cuentan dentro del límite de respuesta.",
+                        "Reasoning models think before answering. Reasoning tokens also count toward the response limit."))
+
+            HStack(spacing: 6) {
+                Label(loc.t("Creatividad", "Creativity"), systemImage: "dial.medium")
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Slider(value: $temperature, in: 0...1.5).frame(width: 76)
+                Text(String(format: "%.2f", temperature))
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(width: 34)
+            }
+            .help(loc.t("Temperatura: 0 = más determinista; valores altos = respuestas más variadas.",
+                        "Temperature: 0 = more deterministic; higher values = more varied responses."))
+
+            Menu {
+                ForEach(maxTokenOptions, id: \.self) { option in
+                    Button {
+                        maxTokens = option
+                    } label: {
+                        if option == maxTokens {
+                            Label(option.formatted(), systemImage: "checkmark")
+                        } else {
+                            Text(option.formatted())
+                        }
+                    }
+                }
+            } label: {
+                Label(loc.t("Respuesta \(maxTokens.formatted())",
+                            "Response \(maxTokens.formatted())"),
+                      systemImage: maxTokensIsLarge ? "exclamationmark.triangle.fill" : "text.line.last.and.arrowtriangle.forward")
+                    .foregroundStyle(maxTokensIsLarge ? .orange : .secondary)
+                    .fixedSize()
+            }
+            .menuStyle(.borderlessButton)
+            .help(loc.t("Máximo de tokens que el modelo puede generar en este turno, incluyendo razonamiento y respuesta visible. No aumenta el contexto. Recomendado: 2.048–4.096.",
+                        "Maximum tokens the model may generate this turn, including reasoning and visible answer. It does not increase context. Recommended: 2,048–4,096."))
+        }
+        .font(.caption)
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private var chatStatus: some View {
+        HStack(spacing: 12) {
+            if maxTokensIsLarge {
+                Label(loc.t("Respuesta muy larga", "Very long response"),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .help(loc.t("Este límite reserva más de la mitad del contexto para una sola respuesta y puede desplazar mensajes anteriores.",
+                                "This limit reserves more than half the context for one response and may displace earlier messages."))
+            }
+
+            if chat.compacting {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(loc.t("Compactando…", "Compacting…"))
+                        .foregroundStyle(.secondary)
+                }
+                .help(loc.t("Resumiendo los mensajes antiguos con el modelo para liberar contexto.",
+                            "Summarizing older messages with the model to free context."))
+            }
+
+            if let used = chat.contextUsed, contextLimit > 0 {
+                let fraction = Double(used) / Double(contextLimit)
+                HStack(spacing: 5) {
+                    Label(loc.t("Contexto", "Context"), systemImage: "memorychip")
+                        .foregroundStyle(.secondary)
+                    ProgressView(value: min(fraction, 1))
+                        .frame(width: 76)
+                        .tint(fraction > 0.9 ? .red : fraction > 0.8 ? .orange : .accentColor)
+                    Text("\(used / 1000)k / \(contextLimit / 1000)k")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(fraction > 0.8 ? .orange : .secondary)
+                }
+                .help(loc.t("Tokens usados por el historial y la última respuesta. Al superar 70%, la app intenta resumir los turnos antiguos.",
+                            "Tokens used by history and the latest response. Past 70%, the app attempts to summarize older turns."))
+            }
+
+            if contextMaySlowGeneration && chat.canCompactCurrent {
+                Button {
+                    chat.compactCurrent(port: port)
+                } label: {
+                    Label(loc.t("Recuperar velocidad", "Recover speed"),
+                          systemImage: "archivebox")
+                        .foregroundStyle(.orange)
+                }
+                .buttonStyle(.borderless)
+                .help(loc.t("Resume el historial completado para que el próximo turno procese menos contexto. El chat completo sigue visible y guardado.",
+                            "Summarizes completed history so the next turn processes less context. The full chat remains visible and saved."))
+            }
+
+            LiveSpeedBadge(live: chat.live)
+        }
+        .font(.caption)
+        .fixedSize()
     }
 
     private var filteredConversations: [Conversation] {
@@ -871,19 +1106,17 @@ struct MessageBubble: View, Equatable {
                     let isThinkingLive = streaming && parts.body.isEmpty && parts.thinking != nil
                     if let think = parts.thinking, !think.isEmpty {
                         DisclosureGroup(isExpanded: $thinkExpanded) {
-                            Text(think)
-                                .font(.caption).foregroundStyle(.secondary)
-                                .textSelection(.enabled)
+                            if thinkExpanded {
+                                Text(think)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
                         } label: {
                             Label(isThinkingLive ? loc.t("Razonando…", "Thinking…")
                                                  : loc.t("Razonamiento", "Reasoning"),
                                   systemImage: "brain")
                                 .font(.caption).foregroundStyle(.blue)
                         }
-                        .onChange(of: isThinkingLive) { _, live in
-                            thinkExpanded = live
-                        }
-                        .onAppear { if isThinkingLive { thinkExpanded = true } }
                     }
                     if !parts.body.isEmpty || parts.thinking == nil {
                         RichText(text: isUser ? message.content : parts.body)
@@ -934,21 +1167,90 @@ private struct StreamingBubble: View {
 
     private var liveMessage: ChatMessage {
         var m = message
-        m.content = live.text
+        if live.hasReasoning {
+            m.content = "<think>" + live.displayedReasoning
+                + (live.visibleText.isEmpty ? "" : "</think>" + live.visibleText)
+        } else {
+            m.content = live.visibleText
+        }
         return m
     }
 
     var body: some View {
-        MessageBubble(
-            message: liveMessage,
-            streaming: true,
-            liveSpeed: live.speed,
-            isLastAssistant: true,
-            isLastUser: false,
-            canRegenerate: false,
-            onRegenerate: {},
-            onEdit: {})
-            .onChange(of: live.text) { _, _ in onGrow() }
+        StreamingMessageBubble(live: live, message: liveMessage)
+            .onChange(of: live.visibleText) { _, _ in onGrow() }
+    }
+}
+
+/// Streaming-only bubble. Reasoning stays collapsed and its growing text is
+/// not published or laid out unless the user explicitly opens it.
+private struct StreamingMessageBubble: View {
+    @ObservedObject var live: LiveStream
+    let message: ChatMessage
+    @EnvironmentObject var loc: Localizer
+
+    private var reasoningBinding: Binding<Bool> {
+        Binding(get: { live.reasoningExpanded },
+                set: { live.setReasoningExpanded($0) })
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "cpu.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.pink)
+                .frame(width: 26, height: 26)
+                .background(.pink.opacity(0.15), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text("Asistente").font(.caption.weight(.medium))
+                    Text(message.date.formatted(date: .omitted, time: .shortened))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    if live.hasReasoning {
+                        DisclosureGroup(isExpanded: reasoningBinding) {
+                            if live.reasoningExpanded {
+                                Text(live.displayedReasoning)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Label(live.visibleText.isEmpty ? loc.t("Razonando…", "Thinking…")
+                                                               : loc.t("Razonamiento", "Reasoning"),
+                                      systemImage: "brain")
+                                if live.reasoningExpanded && live.visibleText.isEmpty {
+                                    Text(loc.t("actualización ligera", "light updates"))
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .font(.caption).foregroundStyle(.blue)
+                        }
+                    }
+
+                    if !live.visibleText.isEmpty {
+                        RichText(text: live.visibleText)
+                    }
+
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        if let speed = live.speed {
+                            Text(String(format: "%.1f t/s", speed))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.horizontal, 13).padding(.vertical, 10)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+            }
+
+            Spacer(minLength: 70)
+        }
     }
 }
 

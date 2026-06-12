@@ -162,6 +162,53 @@ final class ChatMessageTests: XCTestCase {
     }
 }
 
+@MainActor
+final class LiveStreamTests: XCTestCase {
+    func testCollapsedReasoningDoesNotPublishGrowingText() {
+        let live = LiveStream()
+
+        for i in 1...500 {
+            live.update(reasoning: String(repeating: "x", count: i),
+                        visible: "", speed: nil)
+        }
+
+        XCTAssertTrue(live.hasReasoning)
+        XCTAssertFalse(live.reasoningExpanded)
+        XCTAssertEqual(live.displayedReasoning, "")
+
+        live.setReasoningExpanded(true)
+        XCTAssertEqual(live.displayedReasoning.count, 500)
+
+        live.setReasoningExpanded(false)
+        XCTAssertEqual(live.displayedReasoning, "")
+    }
+
+    func testVisibleAnswerStillStreamsWhileReasoningIsCollapsed() {
+        let live = LiveStream()
+        live.update(reasoning: "hidden thought", visible: "Hola", speed: 12)
+
+        XCTAssertEqual(live.displayedReasoning, "")
+        XCTAssertEqual(live.visibleText, "Hola")
+        XCTAssertEqual(live.speed, 12)
+    }
+
+    func testExpandedReasoningPublishesAtMostTwicePerSecond() {
+        let live = LiveStream()
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        live.update(reasoning: "a", visible: "", speed: nil, now: start)
+        live.setReasoningExpanded(true, now: start)
+        XCTAssertEqual(live.displayedReasoning, "a")
+
+        live.update(reasoning: "ab", visible: "", speed: nil,
+                    now: start.addingTimeInterval(0.1))
+        XCTAssertEqual(live.displayedReasoning, "a")
+
+        live.update(reasoning: "abc", visible: "", speed: nil,
+                    now: start.addingTimeInterval(0.6))
+        XCTAssertEqual(live.displayedReasoning, "abc")
+    }
+}
+
 // MARK: - Auto-compaction
 
 final class CompactionTests: XCTestCase {
@@ -200,6 +247,28 @@ final class CompactionTests: XCTestCase {
                                                messages: makeMessages(2), from: 0)
         XCTAssertEqual(history.count, 4)
         XCTAssertEqual(history.first?["role"], "user")
+    }
+
+    func testRequestHistoryDropsReasoningOnlyAssistantMessage() {
+        let messages = [
+            ChatMessage(role: "user", content: "hola"),
+            ChatMessage(role: "assistant", content: "<think>solo razonamiento"),
+            ChatMessage(role: "user", content: "¿qué pasó?"),
+        ]
+        let history = ChatStore.requestHistory(system: "", summary: nil,
+                                               messages: messages, from: 0)
+        XCTAssertEqual(history.map { $0["role"]! }, ["user", "user"])
+        XCTAssertEqual(history.last?["content"], "¿qué pasó?")
+    }
+
+    func testStreamingErrorIsExtractedFromSuccessfulHTTPStream() {
+        let object: [String: Any] = ["error": ["message": "Compute error."]]
+        XCTAssertEqual(ChatStore.streamedError(from: object), "Compute error.")
+    }
+
+    func testReasoningOnlyLengthMessageExplainsTokenLimit() {
+        let message = ChatStore.emptyResponseMessage(finishReason: "length")
+        XCTAssertTrue(message.contains("máximo de tokens"))
     }
 }
 
