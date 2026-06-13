@@ -33,6 +33,11 @@ struct ServerSettings {
     /// Emit reasoning inline in `content` (<think>…) instead of the separate
     /// `reasoning_content` field, for external clients that ignore the latter.
     var reasoningInline: Bool = false
+    /// Server slots (0 = engine auto, currently 4). With 1, requests queue
+    /// instead of competing for the GPU, and a prefill aborted by a client
+    /// timeout stays in the slot so the retry resumes where it left off —
+    /// crucial for coding assistants that send huge prompts.
+    var parallelSlots: Int = 1
     var apiKeyEnabled: Bool = false
     /// MTP self-speculative decoding (+30% generation). Only applied when the
     /// selected GGUF actually ships the MTP head; silently skipped otherwise.
@@ -57,6 +62,11 @@ struct ServerSettings {
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if mlock { args.append("--mlock") }
         args += ["--cache-ram", String(cacheRAM)]
+        // Reuse shifted KV chunks when a prompt diverges mid-way (agent
+        // clients edit their prompts between turns); harmlessly ignored
+        // where unsupported.
+        args += ["--cache-reuse", "256"]
+        if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         if specMTP && Self.modelHasMTP(at: modelPath) {
@@ -140,6 +150,7 @@ struct ServerSettings {
             mlock: bool(SettingsKeys.mlock, false),
             cacheRAM: int(SettingsKeys.cacheRAM, 2048),
             reasoningInline: bool(SettingsKeys.reasoningInline, false),
+            parallelSlots: int(SettingsKeys.parallelSlots, 1),
             apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),
             specMTP: bool(SettingsKeys.specMTP, false))
     }

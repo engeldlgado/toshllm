@@ -26,6 +26,7 @@ struct Profile: Codable, Identifiable {
     // Optionals for backward compatibility with profiles saved by older builds.
     var cacheRAM: Int? = nil
     var reasoningInline: Bool? = nil
+    var parallelSlots: Int? = nil
 }
 
 @MainActor
@@ -51,7 +52,8 @@ final class ProfileStore: ObservableObject {
                         vramReserve: s.vramReserveMB, gpuIndex: s.gpuIndex, extraArgs: s.extraArgs,
                         cacheTypeK: s.cacheTypeK, cacheTypeV: s.cacheTypeV, mlock: s.mlock, port: s.port,
                         specMTP: s.specMTP, engine: engine,
-                        cacheRAM: s.cacheRAM, reasoningInline: s.reasoningInline)
+                        cacheRAM: s.cacheRAM, reasoningInline: s.reasoningInline,
+                        parallelSlots: s.parallelSlots)
         profiles.removeAll { $0.name == name }
         profiles.append(p)
         save()
@@ -78,6 +80,7 @@ final class ProfileStore: ObservableObject {
         if let mtp = p.specMTP { d.set(mtp, forKey: SettingsKeys.specMTP) }
         if let cram = p.cacheRAM { d.set(cram, forKey: SettingsKeys.cacheRAM) }
         if let inline = p.reasoningInline { d.set(inline, forKey: SettingsKeys.reasoningInline) }
+        if let slots = p.parallelSlots { d.set(slots, forKey: SettingsKeys.parallelSlots) }
         switch p.engine {
         case "bundled": d.set(ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
         case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)

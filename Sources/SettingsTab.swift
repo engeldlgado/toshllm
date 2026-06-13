@@ -26,6 +26,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.cacheTypeV) private var cacheTypeV = "f16"
     @AppStorage(SettingsKeys.mlock) private var mlock = false
     @AppStorage(SettingsKeys.cacheRAM) private var cacheRAM = 2048
+    @AppStorage(SettingsKeys.parallelSlots) private var parallelSlots = 1
     @AppStorage(SettingsKeys.reasoningInline) private var reasoningInline = false
     @AppStorage(SettingsKeys.specMTP) private var specMTP = false
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
@@ -200,6 +201,14 @@ struct SettingsView: View {
                           systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.orange)
                 }
+                Picker(loc.t("Peticiones simultáneas", "Concurrent requests"), selection: $parallelSlots) {
+                    Text(loc.t("1 (recomendado)", "1 (recommended)")).tag(1)
+                    Text("2").tag(2)
+                    Text("4").tag(4)
+                    Text("Auto").tag(0)
+                }
+                .help(loc.t("Cuántas peticiones procesa el motor a la vez. Con 1, las peticiones hacen cola en vez de competir por la GPU, y un prompt enorme interrumpido por el timeout de un cliente (VS Code) se retoma donde iba al reintentar. Sube el valor solo si varios clientes usan el servidor a la vez.",
+                            "How many requests the engine processes at once. With 1, requests queue instead of competing for the GPU, and a huge prompt interrupted by a client timeout (VS Code) resumes where it was on retry. Raise it only if several clients use the server at the same time."))
                 Toggle(loc.t("Razonamiento como texto (clientes externos)",
                              "Reasoning as plain text (external clients)"), isOn: $reasoningInline)
                     .help(loc.t("Envía el razonamiento dentro de la respuesta (<think>…) en vez del campo aparte reasoning_content. Actívalo si un cliente externo (VS Code, plugins) se queda 'pensando' sin mostrar nada. El chat de la app entiende ambos formatos.",

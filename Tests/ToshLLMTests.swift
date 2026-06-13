@@ -83,6 +83,9 @@ final class ServerSettingsTests: XCTestCase {
         // The engine's 8 GiB host prompt cache must always be capped.
         XCTAssertEqual(args[args.firstIndex(of: "--cache-ram")! + 1], "2048")
         XCTAssertFalse(args.contains("--reasoning-format"), "inline reasoning is opt-in")
+        // One slot by default: retries resume aborted prefills (VS Code).
+        XCTAssertEqual(args[args.firstIndex(of: "--parallel")! + 1], "1")
+        XCTAssertEqual(args[args.firstIndex(of: "--cache-reuse")! + 1], "256")
     }
 
     func testPromptCacheAndReasoningArguments() {

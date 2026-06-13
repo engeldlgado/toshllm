@@ -161,7 +161,8 @@ También hay un chat web minimalista en la raíz (`http://127.0.0.1:8080`) para 
 - URL base: `http://127.0.0.1:8080/v1` · nombre de modelo: cualquiera · clave API: la de Ajustes solo si activaste la protección.
 - **Sube el Contexto a 32k o más**: estos clientes envían prompts enormes (instrucciones + archivos abiertos) y con 16k el servidor rechaza la petición. Compensa la memoria cuantizando las claves del KV cache a `q8_0`.
 - Los modelos razonadores "piensan" antes de responder y muchos clientes no muestran esa fase: parece que **se quedó colgado** cuando en realidad está generando. Activa "Razonamiento como texto" en Ajustes → Inferencia, o usa un modelo no razonador para código.
-- La **primera respuesta tarda**: procesar un prompt de 15k tokens lleva 1-2 minutos en un MoE grande. Si el cliente corta antes, sube su timeout.
+- La **primera respuesta tarda**: en esta clase de GPU el prompt se procesa a ~80-120 t/s, así que 16k tokens son 2-4 minutos. **Limita los tokens de entrada del cliente** (p. ej. `maxInputTokens: 8000`) para que la primera petición baje a ~1-2 min; las siguientes reutilizan la caché y son incrementales.
+- Si el cliente corta por timeout, reintenta: con "Peticiones simultáneas" en 1 (el valor por defecto), el reintento **retoma el procesamiento donde se quedó** en vez de empezar de cero.
 """),
         DocSection(title: "Rendimiento de referencia", icon: "gauge.high", body: """
 Números medidos en el equipo de desarrollo (RX 6700 XT 12 GB, DDR4, macOS):
@@ -328,7 +329,8 @@ There's also a minimal web chat at the root (`http://127.0.0.1:8080`) for browse
 - Base URL: `http://127.0.0.1:8080/v1` · model name: anything · API key: the one in Settings only if you enabled protection.
 - **Raise Context to 32k or more**: these clients send huge prompts (instructions + open files) and at 16k the server rejects the request. Offset the memory by quantizing KV cache keys to `q8_0`.
 - Reasoning models "think" before answering and many clients don't display that phase: it **looks hung** while it's actually generating. Enable "Reasoning as plain text" in Settings → Inference, or use a non-reasoning model for coding.
-- The **first response takes a while**: processing a 15k-token prompt takes 1-2 minutes on a large MoE. If the client gives up earlier, raise its timeout.
+- The **first response takes a while**: on this class of GPU prompts process at ~80-120 t/s, so 16k tokens take 2-4 minutes. **Limit the client's input tokens** (e.g. `maxInputTokens: 8000`) so the first request drops to ~1-2 min; later ones reuse the cache and are incremental.
+- If the client times out, retry: with "Concurrent requests" at 1 (the default), the retry **resumes processing where it stopped** instead of starting over.
 """),
         DocSection(title: "Reference performance", icon: "gauge.high", body: """
 Numbers measured on the development machine (RX 6700 XT 12 GB, DDR4, macOS):
