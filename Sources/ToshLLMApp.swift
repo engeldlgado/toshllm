@@ -4,6 +4,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var sigtermSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The system default tooltip delay (~1.5 s) makes the bilingual .help
+        // hints feel broken; show them promptly.
+        UserDefaults.standard.set(400, forKey: "NSInitialToolTipDelay")
+
         // Shut the engine down cleanly on SIGTERM (pkill, logout, system
         // shutdown); otherwise the child would be orphaned holding VRAM.
         signal(SIGTERM, SIG_IGN)
@@ -36,6 +40,7 @@ struct ToshLLMApp: App {
     @StateObject private var search = SearchStore()
     @StateObject private var profiles = ProfileStore()
     @StateObject private var updates = UpdateChecker()
+    @StateObject private var control = ControlPanelState()
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
 
     init() {
@@ -61,8 +66,10 @@ struct ToshLLMApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        // Main window: the chat. A single Window (not WindowGroup) keeps ⌘N
+        // for "new conversation" instead of "new window".
+        Window("ToshLLM", id: "chat") {
+            ChatMainView()
                 .environmentObject(server)
                 .environmentObject(models)
                 .environmentObject(vram)
@@ -71,9 +78,26 @@ struct ToshLLMApp: App {
                 .environmentObject(search)
                 .environmentObject(profiles)
                 .environmentObject(updates)
-                .frame(minWidth: 980, minHeight: 640)
+                .environmentObject(control)
+                .tint(.pink)
+                .frame(minWidth: 760, minHeight: 540)
                 .task { await updates.check() }
         }
+
+        Window(loc.t("Configuración", "Configuration"), id: "control") {
+            ControlPanelView()
+                .environmentObject(server)
+                .environmentObject(models)
+                .environmentObject(vram)
+                .environmentObject(loc)
+                .environmentObject(bench)
+                .environmentObject(search)
+                .environmentObject(profiles)
+                .environmentObject(updates)
+                .environmentObject(control)
+                .frame(minWidth: 980, minHeight: 640)
+        }
+        .defaultSize(width: 1080, height: 700)
 
         MenuBarExtra(isInserted: $menuBarIcon) {
             MenuBarView()

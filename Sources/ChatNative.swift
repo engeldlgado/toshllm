@@ -139,8 +139,13 @@ final class ChatStore: ObservableObject {
 
     init() {
         load()
-        if conversations.isEmpty { newConversation() }
-        currentID = conversations.first?.id
+        // Open ready to type a new message: reuse the most recent empty
+        // conversation or start a fresh one. Earlier chats stay one click away.
+        if let empty = conversations.first(where: { $0.messages.isEmpty }) {
+            currentID = empty.id
+        } else {
+            newConversation()
+        }
     }
 
     var currentIndex: Int? { conversations.firstIndex { $0.id == currentID } }
@@ -159,6 +164,12 @@ final class ChatStore: ObservableObject {
         conversations.removeAll { $0.id == c.id }
         if currentID == c.id { currentID = conversations.first?.id }
         if conversations.isEmpty { newConversation() }
+        save()
+    }
+
+    func rename(_ c: Conversation, to title: String) {
+        guard let i = conversations.firstIndex(where: { $0.id == c.id }) else { return }
+        conversations[i].title = title.trimmingCharacters(in: .whitespaces)
         save()
     }
 
@@ -642,6 +653,8 @@ struct NativeChatView: View {
     @State private var searchText = ""
     @State private var showSystem = false
     @State private var pinnedToBottom = true
+    @State private var renaming: Conversation?
+    @State private var renameText = ""
     @FocusState private var inputFocused: Bool
 
     private var maxTokenOptions: [Int] {
@@ -656,7 +669,10 @@ struct NativeChatView: View {
         guard !ServerSettings.isAppleSilicon, let used = chat.contextUsed, contextLimit > 0 else {
             return false
         }
-        return Double(used) / Double(contextLimit) >= 0.15
+        // Without Flash Attention, generation slows with absolute depth
+        // (~ -8 t/s per 1k tokens measured on RDNA2), so an absolute token
+        // threshold matters more than the fraction of configured context.
+        return used >= 2560 || Double(used) / Double(contextLimit) >= 0.15
     }
 
     var body: some View {
@@ -698,6 +714,10 @@ struct NativeChatView: View {
                     }
                     .tag(c.id)
                     .contextMenu {
+                        Button(loc.t("Renombrar…", "Rename…")) {
+                            renameText = chat.displayTitle(c)
+                            renaming = c
+                        }
                         Button(loc.t("Copiar conversación", "Copy conversation")) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(chat.exportText(c), forType: .string)
@@ -717,6 +737,16 @@ struct NativeChatView: View {
             .listStyle(.sidebar)
         }
         .background(.background.secondary)
+        .alert(loc.t("Renombrar conversación", "Rename conversation"),
+               isPresented: Binding(get: { renaming != nil },
+                                    set: { if !$0 { renaming = nil } })) {
+            TextField(loc.t("Título", "Title"), text: $renameText)
+            Button(loc.t("Guardar", "Save")) {
+                if let c = renaming { chat.rename(c, to: renameText) }
+                renaming = nil
+            }
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { renaming = nil }
+        }
     }
 
     // MARK: messages column
@@ -743,12 +773,20 @@ struct NativeChatView: View {
             ScrollView {
                 LazyVStack(spacing: 14) {
                     if chat.current?.messages.isEmpty ?? true {
-                        ContentUnavailableView(
-                            loc.t("Conversa con el modelo", "Chat with the model"),
-                            systemImage: "bubble.left.and.text.bubble.right",
-                            description: Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo.",
-                                                    "Everything is generated on your GPU, never leaving your machine.")))
-                            .padding(.top, 60)
+                        VStack(spacing: 10) {
+                            Image(systemName: "bubble.left.and.text.bubble.right")
+                                .font(.system(size: 34))
+                                .foregroundStyle(.pink.opacity(0.8))
+                            Text(loc.t("¿En qué puedo ayudarte?", "What can I help with?"))
+                                .font(.title2.weight(.semibold))
+                            Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo. Adjunta archivos con el clip para preguntar sobre tu código.",
+                                       "Everything runs on your GPU, never leaving your machine. Attach files with the paperclip to ask about your code."))
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 420)
+                        }
+                        .padding(.top, 100)
                     }
                     ForEach(chat.current?.messages ?? []) { msg in
                         let isLast = msg.id == chat.current?.messages.last?.id
@@ -815,6 +853,23 @@ struct NativeChatView: View {
                 let pinned = y <= viewport.size.height + 120
                 if pinned != pinnedToBottom { pinnedToBottom = pinned }
             }
+            .overlay(alignment: .bottomTrailing) {
+                if !pinnedToBottom {
+                    Button {
+                        pinnedToBottom = true
+                        proxy.scrollTo("chatBottom", anchor: .bottom)
+                    } label: {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+                            .background(Circle().fill(.background).padding(3))
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(14)
+                    .help(loc.t("Ir al final de la conversación y seguir la respuesta.",
+                                "Jump to the end of the conversation and follow the response."))
+                }
+            }
             .onChange(of: chat.current?.messages.last?.content) { _, _ in
                 if pinnedToBottom { proxy.scrollTo("chatBottom", anchor: .bottom) }
             }
@@ -849,6 +904,11 @@ struct NativeChatView: View {
                     .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 17))
                     .focused($inputFocused)
                     .onSubmit(send)
+                    .onChange(of: draft) { _, value in
+                        absorbLargeDraft(value)
+                    }
+                    .help(loc.t("Intro envía; Opción+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto.",
+                                "Return sends; Option+Return inserts a line break. Large pasted text becomes an attachment."))
                 if chat.generating {
                     Button { chat.stop() } label: {
                         Image(systemName: "stop.circle.fill")
@@ -1008,6 +1068,18 @@ struct NativeChatView: View {
 
     private var attachmentsTooLarge: Bool {
         contextLimit > 0 && attachments.reduce(0) { $0 + $1.estimatedTokens } > contextLimit / 2
+    }
+
+    /// A multiline TextField re-measures its whole contents on every
+    /// keystroke, so a large pasted blob makes typing crawl. Fold it into an
+    /// attachment chip instead; it still reaches the model verbatim.
+    private func absorbLargeDraft(_ value: String) {
+        guard value.count > 4000 else { return }
+        let base = loc.t("Texto pegado", "Pasted text")
+        let existing = attachments.filter { $0.name.hasPrefix(base) }.count
+        let name = existing == 0 ? base + ".txt" : "\(base) \(existing + 1).txt"
+        attachments.append(ChatAttachment(name: name, content: value))
+        draft = ""
     }
 
     private func pickAttachments() {
@@ -1377,6 +1449,8 @@ private enum MDBlock {
     case numbered([String])
     case code(String, String)   // language, content
     case quote(String)
+    case table([String], [[String]])   // headers, rows
+    case rule
 }
 
 struct RichText: View {
@@ -1400,8 +1474,14 @@ struct RichText: View {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                                Text("•").foregroundStyle(.secondary)
-                                Text(Self.inline(item)).textSelection(.enabled)
+                                if let done = Self.taskState(item) {
+                                    Image(systemName: done ? "checkmark.square" : "square")
+                                        .font(.callout).foregroundStyle(.secondary)
+                                    Text(Self.inline(String(item.dropFirst(4)))).textSelection(.enabled)
+                                } else {
+                                    Text("•").foregroundStyle(.secondary)
+                                    Text(Self.inline(item)).textSelection(.enabled)
+                                }
                             }
                         }
                     }
@@ -1422,6 +1502,10 @@ struct RichText: View {
                         RoundedRectangle(cornerRadius: 2).fill(.tertiary).frame(width: 3)
                         Text(Self.inline(s)).foregroundStyle(.secondary).textSelection(.enabled)
                     }
+                case .table(let headers, let rows):
+                    MDTable(headers: headers, rows: rows)
+                case .rule:
+                    Divider().padding(.vertical, 2)
                 }
             }
         }
@@ -1459,13 +1543,31 @@ struct RichText: View {
                 }
                 if lines.first?.hasPrefix("```") == true { lines = lines.dropFirst() }
                 blocks.append(.code(lang, code.joined(separator: "\n")))
-            } else if let m = l.range(of: #"^#{1,4} "#, options: .regularExpression) {
+            } else if let m = l.range(of: #"^#{1,6} "#, options: .regularExpression) {
                 flush()
                 let level = l[..<m.upperBound].filter { $0 == "#" }.count
                 blocks.append(.header(level, String(l[m.upperBound...])))
-            } else if l.hasPrefix("> ") {
+            } else if l.hasPrefix(">") {
                 flush()
-                blocks.append(.quote(String(l.dropFirst(2))))
+                var quoteLines = [stripQuote(l)]
+                while let next = lines.first, next.hasPrefix(">") {
+                    quoteLines.append(stripQuote(String(next)))
+                    lines = lines.dropFirst()
+                }
+                blocks.append(.quote(quoteLines.joined(separator: "\n")))
+            } else if let headers = tableCells(l),
+                      let sep = lines.first, isTableSeparator(String(sep)) {
+                flush()
+                lines = lines.dropFirst()
+                var rows: [[String]] = []
+                while let next = lines.first, let cells = tableCells(String(next)) {
+                    rows.append(cells)
+                    lines = lines.dropFirst()
+                }
+                blocks.append(.table(headers, rows))
+            } else if l.range(of: #"^\s*([-*_])(\s*\1){2,}\s*$"#, options: .regularExpression) != nil {
+                flush()
+                blocks.append(.rule)
             } else if l.range(of: #"^\s*[-*+] "#, options: .regularExpression) != nil {
                 if !paragraph.isEmpty || !numbers.isEmpty { flush() }
                 bullets.append(l.replacingOccurrences(of: #"^\s*[-*+] "#, with: "", options: .regularExpression))
@@ -1483,10 +1585,73 @@ struct RichText: View {
         return blocks
     }
 
+    private static func stripQuote(_ line: String) -> String {
+        var s = line
+        if s.hasPrefix("> ") { s.removeFirst(2) } else if s.hasPrefix(">") { s.removeFirst() }
+        return s
+    }
+
+    /// "[ ] item" / "[x] item" → checkbox state, nil for regular bullets.
+    fileprivate static func taskState(_ item: String) -> Bool? {
+        if item.hasPrefix("[ ] ") { return false }
+        if item.hasPrefix("[x] ") || item.hasPrefix("[X] ") { return true }
+        return nil
+    }
+
+    /// Splits a `| a | b |` line into trimmed cells; nil when it has no pipes.
+    private static func tableCells(_ line: String) -> [String]? {
+        var t = line.trimmingCharacters(in: .whitespaces)
+        guard t.contains("|") else { return nil }
+        if t.hasPrefix("|") { t.removeFirst() }
+        if t.hasSuffix("|") { t.removeLast() }
+        let cells = t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+        return cells.isEmpty ? nil : cells
+    }
+
+    /// `|---|:---:|` style separator under the header row.
+    private static func isTableSeparator(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return t.contains("-") && t.contains("|")
+            && t.range(of: #"^[\s|:\-]+$"#, options: .regularExpression) != nil
+    }
+
     static func inline(_ s: String) -> AttributedString {
         (try? AttributedString(markdown: s, options: .init(
             allowsExtendedAttributes: false,
             interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+    }
+}
+
+/// Markdown pipe table rendered as a grid: bold header, hairline divider and
+/// striped rows, selectable text.
+private struct MDTable: View {
+    let headers: [String]
+    let rows: [[String]]
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 16, verticalSpacing: 0) {
+            GridRow {
+                ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
+                    Text(RichText.inline(h))
+                        .fontWeight(.semibold)
+                        .padding(.vertical, 6)
+                }
+            }
+            Divider()
+            ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
+                GridRow {
+                    ForEach(0..<headers.count, id: \.self) { c in
+                        Text(RichText.inline(c < row.count ? row[c] : ""))
+                            .padding(.vertical, 5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .background(i.isMultiple(of: 2) ? Color.clear : Color.secondary.opacity(0.07))
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 4)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+        .textSelection(.enabled)
     }
 }
 

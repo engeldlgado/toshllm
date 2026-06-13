@@ -18,6 +18,8 @@ Native macOS app · Metal acceleration · No cloud, no accounts, no per-token co
 ---
 
 > **Project status: beta.** ToshLLM is under active development. It works for daily use, but you may still hit bugs and rough edges. Please report anything you find in [Issues](https://github.com/engeldlgado/toshllm/issues) — diagnostics can be exported from Settings → Server log.
+>
+> **Known limitation — external clients (VS Code Copilot, Cline, Continue…):** these providers send a fixed 15–19k-token prompt (system instructions + tool definitions) with *every* request. On GPUs without Metal Flash Attention that means several minutes of prompt processing per cold request, which saturates the GPU and can thermally throttle it. Recent versions mitigate this (single slot with resumable prefill, prompt-cache reuse, inline reasoning), and further improvements are under investigation. The built-in chat is not affected — it sends only your conversation, and supports file attachments for code questions.
 
 ## Why ToshLLM?
 
@@ -135,6 +137,8 @@ If ToshLLM is useful to you:
 ## ToshLLM en español
 
 > **Estado del proyecto: beta.** ToshLLM está en desarrollo activo. Funciona para uso diario, pero todavía pueden aparecer errores y detalles por pulir. Reporta cualquier problema en [Issues](https://github.com/engeldlgado/toshllm/issues) — puedes exportar un diagnóstico desde Ajustes → Registro del servidor.
+>
+> **Limitación conocida — clientes externos (VS Code Copilot, Cline, Continue…):** estos proveedores envían un prompt fijo de 15-19k tokens (instrucciones + definiciones de herramientas) en *cada* petición. En GPUs sin Flash Attention de Metal eso supone varios minutos de procesamiento por petición en frío, lo que satura la GPU y puede provocar throttling térmico. Las versiones recientes lo mitigan (slot único con prefill reanudable, reutilización de caché de prompts, razonamiento inline) y se sigue investigando cómo mejorarlo. El chat integrado no se ve afectado — solo envía tu conversación y admite adjuntar archivos para preguntas de código.
 
 **Ejecuta modelos de lenguaje localmente en Macs Intel con GPU AMD**, con aceleración Metal. Sin nube, sin cuentas, sin costos por token.
 

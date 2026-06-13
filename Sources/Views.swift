@@ -30,24 +30,21 @@ enum Section_: String, CaseIterable, Identifiable {
 
 let hardware = HardwareInfo.detect()
 
-struct ContentView: View {
-    @EnvironmentObject var server: ServerController
-    @EnvironmentObject var models: ModelStore
+/// The management window: hardware dashboard, models, benchmarks, docs and
+/// settings. The chat lives in its own (main) window.
+struct ControlPanelView: View {
     @EnvironmentObject var loc: Localizer
-    @State private var section: Section_ = .dashboard
-    @AppStorage(SettingsKeys.onboardingDone) private var onboardingDone = false
-    @State private var showOnboarding = false
+    @EnvironmentObject var control: ControlPanelState
 
     var body: some View {
         NavigationSplitView {
-            List(Section_.allCases, selection: $section) { s in
+            List(Section_.allCases.filter { $0 != .chat }, selection: $control.section) { s in
                 Label(s.title(loc), systemImage: s.icon).tag(s)
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 185, max: 220)
         } detail: {
-            switch section {
-            case .dashboard: DashboardView()
-            case .chat: ChatTabView()
+            switch control.section {
+            case .dashboard, .chat: DashboardView()
             case .models: ModelsView()
             case .benchmarks: BenchmarksView()
             case .docs: DocsView()
@@ -56,29 +53,7 @@ struct ContentView: View {
             }
         }
         .tint(.pink)
-        .navigationTitle("ToshLLM")
-        .onAppear {
-            models.refresh()
-            if !onboardingDone && models.models.isEmpty {
-                showOnboarding = true
-            }
-            // Auto-start the server when enabled
-            if UserDefaults.standard.bool(forKey: SettingsKeys.autoStart),
-               server.state == .stopped,
-               !(UserDefaults.standard.string(forKey: SettingsKeys.modelPath) ?? "").isEmpty {
-                server.start(.fromDefaults())
-            }
-        }
-        .sheet(isPresented: $showOnboarding) {
-            OnboardingSheet {
-                onboardingDone = true
-                showOnboarding = false
-                section = .models
-            } onDismiss: {
-                onboardingDone = true
-                showOnboarding = false
-            }
-        }
+        .navigationTitle(loc.t("Configuración", "Configuration"))
     }
 }
 
@@ -103,8 +78,8 @@ struct OnboardingSheet: View {
                                 "Download a model from the catalog — the app marks which ones fit your machine."))
                 step("2", loc.t("Pulsa 'Usar' y los parámetros se configuran solos.",
                                 "Press 'Use' and the parameters configure themselves."))
-                step("3", loc.t("Inicia el servidor en Inicio y abre el Chat.",
-                                "Start the server from Home and open the Chat."))
+                step("3", loc.t("Vuelve al Chat, pulsa 'Iniciar servidor' y escribe.",
+                                "Go back to Chat, press 'Start server' and type."))
             }
             .frame(maxWidth: 380)
 
