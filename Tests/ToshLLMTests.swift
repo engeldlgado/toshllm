@@ -276,6 +276,25 @@ final class CompactionTests: XCTestCase {
         XCTAssertEqual(history.last?["content"], "¿qué pasó?")
     }
 
+    func testAttachmentsAreFoldedIntoTheWireHistory() {
+        let msg = ChatMessage(role: "user", content: "¿Qué hace este código?",
+                              attachments: [ChatAttachment(name: "main.swift", content: "print(1)")])
+        let history = ChatStore.requestHistory(system: "", summary: nil, messages: [msg], from: 0)
+        XCTAssertEqual(history.count, 1)
+        let wire = history[0]["content"]!
+        XCTAssertTrue(wire.contains("main.swift"))
+        XCTAssertTrue(wire.contains("```swift\nprint(1)\n```"))
+        XCTAssertTrue(wire.hasSuffix("¿Qué hace este código?"))
+    }
+
+    func testMessageWithoutAttachmentsKeepsItsPlainContentDecodable() throws {
+        // Pre-attachment JSON (no 'attachments' key) must keep decoding.
+        let json = #"{"id":"00000000-0000-0000-0000-000000000001","role":"user","content":"hola","date":700000000}"#
+        let decoded = try JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.attachments)
+        XCTAssertEqual(decoded.wireContent, "hola")
+    }
+
     func testStreamingErrorIsExtractedFromSuccessfulHTTPStream() {
         let object: [String: Any] = ["error": ["message": "Compute error."]]
         XCTAssertEqual(ChatStore.streamedError(from: object), "Compute error.")

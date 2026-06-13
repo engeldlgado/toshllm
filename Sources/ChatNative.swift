@@ -2,12 +2,38 @@ import SwiftUI
 
 // MARK: - Model
 
+/// A text file attached to a user message: sent to the model as a fenced
+/// block, rendered in the transcript as a compact chip.
+struct ChatAttachment: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var content: String
+
+    /// Rough token estimate (chars/4) for context budgeting in the UI.
+    var estimatedTokens: Int { max(1, content.count / 4) }
+
+    var fenceHint: String { (name as NSString).pathExtension.lowercased() }
+}
+
 struct ChatMessage: Identifiable, Codable, Equatable {
     var id = UUID()
     let role: String          // user | assistant
     var content: String
     var date = Date()
     var genSpeed: Double?     // t/s for this response
+    // Optional keeps pre-attachment JSON decodable.
+    var attachments: [ChatAttachment]? = nil
+
+    /// Content as sent over the wire: attached files as fenced blocks first,
+    /// then the typed text.
+    var wireContent: String {
+        guard let attachments, !attachments.isEmpty else { return content }
+        let blocks = attachments.map { a in
+            "File: \(a.name)\n```\(a.fenceHint)\n\(a.content)\n```"
+        }
+        return (blocks.joined(separator: "\n\n") + "\n\n" + content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// Splits the <think>…</think> block from the visible content.
     var parts: (thinking: String?, body: String) {
@@ -146,12 +172,16 @@ final class ChatStore: ObservableObject {
 
     // MARK: sending
 
-    func send(text: String, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
+    func send(text: String, attachments: [ChatAttachment] = [], port: Int, temperature: Double,
+              maxTokens: Int, system: String, thinking: Bool) {
         guard !generating, let i = currentIndex else { return }
         lastError = nil
-        conversations[i].messages.append(ChatMessage(role: "user", content: text))
+        conversations[i].messages.append(ChatMessage(role: "user", content: text,
+                                                     attachments: attachments.isEmpty ? nil : attachments))
         if conversations[i].title.isEmpty {
-            conversations[i].title = String(text.prefix(40))
+            conversations[i].title = text.isEmpty
+                ? (attachments.first?.name ?? "…")
+                : String(text.prefix(40))
         }
         stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system, thinking: thinking)
     }
@@ -391,7 +421,7 @@ final class ChatStore: ObservableObject {
         if !sys.isEmpty { history.append(["role": "system", "content": sys]) }
         let safeStart = min(max(0, start), messages.count)
         history += messages[safeStart...].compactMap { m in
-            let content = m.role == "assistant" ? m.parts.body : m.content
+            let content = m.role == "assistant" ? m.parts.body : m.wireContent
             guard m.role != "assistant"
                     || !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return ["role": m.role, "content": content]
@@ -553,16 +583,16 @@ final class ChatStore: ObservableObject {
     func stop() { task?.cancel() }
 
     /// Removes the last user message (and its response, if any) so it can be
-    /// edited and resent. Returns the removed user text.
-    func popLastExchange() -> String? {
+    /// edited and resent. Returns the removed message, attachments included.
+    func popLastExchange() -> ChatMessage? {
         guard !generating, let i = currentIndex else { return nil }
         if conversations[i].messages.last?.role == "assistant" {
             conversations[i].messages.removeLast()
         }
         guard conversations[i].messages.last?.role == "user" else { return nil }
-        let text = conversations[i].messages.removeLast().content
+        let message = conversations[i].messages.removeLast()
         save()
-        return text
+        return message
     }
 
     // MARK: persistence
@@ -607,6 +637,8 @@ struct NativeChatView: View {
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ctx) private var contextLimit = 16384
     @State private var draft = ""
+    @State private var attachments: [ChatAttachment] = []
+    @State private var attachError: String?
     @State private var searchText = ""
     @State private var showSystem = false
     @State private var pinnedToBottom = true
@@ -691,33 +723,10 @@ struct NativeChatView: View {
 
     private var chatColumn: some View {
         VStack(spacing: 0) {
-            quickChatNotice
-            Divider()
             messagesScroll
             Divider()
             inputArea
         }
-    }
-
-    private var quickChatNotice: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "bolt.circle.fill")
-                .foregroundStyle(.orange)
-            Text(loc.t(
-                "Chat de pruebas rápidas. En sesiones largas, el contexto acumulado reduce progresivamente la velocidad; usa «Recuperar velocidad» o inicia una conversación nueva.",
-                "Quick testing chat. In long sessions, accumulated context progressively reduces speed; use “Recover speed” or start a new conversation."
-            ))
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.orange.opacity(0.08))
-        .help(loc.t(
-            "El chat completo permanece guardado, pero los modelos locales generan más lento cuanto mayor es el contexto procesado.",
-            "The full chat remains saved, but local models generate more slowly as the processed context grows."
-        ))
     }
 
     /// First message not covered by the compaction summary; the transcript
@@ -777,8 +786,9 @@ struct NativeChatView: View {
                                                     thinking: thinkingEnabled)
                                 },
                                 onEdit: {
-                                    if let text = chat.popLastExchange() {
-                                        draft = text
+                                    if let m = chat.popLastExchange() {
+                                        draft = m.content
+                                        attachments = m.attachments ?? []
                                         inputFocused = true
                                     }
                                 })
@@ -820,94 +830,90 @@ struct NativeChatView: View {
 
     private var inputArea: some View {
         VStack(spacing: 8) {
-            chatControls
+            statusStrip
+            if !attachments.isEmpty { attachmentChips }
+            if let attachError {
+                Label(attachError, systemImage: "exclamationmark.triangle")
+                    .font(.caption2).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 10) {
+                paramsButton
+                attachButton
                 TextField(loc.t("Escribe tu mensaje…", "Type your message…"),
                           text: $draft, axis: .vertical)
                     .lineLimit(1...8)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 13).padding(.vertical, 8)
+                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 17))
                     .focused($inputFocused)
                     .onSubmit(send)
                 if chat.generating {
-                    Button(role: .destructive) { chat.stop() } label: {
-                        Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
+                    Button { chat.stop() } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(.red)
                     }
-                    .controlSize(.large)
+                    .buttonStyle(.borderless)
+                    .padding(.bottom, 2)
+                    .help(loc.t("Detener la generación.", "Stop generation."))
                 } else {
                     Button(action: send) {
-                        Label(loc.t("Enviar", "Send"), systemImage: "paperplane.fill")
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.45))
                     }
-                    .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .buttonStyle(.borderless)
+                    .padding(.bottom, 2)
+                    .disabled(!canSend)
+                    .help(loc.t("Enviar mensaje (Intro).", "Send message (Return)."))
                 }
             }
         }
-        .padding(12)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .background(.bar)
-    }
-
-    private var chatControls: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 14) {
-                primaryControls
-                Spacer(minLength: 8)
-                chatStatus
-            }
-            VStack(spacing: 8) {
-                HStack(spacing: 14) {
-                    primaryControls
-                    Spacer(minLength: 0)
-                }
-                HStack {
-                    chatStatus
-                    Spacer(minLength: 0)
-                }
-            }
+        // Files dropped anywhere on the composer become attachments.
+        .dropDestination(for: URL.self) { urls, _ in
+            addAttachments(urls: urls)
+            return true
         }
     }
 
-    private var primaryControls: some View {
-        HStack(spacing: 14) {
-            Button {
-                showSystem.toggle()
-            } label: {
-                Label(loc.t("Sistema", "System"),
-                      systemImage: systemPrompt.isEmpty ? "gearshape" : "gearshape.fill")
-                    .foregroundStyle(systemPrompt.isEmpty ? .secondary : Color.accentColor)
-            }
-            .buttonStyle(.borderless)
-            .popover(isPresented: $showSystem, arrowEdge: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(loc.t("Prompt de sistema", "System prompt")).font(.headline)
-                    TextEditor(text: $systemPrompt)
-                        .font(.system(size: 12))
-                        .frame(width: 380, height: 110)
-                        .scrollContentBackground(.hidden)
-                        .padding(6)
-                        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
-                    Text(loc.t("Se aplica a los mensajes nuevos de todas las conversaciones.",
-                               "Applies to new messages in all conversations."))
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                .padding(12)
-            }
-            .help(loc.t("Prompt de sistema: instrucciones permanentes para el modelo.",
-                        "System prompt: permanent instructions for the model."))
+    private var canSend: Bool {
+        !chat.generating
+            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+    }
+
+    private var paramsButton: some View {
+        Button {
+            showSystem.toggle()
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 16))
+                .foregroundStyle(systemPrompt.isEmpty ? Color.secondary : Color.accentColor)
+        }
+        .buttonStyle(.borderless)
+        .padding(.bottom, 6)
+        .popover(isPresented: $showSystem, arrowEdge: .top) { paramsPopover }
+        .help(loc.t("Parámetros del chat: razonamiento, creatividad, longitud de respuesta y prompt de sistema.",
+                    "Chat parameters: reasoning, creativity, response length and system prompt."))
+    }
+
+    private var paramsPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(loc.t("Parámetros del chat", "Chat parameters")).font(.headline)
 
             Toggle(isOn: $thinkingEnabled) {
                 Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
             }
-            .toggleStyle(.checkbox)
             .help(loc.t("Los modelos razonadores piensan antes de responder. Estos tokens también cuentan dentro del límite de respuesta.",
                         "Reasoning models think before answering. Reasoning tokens also count toward the response limit."))
 
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Label(loc.t("Creatividad", "Creativity"), systemImage: "dial.medium")
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-                Slider(value: $temperature, in: 0...1.5).frame(width: 76)
+                Slider(value: $temperature, in: 0...1.5)
                 Text(String(format: "%.2f", temperature))
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 34)
@@ -915,88 +921,167 @@ struct NativeChatView: View {
             .help(loc.t("Temperatura: 0 = más determinista; valores altos = respuestas más variadas.",
                         "Temperature: 0 = more deterministic; higher values = more varied responses."))
 
-            Menu {
-                ForEach(maxTokenOptions, id: \.self) { option in
-                    Button {
-                        maxTokens = option
-                    } label: {
-                        if option == maxTokens {
-                            Label(option.formatted(), systemImage: "checkmark")
-                        } else {
-                            Text(option.formatted())
-                        }
-                    }
-                }
+            Picker(selection: $maxTokens) {
+                ForEach(maxTokenOptions, id: \.self) { Text($0.formatted()).tag($0) }
             } label: {
-                Label(loc.t("Respuesta \(maxTokens.formatted())",
-                            "Response \(maxTokens.formatted())"),
-                      systemImage: maxTokensIsLarge ? "exclamationmark.triangle.fill" : "text.line.last.and.arrowtriangle.forward")
-                    .foregroundStyle(maxTokensIsLarge ? .orange : .secondary)
-                    .fixedSize()
+                Label(loc.t("Tokens de respuesta", "Response tokens"),
+                      systemImage: "text.line.last.and.arrowtriangle.forward")
             }
-            .menuStyle(.borderlessButton)
             .help(loc.t("Máximo de tokens que el modelo puede generar en este turno, incluyendo razonamiento y respuesta visible. No aumenta el contexto. Recomendado: 2.048–4.096.",
                         "Maximum tokens the model may generate this turn, including reasoning and visible answer. It does not increase context. Recommended: 2,048–4,096."))
+            if maxTokensIsLarge {
+                Label(loc.t("Este límite reserva más de la mitad del contexto para una sola respuesta.",
+                            "This limit reserves more than half the context for a single response."),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+
+            Divider()
+
+            Label(loc.t("Prompt de sistema", "System prompt"), systemImage: "gearshape")
+                .font(.subheadline.weight(.medium))
+            TextEditor(text: $systemPrompt)
+                .font(.system(size: 12))
+                .frame(height: 90)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
+                .help(loc.t("Instrucciones permanentes para el modelo.",
+                            "Permanent instructions for the model."))
+            Text(loc.t("Se aplica a los mensajes nuevos de todas las conversaciones.",
+                       "Applies to new messages in all conversations."))
+                .font(.caption2).foregroundStyle(.secondary)
         }
-        .font(.caption)
-        .fixedSize()
+        .padding(14)
+        .frame(width: 380)
     }
 
-    @ViewBuilder
-    private var chatStatus: some View {
-        HStack(spacing: 12) {
-            if maxTokensIsLarge {
-                Label(loc.t("Respuesta muy larga", "Very long response"),
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .help(loc.t("Este límite reserva más de la mitad del contexto para una sola respuesta y puede desplazar mensajes anteriores.",
-                                "This limit reserves more than half the context for one response and may displace earlier messages."))
-            }
-
-            if chat.compacting {
-                HStack(spacing: 5) {
-                    ProgressView().controlSize(.mini)
-                    Text(loc.t("Compactando…", "Compacting…"))
-                        .foregroundStyle(.secondary)
-                }
-                .help(loc.t("Resumiendo los mensajes antiguos con el modelo para liberar contexto.",
-                            "Summarizing older messages with the model to free context."))
-            }
-
-            if let used = chat.contextUsed, contextLimit > 0 {
-                let fraction = Double(used) / Double(contextLimit)
-                HStack(spacing: 5) {
-                    Label(loc.t("Contexto", "Context"), systemImage: "memorychip")
-                        .foregroundStyle(.secondary)
-                    ProgressView(value: min(fraction, 1))
-                        .frame(width: 76)
-                        .tint(fraction > 0.9 ? .red : fraction > 0.8 ? .orange : .accentColor)
-                    Text("\(used / 1000)k / \(contextLimit / 1000)k")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(fraction > 0.8 ? .orange : .secondary)
-                }
-                .help(loc.t("Tokens usados por el historial y la última respuesta. Al superar 70%, la app intenta resumir los turnos antiguos.",
-                            "Tokens used by history and the latest response. Past 70%, the app attempts to summarize older turns."))
-            }
-
-            if contextMaySlowGeneration && chat.canCompactCurrent {
-                Button {
-                    chat.compactCurrent(port: port)
-                } label: {
-                    Label(loc.t("Recuperar velocidad", "Recover speed"),
-                          systemImage: "archivebox")
-                        .foregroundStyle(.orange)
-                }
-                .buttonStyle(.borderless)
-                .help(loc.t("Resume el historial completado para que el próximo turno procese menos contexto. El chat completo sigue visible y guardado.",
-                            "Summarizes completed history so the next turn processes less context. The full chat remains visible and saved."))
-            }
-
-            LiveSpeedBadge(live: chat.live)
+    private var attachButton: some View {
+        Button(action: pickAttachments) {
+            Image(systemName: "paperclip")
+                .font(.system(size: 16))
+                .foregroundStyle(attachments.isEmpty ? Color.secondary : Color.accentColor)
         }
-        .font(.caption)
-        .fixedSize()
+        .buttonStyle(.borderless)
+        .padding(.bottom, 6)
+        .disabled(chat.generating)
+        .help(loc.t("Adjuntar archivos de texto o código a este mensaje. También puedes arrastrarlos al área de escritura.",
+                    "Attach text or code files to this message. You can also drag them onto the input area."))
+    }
+
+    private var attachmentChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(attachments) { a in
+                    HStack(spacing: 5) {
+                        Image(systemName: "doc.text")
+                        Text(a.name).lineLimit(1)
+                        Text("~\(a.estimatedTokens)t")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Button {
+                            attachments.removeAll { $0.id == a.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 10))
+                        }
+                        .buttonStyle(.borderless)
+                        .help(loc.t("Quitar este archivo.", "Remove this file."))
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .background(.quaternary.opacity(0.5), in: Capsule())
+                    .help(loc.t("Se enviará al modelo junto con tu mensaje (~\(a.estimatedTokens) tokens).",
+                                "Sent to the model along with your message (~\(a.estimatedTokens) tokens)."))
+                }
+                if attachmentsTooLarge {
+                    Label(loc.t("Adjuntos grandes: pueden llenar el contexto",
+                                "Large attachments: they may fill the context"),
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2).foregroundStyle(.orange)
+                        .help(loc.t("El total estimado supera la mitad del contexto configurado en Ajustes.",
+                                    "The estimated total exceeds half the context configured in Settings."))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var attachmentsTooLarge: Bool {
+        contextLimit > 0 && attachments.reduce(0) { $0 + $1.estimatedTokens } > contextLimit / 2
+    }
+
+    private func pickAttachments() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK { addAttachments(urls: panel.urls) }
+    }
+
+    private func addAttachments(urls: [URL]) {
+        attachError = nil
+        for url in urls {
+            guard let data = try? Data(contentsOf: url), data.count <= 512 * 1024,
+                  !data.prefix(8192).contains(0),
+                  let text = String(data: data, encoding: .utf8) else {
+                attachError = loc.t("\(url.lastPathComponent): solo archivos de texto de hasta 512 KB",
+                                    "\(url.lastPathComponent): only text files up to 512 KB")
+                continue
+            }
+            guard !attachments.contains(where: { $0.name == url.lastPathComponent && $0.content == text }) else { continue }
+            attachments.append(ChatAttachment(name: url.lastPathComponent, content: text))
+        }
+    }
+
+    /// One slim line above the composer; present only while there is
+    /// something to report, so the chat keeps a clean look at rest.
+    @ViewBuilder
+    private var statusStrip: some View {
+        if chat.generating || chat.compacting || chat.contextUsed != nil {
+            HStack(spacing: 12) {
+                if chat.compacting {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.mini)
+                        Text(loc.t("Compactando…", "Compacting…"))
+                            .foregroundStyle(.secondary)
+                    }
+                    .help(loc.t("Resumiendo los mensajes antiguos con el modelo para liberar contexto.",
+                                "Summarizing older messages with the model to free context."))
+                }
+
+                if let used = chat.contextUsed, contextLimit > 0 {
+                    let fraction = Double(used) / Double(contextLimit)
+                    HStack(spacing: 5) {
+                        Label(loc.t("Contexto", "Context"), systemImage: "memorychip")
+                            .foregroundStyle(.secondary)
+                        ProgressView(value: min(fraction, 1))
+                            .frame(width: 76)
+                            .tint(fraction > 0.9 ? .red : fraction > 0.8 ? .orange : .accentColor)
+                        Text("\(used / 1000)k / \(contextLimit / 1000)k")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(fraction > 0.8 ? .orange : .secondary)
+                    }
+                    .help(loc.t("Tokens usados por el historial y la última respuesta. Al superar 70%, la app intenta resumir los turnos antiguos.",
+                                "Tokens used by history and the latest response. Past 70%, the app attempts to summarize older turns."))
+                }
+
+                if contextMaySlowGeneration && chat.canCompactCurrent {
+                    Button {
+                        chat.compactCurrent(port: port)
+                    } label: {
+                        Label(loc.t("Recuperar velocidad", "Recover speed"),
+                              systemImage: "archivebox")
+                            .foregroundStyle(.orange)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(loc.t("Resume el historial completado para que el próximo turno procese menos contexto. El chat completo sigue visible y guardado.",
+                                "Summarizes completed history so the next turn processes less context. The full chat remains visible and saved."))
+                }
+
+                Spacer(minLength: 0)
+                LiveSpeedBadge(live: chat.live)
+            }
+            .font(.caption)
+        }
     }
 
     private var filteredConversations: [Conversation] {
@@ -1010,10 +1095,13 @@ struct NativeChatView: View {
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !chat.generating else { return }
+        guard canSend else { return }
         draft = ""
+        let files = attachments
+        attachments = []
+        attachError = nil
         pinnedToBottom = true
-        chat.send(text: text, port: port, temperature: temperature,
+        chat.send(text: text, attachments: files, port: port, temperature: temperature,
                   maxTokens: maxTokens, system: systemPrompt, thinking: thinkingEnabled)
     }
 }
@@ -1102,6 +1190,18 @@ struct MessageBubble: View, Equatable {
 
                 // body
                 VStack(alignment: .leading, spacing: 6) {
+                    if let files = message.attachments, !files.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(files) { a in
+                                Label(a.name, systemImage: "doc.text")
+                                    .font(.caption)
+                                    .padding(.horizontal, 8).padding(.vertical, 3)
+                                    .background(.quaternary.opacity(0.7), in: Capsule())
+                                    .help(loc.t("Archivo enviado al modelo en este turno (~\(a.estimatedTokens) tokens).",
+                                                "File sent to the model this turn (~\(a.estimatedTokens) tokens)."))
+                            }
+                        }
+                    }
                     let parts = message.parts
                     let isThinkingLive = streaming && parts.body.isEmpty && parts.thinking != nil
                     if let think = parts.thinking, !think.isEmpty {
