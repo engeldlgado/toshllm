@@ -14,7 +14,7 @@ permissions:
 jobs:
   build:
     name: Build ToshLLM (x86_64)
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v6
