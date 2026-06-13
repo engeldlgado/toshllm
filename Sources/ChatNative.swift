@@ -1211,6 +1211,14 @@ struct ConversationListView: View {
         }
     }
 
+    /// Relative timestamp in the app's language, not the system locale — the
+    /// default `.formatted(.relative…)` ignores the in-app language toggle.
+    private func relativeDate(_ date: Date) -> String {
+        date.formatted(Date.RelativeFormatStyle(
+            presentation: .named,
+            locale: Locale(identifier: loc.isSpanish ? "es" : "en")))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Button {
@@ -1221,21 +1229,26 @@ struct ConversationListView: View {
             }
             .controlSize(.large)
             .keyboardShortcut("n", modifiers: .command)
-            .padding(10)
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
             .help(loc.t("Empieza una conversación nueva (⌘N).", "Start a new conversation (⌘N)."))
 
             TextField(loc.t("Buscar…", "Search…"), text: $searchText)
                 .textFieldStyle(.roundedBorder)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 4)
+                .controlSize(.large)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
 
             List(selection: $chat.currentID) {
                 ForEach(filtered) { c in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(chat.displayTitle(c)).lineLimit(1)
-                        Text(c.updated.formatted(.relative(presentation: .named)))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(chat.displayTitle(c))
+                            .lineLimit(1)
+                        Text(relativeDate(c.updated))
                             .font(.caption2).foregroundStyle(.secondary)
                     }
+                    .padding(.vertical, 5)
                     .tag(c.id)
                     .contextMenu {
                         Button(loc.t("Renombrar…", "Rename…")) {

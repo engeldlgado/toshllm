@@ -155,9 +155,14 @@ struct ServerSettings {
             specMTP: bool(SettingsKeys.specMTP, false))
     }
 
-    /// Whether a GGUF ships the MTP (multi-token prediction) head, detected by
-    /// scanning the metadata section for the `nextn` tensor markers. Cached per
-    /// path+size so repeated calls are free.
+    /// Whether a GGUF ships the MTP (multi-token prediction) head. Detected by
+    /// scanning the header for the `nextn` marker — it appears both in the
+    /// `nextn_predict_layers` metadata key and in the MTP tensor names, so this
+    /// catches models that keep the tensors but drop/rename the metadata key
+    /// (a common cause of missed detection). We deliberately do NOT match "mtp"
+    /// or "MTP": that word lives in the model's `general.name` (these repos are
+    /// named "…-MTP-GGUF"), which would make every model a false positive.
+    /// Cached per path+size so repeated calls are free.
     nonisolated static func modelHasMTP(at path: String) -> Bool {
         struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
@@ -167,7 +172,7 @@ struct ServerSettings {
         var found = false
         if let handle = FileHandle(forReadingAtPath: path),
            let head = try? handle.read(upToCount: 32 * 1024 * 1024) {
-            found = head.range(of: Data("nextn_predict_layers".utf8)) != nil
+            found = head.range(of: Data("nextn".utf8)) != nil
             try? handle.close()
         }
         Cache.store[key] = found

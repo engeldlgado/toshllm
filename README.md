@@ -96,6 +96,12 @@ Measured on RX 6700 XT (12 GB) + DDR4, macOS:
 
 Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double these generation numbers.
 
+The built-in **Benchmarks** tab measures prompt and generation speed for each configuration on *your own* hardware, with per-metric normalized bars for easy comparison:
+
+<div align="center">
+  <img src="Assets/benchmarks.png" alt="ToshLLM benchmarks comparison" width="640">
+</div>
+
 ## Architecture
 
 ```
