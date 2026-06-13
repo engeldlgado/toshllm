@@ -1,5 +1,4 @@
 import SwiftUI
-import Charts
 
 enum Section_: String, CaseIterable, Identifiable {
     case dashboard, chat, models, benchmarks, docs, settings, about
@@ -54,6 +53,11 @@ struct ControlPanelView: View {
         }
         .tint(.pink)
         .navigationTitle(loc.t("Configuración", "Configuration"))
+        // Telemetry rides in the glass title bar (macOS 26), shared across all
+        // sections, instead of a flat strip beneath the large title.
+        .toolbar {
+            ToolbarItem(placement: .automatic) { ServerStatsToolbar() }
+        }
     }
 }
 
@@ -113,62 +117,51 @@ struct OnboardingSheet: View {
 
 // MARK: - Stats bar
 
-struct StatsBar: View {
+/// Compact server telemetry for the configuration window's toolbar, so the
+/// stats share the system's glass title bar (macOS 26) instead of sitting in a
+/// flat strip under the large title.
+struct ServerStatsToolbar: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var vram: VRAMMonitor
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        HStack(spacing: 22) {
+        HStack(spacing: 14) {
             stat("Prompt", server.promptSpeed)
             stat(loc.t("Generación", "Generation"), server.genSpeed)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("VRAM").font(.caption).foregroundStyle(.secondary)
-                HStack(spacing: 6) {
-                    ProgressView(value: min(vram.fraction, 1)).frame(width: 90)
-                        .tint(vram.fraction > 0.9 ? .red : vram.fraction > 0.75 ? .orange : .accentColor)
-                    Text(String(format: "%.1f / %.0f GB", vram.usedMB / 1024, vram.totalMB / 1024))
-                        .font(.system(.caption, design: .monospaced))
-                }
+            HStack(spacing: 5) {
+                Image(systemName: "memorychip").font(.caption).foregroundStyle(.secondary)
+                ProgressView(value: min(vram.fraction, 1)).frame(width: 56)
+                    .tint(vram.fraction > 0.9 ? .red : vram.fraction > 0.75 ? .orange : .accentColor)
+                Text(String(format: "%.1f/%.0f", vram.usedMB / 1024, vram.totalMB / 1024))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
             }
-            if !server.genHistory.isEmpty {
-                Chart(Array(server.genHistory.enumerated()), id: \.offset) { i, v in
-                    LineMark(x: .value("n", i), y: .value("t/s", v))
-                        .interpolationMethod(.catmullRom)
-                }
-                .chartXAxis(.hidden)
-                .chartYAxis(.hidden)
-                .frame(width: 120, height: 30)
-                .foregroundStyle(.pink)
-            }
-            Spacer()
             statusBadge
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 
     private func stat(_ label: String, _ value: Double?) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 4) {
             Text(label).font(.caption).foregroundStyle(.secondary)
-            Text(value.map { String(format: "%.1f t/s", $0) } ?? "—")
-                .font(.system(.body, design: .monospaced).weight(.semibold))
+            Text(value.map { String(format: "%.0f", $0) } ?? "—")
+                .font(.system(size: 12, design: .monospaced).weight(.semibold))
         }
+        .help(loc.t("\(label): velocidad de la última petición en tokens por segundo.",
+                    "\(label): last request speed in tokens per second."))
     }
 
     private var statusBadge: some View {
         let (text, color): (String, Color) = {
             switch server.state {
             case .stopped: return (loc.t("Detenido", "Stopped"), .secondary)
-            case .starting: return (loc.t("Cargando modelo…", "Loading model…"), .orange)
+            case .starting: return (loc.t("Cargando…", "Loading…"), .orange)
             case .running: return (loc.t("Activo", "Running"), .green)
             case .failed(let msg): return (msg, .red)
             }
         }()
-        return HStack(spacing: 6) {
-            Circle().fill(color).frame(width: 9, height: 9)
-            Text(text).font(.callout).lineLimit(1)
+        return HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(text).font(.caption).lineLimit(1)
         }
     }
 }

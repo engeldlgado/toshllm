@@ -1,5 +1,4 @@
 import SwiftUI
-import Charts
 
 // MARK: - Benchmarks
 
@@ -15,20 +14,17 @@ struct BenchmarksView: View {
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
 
     var body: some View {
-        VStack(spacing: 0) {
-            StatsBar()
-            ScrollView {
-                VStack(spacing: 16) {
-                    runCard
-                    if bench.running || !bench.output.isEmpty { outputCard }
-                    if !bench.history.isEmpty {
-                        bestCards
-                        chartCard
-                        historyCard
-                    }
+        ScrollView {
+            VStack(spacing: 16) {
+                runCard
+                if bench.running || !bench.output.isEmpty { outputCard }
+                if !bench.history.isEmpty {
+                    bestCards
+                    chartCard
+                    historyCard
                 }
-                .padding()
             }
+            .padding()
         }
     }
 
@@ -180,32 +176,71 @@ struct BenchmarksView: View {
 
     private var chartCard: some View {
         let recent = Array(bench.history.prefix(8))
+        // Generation (~15–60) and prompt (~50–130) live on very different
+        // scales; sharing one axis squashes the generation bars to slivers.
+        // Normalize each metric to its own max so both stay readable and the
+        // comparison across runs is meaningful.
+        let maxTG = recent.map(\.tg).max() ?? 1
+        let maxPP = recent.map(\.pp).max() ?? 1
         return Card(title: loc.t("Comparativa (últimas \(recent.count) corridas)",
                                  "Comparison (last \(recent.count) runs)"), icon: "chart.bar") {
-            Chart {
+            VStack(alignment: .leading, spacing: 10) {
                 ForEach(recent) { r in
-                    BarMark(x: .value("t/s", r.tg),
-                            y: .value("run", "\(r.shortModel)\n\(r.configLabel)"))
-                        .position(by: .value("metric", loc.t("Generación", "Generation")))
-                        .foregroundStyle(by: .value("metric", loc.t("Generación", "Generation")))
-                        .annotation(position: .trailing) {
-                            Text(String(format: "%.1f", r.tg)).font(.system(size: 9))
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            Text(r.shortModel).font(.callout.weight(.medium)).lineLimit(1)
+                            Text(r.configLabel)
+                                .font(.system(size: 10, design: .monospaced))
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(.quaternary.opacity(0.6), in: Capsule())
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
                         }
-                    BarMark(x: .value("t/s", r.pp),
-                            y: .value("run", "\(r.shortModel)\n\(r.configLabel)"))
-                        .position(by: .value("metric", "Prompt"))
-                        .foregroundStyle(by: .value("metric", "Prompt"))
-                        .annotation(position: .trailing) {
-                            Text(String(format: "%.0f", r.pp)).font(.system(size: 9))
-                        }
+                        metricBar(loc.t("Gen", "Gen"), value: r.tg, max: maxTG, color: .pink)
+                        metricBar("Prompt", value: r.pp, max: maxPP, color: Color.blue.opacity(0.8))
+                    }
+                    .padding(.vertical, 3)
+                    if r.id != recent.last?.id { Divider().opacity(0.4) }
+                }
+                HStack(spacing: 16) {
+                    legendDot(.pink, loc.t("Generación", "Generation"))
+                    legendDot(Color.blue.opacity(0.8), "Prompt")
+                    Spacer()
+                    Text(loc.t("t/s · barras normalizadas por métrica",
+                               "t/s · bars normalized per metric"))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    /// One horizontal bar: fixed-width label and value flank a proportional
+    /// track, so every row aligns regardless of the numbers.
+    private func metricBar(_ label: String, value: Double, max: Double, color: Color) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+            GeometryReader { g in
+                let frac = max > 0 ? value / max : 0
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary.opacity(0.35))
+                    Capsule().fill(color.gradient)
+                        .frame(width: Swift.max(8, g.size.width * frac))
                 }
             }
-            .chartForegroundStyleScale([
-                loc.t("Generación", "Generation"): Color.pink,
-                "Prompt": Color.blue.opacity(0.65),
-            ])
-            .chartXAxisLabel("t/s")
-            .frame(height: CGFloat(recent.count) * 52 + 40)
+            .frame(height: 15)
+            Text(String(format: "%.1f", value))
+                .font(.system(.caption, design: .monospaced).weight(.medium))
+                .frame(width: 48, alignment: .trailing)
+        }
+    }
+
+    private func legendDot(_ color: Color, _ text: String) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(text).font(.caption2).foregroundStyle(.secondary)
         }
     }
 

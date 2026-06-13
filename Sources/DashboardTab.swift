@@ -14,19 +14,16 @@ struct DashboardView: View {
     @EnvironmentObject var updates: UpdateChecker
 
     var body: some View {
-        VStack(spacing: 0) {
-            StatsBar()
-            ScrollView {
-                VStack(spacing: 16) {
-                    updateBanner
-                    HStack(alignment: .top, spacing: 16) {
-                        hardwareCard
-                        serverCard
-                    }
-                    recommendationCard
+        ScrollView {
+            VStack(spacing: 16) {
+                updateBanner
+                HStack(alignment: .top, spacing: 16) {
+                    hardwareCard
+                    serverCard
                 }
-                .padding()
+                recommendationCard
             }
+            .padding()
         }
     }
 

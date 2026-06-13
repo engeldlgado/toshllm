@@ -83,6 +83,7 @@ struct ToshLLMApp: App {
                 .frame(minWidth: 760, minHeight: 540)
                 .task { await updates.check() }
         }
+        .defaultSize(width: 1240, height: 820)
 
         Window(loc.t("Configuración", "Configuration"), id: "control") {
             ControlPanelView()

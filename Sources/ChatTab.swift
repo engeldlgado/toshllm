@@ -17,27 +17,28 @@ struct ChatMainView: View {
     @EnvironmentObject var updates: UpdateChecker
     @EnvironmentObject var control: ControlPanelState
     @Environment(\.openWindow) private var openWindow
+    @StateObject private var chat = ChatStore()
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.onboardingDone) private var onboardingDone = false
     @State private var showOnboarding = false
 
     var body: some View {
-        Group {
-            switch server.state {
-            case .running:
-                NativeChatView()
-            case .starting:
-                VStack(spacing: 14) {
-                    ProgressView().controlSize(.large)
-                    Text(loc.t("Cargando modelo…", "Loading model…")).foregroundStyle(.secondary)
-                    Button(loc.t("Cancelar", "Cancel")) { server.stop() }
-                        .help(loc.t("Detiene la carga del modelo.", "Stops loading the model."))
+        NavigationSplitView {
+            ConversationListView()
+        } detail: {
+            Group {
+                switch server.state {
+                case .running:
+                    NativeChatView()
+                case .starting:
+                    loadingView
+                default:
+                    setupHero
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            default:
-                setupHero
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .environmentObject(chat)
         .navigationTitle("ToshLLM")
         .navigationSubtitle(stateSubtitle)
         .toolbar {
@@ -90,6 +91,15 @@ struct ChatMainView: View {
     private func openControl(_ section: Section_? = nil) {
         if let section { control.section = section }
         openWindow(id: "control")
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: 14) {
+            ProgressView().controlSize(.large)
+            Text(loc.t("Cargando modelo…", "Loading model…")).foregroundStyle(.secondary)
+            Button(loc.t("Cancelar", "Cancel")) { server.stop() }
+                .help(loc.t("Detiene la carga del modelo.", "Stops loading the model."))
+        }
     }
 
     /// Welcome state when the engine is not running: one obvious action to

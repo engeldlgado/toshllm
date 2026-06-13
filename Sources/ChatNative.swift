@@ -699,10 +699,13 @@ final class ChatStore: ObservableObject {
 
 // MARK: - Main chat view
 
+/// The chat detail: transcript and composer. The conversation list lives in
+/// `ConversationListView` (the split-view sidebar); both share the ChatStore
+/// from the environment, injected by ChatMainView.
 struct NativeChatView: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var loc: Localizer
-    @StateObject private var chat = ChatStore()
+    @EnvironmentObject var chat: ChatStore
     @AppStorage(SettingsKeys.chatTemp) private var temperature = 0.7
     @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = 2048
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
@@ -712,11 +715,8 @@ struct NativeChatView: View {
     @State private var draft = ""
     @State private var attachments: [ChatAttachment] = []
     @State private var attachError: String?
-    @State private var searchText = ""
     @State private var showSystem = false
     @State private var pinnedToBottom = true
-    @State private var renaming: Conversation?
-    @State private var renameText = ""
     @FocusState private var inputFocused: Bool
 
     private var maxTokenOptions: [Int] {
@@ -738,77 +738,19 @@ struct NativeChatView: View {
     }
 
     var body: some View {
-        HSplitView {
-            conversationList
-                .frame(minWidth: 180, idealWidth: 210, maxWidth: 280)
-            chatColumn
-                .frame(minWidth: 420, maxWidth: .infinity)
-        }
-        .onAppear { inputFocused = true }
-    }
-
-    // MARK: left column
-
-    private var conversationList: some View {
-        VStack(spacing: 0) {
-            Button {
-                chat.newConversation()
-                inputFocused = true
-            } label: {
-                Label(loc.t("Nueva conversación", "New chat"), systemImage: "square.and.pencil")
-                    .frame(maxWidth: .infinity)
-            }
-            .controlSize(.large)
-            .keyboardShortcut("n", modifiers: .command)
-            .padding(10)
-
-            TextField(loc.t("Buscar…", "Search…"), text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 4)
-
-            List(selection: $chat.currentID) {
-                ForEach(filteredConversations) { c in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(chat.displayTitle(c)).lineLimit(1)
-                        Text(c.updated.formatted(.relative(presentation: .named)))
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                    .tag(c.id)
-                    .contextMenu {
-                        Button(loc.t("Renombrar…", "Rename…")) {
-                            renameText = chat.displayTitle(c)
-                            renaming = c
-                        }
-                        Button(loc.t("Copiar conversación", "Copy conversation")) {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(chat.exportText(c), forType: .string)
-                        }
-                        Button(loc.t("Exportar a Markdown…", "Export to Markdown…")) {
-                            let panel = NSSavePanel()
-                            panel.nameFieldStringValue = chat.displayTitle(c)
-                                .replacingOccurrences(of: "/", with: "-") + ".md"
-                            if panel.runModal() == .OK, let url = panel.url {
-                                try? chat.exportText(c).write(to: url, atomically: true, encoding: .utf8)
-                            }
-                        }
-                        Button(loc.t("Eliminar", "Delete"), role: .destructive) { chat.delete(c) }
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-        }
-        .background(.background.secondary)
-        .alert(loc.t("Renombrar conversación", "Rename conversation"),
-               isPresented: Binding(get: { renaming != nil },
-                                    set: { if !$0 { renaming = nil } })) {
-            TextField(loc.t("Título", "Title"), text: $renameText)
-            Button(loc.t("Guardar", "Save")) {
-                if let c = renaming { chat.rename(c, to: renameText) }
-                renaming = nil
-            }
-            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { renaming = nil }
-        }
+        chatColumn
+            .onAppear { inputFocused = true }
+            // Markdown links: open valid web/mail URLs in the default browser
+            // and silently drop malformed ones (e.g. placeholder "#" links),
+            // instead of the system's "can't open the application (-50)" dialog.
+            .environment(\.openURL, OpenURLAction { url in
+                let raw = url.scheme == nil ? "https://\(url.absoluteString)" : url.absoluteString
+                guard let target = URL(string: raw), let scheme = target.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https" || scheme == "mailto",
+                      target.host != nil || scheme == "mailto" else { return .discarded }
+                NSWorkspace.shared.open(target)
+                return .handled
+            })
     }
 
     // MARK: messages column
@@ -912,7 +854,13 @@ struct NativeChatView: View {
             // Follow the stream only while the user is already at the bottom;
             // scrolling up to read pauses the auto-follow until they return.
             .onPreferenceChange(BottomMarkerKey.self) { y in
-                let pinned = y <= viewport.size.height + 120
+                // Generous margin (~0.6 screen): a single streamed flush can
+                // add a tall block (e.g. a code fence) all at once, pushing the
+                // bottom marker far down. With a small margin that flips the
+                // pin off and auto-follow dead-locks (it only re-pins by
+                // scrolling, which it won't do while unpinned). The slack keeps
+                // following the stream; a deliberate scroll-up past it unpins.
+                let pinned = y <= viewport.size.height * 1.6
                 if pinned != pinnedToBottom { pinnedToBottom = pinned }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -921,12 +869,13 @@ struct NativeChatView: View {
                         pinnedToBottom = true
                         proxy.scrollTo("chatBottom", anchor: .bottom)
                     } label: {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 28))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.secondary)
-                            .background(Circle().fill(.background).padding(3))
+                            .frame(width: 34, height: 34)
+                            .glassSurface(in: Circle(), interactive: true)
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.plain)
                     .padding(14)
                     .help(loc.t("Ir al final de la conversación y seguir la respuesta.",
                                 "Jump to the end of the conversation and follow the response."))
@@ -938,6 +887,15 @@ struct NativeChatView: View {
             .onChange(of: chat.currentID) { _, _ in
                 pinnedToBottom = true
                 proxy.scrollTo("chatBottom", anchor: .bottom)
+                inputFocused = true
+            }
+            // When generation ends, the streaming bubble is swapped for the
+            // finished one (different identity/height); settle the position so
+            // that swap doesn't leave a visible jump.
+            .onChange(of: chat.generating) { _, generating in
+                if !generating && pinnedToBottom {
+                    DispatchQueue.main.async { proxy.scrollTo("chatBottom", anchor: .bottom) }
+                }
             }
             }
         }
@@ -963,7 +921,7 @@ struct NativeChatView: View {
                     .lineLimit(1...8)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 13).padding(.vertical, 8)
-                    .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 17))
+                    .glassSurface(in: RoundedRectangle(cornerRadius: 20), interactive: true)
                     .focused($inputFocused)
                     .onSubmit(send)
                     .onChange(of: draft) { _, value in
@@ -1218,15 +1176,6 @@ struct NativeChatView: View {
         }
     }
 
-    private var filteredConversations: [Conversation] {
-        let query = searchText.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return chat.conversations }
-        return chat.conversations.filter { c in
-            chat.displayTitle(c).localizedCaseInsensitiveContains(query) ||
-            c.messages.contains { $0.content.localizedCaseInsensitiveContains(query) }
-        }
-    }
-
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend else { return }
@@ -1240,518 +1189,88 @@ struct NativeChatView: View {
     }
 }
 
-// MARK: - Message bubble
+// MARK: - Conversation list (split-view sidebar)
 
-struct MessageBubble: View, Equatable {
-    let message: ChatMessage
-    let streaming: Bool
-    let liveSpeed: Double?
-    let isLastAssistant: Bool
-    let isLastUser: Bool
-    let canRegenerate: Bool
-    let onRegenerate: () -> Void
-    let onEdit: () -> Void
+/// The chat sidebar: new-conversation button, search and the conversation
+/// list. A native `List`/`.sidebar` inside the NavigationSplitView so it
+/// adopts the system's translucent sidebar — including macOS 26 Liquid Glass —
+/// on every supported release.
+struct ConversationListView: View {
+    @EnvironmentObject var chat: ChatStore
+    @EnvironmentObject var loc: Localizer
+    @State private var searchText = ""
+    @State private var renaming: Conversation?
+    @State private var renameText = ""
 
-    // Skips re-rendering finished bubbles while another one streams; without
-    // this every visible bubble re-parses its markdown on each flush. The
-    // closures are excluded: their behavior never varies for a given message.
-    static func == (a: MessageBubble, b: MessageBubble) -> Bool {
-        a.message == b.message && a.streaming == b.streaming
-            && a.liveSpeed == b.liveSpeed && a.isLastAssistant == b.isLastAssistant
-            && a.isLastUser == b.isLastUser && a.canRegenerate == b.canRegenerate
+    private var filtered: [Conversation] {
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return chat.conversations }
+        return chat.conversations.filter { c in
+            chat.displayTitle(c).localizedCaseInsensitiveContains(query) ||
+            c.messages.contains { $0.content.localizedCaseInsensitiveContains(query) }
+        }
     }
 
-    @EnvironmentObject var loc: Localizer
-    @State private var thinkExpanded = false
-    @State private var copied = false
-    @State private var hovering = false
-
-    private var isUser: Bool { message.role == "user" }
-
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if isUser { Spacer(minLength: 70) }
-
-            if !isUser {
-                Image(systemName: "cpu.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.pink)
-                    .frame(width: 26, height: 26)
-                    .background(.pink.opacity(0.15), in: Circle())
+        VStack(spacing: 0) {
+            Button {
+                chat.newConversation()
+            } label: {
+                Label(loc.t("Nueva conversación", "New chat"), systemImage: "square.and.pencil")
+                    .frame(maxWidth: .infinity)
             }
+            .controlSize(.large)
+            .keyboardShortcut("n", modifiers: .command)
+            .padding(10)
+            .help(loc.t("Empieza una conversación nueva (⌘N).", "Start a new conversation (⌘N)."))
 
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
-                // header
-                HStack(spacing: 8) {
-                    Text(isUser ? loc.t("Tú", "You") : "Asistente")
-                        .font(.caption.weight(.medium))
-                    Text(message.date.formatted(date: .omitted, time: .shortened))
-                        .font(.caption2).foregroundStyle(.tertiary)
-                    if let speed = message.genSpeed {
-                        Text(String(format: "%.1f t/s", speed))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
+            TextField(loc.t("Buscar…", "Search…"), text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+
+            List(selection: $chat.currentID) {
+                ForEach(filtered) { c in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(chat.displayTitle(c)).lineLimit(1)
+                        Text(c.updated.formatted(.relative(presentation: .named)))
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
-                    if hovering && !streaming {
-                        Button {
+                    .tag(c.id)
+                    .contextMenu {
+                        Button(loc.t("Renombrar…", "Rename…")) {
+                            renameText = chat.displayTitle(c)
+                            renaming = c
+                        }
+                        Button(loc.t("Copiar conversación", "Copy conversation")) {
                             NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(
-                                isUser ? message.content : message.parts.body, forType: .string)
-                            copied = true
-                            Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
-                        } label: {
-                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                                .font(.system(size: 10))
+                            NSPasteboard.general.setString(chat.exportText(c), forType: .string)
                         }
-                        .buttonStyle(.borderless)
-                        .help(loc.t("Copiar mensaje", "Copy message"))
-                        if isLastAssistant && canRegenerate {
-                            Button(action: onRegenerate) {
-                                Image(systemName: "arrow.clockwise").font(.system(size: 10))
+                        Button(loc.t("Exportar a Markdown…", "Export to Markdown…")) {
+                            let panel = NSSavePanel()
+                            panel.nameFieldStringValue = chat.displayTitle(c)
+                                .replacingOccurrences(of: "/", with: "-") + ".md"
+                            if panel.runModal() == .OK, let url = panel.url {
+                                try? chat.exportText(c).write(to: url, atomically: true, encoding: .utf8)
                             }
-                            .buttonStyle(.borderless)
-                            .help(loc.t("Regenerar respuesta", "Regenerate response"))
                         }
-                        if isLastUser && canRegenerate {
-                            Button(action: onEdit) {
-                                Image(systemName: "pencil").font(.system(size: 10))
-                            }
-                            .buttonStyle(.borderless)
-                            .help(loc.t("Editar y reenviar", "Edit and resend"))
-                        }
+                        Button(loc.t("Eliminar", "Delete"), role: .destructive) { chat.delete(c) }
                     }
                 }
-
-                // body
-                VStack(alignment: .leading, spacing: 6) {
-                    if let files = message.attachments, !files.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(files) { a in
-                                Label(a.name, systemImage: "doc.text")
-                                    .font(.caption)
-                                    .padding(.horizontal, 8).padding(.vertical, 3)
-                                    .background(.quaternary.opacity(0.7), in: Capsule())
-                                    .help(loc.t("Archivo enviado al modelo en este turno (~\(a.estimatedTokens) tokens).",
-                                                "File sent to the model this turn (~\(a.estimatedTokens) tokens)."))
-                            }
-                        }
-                    }
-                    let parts = message.parts
-                    let isThinkingLive = streaming && parts.body.isEmpty && parts.thinking != nil
-                    if let think = parts.thinking, !think.isEmpty {
-                        DisclosureGroup(isExpanded: $thinkExpanded) {
-                            if thinkExpanded {
-                                Text(think)
-                                    .font(.caption).foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
-                        } label: {
-                            Label(isThinkingLive ? loc.t("Razonando…", "Thinking…")
-                                                 : loc.t("Razonamiento", "Reasoning"),
-                                  systemImage: "brain")
-                                .font(.caption).foregroundStyle(.blue)
-                        }
-                    }
-                    if !parts.body.isEmpty || parts.thinking == nil {
-                        RichText(text: isUser ? message.content : parts.body)
-                    }
-                    if streaming {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            if let speed = liveSpeed {
-                                Text(String(format: "%.1f t/s", speed))
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-                .padding(.horizontal, 13).padding(.vertical, 10)
-                .background(isUser ? AnyShapeStyle(.tint.opacity(0.17)) : AnyShapeStyle(.quaternary.opacity(0.5)),
-                            in: RoundedRectangle(cornerRadius: 12))
             }
-
-            if isUser {
-                Image(systemName: "person.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 26, height: 26)
-                    .background(.quaternary.opacity(0.6), in: Circle())
-            }
-            if !isUser { Spacer(minLength: 70) }
+            .listStyle(.sidebar)
         }
-        .onHover { hovering = $0 }
-    }
-}
-
-/// Position of the transcript's bottom sentinel within the scroll viewport,
-/// used to detect whether the user is at the bottom (auto-follow) or reading
-/// older messages (no scroll hijacking).
-private struct BottomMarkerKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// Hosts the in-progress assistant bubble: the only transcript view that
-/// observes LiveStream, so per-flush updates re-render just this subtree.
-private struct StreamingBubble: View {
-    @ObservedObject var live: LiveStream
-    let message: ChatMessage
-    let onGrow: () -> Void
-
-    private var liveMessage: ChatMessage {
-        var m = message
-        if live.hasReasoning {
-            m.content = "<think>" + live.displayedReasoning
-                + (live.visibleText.isEmpty ? "" : "</think>" + live.visibleText)
-        } else {
-            m.content = live.visibleText
-        }
-        return m
-    }
-
-    var body: some View {
-        StreamingMessageBubble(live: live, message: liveMessage)
-            .onChange(of: live.visibleText) { _, _ in onGrow() }
-    }
-}
-
-/// Streaming-only bubble. Reasoning stays collapsed and its growing text is
-/// not published or laid out unless the user explicitly opens it.
-private struct StreamingMessageBubble: View {
-    @ObservedObject var live: LiveStream
-    let message: ChatMessage
-    @EnvironmentObject var loc: Localizer
-
-    private var reasoningBinding: Binding<Bool> {
-        Binding(get: { live.reasoningExpanded },
-                set: { live.setReasoningExpanded($0) })
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "cpu.fill")
-                .font(.system(size: 13))
-                .foregroundStyle(.pink)
-                .frame(width: 26, height: 26)
-                .background(.pink.opacity(0.15), in: Circle())
-
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text("Asistente").font(.caption.weight(.medium))
-                    Text(message.date.formatted(date: .omitted, time: .shortened))
-                        .font(.caption2).foregroundStyle(.tertiary)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    if live.hasReasoning {
-                        DisclosureGroup(isExpanded: reasoningBinding) {
-                            if live.reasoningExpanded {
-                                Text(live.displayedReasoning)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Label(live.visibleText.isEmpty ? loc.t("Razonando…", "Thinking…")
-                                                               : loc.t("Razonamiento", "Reasoning"),
-                                      systemImage: "brain")
-                                if live.reasoningExpanded && live.visibleText.isEmpty {
-                                    Text(loc.t("actualización ligera", "light updates"))
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                            .font(.caption).foregroundStyle(.blue)
-                        }
-                    }
-
-                    if !live.visibleText.isEmpty {
-                        RichText(text: live.visibleText)
-                    }
-
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        if let speed = live.speed {
-                            Text(String(format: "%.1f t/s", speed))
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(.horizontal, 13).padding(.vertical, 10)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .navigationSplitViewColumnWidth(min: 200, ideal: 235, max: 320)
+        .alert(loc.t("Renombrar conversación", "Rename conversation"),
+               isPresented: Binding(get: { renaming != nil },
+                                    set: { if !$0 { renaming = nil } })) {
+            TextField(loc.t("Título", "Title"), text: $renameText)
+            Button(loc.t("Guardar", "Save")) {
+                if let c = renaming { chat.rename(c, to: renameText) }
+                renaming = nil
             }
-
-            Spacer(minLength: 70)
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { renaming = nil }
         }
     }
 }
 
-/// Observes LiveStream on its own so the t/s readout updates per flush
-/// without re-evaluating the whole input bar.
-private struct LiveSpeedBadge: View {
-    @ObservedObject var live: LiveStream
-
-    var body: some View {
-        if let speed = live.speed {
-            Text(String(format: "%.1f t/s", speed))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.pink)
-        }
-    }
-}
-
-// MARK: - Markdown rendering
-
-private enum MDBlock {
-    case paragraph(String)
-    case header(Int, String)
-    case bullet([String])
-    case numbered([String])
-    case code(String, String)   // language, content
-    case quote(String)
-    case table([String], [[String]])   // headers, rows
-    case rule
-}
-
-struct RichText: View {
-    let text: String
-
-    var body: some View {
-        let blocks = Self.parse(text)
-        VStack(alignment: .leading, spacing: 8) {
-            // Positional identity: content-derived ids would change on every
-            // streamed token, tearing the last block's views down each flush.
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .paragraph(let s):
-                    Text(Self.inline(s)).textSelection(.enabled)
-                case .header(let level, let s):
-                    Text(Self.inline(s))
-                        .font(level <= 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
-                        .textSelection(.enabled)
-                        .padding(.top, 2)
-                case .bullet(let items):
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                                if let done = Self.taskState(item) {
-                                    Image(systemName: done ? "checkmark.square" : "square")
-                                        .font(.callout).foregroundStyle(.secondary)
-                                    Text(Self.inline(String(item.dropFirst(4)))).textSelection(.enabled)
-                                } else {
-                                    Text("•").foregroundStyle(.secondary)
-                                    Text(Self.inline(item)).textSelection(.enabled)
-                                }
-                            }
-                        }
-                    }
-                case .numbered(let items):
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { i, item in
-                            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                                Text("\(i + 1).").foregroundStyle(.secondary)
-                                    .font(.system(.body, design: .monospaced))
-                                Text(Self.inline(item)).textSelection(.enabled)
-                            }
-                        }
-                    }
-                case .code(let lang, let content):
-                    CodeBlock(language: lang, content: content)
-                case .quote(let s):
-                    HStack(spacing: 8) {
-                        RoundedRectangle(cornerRadius: 2).fill(.tertiary).frame(width: 3)
-                        Text(Self.inline(s)).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
-                case .table(let headers, let rows):
-                    MDTable(headers: headers, rows: rows)
-                case .rule:
-                    Divider().padding(.vertical, 2)
-                }
-            }
-        }
-    }
-
-    // MARK: parser
-
-    private static func parse(_ raw: String) -> [MDBlock] {
-        var blocks: [MDBlock] = []
-        var lines = raw.split(separator: "\n", omittingEmptySubsequences: false)[...]
-        var paragraph: [String] = []
-        var bullets: [String] = []
-        var numbers: [String] = []
-
-        func flush() {
-            if !paragraph.isEmpty {
-                blocks.append(.paragraph(paragraph.joined(separator: "\n")))
-                paragraph = []
-            }
-            if !bullets.isEmpty { blocks.append(.bullet(bullets)); bullets = [] }
-            if !numbers.isEmpty { blocks.append(.numbered(numbers)); numbers = [] }
-        }
-
-        while let line = lines.first {
-            lines = lines.dropFirst()
-            let l = String(line)
-
-            if l.hasPrefix("```") {
-                flush()
-                let lang = String(l.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                var code: [String] = []
-                while let next = lines.first, !next.hasPrefix("```") {
-                    code.append(String(next))
-                    lines = lines.dropFirst()
-                }
-                if lines.first?.hasPrefix("```") == true { lines = lines.dropFirst() }
-                blocks.append(.code(lang, code.joined(separator: "\n")))
-            } else if let m = l.range(of: #"^#{1,6} "#, options: .regularExpression) {
-                flush()
-                let level = l[..<m.upperBound].filter { $0 == "#" }.count
-                blocks.append(.header(level, String(l[m.upperBound...])))
-            } else if l.hasPrefix(">") {
-                flush()
-                var quoteLines = [stripQuote(l)]
-                while let next = lines.first, next.hasPrefix(">") {
-                    quoteLines.append(stripQuote(String(next)))
-                    lines = lines.dropFirst()
-                }
-                blocks.append(.quote(quoteLines.joined(separator: "\n")))
-            } else if let headers = tableCells(l),
-                      let sep = lines.first, isTableSeparator(String(sep)) {
-                flush()
-                lines = lines.dropFirst()
-                var rows: [[String]] = []
-                while let next = lines.first, let cells = tableCells(String(next)) {
-                    rows.append(cells)
-                    lines = lines.dropFirst()
-                }
-                blocks.append(.table(headers, rows))
-            } else if l.range(of: #"^\s*([-*_])(\s*\1){2,}\s*$"#, options: .regularExpression) != nil {
-                flush()
-                blocks.append(.rule)
-            } else if l.range(of: #"^\s*[-*+] "#, options: .regularExpression) != nil {
-                if !paragraph.isEmpty || !numbers.isEmpty { flush() }
-                bullets.append(l.replacingOccurrences(of: #"^\s*[-*+] "#, with: "", options: .regularExpression))
-            } else if l.range(of: #"^\s*\d+[.)] "#, options: .regularExpression) != nil {
-                if !paragraph.isEmpty || !bullets.isEmpty { flush() }
-                numbers.append(l.replacingOccurrences(of: #"^\s*\d+[.)] "#, with: "", options: .regularExpression))
-            } else if l.trimmingCharacters(in: .whitespaces).isEmpty {
-                flush()
-            } else {
-                if !bullets.isEmpty || !numbers.isEmpty { flush() }
-                paragraph.append(l)
-            }
-        }
-        flush()
-        return blocks
-    }
-
-    private static func stripQuote(_ line: String) -> String {
-        var s = line
-        if s.hasPrefix("> ") { s.removeFirst(2) } else if s.hasPrefix(">") { s.removeFirst() }
-        return s
-    }
-
-    /// "[ ] item" / "[x] item" → checkbox state, nil for regular bullets.
-    fileprivate static func taskState(_ item: String) -> Bool? {
-        if item.hasPrefix("[ ] ") { return false }
-        if item.hasPrefix("[x] ") || item.hasPrefix("[X] ") { return true }
-        return nil
-    }
-
-    /// Splits a `| a | b |` line into trimmed cells; nil when it has no pipes.
-    private static func tableCells(_ line: String) -> [String]? {
-        var t = line.trimmingCharacters(in: .whitespaces)
-        guard t.contains("|") else { return nil }
-        if t.hasPrefix("|") { t.removeFirst() }
-        if t.hasSuffix("|") { t.removeLast() }
-        let cells = t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-        return cells.isEmpty ? nil : cells
-    }
-
-    /// `|---|:---:|` style separator under the header row.
-    private static func isTableSeparator(_ line: String) -> Bool {
-        let t = line.trimmingCharacters(in: .whitespaces)
-        return t.contains("-") && t.contains("|")
-            && t.range(of: #"^[\s|:\-]+$"#, options: .regularExpression) != nil
-    }
-
-    static func inline(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(
-            allowsExtendedAttributes: false,
-            interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
-    }
-}
-
-/// Markdown pipe table rendered as a grid: bold header, hairline divider and
-/// striped rows, selectable text.
-private struct MDTable: View {
-    let headers: [String]
-    let rows: [[String]]
-
-    var body: some View {
-        Grid(alignment: .topLeading, horizontalSpacing: 16, verticalSpacing: 0) {
-            GridRow {
-                ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                    Text(RichText.inline(h))
-                        .fontWeight(.semibold)
-                        .padding(.vertical, 6)
-                }
-            }
-            Divider()
-            ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
-                GridRow {
-                    ForEach(0..<headers.count, id: \.self) { c in
-                        Text(RichText.inline(c < row.count ? row[c] : ""))
-                            .padding(.vertical, 5)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .background(i.isMultiple(of: 2) ? Color.clear : Color.secondary.opacity(0.07))
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 4)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-        .textSelection(.enabled)
-    }
-}
-
-struct CodeBlock: View {
-    let language: String
-    let content: String
-    @State private var copied = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(language.isEmpty ? "code" : language)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(content, forType: .string)
-                    copied = true
-                    Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
-                } label: {
-                    Label(copied ? "✓" : "", systemImage: copied ? "" : "doc.on.doc")
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 10))
-                }
-                .buttonStyle(.borderless)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.black.opacity(0.35))
-
-            ScrollView(.horizontal) {
-                Text(content)
-                    .font(.system(size: 12, design: .monospaced))
-                    .padding(10)
-                    .textSelection(.enabled)
-            }
-            .background(.black.opacity(0.22))
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-}
