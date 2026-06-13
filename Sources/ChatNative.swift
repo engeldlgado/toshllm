@@ -129,6 +129,12 @@ final class ChatStore: ObservableObject {
     @Published var contextUsed: Int?
 
     private var task: Task<Void, Never>?
+    // Watchdog: large MoE models with CPU offload can deadlock the AMD Metal
+    // driver mid-generation (process stuck in uninterruptible wait, 0% CPU).
+    // We detect the stall, stop the engine to free memory, and report it.
+    private var watchdog: Task<Void, Never>?
+    private var lastStreamActivity = Date()
+    private var sawFirstToken = false
 
     private var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -207,6 +213,7 @@ final class ChatStore: ObservableObject {
     private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
         generating = true
         live.reset()
+        startWatchdog(port: port)
         // The user can switch or delete conversations mid-stream; the result
         // must land in the one this request started from, found by id.
         let convID = conversations[i].id
@@ -264,6 +271,7 @@ final class ChatStore: ObservableObject {
                     store?.live.update(reasoning: reasoningSnapshot,
                                        visible: visibleSnapshot,
                                        speed: newSpeed)
+                    store?.noteStreamActivity()
                 }
             }
 
@@ -413,7 +421,57 @@ final class ChatStore: ObservableObject {
         generating = false
         live.reset()
         task = nil
+        watchdog?.cancel()
+        watchdog = nil
         save()
+    }
+
+    // MARK: stall watchdog
+
+    /// Called from the stream whenever a token reaches the UI; resets the
+    /// inactivity timer and marks that generation (not prefill) has begun.
+    func noteStreamActivity() {
+        lastStreamActivity = Date()
+        sawFirstToken = true
+    }
+
+    private func startWatchdog(port: Int) {
+        watchdog?.cancel()
+        lastStreamActivity = Date()
+        sawFirstToken = false
+        watchdog = Task { [weak self] in
+            while true {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self, !Task.isCancelled, self.generating else { return }
+                let idle = Date().timeIntervalSince(self.lastStreamActivity)
+                // Before the first token the engine may be doing a long
+                // prefill, so allow a generous grace period; once tokens flow,
+                // a 30 s gap means it deadlocked rather than merely slowed.
+                let limit: TimeInterval = self.sawFirstToken ? 30 : 180
+                if idle > limit {
+                    self.handleStreamStall()
+                    return
+                }
+            }
+        }
+    }
+
+    /// The engine stopped producing tokens while alive: treat it as a driver
+    /// deadlock, stop the engine to free its memory, and tell the user.
+    private func handleStreamStall() {
+        AppLog.chat.error("stream stalled; stopping engine")
+        task?.cancel()
+        task = nil
+        watchdog = nil
+        ServerController.shared.stop()
+        lastError = Self.stallMessage
+        generating = false
+        live.reset()
+        save()
+    }
+
+    nonisolated static var stallMessage: String {
+        "El motor dejó de responder y se detuvo para liberar memoria. Suele pasar con modelos MoE grandes en GPU AMD: usa un modelo denso (8B) o sube 'Expertos MoE en CPU'. / The engine stopped responding and was stopped to free memory. This happens with large MoE models on AMD GPUs: use a dense model (8B) or raise 'MoE experts on CPU'."
     }
 
     // MARK: auto-compaction
@@ -591,7 +649,11 @@ final class ChatStore: ObservableObject {
         return "El modelo terminó el razonamiento sin producir una respuesta visible; intenta regenerar o desactiva Razonamiento / the model finished reasoning without a visible answer; regenerate or disable Reasoning"
     }
 
-    func stop() { task?.cancel() }
+    func stop() {
+        watchdog?.cancel()
+        watchdog = nil
+        task?.cancel()
+    }
 
     /// Removes the last user message (and its response, if any) so it can be
     /// edited and resent. Returns the removed message, attachments included.
