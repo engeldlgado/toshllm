@@ -41,7 +41,7 @@ ToshLLM fixes this. It bundles **llama.cpp** built with AMD-specific patches and
 - **Model manager** — curated catalog with **per-model VRAM/RAM estimates for *your* hardware**, Hugging Face search, downloads with progress, one-click delete
 - **MoE-aware** — automatic `--n-cpu-moe` calculation so 35B-class Mixture-of-Experts models run well on 12 GB GPUs
 - **MTP speculative decoding** — +34% generation speed with compatible models, zero quality loss
-- **Dual engines** — official llama.cpp + experimental TurboQuant engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM)
+- **Dual engines** — official llama.cpp + experimental TurboQuant engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), with an optional **AMD Flash Attention kernel** that runs decode attention on the GPU for quantized/turbo KV (see [research note](#research-flash-attention-on-amd))
 - **Benchmarks** — measure prompt/generation speed per configuration, with history and comparison charts
 - **OpenAI-compatible API** — use it from any client or library at `http://127.0.0.1:8080`
 - **Every parameter explained** — bilingual tooltips and built-in documentation (English/Spanish)
@@ -81,7 +81,23 @@ cd toshllm
 ./scripts/make-dmg.sh v0.81.1   # optional: create an installable DMG
 ```
 
-The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for Metal drivers that cap host-visible allocations. The other key stability setting (`GGML_METAL_CONCURRENCY_DISABLE`) is already supported upstream and the app sets it automatically.
+The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for Metal drivers that cap host-visible allocations (now also covering the asynchronous tensor read path that MTP exercises, which previously aborted mid-generation). The other key stability setting (`GGML_METAL_CONCURRENCY_DISABLE`) is already supported upstream and the app sets it automatically.
+
+## Research: Flash Attention on AMD
+
+A recurring limitation on discrete AMD GPUs under Metal is that **Flash Attention** is gated on hardware features these GPUs report as unavailable (`simdgroup matrix multiply`), and the upstream "vec" decode kernel miscompiles on RDNA 2 (it produces garbage even though each SIMD primitive is correct in isolation). The practical consequence: any quantized or `turbo*` KV cache **requires** Flash Attention, so on AMD that attention silently falls back to the CPU and generation collapses at longer contexts.
+
+ToshLLM ships a from-scratch **AMD decode attention kernel** (Metal) as an opt-in toggle on the experimental engine. It keeps a deliberately simple structure (one `float4` slice of the head per SIMD lane, simdgroups splitting the KV stream, online-softmax merge) that was validated bit-for-bit against a CPU reference. It supports head dims **128 and 256**, KV types **f16, q8_0, q4_0 and turbo2/3/4** (including the asymmetric pairs the TurboQuant engine allows), and is gated behind an environment flag so the default engine is unchanged.
+
+Measured on an RX 6700 XT (decode, `tg`, llama-bench), GPU kernel vs the CPU fallback that quantized KV would otherwise force:
+
+| Model / KV | context | CPU fallback | AMD kernel |
+|---|---:|---:|---:|
+| Qwen3-8B, f16 (head 128) | 1k | 7.1 t/s | **43.4 t/s** |
+| Qwen3-8B, turbo3 (head 128) | 1k | 3.9 t/s | **30.3 t/s** |
+| 9B coder, turbo3 (head 256) | 1k | 13.6 t/s | **30.8 t/s** |
+
+Prompt processing still runs on the CPU (the prefill kernel genuinely needs the missing hardware feature), so this accelerates generation, not the initial prompt. It remains experimental and off by default. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
 
 ## Performance reference
 

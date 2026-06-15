@@ -42,6 +42,10 @@ struct ServerSettings {
     /// MTP self-speculative decoding (+30% generation). Only applied when the
     /// selected GGUF actually ships the MTP head; silently skipped otherwise.
     var specMTP: Bool = false
+    /// Experimental: route decode attention through the dedicated AMD Metal
+    /// Flash-Attention kernel (gated by the TOSH_FA_AMD env var in the engine).
+    /// Forces `-fa 1`; prefill falls back to CPU, so prompt processing is slower.
+    var faAmd: Bool = false
 
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
 
@@ -51,7 +55,7 @@ struct ServerSettings {
             "-ngl", String(ngl),
             "-c", String(ctx),
             "-t", String(threads),
-            "-fa", flashAttn,
+            "-fa", faAmd ? "1" : flashAttn,
             "--host", "127.0.0.1",
             "--port", String(port),
         ]
@@ -89,6 +93,7 @@ struct ServerSettings {
         env["GGML_METAL_CONCURRENCY_DISABLE"] = concurrencyDisable ? "1" : nil
         env["GGML_METAL_VRAM_RESERVE_MB"] = String(vramReserveMB)
         if gpuIndex >= 0 { env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex) }
+        if faAmd { env["TOSH_FA_AMD"] = "1" }
         return env.compactMapValues { $0 }
     }
 
@@ -152,7 +157,8 @@ struct ServerSettings {
             reasoningInline: bool(SettingsKeys.reasoningInline, false),
             parallelSlots: int(SettingsKeys.parallelSlots, 1),
             apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),
-            specMTP: bool(SettingsKeys.specMTP, false))
+            specMTP: bool(SettingsKeys.specMTP, false),
+            faAmd: bool(SettingsKeys.faAmd, false))
     }
 
     /// Whether a GGUF ships the MTP (multi-token prediction) head. Detected by

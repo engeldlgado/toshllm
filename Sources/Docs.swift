@@ -98,7 +98,7 @@ El parámetro **Expertos MoE en CPU** (`--n-cpu-moe`) controla cuántas capas de
 
 **KV cache claves/valores (-ctk / -ctv)** — Cuantización de la memoria de atención:
 - Claves `q8_0`: mitad de memoria, costo casi nulo (recomendado)
-- Valores cuantizados: requiere Flash Attention y **en GPU AMD lo fuerza al CPU**, bajando la generación ~3×. Úsalo solo para contextos enormes.
+- Valores cuantizados: requiere Flash Attention, que en GPU AMD cae al CPU (generación ~3× más lenta). El motor **Experimental (TurboQuant)** con su kernel **Flash Attention AMD** lo ejecuta en la GPU y evita esa caída.
 
 **Flash Attention** — Atención eficiente en memoria. `auto` es lo correcto en GPU AMD.
 
@@ -111,7 +111,9 @@ La app incluye **dos motores** y admite externos (Ajustes → Avanzado):
 
 **Integrado (oficial)** — llama.cpp oficial con parches AMD. Recomendado para todo uso. Soporta las arquitecturas más recientes (Qwen 3.6, MTP).
 
-**TurboQuant (experimental)** — Motor con cuantización extrema del KV cache (tipos `turbo2/3/4`, basados en investigación de compresión presentada en ICLR 2026). Reduce la memoria de contexto hasta ~6×, permitiendo contextos de 100k+ tokens en GPUs de 12 GB. Costo: la generación baja (~15% en MoE grandes, mucho más en modelos pequeños). La mejor combinación medida: claves `turbo4` + valores `turbo3` + Flash Attention `on`.
+**Experimental (TurboQuant)** — Motor con cuantización extrema del KV cache (tipos `turbo2/3/4`, basados en investigación de compresión presentada en ICLR 2026). Reduce la memoria de contexto hasta ~6×, permitiendo contextos de 100k+ tokens en GPUs de 12 GB. Costo: la generación baja (~15% en MoE grandes, mucho más en modelos pequeños). La mejor combinación medida: claves `turbo4` + valores `turbo3`.
+
+Al elegir este motor aparece el interruptor **Kernel Flash Attention AMD**. Ejecuta la atención de generación en la GPU AMD mediante un kernel Metal propio (cabezas de 128 y 256; tipos de KV f16, q8_0, q4_0 y turbo2/3/4). Es clave con KV cuantizado o turbo: como esos tipos **obligan** a Flash Attention, sin el kernel la atención cae a CPU y la generación se desploma; con el kernel se mantiene en GPU (p. ej. KV turbo a 1k de contexto medido ~14 → ~31 t/s). El procesamiento del prompt sigue en CPU.
 
 **Externo** — Cualquier binario `llama-server` tuyo, para probar builds propias.
 """),
@@ -266,7 +268,7 @@ The **MoE experts on CPU** parameter (`--n-cpu-moe`) controls how many expert la
 
 **KV cache keys/values (-ctk / -ctv)** — Quantization of attention memory:
 - Keys `q8_0`: half the memory at near-zero cost (recommended)
-- Quantized values: requires Flash Attention and **on AMD GPUs forces it onto the CPU**, dropping generation ~3×. Use only for huge contexts.
+- Quantized values: require Flash Attention, which on AMD GPUs falls back to the CPU (~3× slower generation). The **Experimental (TurboQuant)** engine with its **AMD Flash Attention kernel** runs it on the GPU and avoids that drop.
 
 **Flash Attention** — Memory-efficient attention. `auto` is right on AMD GPUs.
 
@@ -279,7 +281,9 @@ The app ships **two engines** and supports external ones (Settings → Advanced)
 
 **Bundled (official)** — Official llama.cpp with AMD patches. Recommended for everything. Supports the newest architectures (Qwen 3.6, MTP).
 
-**TurboQuant (experimental)** — Engine with extreme KV cache quantization (`turbo2/3/4` types, based on compression research presented at ICLR 2026). Cuts context memory up to ~6×, enabling 100k+ token contexts on 12 GB GPUs. Cost: generation drops (~15% on large MoE, much more on small models). Best measured combo: keys `turbo4` + values `turbo3` + Flash Attention `on`.
+**Experimental (TurboQuant)** — Engine with extreme KV cache quantization (`turbo2/3/4` types, based on compression research presented at ICLR 2026). Cuts context memory up to ~6×, enabling 100k+ token contexts on 12 GB GPUs. Cost: generation drops (~15% on large MoE, much more on small models). Best measured combo: keys `turbo4` + values `turbo3`.
+
+Selecting this engine reveals the **AMD Flash Attention kernel** toggle. It runs decode attention on the AMD GPU via a custom Metal kernel (head dims 128 and 256; KV types f16, q8_0, q4_0 and turbo2/3/4). It matters most with quantized or turbo KV: those types **require** Flash Attention, so without the kernel attention falls back to the CPU and generation collapses; with it, attention stays on the GPU (e.g. turbo KV at 1k context measured ~14 → ~31 t/s). Prompt processing still runs on the CPU.
 
 **External** — Any `llama-server` binary of yours, for testing custom builds.
 """),

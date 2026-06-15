@@ -9,6 +9,7 @@ struct SettingsView: View {
     @EnvironmentObject var profileStore: ProfileStore
 
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
+    @AppStorage(SettingsKeys.faAmd) private var faAmd = false
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
@@ -51,9 +52,9 @@ struct SettingsView: View {
             },
             set: { kind in
                 switch kind {
-                case "bundled": serverBinary = ServerSettings.defaultBinary
                 case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary
-                default: serverBinary = ""
+                case "bundled": serverBinary = ServerSettings.defaultBinary; faAmd = false
+                default: serverBinary = ""; faAmd = false
                 }
             })
     }
@@ -230,12 +231,17 @@ struct SettingsView: View {
                 Picker(loc.t("Motor de inferencia", "Inference engine"), selection: engineSelection) {
                     Text(loc.t("Integrado (oficial)", "Bundled (official)")).tag("bundled")
                     if ServerSettings.turboBinary != nil {
-                        Text("TurboQuant (experimental)").tag("turbo")
+                        Text(loc.t("Experimental (TurboQuant)", "Experimental (TurboQuant)")).tag("turbo")
                     }
                     Text(loc.t("Externo…", "External…")).tag("custom")
                 }
-                .help(loc.t("Integrado: llama.cpp oficial, recomendado. TurboQuant: motor experimental con KV cache turbo2/3/4 (~6× más contexto, pero la generación baja ~3× en GPU AMD). Externo: cualquier llama-server tuyo.",
-                            "Bundled: official llama.cpp, recommended. TurboQuant: experimental engine with turbo2/3/4 KV cache (~6× more context, but generation drops ~3× on AMD GPUs). External: any llama-server of yours."))
+                .help(loc.t("Integrado: llama.cpp oficial, recomendado. Experimental (TurboQuant): motor experimental con KV cache turbo2/3/4 (~6× más contexto, pero la generación baja ~3× en GPU AMD) e incluye el kernel Flash Attention AMD activable abajo. Externo: cualquier llama-server tuyo.",
+                            "Bundled: official llama.cpp, recommended. Experimental (TurboQuant): experimental engine with turbo2/3/4 KV cache (~6× more context, but generation drops ~3× on AMD GPUs); also bundles the AMD Flash Attention kernel you can enable below. External: any llama-server of yours."))
+                if engineSelection.wrappedValue == "turbo" {
+                    Toggle(loc.t("Kernel Flash Attention AMD", "AMD Flash Attention kernel"), isOn: $faAmd)
+                        .help(loc.t("Activa un kernel Metal propio que ejecuta la atención de generación en la GPU AMD (define TOSH_FA_AMD y fuerza -fa activado), para cabezas de 128 y 256. Imprescindible con KV cuantizado/turbo: como ese KV obliga a -fa, sin este kernel la atención cae a CPU y la generación se desploma (p. ej. ~4 t/s → ~30 t/s a 1K de contexto). El procesamiento del prompt sí sigue en CPU.",
+                                    "Enables a custom Metal kernel that runs decode attention on the AMD GPU (sets TOSH_FA_AMD and forces -fa on), for head dim 128 and 256. Essential with quantized/turbo KV: since that KV requires -fa, without this kernel attention falls back to CPU and decode collapses (e.g. ~4 t/s → ~30 t/s at 1K context). Prompt processing still runs on CPU."))
+                }
                 if engineSelection.wrappedValue == "custom" {
                     TextField(loc.t("Ruta del llama-server externo", "External llama-server path"), text: $serverBinary)
                         .font(.system(.caption, design: .monospaced))

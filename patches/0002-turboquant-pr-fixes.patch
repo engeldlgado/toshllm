@@ -1,8 +1,179 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 32d97cd5..26cc90d1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -349,14 +349,12 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+ }
+ 
+ void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
++    if (size == 0) {
++        return;
++    }
++
+     @autoreleasepool {
+         id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
+-        id<MTLBuffer> buf_dst = [device newBufferWithBytesNoCopy:data
+-                                                          length:size
+-                                                         options:MTLResourceStorageModeShared
+-                                                     deallocator:nil];
+-
+-        GGML_ASSERT(buf_dst);
+ 
+         struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(tensor);
+         if (bid_src.metal == nil) {
+@@ -365,30 +363,83 @@ void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * te
+ 
+         bid_src.offs += offset;
+ 
+-        // queue the copy operation into the queue of the Metal context
+-        // this will be queued at the end, after any currently ongoing GPU operations
+         id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
+-        id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+-        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+-        [encoder copyFromBuffer:bid_src.metal
+-                   sourceOffset:bid_src.offs
+-                       toBuffer:buf_dst
+-              destinationOffset:0
+-                           size:size];
++        id<MTLBuffer> buf_dst = [device newBufferWithBytesNoCopy:data
++                                                          length:size
++                                                         options:MTLResourceStorageModeShared
++                                                     deallocator:nil];
+ 
+-        [encoder endEncoding];
+-        [cmd_buf commit];
+-        [buf_dst release];
++        if (buf_dst != nil) {
++            // queue the copy operation into the queue of the Metal context
++            // this will be queued at the end, after any currently ongoing GPU operations
++            id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
++            id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+-        // do not wait here for completion
+-        //[cmd_buf waitUntilCompleted];
++            [encoder copyFromBuffer:bid_src.metal
++                       sourceOffset:bid_src.offs
++                           toBuffer:buf_dst
++                  destinationOffset:0
++                               size:size];
+ 
+-        // instead, remember a reference to the command buffer and wait for it later if needed
+-        [ctx->cmd_bufs_ext addObject:cmd_buf];
+-        ctx->cmd_buf_last = cmd_buf;
++            [encoder endEncoding];
++            [cmd_buf commit];
++            [buf_dst release];
+ 
+-        [cmd_buf retain];
++            // do not wait here for completion
++            //[cmd_buf waitUntilCompleted];
++
++            // instead, remember a reference to the command buffer and wait for it later if needed
++            [ctx->cmd_bufs_ext addObject:cmd_buf];
++            ctx->cmd_buf_last = cmd_buf;
++
++            [cmd_buf retain];
++
++            return;
++        }
++
++        // newBufferWithBytesNoCopy requires page-aligned data, and some drivers cap the size of
++        // host-visible allocations; copy through a small staging buffer in chunks instead. The
++        // staging path is synchronous (commit + waitUntilCompleted) so callers that would later
++        // wait on cmd_buf_last still observe a completed transfer.
++        size_t stage_size = MIN(size, (size_t) 8*1024*1024);
++        id<MTLBuffer> buf_stage = nil;
++        while (stage_size > 0) {
++            buf_stage = [device newBufferWithLength:stage_size options:MTLResourceStorageModeShared];
++            if (buf_stage != nil) {
++                break;
++            }
++            stage_size /= 2;
++        }
++        if (buf_stage == nil) {
++            GGML_LOG_ERROR("%s: failed to allocate staging buffer, size = %zu\n", __func__, size);
++        }
++        GGML_ASSERT(buf_stage);
++
++        for (size_t done = 0; done < size;) {
++            const size_t n = MIN(stage_size, size - done);
++
++            id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
++
++            {
++                id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
++
++                [encoder copyFromBuffer:bid_src.metal
++                           sourceOffset:bid_src.offs + done
++                               toBuffer:buf_stage
++                      destinationOffset:0
++                                   size:n];
++
++                [encoder endEncoding];
++            }
++
++            [cmd_buf commit];
++            [cmd_buf waitUntilCompleted];
++
++            memcpy((char *) data + done, buf_stage.contents, n);
++
++            done += n;
++        }
+     }
+ }
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 693e2ff..2ac557b 100644
+index 693e2ff6..0537df75 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -1759,6 +1759,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1285,6 +1285,45 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                 default:
+                     return false;
+             }
++            // AMD dGPUs report no simdgroup_mm, so the templated vec kernel would be
++            // rejected (and it miscompiles anyway). We ship a dedicated decode kernel
++            // for the common case; allow FA for exactly that case via simdgroup
++            // reduction. Everything else still requires simdgroup matrix multiply.
++            if (getenv("TOSH_FA_AMD") != NULL &&
++                !has_simdgroup_mm && has_simdgroup_reduction &&
++                op->src[0]->ne[1] < 20 && op->src[0]->ne[0] % 32 == 0) {
++                float max_bias = 0.0f;
++                float softcap  = 0.0f;
++                memcpy(&max_bias, ((const int32_t *) op->op_params) + 1, sizeof(float));
++                memcpy(&softcap,  ((const int32_t *) op->op_params) + 2, sizeof(float));
++                // (K,V) type pairs we have an AMD vec instantiation for: equal type,
++                // turbo x turbo (any levels), or q8_0 <-> turbo (matches the turbo
++                // engine's allowed asymmetric set). f16/q4_0 are symmetric-only.
++                const enum ggml_type kt = op->src[1]->type;
++                const enum ggml_type vt = op->src[2]->type;
++                const bool k_in = (kt == GGML_TYPE_F16 || kt == GGML_TYPE_Q8_0 || kt == GGML_TYPE_Q4_0 ||
++                                   kt == GGML_TYPE_TURBO2_0 || kt == GGML_TYPE_TURBO3_0 || kt == GGML_TYPE_TURBO4_0);
++                const bool v_in = (vt == GGML_TYPE_F16 || vt == GGML_TYPE_Q8_0 || vt == GGML_TYPE_Q4_0 ||
++                                   vt == GGML_TYPE_TURBO2_0 || vt == GGML_TYPE_TURBO3_0 || vt == GGML_TYPE_TURBO4_0);
++                const bool k_turbo = (kt == GGML_TYPE_TURBO2_0 || kt == GGML_TYPE_TURBO3_0 || kt == GGML_TYPE_TURBO4_0);
++                const bool v_turbo = (vt == GGML_TYPE_TURBO2_0 || vt == GGML_TYPE_TURBO3_0 || vt == GGML_TYPE_TURBO4_0);
++                const bool pair_ok = (kt == vt) ||
++                                     (k_turbo && v_turbo) ||
++                                     (kt == GGML_TYPE_Q8_0 && v_turbo) ||
++                                     (k_turbo && vt == GGML_TYPE_Q8_0);
++                const bool kv_ok = k_in && v_in && pair_ok;
++                const int64_t dk = op->src[0]->ne[0];
++                const bool simple =
++                    (dk == 128 || dk == 256) &&
++                    op->src[2]->ne[0] == dk &&   // DK == DV (one head-dim template)
++                    kv_ok &&
++                    op->src[3] != NULL &&   // additive mask present
++                    op->src[4] == NULL &&   // no attention sinks
++                    max_bias == 0.0f && softcap == 0.0f;
++                if (simple) {
++                    return true;
++                }
++            }
+             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
+         case GGML_OP_SSM_CONV:
+         case GGML_OP_SSM_SCAN:
+@@ -1759,6 +1798,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
  }
  
  void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -13,7 +184,7 @@ index 693e2ff..2ac557b 100644
      if (buf->is_shared) {
          memcpy((char *) tensor->data + offset, data, size);
          return;
-@@ -1772,12 +1776,52 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1772,12 +1815,52 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -68,7 +239,7 @@ index 693e2ff..2ac557b 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1813,6 +1857,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1813,6 +1896,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -79,7 +250,7 @@ index 693e2ff..2ac557b 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1829,24 +1877,64 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1829,24 +1916,64 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -156,8 +327,315 @@ index 693e2ff..2ac557b 100644
      }
  }
  
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 3e1c5833..e8ee8f56 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -2716,6 +2716,34 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
+     return (ne01 < 20) && (ne00 % 32 == 0);
+ }
+ 
++// Map a KV cache element type to the suffix used in the AMD vec FA pipeline
++// names (kernel_flash_attn_ext_vec_amd_k<ks>_v<vs>), or nullptr if unsupported.
++static const char * ggml_metal_fa_amd_type_suffix(enum ggml_type t) {
++    switch (t) {
++        case GGML_TYPE_F16:      return "f16";
++        case GGML_TYPE_Q8_0:     return "q8_0";
++        case GGML_TYPE_Q4_0:     return "q4_0";
++        case GGML_TYPE_TURBO2_0: return "turbo2";
++        case GGML_TYPE_TURBO3_0: return "turbo3";
++        case GGML_TYPE_TURBO4_0: return "turbo4";
++        default:                 return nullptr;
++    }
++}
++
++// Which (K,V) type pairs the AMD vec FA kernel is instantiated for: equal types,
++// turbo x turbo (any levels), or q8_0 <-> turbo (matching the turbo engine's own
++// allowed asymmetric set). f16 and q4_0 are symmetric-only.
++static bool ggml_metal_fa_amd_pair_ok(enum ggml_type kt, enum ggml_type vt) {
++    if (kt == vt) {
++        return true;
++    }
++    const bool k_turbo = (kt == GGML_TYPE_TURBO2_0 || kt == GGML_TYPE_TURBO3_0 || kt == GGML_TYPE_TURBO4_0);
++    const bool v_turbo = (vt == GGML_TYPE_TURBO2_0 || vt == GGML_TYPE_TURBO3_0 || vt == GGML_TYPE_TURBO4_0);
++    const bool k_q8    = (kt == GGML_TYPE_Q8_0);
++    const bool v_q8    = (vt == GGML_TYPE_Q8_0);
++    return (k_turbo && v_turbo) || (k_q8 && v_turbo) || (k_turbo && v_q8);
++}
++
+ // TurboFlash: two-pass fused asymmetric attention for turbo3 V decode
+ // Returns true when V=turbo3, single-token decode (ne01==1), and K is q8_0 or turbo3
+ static bool ggml_metal_op_flash_attn_ext_use_turbo_flash(const ggml_tensor * op) {
+@@ -2970,6 +2998,83 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+     ggml_metal_buffer_id bid_tmp = bid_blk;
+     bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
+ 
++    // AMD discrete GPUs miscompile the templated vec kernel (garbage output),
++    // even though the SIMD primitives are correct in isolation. Route decode
++    // (small ne01) to a dedicated kernel that is known-correct, for the KV
++    // element-type pairs we have an instantiation for. Intercepts before the
++    // TurboFlash path so turbo KV runs on the AMD GPU too. Supported pairs are
++    // exactly those the turbo engine allows: equal type, turbo x turbo (any
++    // levels), or q8_0 <-> turbo. f16/q4_0 are symmetric-only.
++    char fa_amd_pipeline[80] = {0};
++    if (ne00 == ne20 && (ne00 == 128 || ne00 == 256)) {
++        const char * ks = ggml_metal_fa_amd_type_suffix(op->src[1]->type);
++        const char * vs = ggml_metal_fa_amd_type_suffix(op->src[2]->type);
++        if (ks && vs && ggml_metal_fa_amd_pair_ok(op->src[1]->type, op->src[2]->type)) {
++            snprintf(fa_amd_pipeline, sizeof(fa_amd_pipeline), "kernel_flash_attn_ext_vec_amd_dk%d_k%s_v%s", (int) ne00, ks, vs);
++        }
++    }
++    if (getenv("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
++        !props_dev->has_simdgroup_mm && props_dev->has_simdgroup_reduction &&
++        ne01 < 20 &&
++        has_mask && !has_sinks && !has_bias && !has_scap) {
++
++        ggml_metal_kargs_flash_attn_ext_vec args = {
++            /*.ne01          =*/ ne01,
++            /*.ne02          =*/ ne02,
++            /*.ne03          =*/ ne03,
++            /*.nb01          =*/ nb01,
++            /*.nb02          =*/ nb02,
++            /*.nb03          =*/ nb03,
++            /*.ne11          =*/ ne11,
++            /*.ne_12_2       =*/ ne12,
++            /*.ne_12_3       =*/ ne13,
++            /*.ns10          =*/ int32_t(nb11/nb10),
++            /*.nb11          =*/ nb11,
++            /*.nb12          =*/ nb12,
++            /*.nb13          =*/ nb13,
++            /*.ns20          =*/ int32_t(nb21/nb20),
++            /*.nb21          =*/ nb21,
++            /*.nb22          =*/ nb22,
++            /*.nb23          =*/ nb23,
++            /*.ne31          =*/ ne31,
++            /*.ne32          =*/ ne32,
++            /*.ne33          =*/ ne33,
++            /*.nb31          =*/ nb31,
++            /*.nb32          =*/ nb32,
++            /*.nb33          =*/ nb33,
++            /*.ne1           =*/ ne1,
++            /*.ne2           =*/ ne2,
++            /*.ne3           =*/ ne3,
++            /*.scale         =*/ scale,
++            /*.max_bias      =*/ max_bias,
++            /*.m0            =*/ m0,
++            /*.m1            =*/ m1,
++            /*.n_head_log2   =*/ n_head_log2,
++            /*.logit_softcap =*/ logit_softcap,
++        };
++
++        auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_pipeline);
++        if (!pipeline.pipeline) {
++            pipeline = ggml_metal_library_compile_pipeline(lib, fa_amd_pipeline, fa_amd_pipeline, nullptr);
++        }
++
++        ggml_metal_encoder_set_pipeline(enc, pipeline);
++        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
++        ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
++        ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);
++        ggml_metal_encoder_set_buffer  (enc, bid_src3, 4);
++        ggml_metal_encoder_set_buffer  (enc, bid_src4, 5);
++        ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
++        ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
++
++        // NSG simdgroups (32 threads each) per (query token, head, batch);
++        // NSG must match the constant inside kernel_flash_attn_ext_vec_amd.
++        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, 32, 4, 1);
++
++        return 1;
++    }
++
+     // ==================== TurboFlash two-pass dispatch ====================
+     // Intercept before the normal VEC/non-VEC path when conditions are met:
+     //   - V is turbo3, K is q8_0 or turbo3
+diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
+index 344657df..fdb968f9 100644
+--- a/ggml/src/ggml-metal/ggml-metal.metal
++++ b/ggml/src/ggml-metal/ggml-metal.metal
+@@ -8500,6 +8500,179 @@ kernel void kernel_flash_attn_ext_vec(
+ #undef NS20
+ }
+ 
++// Dedicated flash-attention DECODE kernel for AMD discrete GPUs. The templated
++// vec kernel above miscompiles on these GPUs (the SIMD primitives are correct in
++// isolation, but the full kernel produces garbage). This minimal version was
++// validated against a CPU reference and handles the common decode case only:
++// head_dim 128, f16 K/V, additive mask, GQA, scale; no ALiBi/softcap/sinks.
++// NSG simdgroups per (query, head, batch) threadgroup split the KV cache between
++// them (strided), then simdgroup 0 merges the partial results with the online-softmax
++// combine. NWG = 1 (no split-K across workgroups). Keep NSG in sync with the host.
++// Dedicated AMD decode (vec) flash-attention kernel. The upstream templated vec
++// kernel miscompiles on RDNA 2 under Metal; this from-scratch version keeps a
++// simple structure (one float4 per lane over the 128-dim head, NSG simdgroups
++// splitting the KV stream + online-softmax merge) that computes correctly.
++//
++// Generalized over the K/V cache element type via the existing dequantize_*_t4
++// helpers (same convention as the upstream vec kernel): each lane owns the 4
++// contiguous head elements [tiisg*4 .. tiisg*4+3]. With NK = QK/4 dequant chunks
++// per block, lane tiisg reads block (tiisg/NK), sub-chunk (tiisg%NK). NK is 1 for
++// f16, 8 for q8_0/q4_0 (block 32), 32 for turbo2/3/4 (block 128). Q is always f32.
++// DK = head dim (128 or 256). Each lane owns NC = DK/128 float4 chunks of the head:
++// chunk c on lane tiisg covers head elements [(tiisg + c*32)*4 .. +3]. NK = QK/4 dequant
++// chunks per block, so chunk index ch reads block (ch/NK), sub-chunk (ch%NK).
++template<
++    short DK,
++    typename k_t, short NKK, void (*deq_k)(device const k_t *, short, thread float4 &),
++    typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &)>
++kernel void kernel_flash_attn_ext_vec_amd(
++        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
++        device const char * q     [[buffer(1)]],
++        device const char * k     [[buffer(2)]],
++        device const char * v     [[buffer(3)]],
++        device const char * mask  [[buffer(4)]],
++        device const char * sinks [[buffer(5)]],
++        device const char * pad   [[buffer(6)]],
++        device       char * dst   [[buffer(7)]],
++        uint3  tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]],
++        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
++    constexpr short DV4 = DK/4;   // float4 per head row (32 for DK=128, 64 for DK=256)
++    constexpr short NC  = DV4/32; // float4 chunks each lane owns (1 for DK=128, 2 for DK=256)
++    constexpr short NSG = 4;      // simdgroups per threadgroup (sync with host dispatch)
++
++    threadgroup float4 sh_acc[NSG*DV4]; // per-simdgroup partial output (NC float4 per lane)
++    threadgroup float  sh_m[NSG];       // per-simdgroup running max
++    threadgroup float  sh_s[NSG];       // per-simdgroup running sum
++
++    const int iq1 = tgpig[0]; // query token
++    const int iq2 = tgpig[1]; // query head
++    const int iq3 = tgpig[2]; // batch
++
++    device const float4 * q4 = (device const float4 *) (q + iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03);
++
++    // grouped-query attention: map query head -> kv head
++    const int ikv2 = iq2 / (args.ne02 / args.ne_12_2);
++    const int ikv3 = iq3 / (args.ne03 / args.ne_12_3);
++
++    device const char * kp = k + ikv2*args.nb12 + ikv3*args.nb13;
++    device const char * vp = v + ikv2*args.nb22 + ikv3*args.nb23;
++
++    device const half * pm = (device const half *) (mask + iq1*args.nb31 + (iq2%args.ne32)*args.nb32 + (iq3%args.ne33)*args.nb33);
++
++    float4 myq[NC];  // this lane's slice(s) of the query
++    for (short c = 0; c < NC; ++c) {
++        myq[c] = q4[tiisg + c*32];
++    }
++
++    float4 acc[NC];  // this lane's slice(s) of the output
++    for (short c = 0; c < NC; ++c) {
++        acc[c] = float4(0.0f);
++    }
++    float m = -FLT_MAX/2;
++    float s = 0.0f;
++
++    for (int j = sgitg; j < args.ne11; j += NSG) {
++        device const k_t * kb = (device const k_t *) (kp + (uint64_t) j*args.nb11);
++        float pl = 0.0f;
++        for (short c = 0; c < NC; ++c) {
++            const short ch = tiisg + c*32;
++            float4 kreg;
++            deq_k(kb + ch/NKK, ch%NKK, kreg);
++            pl += dot(myq[c], kreg);
++        }
++        const float p = simd_sum(pl); // full DK-dim Q.K
++
++        const float mv = (float) pm[j];
++        if (mv > -1e30f) { // skip fully-masked positions (mask is uniform across lanes)
++            const float pp   = p*args.scale + mv;
++            const float nm   = max(m, pp);
++            const float corr = exp(m  - nm);
++            const float w    = exp(pp - nm);
++
++            device const v_t * vb = (device const v_t *) (vp + (uint64_t) j*args.nb21);
++            for (short c = 0; c < NC; ++c) {
++                const short ch = tiisg + c*32;
++                float4 vreg;
++                deq_v(vb + ch/NKV, ch%NKV, vreg);
++                acc[c] = acc[c]*corr + w*vreg;
++            }
++            s = s*corr + w;
++            m = nm;
++        }
++    }
++
++    // publish this simdgroup's partials (acc, m, s) and merge in simdgroup 0
++    for (short c = 0; c < NC; ++c) {
++        sh_acc[sgitg*DV4 + tiisg + c*32] = acc[c];
++    }
++    if (tiisg == 0) {
++        sh_m[sgitg] = m;
++        sh_s[sgitg] = s;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    if (sgitg == 0) {
++        float gm = -FLT_MAX/2;
++        for (short g = 0; g < NSG; ++g) {
++            gm = max(gm, sh_m[g]);
++        }
++        float4 num[NC];
++        for (short c = 0; c < NC; ++c) {
++            num[c] = float4(0.0f);
++        }
++        float den = 0.0f;
++        for (short g = 0; g < NSG; ++g) {
++            const float f = exp(sh_m[g] - gm);
++            for (short c = 0; c < NC; ++c) {
++                num[c] += f * sh_acc[g*DV4 + tiisg + c*32];
++            }
++            den += f * sh_s[g];
++        }
++        const float inv = den > 0.0f ? 1.0f/den : 0.0f;
++
++        const int64_t rid = (int64_t) iq3*args.ne2*args.ne1 + iq2 + (int64_t) iq1*args.ne1;
++        device float4 * dst4 = (device float4 *) dst;
++        for (short c = 0; c < NC; ++c) {
++            dst4[rid*DV4 + tiisg + c*32] = num[c]*inv;
++        }
++    }
++}
++
++typedef decltype(kernel_flash_attn_ext_vec_amd<128, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4>) flash_attn_ext_vec_amd_t;
++
++// one instantiation for a given head dim + (K,V) type pair
++#define FA_AMD_INST(dk, nm, kt, nkk, dkf, vt, nkv, dvf) \
++template [[host_name("kernel_flash_attn_ext_vec_amd_dk" #dk "_" nm)]] kernel flash_attn_ext_vec_amd_t \
++    kernel_flash_attn_ext_vec_amd<dk, kt, nkk, dkf, vt, nkv, dvf>;
++// both supported head dims (128 and 256) for a given (K,V) type pair
++#define FA_AMD_PAIR(nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST(128, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST(256, nm, kt, nkk, dkf, vt, nkv, dvf)
++
++// symmetric pairs
++FA_AMD_PAIR("kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)
++FA_AMD_PAIR("kq8_0_vq8_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
++FA_AMD_PAIR("kq4_0_vq4_0",       block_q4_0,     8,  dequantize_q4_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
++FA_AMD_PAIR("kturbo2_vturbo2",   block_turbo2_0, 32, dequantize_turbo2_0_t4, block_turbo2_0, 32, dequantize_turbo2_0_t4)
++FA_AMD_PAIR("kturbo3_vturbo3",   block_turbo3_0, 32, dequantize_turbo3_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
++FA_AMD_PAIR("kturbo4_vturbo4",   block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
++// asymmetric pairs the turbo engine allows: turbo x turbo (mixed levels) and q8_0 <-> turbo
++FA_AMD_PAIR("kturbo2_vturbo3",   block_turbo2_0, 32, dequantize_turbo2_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
++FA_AMD_PAIR("kturbo2_vturbo4",   block_turbo2_0, 32, dequantize_turbo2_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
++FA_AMD_PAIR("kturbo3_vturbo2",   block_turbo3_0, 32, dequantize_turbo3_0_t4, block_turbo2_0, 32, dequantize_turbo2_0_t4)
++FA_AMD_PAIR("kturbo3_vturbo4",   block_turbo3_0, 32, dequantize_turbo3_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
++FA_AMD_PAIR("kturbo4_vturbo2",   block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo2_0, 32, dequantize_turbo2_0_t4)
++FA_AMD_PAIR("kturbo4_vturbo3",   block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
++FA_AMD_PAIR("kq8_0_vturbo2",     block_q8_0,     8,  dequantize_q8_0_t4,     block_turbo2_0, 32, dequantize_turbo2_0_t4)
++FA_AMD_PAIR("kq8_0_vturbo3",     block_q8_0,     8,  dequantize_q8_0_t4,     block_turbo3_0, 32, dequantize_turbo3_0_t4)
++FA_AMD_PAIR("kq8_0_vturbo4",     block_q8_0,     8,  dequantize_q8_0_t4,     block_turbo4_0, 32, dequantize_turbo4_0_t4)
++FA_AMD_PAIR("kturbo2_vq8_0",     block_turbo2_0, 32, dequantize_turbo2_0_t4, block_q8_0,     8,  dequantize_q8_0_t4)
++FA_AMD_PAIR("kturbo3_vq8_0",     block_turbo3_0, 32, dequantize_turbo3_0_t4, block_q8_0,     8,  dequantize_q8_0_t4)
++FA_AMD_PAIR("kturbo4_vq8_0",     block_turbo4_0, 32, dequantize_turbo4_0_t4, block_q8_0,     8,  dequantize_q8_0_t4)
++#undef FA_AMD_PAIR
++#undef FA_AMD_INST
++
+ // note: I think the s_t can be half instead of float, because the Q*K scaling is done before storing to shared mem
+ //       in the other (non-vec) kernel, we need s_t to also be float because we scale during the soft_max
+ //
 diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
-index fa49cc8..799c2f6 100644
+index fa49cc84..799c2f6f 100644
 --- a/src/llama-quant.cpp
 +++ b/src/llama-quant.cpp
 @@ -455,7 +455,7 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type
@@ -188,7 +666,7 @@ index fa49cc8..799c2f6 100644
          } else {
              if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) new_type = GGML_TYPE_Q4_K;
 diff --git a/tools/ui/CMakeLists.txt b/tools/ui/CMakeLists.txt
-index e77b39c..60d9020 100644
+index e77b39cc..60d9020d 100644
 --- a/tools/ui/CMakeLists.txt
 +++ b/tools/ui/CMakeLists.txt
 @@ -66,123 +66,6 @@ else()

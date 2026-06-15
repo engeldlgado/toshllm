@@ -30,6 +30,7 @@ enum SettingsKeys {
     static let parallelSlots = "parallelSlots"
     static let reasoningInline = "reasoningInline"
     static let specMTP = "specMTP"
+    static let faAmd = "faAmd"
     static let apiKeyEnabled = "apiKeyEnabled"
     static let menuBarIcon = "menuBarIcon"
     static let autoStart = "autoStart"
