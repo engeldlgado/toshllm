@@ -87,14 +87,23 @@ The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for 
 
 Measured on RX 6700 XT (12 GB) + DDR4, macOS:
 
-| Model | Configuration | Prompt | Generation |
+| Model | Configuration | Prompt (t/s) | Generation (t/s) |
 |---|---|---:|---:|
-| Qwen3-8B Q4 | all-GPU | 101 t/s | 57 t/s |
-| Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 24`) | 123 t/s | 18.6 t/s |
-| Qwen3.6-35B-A3B Q4 | + MTP speculative | — | **25.7 t/s** |
-| Qwen3.6-35B-A3B Q4 | TurboQuant XL context | 68 t/s | 15.7 t/s |
+| Qwen3-8B Q4 | all-GPU | 101 | 57 |
+| Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 24`) | 123 | 18.6 |
+| Qwen3.6-35B-A3B Q4 | + MTP speculative | — | **25.7** |
+| Qwen3.6-35B-A3B Q4 | TurboQuant XL context | 68 | 15.7 |
 
 Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double these generation numbers.
+
+### Community benchmarks
+
+Contributed by users running the built-in **Qwen3-4B (Q4_K_M)** benchmark on their own hardware:
+
+| GPU | System | Prompt (t/s) | Generation (t/s) |
+|---|---|---:|---:|
+| Radeon RX 6900 XT 16 GB | Mac Pro 2019 — Xeon W 16-core, 96 GB DDR4 (genuine Mac) | 291.4 | 97.5 |
+| Radeon RX 5600 XT 6 GB | Hackintosh — Core i5-12400F, DDR5 | 100.0 | 52.1 |
 
 The built-in **Benchmarks** tab measures prompt and generation speed for each configuration on *your own* hardware, with per-metric normalized bars for easy comparison:
 

@@ -1,0 +1,40 @@
+name: Translations
+
+# Validates community translation files and verifies the status table in
+# Assets/lang/README.md is up to date. Runs only when translations or their
+# scripts change, so unrelated PRs are unaffected.
+on:
+  pull_request:
+    paths:
+      - "Assets/lang/**"
+      - "scripts/check-translations.py"
+      - "scripts/translation-status.py"
+  push:
+    branches: [main, master]
+    paths:
+      - "Assets/lang/**"
+      - "scripts/check-translations.py"
+      - "scripts/translation-status.py"
+
+jobs:
+  check:
+    name: Check translations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate translation files
+        run: python3 scripts/check-translations.py
+
+      - name: Verify status table is up to date
+        run: |
+          python3 scripts/translation-status.py
+          if ! git diff --quiet -- Assets/lang/README.md; then
+            echo "::error::The status table in Assets/lang/README.md is out of date. Run 'python3 scripts/translation-status.py' and commit the result."
+            git --no-pager diff -- Assets/lang/README.md
+            exit 1
+          fi

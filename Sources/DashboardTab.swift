@@ -123,7 +123,7 @@ struct DashboardView: View {
                     .disabled(modelPath.isEmpty)
                 }
                 if server.state == .running {
-                    Button { NSWorkspace.shared.open(server.serverURL) } label: {
+                    Button { NSWorkspace.shared.open(server.webChatURL) } label: {
                         Image(systemName: "safari")
                     }
                     .controlSize(.large)

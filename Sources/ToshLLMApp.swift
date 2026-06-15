@@ -121,7 +121,7 @@ struct MenuBarView: View {
                 Text(loc.t("Servidor activo", "Server running") +
                      (server.genSpeed.map { String(format: " · %.1f t/s", $0) } ?? ""))
                 Button(loc.t("Abrir chat en el navegador", "Open chat in browser")) {
-                    NSWorkspace.shared.open(server.serverURL)
+                    NSWorkspace.shared.open(server.webChatURL)
                 }
                 Button(loc.t("Detener servidor", "Stop server")) { server.stop() }
             case .starting:

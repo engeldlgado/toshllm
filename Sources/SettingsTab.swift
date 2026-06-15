@@ -61,12 +61,13 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section(loc.t("Aplicación", "Application")) {
-                Picker(loc.t("Idioma", "Language"), selection: $loc.isSpanish) {
-                    Text("Español").tag(true)
-                    Text("English").tag(false)
+                Picker(loc.t("Idioma", "Language"), selection: $loc.language) {
+                    ForEach(loc.availableLanguages, id: \.self) { code in
+                        Text(loc.displayName(code)).tag(code)
+                    }
                 }
-                .help(loc.t("Idioma de toda la interfaz de ToshLLM.",
-                            "Language for the entire ToshLLM interface."))
+                .help(loc.t("Idioma de toda la interfaz de ToshLLM. Los idiomas aportados por la comunidad aparecen automáticamente.",
+                            "Language for the entire ToshLLM interface. Community-contributed languages appear here automatically."))
                 Toggle(loc.t("Icono en la barra de menús", "Menu bar icon"), isOn: $menuBarIcon)
                     .help(loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
                                 "Shows a menu bar icon with server status and quick controls, even with the window closed."))

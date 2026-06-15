@@ -53,7 +53,7 @@ struct ChatMainView: View {
                             "ToshLLM \(version) available — install it from Configuration → Home."))
             }
             Button {
-                NSWorkspace.shared.open(server.serverURL)
+                NSWorkspace.shared.open(server.webChatURL)
             } label: { Image(systemName: "safari") }
                 .disabled(server.state != .running)
                 .help(loc.t("Abrir el chat web en el navegador", "Open the web chat in the browser"))

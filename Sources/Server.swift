@@ -208,6 +208,24 @@ final class ServerController: ObservableObject {
 
     var serverURL: URL { URL(string: "http://127.0.0.1:\(currentPort)/")! }
 
+    /// Web chat URL with the app's language and the real Metal device name
+    /// passed through, so the bundled console matches the language picked in
+    /// Settings and shows the GPU actually in use (instead of guessing).
+    var webChatURL: URL {
+        let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "es"
+        var comps = URLComponents(string: "http://127.0.0.1:\(currentPort)/")!
+        var items = [URLQueryItem(name: "lang", value: lang)]
+        if let gpu = ServerController.availableGPUs().max(by: { $0.vramMB < $1.vramMB })?.name {
+            items.append(URLQueryItem(name: "gpu", value: gpu))
+        }
+        // Real inference backend, read from the engine's startup log (a custom
+        // external build may use Vulkan instead of the bundled Metal engine).
+        let backend = log.range(of: "vulkan", options: .caseInsensitive) != nil ? "Vulkan" : "Metal"
+        items.append(URLQueryItem(name: "backend", value: backend))
+        comps.queryItems = items
+        return comps.url!
+    }
+
     nonisolated static func availableGPUs() -> [GPUDevice] {
         MTLCopyAllDevices().enumerated().map { i, dev in
             GPUDevice(index: i, name: dev.name,

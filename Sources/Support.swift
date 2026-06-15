@@ -8,6 +8,7 @@ import os
 /// and `ProfileStore` all reference these constants, so a typo is a compile
 /// error instead of a silent bug.
 enum SettingsKeys {
+    static let language = "lang"
     static let serverBinary = "serverBinary"
     static let modelPath = "modelPath"
     static let port = "port"

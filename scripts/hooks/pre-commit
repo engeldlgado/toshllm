@@ -1,0 +1,24 @@
+#!/bin/sh
+# ToshLLM pre-commit hook.
+#
+# Enable it once in your clone with:
+#     git config core.hooksPath scripts/hooks
+#
+# When a commit touches a community translation file it validates the file and
+# refreshes the status table in Assets/lang/README.md, re-staging the README so
+# the table is always committed up to date. It does nothing for other commits.
+
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '^Assets/lang/.*\.json$')
+[ -z "$staged" ] && exit 0
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-commit: python3 not found; skipping translation checks."
+    exit 0
+fi
+
+# 1. Validate the translation files; block the commit if any is broken.
+python3 scripts/check-translations.py || exit 1
+
+# 2. Refresh the status table and include it in this commit.
+python3 scripts/translation-status.py
+git add Assets/lang/README.md

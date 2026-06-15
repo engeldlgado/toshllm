@@ -55,6 +55,18 @@ fi
 mkdir -p "$APP/Contents/Resources/test-ui"
 cp Assets/test-ui/index.html "$APP/Contents/Resources/test-ui/"
 
+# Community translation overlays (English-string -> translation). Optional:
+# es/en are built in; missing keys fall back to English. Copied both for the
+# native app (Resources/lang) and for the web console to fetch (test-ui/lang).
+if ls Assets/lang/*.json >/dev/null 2>&1; then
+    mkdir -p "$APP/Contents/Resources/lang" "$APP/Contents/Resources/test-ui/lang"
+    for f in Assets/lang/*.json; do
+        [[ "$(basename "$f")" == _* ]] && continue   # skip _template.json
+        cp "$f" "$APP/Contents/Resources/lang/"
+        cp "$f" "$APP/Contents/Resources/test-ui/lang/"
+    done
+fi
+
 # Binance Pay QR (cropped) for the donations popup
 [ -f Assets/binance-qr.png ] && cp Assets/binance-qr.png "$APP/Contents/Resources/binance-qr.png"
 

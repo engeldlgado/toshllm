@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Qwen3 · RX 6700 XT</title>
+<title>ToshLLM · Web chat</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d;
@@ -98,9 +98,9 @@
 </head>
 <body>
 <header>
-  <h1>Qwen3 local</h1>
-  <span class="badge">RX 6700 XT · Metal</span>
-  <span id="model-name">conectando…</span>
+  <h1>ToshLLM</h1>
+  <span class="badge">Metal</span>
+  <span id="model-name"></span>
   <span class="spacer"></span>
   <span id="stats"></span>
 </header>
@@ -111,12 +111,12 @@
   <div class="controls">
     <label>Temp <input type="range" id="temp" min="0" max="1.5" step="0.05" value="0.7">
       <span id="temp-val">0.7</span></label>
-    <label>Máx. tokens <input type="number" id="max-tokens" value="1024" min="16" step="64"></label>
-    <button id="clear">Limpiar chat</button>
+    <label id="max-tokens-label">Max tokens <input type="number" id="max-tokens" value="1024" min="16" step="64"></label>
+    <button id="clear">Clear chat</button>
   </div>
   <div class="input-row">
-    <textarea id="prompt" placeholder="Escribe tu mensaje… (Enter envía, Shift+Enter salto de línea)"></textarea>
-    <button id="send">Enviar</button>
+    <textarea id="prompt"></textarea>
+    <button id="send">Send</button>
   </div>
 </footer>
 
@@ -127,8 +127,72 @@ const sendBtn  = document.getElementById("send");
 const statsEl  = document.getElementById("stats");
 const tempEl   = document.getElementById("temp");
 
-let messages = [];
-let aborter  = null;
+let messages     = [];
+let aborter      = null;
+let aiName       = "Assistant";
+let modelLoaded  = false;
+
+// ── i18n ──────────────────────────────────────────────────────────────
+// Spanish and English are built in, like the app. Any other language is loaded
+// from lang/<code>.json — the same community overlay files the app ships,
+// copied next to this page. The English text is the lookup key, with English as
+// the fallback, so a missing or partial translation never shows blank.
+// The app passes the chosen language as ?lang=; otherwise we use the browser's.
+const EN = {
+  maxTokens: "Max tokens", clear: "Clear chat", send: "Send", stop: "Stop",
+  placeholder: "Type your message… (Enter sends, Shift+Enter newline)",
+  reasoning: "Reasoning", you: "You", assistant: "Assistant",
+  connecting: "connecting…", unknownModel: "unknown model",
+  serverUnavailable: "server unavailable",
+  firstResp: "first resp.", errorRunning: "is llama-server running?",
+};
+const ES = {
+  maxTokens: "Máx. tokens", clear: "Limpiar chat", send: "Enviar", stop: "Detener",
+  placeholder: "Escribe tu mensaje… (Enter envía, Shift+Enter salto de línea)",
+  reasoning: "Razonamiento", you: "Tú", assistant: "Asistente",
+  connecting: "conectando…", unknownModel: "modelo desconocido",
+  serverUnavailable: "servidor no disponible",
+  firstResp: "primera resp.", errorRunning: "¿está corriendo llama-server?",
+};
+const params = new URLSearchParams(location.search);
+const LANG = (params.get("lang") || navigator.language || "en").slice(0, 2).toLowerCase();
+document.documentElement.lang = LANG;
+
+// The app passes the real device name and inference backend in use; show them
+// in the badge instead of guessing. Falls back to the static "Metal" label when
+// opened directly (no parameters).
+const gpu = params.get("gpu");
+const backend = params.get("backend");
+const badgeEl = document.querySelector(".badge");
+if (gpu && backend) badgeEl.textContent = gpu + " · " + backend;
+else if (gpu) badgeEl.textContent = gpu;
+else if (backend) badgeEl.textContent = backend;
+
+let T = LANG === "es" ? ES : EN;
+
+function applyStrings() {
+  document.getElementById("max-tokens-label").firstChild.textContent = T.maxTokens + " ";
+  document.getElementById("clear").textContent = T.clear;
+  if (!aborter) sendBtn.textContent = T.send;
+  promptEl.placeholder = T.placeholder;
+  if (!modelLoaded) {
+    aiName = T.assistant;
+    document.getElementById("model-name").textContent = T.connecting;
+  }
+}
+applyStrings();
+
+// Community language: overlay the English defaults with the fetched file.
+if (LANG !== "es" && LANG !== "en") {
+  fetch("lang/" + LANG + ".json")
+    .then(r => r.ok ? r.json() : {})
+    .catch(() => ({}))
+    .then(ov => {
+      T = Object.fromEntries(Object.entries(EN).map(
+        ([k, en]) => [k, (ov[en] && ov[en].trim()) ? ov[en] : en]));
+      applyStrings();
+    });
+}
 
 tempEl.oninput = () => document.getElementById("temp-val").textContent = tempEl.value;
 
@@ -137,13 +201,16 @@ document.getElementById("clear").onclick = () => {
 };
 
 fetch("/v1/models").then(r => r.json()).then(d => {
-  const id = d.data?.[0]?.id || "modelo desconocido";
-  document.getElementById("model-name").textContent = id.split("/").pop();
+  const id = d.data?.[0]?.id || T.unknownModel;
+  modelLoaded = true;
+  aiName = id.split("/").pop();
+  document.getElementById("model-name").textContent = aiName;
 }).catch(() => {
-  document.getElementById("model-name").textContent = "servidor no disponible";
+  modelLoaded = true;
+  document.getElementById("model-name").textContent = T.serverUnavailable;
 });
 
-// Render minimalista: separa <think>, escapa HTML y aplica negritas/código
+// Minimal render: split <think>, escape HTML and apply bold/code.
 function render(el, raw, streaming) {
   let think = null, body = raw;
   const m = raw.match(/^<think>([\s\S]*?)(<\/think>|$)/);
@@ -158,7 +225,7 @@ function render(el, raw, streaming) {
   let html = "";
   if (think) {
     const open = streaming && !raw.includes("</think>") ? " open" : "";
-    html += `<details class="think"${open}><summary>Razonamiento</summary>${esc(think)}</details>`;
+    html += `<details class="think"${open}><summary>${T.reasoning}</summary>${esc(think)}</details>`;
   }
   html += md(body.replace(/^\s+/, ""));
   el.innerHTML = html + (streaming ? '<span class="cursor"></span>' : "");
@@ -167,7 +234,9 @@ function render(el, raw, streaming) {
 function addMsg(role, text) {
   const div = document.createElement("div");
   div.className = "msg " + (role === "user" ? "user" : "ai");
-  div.innerHTML = `<div class="who">${role === "user" ? "Tú" : "Qwen3"}</div><div class="bubble"></div>`;
+  const who = role === "user" ? T.you : aiName;
+  div.innerHTML = `<div class="who"></div><div class="bubble"></div>`;
+  div.querySelector(".who").textContent = who;
   const bubble = div.querySelector(".bubble");
   if (text !== undefined) bubble.textContent = text;
   chatEl.appendChild(div);
@@ -187,7 +256,7 @@ async function send() {
   const bubble = addMsg("ai");
   bubble.innerHTML = '<span class="cursor"></span>';
 
-  sendBtn.textContent = "Detener";
+  sendBtn.textContent = T.stop;
   sendBtn.classList.add("stop");
   aborter = new AbortController();
 
@@ -230,19 +299,19 @@ async function send() {
         render(bubble, full, true);
         const dt = (performance.now() - tFirst) / 1000;
         if (dt > 0.3) statsEl.textContent =
-          `${nTokens} tokens · ${(nTokens / dt).toFixed(1)} t/s · primera resp. ${((tFirst - t0) / 1000).toFixed(2)}s`;
+          `${nTokens} tokens · ${(nTokens / dt).toFixed(1)} t/s · ${T.firstResp} ${((tFirst - t0) / 1000).toFixed(2)}s`;
         chatEl.scrollTop = chatEl.scrollHeight;
       }
     }
   } catch (e) {
-    if (e.name !== "AbortError") full += `\n\n[Error: ${e.message} — ¿está corriendo llama-server?]`;
+    if (e.name !== "AbortError") full += `\n\n[Error: ${e.message} — ${T.errorRunning}]`;
   }
 
   render(bubble, full, false);
-  // No guardar el razonamiento en el historial: ahorra contexto
+  // Don't keep the reasoning in history: saves context.
   messages.push({ role: "assistant", content: full.replace(/^<think>[\s\S]*?<\/think>\s*/, "") });
   aborter = null;
-  sendBtn.textContent = "Enviar";
+  sendBtn.textContent = T.send;
   sendBtn.classList.remove("stop");
   promptEl.focus();
 }
