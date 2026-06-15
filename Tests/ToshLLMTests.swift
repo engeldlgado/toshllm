@@ -360,9 +360,11 @@ final class LocalizationTests: XCTestCase {
 
     func testLocalizerSwitchesLanguage() {
         let loc = Localizer()
-        loc.isSpanish = true
+        loc.language = "es"
+        XCTAssertTrue(loc.isSpanish)
         XCTAssertEqual(loc.t("hola", "hello"), "hola")
-        loc.isSpanish = false
+        loc.language = "en"
+        XCTAssertFalse(loc.isSpanish)
         XCTAssertEqual(loc.t("hola", "hello"), "hello")
     }
 }
