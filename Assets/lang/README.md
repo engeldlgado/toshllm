@@ -16,6 +16,13 @@ The English string on the left is the key. The app looks each one up while it
 runs. If a key is missing, or its value is left empty, the app shows the
 English text instead, so an unfinished translation never breaks the interface.
 
+Each existing file already lists **every** interface string, with an empty value
+(`""`) for the ones not translated yet. So to continue a language you just fill
+in the blanks, in order, without comparing against the template. Maintainers keep
+the files in sync with `scripts/sync-translations.py`, which adds any new strings
+as empty entries and drops removed ones (it never touches existing translations);
+CI checks that the files stay in sync.
+
 ## Status
 
 The percentages below are how many interface strings each language fills in.

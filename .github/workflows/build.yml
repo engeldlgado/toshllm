@@ -3,6 +3,20 @@ name: Build & Release
 on:
   push:
     branches: [main, master]
+    # Skip the full macOS build for pushes that can't change the app or the DMG
+    # (docs, community translations and their tooling). Release tags (tags: v*)
+    # are matched separately and always build; workflow_dispatch is the manual
+    # fallback if a release ever needs a build by hand.
+    paths-ignore:
+      - "**.md"
+      - "Assets/lang/**"
+      - "scripts/check-translations.py"
+      - "scripts/translation-status.py"
+      - "scripts/sync-translations.py"
+      - ".github/workflows/translations.yml"
+      - ".github/workflows/codeql.yml"
+      - "LICENSE"
+      - ".gitignore"
     tags: ["v*"]
   pull_request:
     branches: [main, master]

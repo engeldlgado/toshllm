@@ -9,12 +9,14 @@ on:
       - "Assets/lang/**"
       - "scripts/check-translations.py"
       - "scripts/translation-status.py"
+      - "scripts/sync-translations.py"
   push:
     branches: [main, master]
     paths:
       - "Assets/lang/**"
       - "scripts/check-translations.py"
       - "scripts/translation-status.py"
+      - "scripts/sync-translations.py"
 
 jobs:
   check:
@@ -29,6 +31,13 @@ jobs:
 
       - name: Validate translation files
         run: python3 scripts/check-translations.py
+
+      - name: Verify files list every template key
+        run: |
+          python3 scripts/sync-translations.py --check || {
+            echo "::error::A language file is missing template keys (or has stale ones). Run 'python3 scripts/sync-translations.py' and commit the result so contributors see every string to translate."
+            exit 1
+          }
 
       - name: Verify status table is up to date
         run: |

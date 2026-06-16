@@ -3,8 +3,30 @@ name: CodeQL
 on:
   push:
     branches: [main, master]
+    # Only analyze when something that affects the Swift build changes; docs and
+    # translations don't. The weekly schedule still gives a full baseline scan.
+    paths-ignore:
+      - "**.md"
+      - "Assets/lang/**"
+      - "scripts/check-translations.py"
+      - "scripts/translation-status.py"
+      - "scripts/sync-translations.py"
+      - ".github/workflows/translations.yml"
+      - ".github/workflows/build.yml"
+      - "LICENSE"
+      - ".gitignore"
   pull_request:
     branches: [main, master]
+    paths-ignore:
+      - "**.md"
+      - "Assets/lang/**"
+      - "scripts/check-translations.py"
+      - "scripts/translation-status.py"
+      - "scripts/sync-translations.py"
+      - ".github/workflows/translations.yml"
+      - ".github/workflows/build.yml"
+      - "LICENSE"
+      - ".gitignore"
   schedule:
     - cron: "30 6 * * 1"
 
