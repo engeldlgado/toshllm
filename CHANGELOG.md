@@ -3,6 +3,19 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.17] - 2026-06-16
+
+### Fixed
+- **The experimental engine took ~45 s to load a model and often "started only
+  after several tries."** The bundled engines compiled their Metal shaders from
+  source on every launch; with the larger AMD Flash Attention kernel set that
+  runtime compile ballooned to tens of seconds, so the app looked stuck and
+  needed retries. The engines now ship a precompiled Metal library and load it
+  directly — model load drops to ~2 s. The shader source stays embedded as a
+  fallback: GPUs whose feature set doesn't match the precompiled library (M5-class
+  tensor GPUs, or any case where it can't load — e.g. an older macOS) transparently
+  compile from source, so nothing breaks and there's nothing extra to install.
+
 ## [0.81.16] - 2026-06-16
 
 ### Changed

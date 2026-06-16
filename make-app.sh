@@ -46,6 +46,10 @@ LLAMA_STATIC="vendor/llama.cpp/build-static/bin"
 if [ -x "$LLAMA_STATIC/llama-server" ]; then
     mkdir -p "$APP/Contents/Resources/bin"
     cp "$LLAMA_STATIC/llama-server" "$LLAMA_STATIC/llama-bench" "$APP/Contents/Resources/bin/"
+    # Precompiled Metal library (loaded instead of compiling shaders at runtime;
+    # see ggml-metal-device.m). Optional: without it the engine still works,
+    # just slower to load. Must sit next to the binary.
+    [ -f "$LLAMA_STATIC/default.metallib" ] && cp "$LLAMA_STATIC/default.metallib" "$APP/Contents/Resources/bin/"
     echo "bundled static llama-server/llama-bench from $LLAMA_STATIC"
 else
     echo "WARNING: engines not built; run ./scripts/build-engines.sh first"
@@ -76,6 +80,7 @@ TURBO_STATIC="vendor/llama.cpp-turbo/build-static/bin"
 if [ -x "$TURBO_STATIC/llama-server" ]; then
     mkdir -p "$APP/Contents/Resources/bin-turbo"
     cp "$TURBO_STATIC/llama-server" "$TURBO_STATIC/llama-bench" "$APP/Contents/Resources/bin-turbo/"
+    [ -f "$TURBO_STATIC/default.metallib" ] && cp "$TURBO_STATIC/default.metallib" "$APP/Contents/Resources/bin-turbo/"
     echo "bundled TurboQuant engine (experimental)"
 fi
 
