@@ -711,6 +711,11 @@ final class ChatStore: ObservableObject {
 
 // MARK: - Main chat view
 
+/// Holds the last auto-follow scroll time. A reference type so updating it from
+/// the streaming callback doesn't reassign a @State value (which would
+/// invalidate the whole transcript view on every token).
+private final class ScrollFollowClock { var last = Date.distantPast }
+
 /// The chat detail: transcript and composer. The conversation list lives in
 /// `ConversationListView` (the split-view sidebar); both share the ChatStore
 /// from the environment, injected by ChatMainView.
@@ -729,6 +734,7 @@ struct NativeChatView: View {
     @State private var attachError: String?
     @State private var showSystem = false
     @State private var pinnedToBottom = true
+    @State private var followClock = ScrollFollowClock()
     @FocusState private var inputFocused: Bool
 
     private var maxTokenOptions: [Int] {
@@ -818,7 +824,20 @@ struct NativeChatView: View {
                         }
                         if chat.generating && isLast && msg.role == "assistant" {
                             StreamingBubble(live: chat.live, message: msg) {
-                                if pinnedToBottom { proxy.scrollTo("chatBottom", anchor: .bottom) }
+                                // Following the stream means scrolling to the
+                                // bottom marker, which forces the ScrollView to
+                                // measure the whole transcript. On a long
+                                // conversation that layout pass is heavy and, on
+                                // a discrete GPU shared with Metal inference,
+                                // stalls generation. Throttle the follow so it
+                                // costs a few passes per second, not one per
+                                // token; the final position is settled when
+                                // generation ends (onChange of chat.generating).
+                                guard pinnedToBottom else { return }
+                                let now = Date()
+                                guard now.timeIntervalSince(followClock.last) > 0.3 else { return }
+                                followClock.last = now
+                                proxy.scrollTo("chatBottom", anchor: .bottom)
                             }
                             // StreamingBubble and the completed MessageBubble
                             // must not share identity. Reusing the streaming

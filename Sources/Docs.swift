@@ -113,7 +113,7 @@ La app incluye **dos motores** y admite externos (Ajustes → Avanzado):
 
 **Experimental (TurboQuant)** — Motor con cuantización extrema del KV cache (tipos `turbo2/3/4`, basados en investigación de compresión presentada en ICLR 2026). Reduce la memoria de contexto hasta ~6×, permitiendo contextos de 100k+ tokens en GPUs de 12 GB. Costo: la generación baja (~15% en MoE grandes, mucho más en modelos pequeños). La mejor combinación medida: claves `turbo4` + valores `turbo3`.
 
-Al elegir este motor aparece el interruptor **Kernel Flash Attention AMD**. Ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD mediante un kernel Metal propio (cabezas de 128 y 256; tipos de KV f16, q8_0, q4_0 y turbo2/3/4). Es clave con KV cuantizado o turbo: como esos tipos **obligan** a Flash Attention, sin el kernel la atención cae a CPU y se desploma con la profundidad (prefill turbo a 2k medido ~6 t/s, generación ~14 t/s); con el kernel todo se queda en GPU y plano (~100 t/s de prompt, ~30 t/s de generación).
+Al elegir este motor aparece el interruptor **Kernel Flash Attention AMD**. Ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD mediante un kernel Metal propio (cabezas de 128 y 256; tipos de KV f16, q8_0, q4_0 y turbo2/3/4). Es clave con KV cuantizado o turbo: como esos tipos **obligan** a Flash Attention, sin el kernel la atención cae a CPU y se desploma con la profundidad (prefill turbo a 2k medido ~6 t/s, generación ~14 t/s); con el kernel todo se queda en GPU (~100 t/s de prompt; la generación aguanta la profundidad: ~33 t/s a 4k de contexto en un 8B, +75% frente a la versión previa del kernel).
 
 **Externo** — Cualquier binario `llama-server` tuyo, para probar builds propias.
 """),
@@ -283,7 +283,7 @@ The app ships **two engines** and supports external ones (Settings → Advanced)
 
 **Experimental (TurboQuant)** — Engine with extreme KV cache quantization (`turbo2/3/4` types, based on compression research presented at ICLR 2026). Cuts context memory up to ~6×, enabling 100k+ token contexts on 12 GB GPUs. Cost: generation drops (~15% on large MoE, much more on small models). Best measured combo: keys `turbo4` + values `turbo3`.
 
-Selecting this engine reveals the **AMD Flash Attention kernel** toggle. It runs attention — both prompt processing and generation — on the AMD GPU via a custom Metal kernel (head dims 128 and 256; KV types f16, q8_0, q4_0 and turbo2/3/4). It matters most with quantized or turbo KV: those types **require** Flash Attention, so without the kernel attention falls back to the CPU and collapses with depth (turbo prefill at 2k measured ~6 t/s, generation ~14 t/s); with it everything stays on the GPU and flat (~100 t/s prompt, ~30 t/s generation).
+Selecting this engine reveals the **AMD Flash Attention kernel** toggle. It runs attention — both prompt processing and generation — on the AMD GPU via a custom Metal kernel (head dims 128 and 256; KV types f16, q8_0, q4_0 and turbo2/3/4). It matters most with quantized or turbo KV: those types **require** Flash Attention, so without the kernel attention falls back to the CPU and collapses with depth (turbo prefill at 2k measured ~6 t/s, generation ~14 t/s); with it everything stays on the GPU (~100 t/s prompt; generation holds up with depth: ~33 t/s at 4k context on an 8B, +75% over the previous kernel revision).
 
 **External** — Any `llama-server` binary of yours, for testing custom builds.
 """),

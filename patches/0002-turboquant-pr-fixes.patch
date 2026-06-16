@@ -333,7 +333,7 @@ index 693e2ff6..7a4bbdd3 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 3e1c5833..70628199 100644
+index 3e1c5833..e40fc835 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -2716,6 +2716,34 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
@@ -371,7 +371,7 @@ index 3e1c5833..70628199 100644
  // TurboFlash: two-pass fused asymmetric attention for turbo3 V decode
  // Returns true when V=turbo3, single-token decode (ne01==1), and K is q8_0 or turbo3
  static bool ggml_metal_op_flash_attn_ext_use_turbo_flash(const ggml_tensor * op) {
-@@ -2970,6 +2998,84 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2970,6 +2998,87 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      ggml_metal_buffer_id bid_tmp = bid_blk;
      bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
  
@@ -446,9 +446,12 @@ index 3e1c5833..70628199 100644
 +        ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
 +        ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
 +
-+        // NSG simdgroups (32 threads each) per (query token, head, batch);
-+        // NSG must match the constant inside kernel_flash_attn_ext_vec_amd.
-+        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, 32, 4, 1);
++        // NSG simdgroups (32 threads each) per (query token, head, batch). NSG
++        // must match the template instantiation for this head dim (see the
++        // FA_AMD_PAIR macro): 32 for DK=128, 16 for DK=256, which keeps the
++        // sh_acc threadgroup buffer at 16 KiB either way.
++        const int fa_amd_nsg = (ne00 == 128) ? 32 : 16;
++        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, 32, fa_amd_nsg, 1);
 +
 +        return 1;
 +    }
@@ -457,10 +460,10 @@ index 3e1c5833..70628199 100644
      // Intercept before the normal VEC/non-VEC path when conditions are met:
      //   - V is turbo3, K is q8_0 or turbo3
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 344657df..fdb968f9 100644
+index 344657df..5fbd51d2 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
-@@ -8500,6 +8500,179 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -8500,6 +8500,187 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NS20
  }
  
@@ -486,7 +489,7 @@ index 344657df..fdb968f9 100644
 +// chunk c on lane tiisg covers head elements [(tiisg + c*32)*4 .. +3]. NK = QK/4 dequant
 +// chunks per block, so chunk index ch reads block (ch/NK), sub-chunk (ch%NK).
 +template<
-+    short DK,
++    short DK, short NSG,
 +    typename k_t, short NKK, void (*deq_k)(device const k_t *, short, thread float4 &),
 +    typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &)>
 +kernel void kernel_flash_attn_ext_vec_amd(
@@ -503,7 +506,11 @@ index 344657df..fdb968f9 100644
 +        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
 +    constexpr short DV4 = DK/4;   // float4 per head row (32 for DK=128, 64 for DK=256)
 +    constexpr short NC  = DV4/32; // float4 chunks each lane owns (1 for DK=128, 2 for DK=256)
-+    constexpr short NSG = 4;      // simdgroups per threadgroup (sync with host dispatch)
++    // NSG (simdgroups per threadgroup) is a template parameter, kept in sync with
++    // the host dispatch. More simdgroups split the KV stream into shorter serial
++    // loops, which is a large decode win at depth; it is chosen per head dim so
++    // the sh_acc threadgroup buffer (NSG*DV4 float4) stays at 16 KiB: 32 for
++    // DK=128, 16 for DK=256.
 +
 +    threadgroup float4 sh_acc[NSG*DV4]; // per-simdgroup partial output (NC float4 per lane)
 +    threadgroup float  sh_m[NSG];       // per-simdgroup running max
@@ -537,6 +544,11 @@ index 344657df..fdb968f9 100644
 +    float s = 0.0f;
 +
 +    for (int j = sgitg; j < args.ne11; j += NSG) {
++        const float mv = (float) pm[j];
++        if (mv <= -1e30f) {
++            continue;
++        }
++
 +        device const k_t * kb = (device const k_t *) (kp + (uint64_t) j*args.nb11);
 +        float pl = 0.0f;
 +        for (short c = 0; c < NC; ++c) {
@@ -547,23 +559,20 @@ index 344657df..fdb968f9 100644
 +        }
 +        const float p = simd_sum(pl); // full DK-dim Q.K
 +
-+        const float mv = (float) pm[j];
-+        if (mv > -1e30f) { // skip fully-masked positions (mask is uniform across lanes)
-+            const float pp   = p*args.scale + mv;
-+            const float nm   = max(m, pp);
-+            const float corr = exp(m  - nm);
-+            const float w    = exp(pp - nm);
++        const float pp   = p*args.scale + mv;
++        const float nm   = max(m, pp);
++        const float corr = exp(m  - nm);
++        const float w    = exp(pp - nm);
 +
-+            device const v_t * vb = (device const v_t *) (vp + (uint64_t) j*args.nb21);
-+            for (short c = 0; c < NC; ++c) {
-+                const short ch = tiisg + c*32;
-+                float4 vreg;
-+                deq_v(vb + ch/NKV, ch%NKV, vreg);
-+                acc[c] = acc[c]*corr + w*vreg;
-+            }
-+            s = s*corr + w;
-+            m = nm;
++        device const v_t * vb = (device const v_t *) (vp + (uint64_t) j*args.nb21);
++        for (short c = 0; c < NC; ++c) {
++            const short ch = tiisg + c*32;
++            float4 vreg;
++            deq_v(vb + ch/NKV, ch%NKV, vreg);
++            acc[c] = acc[c]*corr + w*vreg;
 +        }
++        s = s*corr + w;
++        m = nm;
 +    }
 +
 +    // publish this simdgroup's partials (acc, m, s) and merge in simdgroup 0
@@ -603,16 +612,18 @@ index 344657df..fdb968f9 100644
 +    }
 +}
 +
-+typedef decltype(kernel_flash_attn_ext_vec_amd<128, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4>) flash_attn_ext_vec_amd_t;
++typedef decltype(kernel_flash_attn_ext_vec_amd<128, 32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4>) flash_attn_ext_vec_amd_t;
 +
-+// one instantiation for a given head dim + (K,V) type pair
-+#define FA_AMD_INST(dk, nm, kt, nkk, dkf, vt, nkv, dvf) \
++// one instantiation for a given head dim + simdgroup count + (K,V) type pair
++#define FA_AMD_INST(dk, nsg, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +template [[host_name("kernel_flash_attn_ext_vec_amd_dk" #dk "_" nm)]] kernel flash_attn_ext_vec_amd_t \
-+    kernel_flash_attn_ext_vec_amd<dk, kt, nkk, dkf, vt, nkv, dvf>;
-+// both supported head dims (128 and 256) for a given (K,V) type pair
++    kernel_flash_attn_ext_vec_amd<dk, nsg, kt, nkk, dkf, vt, nkv, dvf>;
++// both supported head dims for a given (K,V) type pair. NSG is picked per head
++// dim so the sh_acc threadgroup buffer stays at 16 KiB (safe on any GPU): 32
++// simdgroups for DK=128, 16 for DK=256.
 +#define FA_AMD_PAIR(nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST(128, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST(256, nm, kt, nkk, dkf, vt, nkv, dvf)
++    FA_AMD_INST(128, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST(256, 16, nm, kt, nkk, dkf, vt, nkv, dvf)
 +
 +// symmetric pairs
 +FA_AMD_PAIR("kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)

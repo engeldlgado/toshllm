@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Markdown rendering
 
-private enum MDBlock {
+private enum MDBlock: Equatable {
     case paragraph(String)
     case header(Int, String)
     case bullet([String])
@@ -19,54 +19,15 @@ struct RichText: View {
     var body: some View {
         let blocks = Self.parse(text)
         VStack(alignment: .leading, spacing: 8) {
-            // Positional identity: content-derived ids would change on every
-            // streamed token, tearing the last block's views down each flush.
+            // Positional identity keeps each block's view alive across flushes;
+            // wrapping it in an Equatable view means SwiftUI re-lays-out only the
+            // block whose value changed. While streaming that is just the last,
+            // growing block — the completed blocks above it are frozen, so a long
+            // answer no longer re-renders the whole transcript on every token.
+            // That full re-layout was starving the GPU (which also drives Metal
+            // inference) and stalling generation on discrete AMD GPUs.
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .paragraph(let s):
-                    Text(Self.inline(s)).textSelection(.enabled)
-                case .header(let level, let s):
-                    Text(Self.inline(s))
-                        .font(level <= 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
-                        .textSelection(.enabled)
-                        .padding(.top, 2)
-                case .bullet(let items):
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                                if let done = Self.taskState(item) {
-                                    Image(systemName: done ? "checkmark.square" : "square")
-                                        .font(.callout).foregroundStyle(.secondary)
-                                    Text(Self.inline(String(item.dropFirst(4)))).textSelection(.enabled)
-                                } else {
-                                    Text("•").foregroundStyle(.secondary)
-                                    Text(Self.inline(item)).textSelection(.enabled)
-                                }
-                            }
-                        }
-                    }
-                case .numbered(let items):
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { i, item in
-                            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                                Text("\(i + 1).").foregroundStyle(.secondary)
-                                    .font(.system(.body, design: .monospaced))
-                                Text(Self.inline(item)).textSelection(.enabled)
-                            }
-                        }
-                    }
-                case .code(let lang, let content):
-                    CodeBlock(language: lang, content: content)
-                case .quote(let s):
-                    HStack(spacing: 8) {
-                        RoundedRectangle(cornerRadius: 2).fill(.tertiary).frame(width: 3)
-                        Text(Self.inline(s)).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
-                case .table(let headers, let rows):
-                    MDTable(headers: headers, rows: rows)
-                case .rule:
-                    Divider().padding(.vertical, 2)
-                }
+                MDBlockView(block: block).equatable()
             }
         }
     }
@@ -212,6 +173,64 @@ struct RichText: View {
             attr[run.range].foregroundColor = .accentColor
         }
         return attr
+    }
+}
+
+/// Renders one parsed Markdown block. Equatable on its block value so that,
+/// during streaming, SwiftUI skips re-rendering every completed block above the
+/// one currently being written — the key to not re-laying-out the whole answer
+/// on each token (see RichText.body).
+private struct MDBlockView: View, Equatable {
+    let block: MDBlock
+
+    static func == (lhs: MDBlockView, rhs: MDBlockView) -> Bool { lhs.block == rhs.block }
+
+    var body: some View {
+        switch block {
+        case .paragraph(let s):
+            Text(RichText.inline(s)).textSelection(.enabled)
+        case .header(let level, let s):
+            Text(RichText.inline(s))
+                .font(level <= 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
+                .textSelection(.enabled)
+                .padding(.top, 2)
+        case .bullet(let items):
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        if let done = RichText.taskState(item) {
+                            Image(systemName: done ? "checkmark.square" : "square")
+                                .font(.callout).foregroundStyle(.secondary)
+                            Text(RichText.inline(String(item.dropFirst(4)))).textSelection(.enabled)
+                        } else {
+                            Text("•").foregroundStyle(.secondary)
+                            Text(RichText.inline(item)).textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        case .numbered(let items):
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(items.enumerated()), id: \.offset) { i, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Text("\(i + 1).").foregroundStyle(.secondary)
+                            .font(.system(.body, design: .monospaced))
+                        Text(RichText.inline(item)).textSelection(.enabled)
+                    }
+                }
+            }
+        case .code(let lang, let content):
+            CodeBlock(language: lang, content: content)
+        case .quote(let s):
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2).fill(.tertiary).frame(width: 3)
+                Text(RichText.inline(s)).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+        case .table(let headers, let rows):
+            MDTable(headers: headers, rows: rows)
+        case .rule:
+            Divider().padding(.vertical, 2)
+        }
     }
 }
 

@@ -3,6 +3,28 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.16] - 2026-06-16
+
+### Changed
+- **AMD Flash Attention kernel is much faster at depth.** Each threadgroup now
+  splits the KV stream across more simdgroups (32 for head dim 128, 16 for head
+  dim 256), turning the long serial decode loop into shorter parallel ones. On
+  the reference RX 6700 XT with a turbo KV cache: generation at 4096 tokens of
+  context goes from 19 → 33 t/s on an 8B (+75%) and 26 → 31 t/s on a 9B coder
+  model (+17%); at 2048 tokens, +42% and +11%. Output is bit-for-bit unchanged
+  (validated on both head dims); prompt processing is within ~3%. The kernel also
+  skips fully-masked positions before the score computation, trimming wasted work
+  in long-prompt prefill.
+
+### Fixed
+- **Chat generation no longer stalls on long conversations.** While streaming, the
+  whole Markdown transcript was re-laid-out on every token; on a discrete AMD GPU
+  (shared between the UI and Metal inference) those layout passes starved the
+  inference and froze generation for several seconds at a time. Completed Markdown
+  blocks are now frozen (only the block being written re-renders), and the
+  auto-follow scroll is throttled so it no longer measures the entire transcript on
+  every token. Generation stays smooth on long chats.
+
 ## [0.81.15] - 2026-06-15
 
 ### Added

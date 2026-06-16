@@ -89,6 +89,8 @@ A recurring limitation on discrete AMD GPUs under Metal is that **Flash Attentio
 
 ToshLLM ships a from-scratch **AMD decode attention kernel** (Metal) as an opt-in toggle on the experimental engine. It keeps a deliberately simple structure (one `float4` slice of the head per SIMD lane, simdgroups splitting the KV stream, online-softmax merge) that was validated bit-for-bit against a CPU reference. It supports head dims **128 and 256**, KV types **f16, q8_0, q4_0 and turbo2/3/4** (including the asymmetric pairs the TurboQuant engine allows), and is gated behind an environment flag so the default engine is unchanged.
 
+The kernel splits the KV stream across as many simdgroups as the threadgroup-memory budget allows (32 for head dim 128, 16 for head dim 256), turning the long serial decode loop into short parallel ones — a win that grows with context depth. On an RX 6700 XT with a turbo KV cache, generation at 4096 tokens of context improves from 19 → 33 t/s on an 8B (+75%) and 26 → 31 t/s on the 9B coder (+17%); at 2048 tokens, +42% and +11%. Prompt processing stays within ~3% and output is bit-for-bit unchanged.
+
 Measured on an RX 6700 XT (decode, `tg`, llama-bench), GPU kernel vs the CPU fallback that quantized KV would otherwise force:
 
 | Model / KV | context | CPU fallback | AMD kernel |
