@@ -124,6 +124,19 @@ final class ChatStore: ObservableObject {
     @Published var compacting = false
     @Published var lastError: String?
     let live = LiveStream()
+    /// Streaming uses a dedicated session, not URLSession.shared, so the long
+    /// idle timeout actually applies. A per-request `timeoutInterval` is
+    /// unreliable on the shared session (its 60s `timeoutIntervalForRequest`
+    /// effectively wins), which dropped the connection mid-prefill whenever the
+    /// first token took longer than ~60s (a long prompt re-processing). The
+    /// server's own read/write timeout is an hour, so the client was the one
+    /// giving up — hence llama-server's "cancelled after 30s" warning.
+    static let streamingSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest  = 600   // idle between bytes (covers a slow first token)
+        cfg.timeoutIntervalForResource = 3600
+        return URLSession(configuration: cfg)
+    }()
     /// Tokens of context consumed by the last exchange (prompt + completion),
     /// reported by the server. Drives the context-usage bar.
     @Published var contextUsed: Int?
@@ -286,11 +299,11 @@ final class ChatStore: ObservableObject {
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                // Idle timeout between SSE packets. A long prompt over a quantized
-                // KV cache prefills on the CPU (Flash Attention needs a hardware
-                // feature AMD lacks) and can take minutes with no token arriving,
-                // so keep a generous 3-minute guard instead of the 60s default.
-                req.timeoutInterval = 180
+                // Idle timeout between SSE packets. A long prompt re-processing
+                // can take minutes with no token arriving; the effective idle
+                // timeout comes from streamingSession's config (600s) — this
+                // per-request value is a belt-and-suspenders match.
+                req.timeoutInterval = 600
                 if let key = ServerSettings.activeAPIKey() {
                     req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
                 }
@@ -310,7 +323,7 @@ final class ChatStore: ObservableObject {
                 }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                let (bytes, response) = try await ChatStore.streamingSession.bytes(for: req)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 guard status == 200 else {
                     // The error body explains the cause (e.g. context overflow);

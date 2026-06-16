@@ -3,6 +3,18 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.18] - 2026-06-16
+
+### Fixed
+- **Chat could drop the connection ("cancelled after ~30s") while waiting for
+  the first token on a long prompt.** The streaming request ran on
+  `URLSession.shared`, whose ~60-second idle timeout effectively overrode the
+  per-request value, so the connection was cut when the first token took longer
+  than that (e.g. a long prompt re-processing). Streaming now uses a dedicated
+  session with a 10-minute idle timeout, so a slow first token no longer drops
+  the chat. Confirmed the server was never the cause — it held a 168-second
+  request to completion in testing.
+
 ## [0.81.17] - 2026-06-16
 
 ### Fixed
