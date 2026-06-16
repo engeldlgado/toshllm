@@ -3,6 +3,21 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.20] - 2026-06-16
+
+### Added
+- **Context up to 256k tokens** in Settings (for testing), with a warning when
+  it's very large; chat response-token options raised to match.
+
+### Changed
+- **Download progress is visible on the card** — a live bar with %, MB and
+  pause/cancel, right where you press Download.
+
+### Fixed
+- **"Reasoning off" now also sends `/no_think`**, so more models actually stop
+  thinking (some reasoning-only models still can't be turned off).
+- Build error in the test suite (it used the renamed recommendation API).
+
 ## [0.81.19] - 2026-06-16
 
 ### Added

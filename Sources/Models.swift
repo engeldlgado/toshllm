@@ -235,6 +235,13 @@ final class ModelStore: ObservableObject {
         downloads.contains { $0.fileName == fileName && !$0.finished && $0.error == nil }
     }
 
+    /// The in-progress (or failed) download for a file, so a card can show its
+    /// live progress right where the user pressed Download. Finished ones are
+    /// excluded — the model then appears as a local file instead.
+    func downloadItem(fileName: String) -> DownloadItem? {
+        downloads.last { $0.fileName == fileName && !$0.finished }
+    }
+
     func download(urlString: String) {
         guard let remote = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
               remote.scheme?.hasPrefix("http") == true else { return }

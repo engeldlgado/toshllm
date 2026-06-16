@@ -269,10 +269,20 @@ final class ChatStore: ObservableObject {
         // must land in the one this request started from, found by id.
         let convID = conversations[i].id
 
-        let history = Self.requestHistory(system: system,
+        var history = Self.requestHistory(system: system,
                                           summary: conversations[i].summary,
                                           messages: conversations[i].messages,
                                           from: conversations[i].summarizedCount ?? 0)
+
+        // Disabling reasoning: `enable_thinking:false` (below) is a Qwen chat-
+        // template kwarg that some reasoning models ignore, so they keep
+        // thinking. The Qwen-family soft switch `/no_think`, appended to the
+        // last user turn, disables it even when the template doesn't; other
+        // models simply ignore the trailing token. Belt-and-braces — only sent
+        // for this request, never persisted to the visible conversation.
+        if !thinking, let last = history.lastIndex(where: { $0["role"] == "user" }) {
+            history[last]["content"] = (history[last]["content"] ?? "") + "\n/no_think"
+        }
 
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
 
@@ -807,7 +817,7 @@ struct NativeChatView: View {
     @FocusState private var inputFocused: Bool
 
     private var maxTokenOptions: [Int] {
-        [512, 1024, 2048, 4096, 8192, 16384].filter { $0 < contextLimit }
+        [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072].filter { $0 < contextLimit }
     }
 
     private var maxTokensIsLarge: Bool {
@@ -1097,8 +1107,8 @@ struct NativeChatView: View {
             Toggle(isOn: $thinkingEnabled) {
                 Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
             }
-            .help(loc.t("Los modelos razonadores piensan antes de responder. Estos tokens también cuentan dentro del límite de respuesta.",
-                        "Reasoning models think before answering. Reasoning tokens also count toward the response limit."))
+            .help(loc.t("Los modelos razonadores piensan antes de responder (esos tokens cuentan dentro del límite de respuesta). Al desactivarlo se envía enable_thinking:false y /no_think; algunos modelos entrenados solo para razonar (p. ej. R1) pueden seguir pensando de todos modos.",
+                        "Reasoning models think before answering (those tokens count toward the response limit). Turning it off sends enable_thinking:false and /no_think; some reasoning-only models (e.g. R1) may still think regardless."))
 
             HStack(spacing: 8) {
                 Label(loc.t("Creatividad", "Creativity"), systemImage: "dial.medium")

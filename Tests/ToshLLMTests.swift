@@ -424,8 +424,11 @@ final class CatalogTests: XCTestCase {
     }
 
     func testRecommendationExistsForReferenceHardware() {
-        let rec = Catalog.recommended(for: referenceHW)
-        XCTAssertNotNil(rec, "debe haber un modelo recomendado para 12GB VRAM + 32GB RAM")
-        XCTAssertGreaterThanOrEqual(rec!.1.level, .good)
+        let recs = Catalog.recommendations(for: referenceHW)
+        XCTAssertFalse(recs.isEmpty, "debe haber modelos recomendados para 12GB VRAM + 32GB RAM")
+        for rec in recs {
+            XCTAssertGreaterThanOrEqual(rec.est.level, .good,
+                                        "\(rec.model.name) no debería recomendarse si no corre bien")
+        }
     }
 }

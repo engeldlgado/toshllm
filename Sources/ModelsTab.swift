@@ -227,9 +227,12 @@ private struct FileRow: View {
             }
             Spacer()
             Text(file.sizeGB).font(.caption2).foregroundStyle(.secondary)
-            if models.isDownloaded(fileName: URL(fileURLWithPath: file.path).lastPathComponent) {
+            let fileName = URL(fileURLWithPath: file.path).lastPathComponent
+            if models.isDownloaded(fileName: fileName) {
                 Label(loc.t("Descargado", "Downloaded"), systemImage: "checkmark.circle.fill")
                     .labelStyle(.iconOnly).foregroundStyle(.green)
+            } else if let item = models.downloadItem(fileName: fileName) {
+                InlineDownloadProgress(item: item)
             } else if est.level == .no {
                 Text(loc.t("No cabe", "Won't fit")).font(.caption2).foregroundStyle(.red)
             } else {

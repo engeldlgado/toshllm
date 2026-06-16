@@ -56,8 +56,8 @@ struct CatalogActionButton: View {
                 }
                 .buttonStyle(.borderedProminent)
             }
-        } else if models.isDownloading(fileName: model.fileName) {
-            ProgressView().controlSize(.small)
+        } else if let item = models.downloadItem(fileName: model.fileName) {
+            InlineDownloadProgress(item: item)
         } else if est.level == .no {
             Text(loc.t("No compatible", "Not compatible")).font(.caption).foregroundStyle(.secondary)
         } else {
@@ -66,6 +66,53 @@ struct CatalogActionButton: View {
             } label: {
                 Label(loc.t("Descargar", "Download"), systemImage: "arrow.down.circle")
             }
+        }
+    }
+}
+
+/// Compact live download state for a single file — a determinate bar with a
+/// percentage and pause/cancel — shown inline on a model card so pressing
+/// Download gives immediate, visible feedback with progress.
+struct InlineDownloadProgress: View {
+    @ObservedObject var item: DownloadItem
+    @EnvironmentObject var loc: Localizer
+
+    var body: some View {
+        switch item.phase {
+        case .preparing:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(loc.t("Preparando…", "Preparing…")).font(.caption2).foregroundStyle(.secondary)
+            }
+        case .verifying:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(loc.t("Verificando…", "Verifying…")).font(.caption2).foregroundStyle(.secondary)
+            }
+        case .downloading, .paused:
+            HStack(spacing: 7) {
+                VStack(alignment: .trailing, spacing: 2) {
+                    ProgressView(value: item.progress).frame(width: 88)
+                    Text("\(Int(item.progress * 100))%  ·  \(Int(item.receivedMB))/\(Int(item.totalMB)) MB")
+                        .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                }
+                Button {
+                    item.phase == .paused ? item.resume() : item.pause()
+                } label: {
+                    Image(systemName: item.phase == .paused ? "play.circle" : "pause.circle")
+                }
+                .buttonStyle(.borderless)
+                .help(item.phase == .paused ? loc.t("Reanudar", "Resume") : loc.t("Pausar", "Pause"))
+                Button { item.cancel() } label: { Image(systemName: "xmark.circle") }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help(loc.t("Cancelar", "Cancel"))
+            }
+        case .finished:
+            Label(loc.t("Listo", "Done"), systemImage: "checkmark.seal.fill")
+                .foregroundStyle(.green).font(.caption)
+        case .failed(let message):
+            Label(loc.t("Error", "Failed"), systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.red).font(.caption).help(message)
         }
     }
 }

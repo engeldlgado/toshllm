@@ -169,10 +169,19 @@ struct SettingsView: View {
 
             Section(loc.t("Inferencia y contexto", "Inference & context")) {
                 Picker(loc.t("Contexto", "Context"), selection: $ctx) {
-                    ForEach([4096, 8192, 16384, 32768, 65536], id: \.self) { Text("\($0) tokens").tag($0) }
+                    ForEach([4096, 8192, 16384, 32768, 65536, 131072, 262144], id: \.self) { n in
+                        Text("\(n / 1024)k tokens").tag(n)
+                    }
                 }
                 .help(loc.t("Tamaño máximo de la conversación en tokens. Más contexto = más memoria para el KV cache (mira los tipos de abajo para compensar).",
                             "Maximum conversation size in tokens. More context = more KV cache memory (see the types below to compensate)."))
+                if ctx >= 131072 {
+                    Label(loc.t("Contexto muy grande (para pruebas). El KV cache puede no caber en VRAM/RAM; en GPU AMD sin Flash Attention la generación se ralentiza con la profundidad. Cuantiza las claves (q8_0) para compensar; para uso normal 16–32k.",
+                                "Very large context (for testing). The KV cache may not fit in VRAM/RAM; on AMD GPUs without Flash Attention generation slows with depth. Quantize keys (q8_0) to compensate; 16–32k is fine for normal use."),
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Toggle(loc.t("Autocompactar conversaciones largas", "Auto-compact long conversations"), isOn: $chatAutoCompact)
                     .help(loc.t("Al superar ~70% del contexto, el chat resume los mensajes antiguos con el propio modelo y envía solo el resumen + los mensajes recientes. La conversación completa sigue visible y guardada.",
                                 "Past ~70% of the context, the chat summarizes older messages with the model itself and sends only the summary + recent messages. The full conversation stays visible and saved."))
