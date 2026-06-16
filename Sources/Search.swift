@@ -26,6 +26,35 @@ final class SearchStore: ObservableObject {
     @Published var searching = false
     @Published var didSearch = false
 
+    @Published var trending: [HFRepo] = []
+    @Published var loadingTrending = false
+
+    /// The GGUF models trending on Hugging Face right now — the "discovery"
+    /// half of the hybrid Browse tab (curated recommendations are computed
+    /// locally elsewhere). Fetched once; rows reuse the same expand-to-files
+    /// path as search, so fit badges appear per quant on expand.
+    func loadTrending(force: Bool = false) async {
+        if force { trending = [] }
+        guard trending.isEmpty, !loadingTrending else { return }
+        loadingTrending = true
+        defer { loadingTrending = false }
+
+        // trendingScore is HF's live trending order; fall back to all-time
+        // downloads if it ever yields nothing, so the tab is never empty.
+        for sort in ["trendingScore", "downloads"] {
+            var comps = URLComponents(string: "https://huggingface.co/api/models")!
+            comps.queryItems = [
+                URLQueryItem(name: "filter", value: "gguf"),
+                URLQueryItem(name: "sort", value: sort),
+                URLQueryItem(name: "limit", value: "15"),
+            ]
+            guard let url = comps.url,
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let repos = try? JSONDecoder().decode([HFRepo].self, from: data) else { continue }
+            if !repos.isEmpty { trending = repos; return }
+        }
+    }
+
     func search() async {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }

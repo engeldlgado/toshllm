@@ -116,6 +116,44 @@ final class LiveStream: ObservableObject {
     }
 }
 
+/// Thread-safe hand-off of the latest streaming snapshot from the off-main SSE
+/// reader (writer) to the main-actor display pump (reader). The reader writes
+/// without ever awaiting the main actor, so a slow render cannot stop it from
+/// draining the socket. Previously the reader awaited `MainActor.run` on every
+/// flush; when a frame was expensive (a long transcript), the reader stopped
+/// reading, the TCP buffer filled, and llama-server blocked on send — stalling
+/// its decode in multi-second bursts. Decoupling removes that backpressure.
+final class StreamBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reasoning = ""
+    private var visible = ""
+    private var speed: Double?
+    private var dirty = false
+    private var done = false
+
+    func write(reasoning: String, visible: String, speed: Double?) {
+        lock.lock()
+        self.reasoning = reasoning
+        self.visible = visible
+        if let speed { self.speed = speed }
+        dirty = true
+        lock.unlock()
+    }
+
+    func finish() {
+        lock.lock(); done = true; dirty = true; lock.unlock()
+    }
+
+    /// The latest snapshot if it changed since the last take (or the stream
+    /// ended); nil when there is nothing new to render.
+    func take() -> (reasoning: String, visible: String, speed: Double?, done: Bool)? {
+        lock.lock(); defer { lock.unlock() }
+        guard dirty else { return nil }
+        dirty = false
+        return (reasoning, visible, speed, done)
+    }
+}
+
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var conversations: [Conversation] = []
@@ -238,10 +276,32 @@ final class ChatStore: ObservableObject {
 
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
 
+        let buffer = StreamBuffer()
+        // Main-actor display pump: the ONLY thing that touches the UI during
+        // streaming. It pulls the latest snapshot at a length-scaled rate and
+        // drops intermediate frames, so render cost stays off the reader's
+        // path. The reader (below) just writes to `buffer` and never awaits the
+        // main actor — that is what keeps a slow frame from backpressuring the
+        // socket and stalling the engine's decode.
+        let pump = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let snap = buffer.take() else {
+                    try? await Task.sleep(for: .milliseconds(40))
+                    continue
+                }
+                if snap.done { break }   // finish() publishes the final transcript
+                self?.live.update(reasoning: snap.reasoning, visible: snap.visible, speed: snap.speed)
+                self?.noteStreamActivity()
+                let n = snap.visible.count
+                let ms = n > 12000 ? 600 : n > 6000 ? 350 : n > 2500 ? 180 : 80
+                try? await Task.sleep(for: .milliseconds(ms))
+            }
+        }
+
         // Detached: SSE parsing must stay off the main actor, otherwise UI
         // rendering throttles token consumption on long responses and the
         // measured t/s drops even though the server keeps generating.
-        task = Task.detached(priority: .userInitiated) { [weak self] in
+        task = Task.detached(priority: .userInitiated) { [weak self, buffer, pump] in
             var nTokens = 0
             var tFirst: Date?
             // Token arrival times within the last seconds; drives the live
@@ -260,18 +320,19 @@ final class ChatStore: ObservableObject {
                 return "<think>" + reasoning + (visible.isEmpty ? "" : "</think>" + visible)
             }
 
-            // Publishes a snapshot to the UI at ~12 Hz; accumulation between
-            // flushes happens locally so the UI never re-renders per token.
-            func flush(force: Bool = false) async {
+            // Hands the latest snapshot to the display pump at most ~12 Hz.
+            // Non-blocking: it only writes to the lock-protected buffer, never
+            // awaits the main actor — so the reader keeps draining the socket
+            // even while a frame renders. Throttling here (rather than writing
+            // every token) also keeps `visible`'s COW append amortized O(1):
+            // the buffer shares the string only once per interval.
+            func flush() {
                 let now = Date()
-                // Re-rendering the whole Markdown transcript on the main thread
-                // gets costlier as the answer grows, and each flush awaits the
-                // main actor — so a fixed 12 Hz lets a long response's render
-                // fall behind generation (and keep rendering after it ends).
-                // Scale the interval with length so the UI stays in step.
-                let n = visible.count
-                let interval: TimeInterval = n > 12000 ? 0.6 : n > 6000 ? 0.35 : n > 2500 ? 0.18 : 0.08
-                guard force || now.timeIntervalSince(lastFlush) > interval else { return }
+                let interval: TimeInterval = {
+                    let n = visible.count
+                    return n > 12000 ? 0.6 : n > 6000 ? 0.35 : n > 2500 ? 0.18 : 0.08
+                }()
+                guard now.timeIntervalSince(lastFlush) > interval else { return }
                 lastFlush = now
                 if let cut = stamps.firstIndex(where: { now.timeIntervalSince($0) < 3 }) {
                     stamps.removeFirst(cut)
@@ -283,16 +344,7 @@ final class ChatStore: ObservableObject {
                     let dt = now.timeIntervalSince(first)
                     if dt > 0.3 { speed = Double(stamps.count - 1) / dt }
                 }
-                let reasoningSnapshot = reasoning
-                let visibleSnapshot = visible
-                let newSpeed = speed
-                let store = self
-                await MainActor.run {
-                    store?.live.update(reasoning: reasoningSnapshot,
-                                       visible: visibleSnapshot,
-                                       speed: newSpeed)
-                    store?.noteStreamActivity()
-                }
+                buffer.write(reasoning: reasoning, visible: visible, speed: speed)
             }
 
             do {
@@ -380,7 +432,7 @@ final class ChatStore: ObservableObject {
                         if tFirst == nil { tFirst = now }
                         nTokens += 1
                         stamps.append(now)
-                        await flush()
+                        flush()
                     }
                     // Keep consuming after finish_reason: llama-server sends
                     // the final usage counters in a later SSE event before
@@ -398,6 +450,9 @@ final class ChatStore: ObservableObject {
                     await MainActor.run { store?.lastError = message }
                 }
             }
+
+            // Tell the pump to stop; the final transcript is published below.
+            buffer.finish()
 
             let finalSpeed: Double? = tFirst.flatMap { start in
                 let dt = Date().timeIntervalSince(start)
@@ -422,6 +477,7 @@ final class ChatStore: ObservableObject {
                 store?.finish(conversation: convID, text: finalText, speed: finalSpeed)
                 store?.compactIfNeeded(conversation: convID, port: port)
             }
+            pump.cancel()
         }
     }
 
@@ -848,7 +904,16 @@ struct NativeChatView: View {
                                 // generation ends (onChange of chat.generating).
                                 guard pinnedToBottom else { return }
                                 let now = Date()
-                                guard now.timeIntervalSince(followClock.last) > 0.3 else { return }
+                                // scrollTo re-measures the whole transcript, a
+                                // pass that grows with the answer. Back off the
+                                // follow rate as the answer gets longer so the
+                                // per-second layout cost stays bounded (that
+                                // cost, not the backend, is what made very long
+                                // answers render progressively slower). The
+                                // position is settled when generation ends.
+                                let n = chat.live.visibleText.count
+                                let interval: TimeInterval = n > 12000 ? 1.0 : n > 6000 ? 0.6 : 0.3
+                                guard now.timeIntervalSince(followClock.last) > interval else { return }
                                 followClock.last = now
                                 proxy.scrollTo("chatBottom", anchor: .bottom)
                             }

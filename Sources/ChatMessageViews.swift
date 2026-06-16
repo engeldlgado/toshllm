@@ -246,7 +246,7 @@ struct StreamingMessageBubble: View {
                     }
 
                     if !live.visibleText.isEmpty {
-                        RichText(text: live.visibleText)
+                        RichText(text: live.visibleText, streaming: true)
                     }
 
                     HStack(spacing: 8) {

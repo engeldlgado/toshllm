@@ -15,20 +15,81 @@ private enum MDBlock: Equatable {
 
 struct RichText: View {
     let text: String
+    /// While true, only the settled portion of `text` is parsed as Markdown and
+    /// the still-growing tail is rendered as plain text (see `body`). Off for
+    /// finished messages, which are always fully formatted.
+    var streaming = false
+
+    // Caches the parsed blocks of the settled prefix so a flush only re-parses
+    // when that prefix actually changes (i.e. when a new block boundary is
+    // reached), not on every token. Held in @State so it survives view updates;
+    // it's a plain reference, so mutating it never invalidates the view.
+    @State private var cache = BlockCache()
 
     var body: some View {
-        let blocks = Self.parse(text)
+        // While streaming, format only the settled text (everything up to the
+        // last block boundary) and render the in-progress tail plainly. The
+        // settled blocks are parsed once per boundary (cached) and frozen by
+        // Equatable below, so the expensive inline-Markdown/AttributedString
+        // work never runs on the hot path. The tail — which changes on every
+        // flush — is rendered by PlainGrowingText (chunked + frozen), and snaps
+        // to full formatting the moment its block closes.
+        //
+        // Without this the trailing block re-ran a full Markdown parse on every
+        // token (O(n²) over a long answer); that re-layout starved the GPU —
+        // which also drives Metal inference — and stalled generation on discrete
+        // AMD GPUs.
+        let (settled, tail) = streaming ? Self.splitSettled(text) : (text, "")
+        let blocks = cache.blocks(for: settled)
         VStack(alignment: .leading, spacing: 8) {
             // Positional identity keeps each block's view alive across flushes;
-            // wrapping it in an Equatable view means SwiftUI re-lays-out only the
-            // block whose value changed. While streaming that is just the last,
-            // growing block — the completed blocks above it are frozen, so a long
-            // answer no longer re-renders the whole transcript on every token.
-            // That full re-layout was starving the GPU (which also drives Metal
-            // inference) and stalling generation on discrete AMD GPUs.
+            // the Equatable wrapper means SwiftUI re-lays-out only the block
+            // whose value changed — and while streaming the settled blocks above
+            // the tail never change, so they stay frozen.
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 MDBlockView(block: block).equatable()
             }
+            if !tail.isEmpty {
+                PlainGrowingText(text: tail)
+            }
+        }
+    }
+
+    /// Splits `text` into the settled prefix (safe to format) and the
+    /// in-progress tail. The boundary is the last blank line that is *not*
+    /// inside an open code fence; everything after it may still change as more
+    /// tokens arrive, so it is rendered plainly until its block closes.
+    private static func splitSettled(_ text: String) -> (settled: String, tail: String) {
+        let lines = text.components(separatedBy: "\n")
+        var inFence = false
+        var fenceChar: Character = "`"
+        var fenceLen = 0
+        var settledLines = 0
+        for (i, line) in lines.enumerated() {
+            if let f = fenceInfo(line) {
+                if !inFence {
+                    inFence = true; fenceChar = f.char; fenceLen = f.length
+                } else if f.info.isEmpty, f.char == fenceChar, f.length >= fenceLen {
+                    inFence = false
+                }
+            } else if !inFence, line.trimmingCharacters(in: .whitespaces).isEmpty {
+                settledLines = i + 1
+            }
+        }
+        let settled = lines[..<settledLines].joined(separator: "\n")
+        let tail = lines[settledLines...].joined(separator: "\n")
+        return (settled, tail)
+    }
+
+    /// Memoizes the parsed blocks of the settled prefix. Re-parses only when the
+    /// settled string changes, turning a per-flush full parse into one parse per
+    /// new block boundary.
+    private final class BlockCache {
+        private var key = "\u{0}"   // sentinel so an empty prefix parses once
+        private var cached: [MDBlock] = []
+        func blocks(for settled: String) -> [MDBlock] {
+            if settled != key { cached = RichText.parse(settled); key = settled }
+            return cached
         }
     }
 
@@ -174,6 +235,55 @@ struct RichText: View {
         }
         return attr
     }
+}
+
+/// Renders the still-growing tail of a streaming answer cheaply. Completed
+/// line-chunks are frozen (Equatable) so they lay out once; only the last,
+/// growing chunk re-renders per flush — turning the tail's per-flush cost from
+/// O(n) into O(1). Without this a single huge block (e.g. a long code listing,
+/// which never produces a settling blank line so the whole thing stays in the
+/// tail) re-laid-out in full on every token and the UI crawled far behind the
+/// already-finished backend.
+private struct PlainGrowingText: View {
+    let text: String
+    /// Lines per frozen chunk: small enough that the live remainder stays cheap
+    /// to re-render, large enough that chunk boundaries are infrequent.
+    private static let chunkLines = 50
+
+    var body: some View {
+        var lines = text.components(separatedBy: "\n")
+        // An open code fence streams in monospace (it snaps to a full CodeBlock
+        // once the closing fence settles the block). Drop the opening ```/~~~
+        // line while the fence is still open.
+        var font: Font = .body
+        if let first = lines.first?.trimmingCharacters(in: .whitespaces),
+           first.hasPrefix("```") || first.hasPrefix("~~~") {
+            font = .system(size: 12, design: .monospaced)
+            lines.removeFirst()
+        }
+        let complete = lines.count / Self.chunkLines
+        let chunks = stride(from: 0, to: complete * Self.chunkLines, by: Self.chunkLines)
+            .map { lines[$0 ..< $0 + Self.chunkLines].joined(separator: "\n") }
+        let rest = lines[(complete * Self.chunkLines)...].joined(separator: "\n")
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(chunks.enumerated()), id: \.offset) { _, chunk in
+                FrozenChunk(text: chunk, font: font).equatable()
+            }
+            if !rest.isEmpty {
+                Text(verbatim: rest).font(font).textSelection(.enabled)
+            }
+        }
+    }
+}
+
+/// One settled line-chunk of a streaming tail. Equatable on its text alone (the
+/// font is constant for a given chunk), so once its lines stop changing SwiftUI
+/// never re-lays-it-out again.
+private struct FrozenChunk: View, Equatable {
+    let text: String
+    let font: Font
+    static func == (a: FrozenChunk, b: FrozenChunk) -> Bool { a.text == b.text }
+    var body: some View { Text(verbatim: text).font(font).textSelection(.enabled) }
 }
 
 /// Renders one parsed Markdown block. Equatable on its block value so that,

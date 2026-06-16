@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum Section_: String, CaseIterable, Identifiable {
-    case dashboard, chat, models, benchmarks, docs, settings, about
+    case dashboard, chat, models, benchmarks, docs, logs, settings, about
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -10,6 +10,7 @@ enum Section_: String, CaseIterable, Identifiable {
         case .models: return "shippingbox"
         case .benchmarks: return "speedometer"
         case .docs: return "book"
+        case .logs: return "list.bullet.rectangle"
         case .settings: return "slider.horizontal.3"
         case .about: return "info.circle"
         }
@@ -21,6 +22,7 @@ enum Section_: String, CaseIterable, Identifiable {
         case .models: return loc.t("Modelos", "Models")
         case .benchmarks: return "Benchmarks"
         case .docs: return loc.t("Documentación", "Docs")
+        case .logs: return loc.t("Registro", "Logs")
         case .settings: return loc.t("Ajustes", "Settings")
         case .about: return loc.t("Acerca de", "About")
         }
@@ -47,6 +49,7 @@ struct ControlPanelView: View {
             case .models: ModelsView()
             case .benchmarks: BenchmarksView()
             case .docs: DocsView()
+            case .logs: LogsView()
             case .settings: SettingsView()
             case .about: AboutView()
             }

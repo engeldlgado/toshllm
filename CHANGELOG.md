@@ -3,6 +3,28 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.19] - 2026-06-16
+
+### Added
+- **Logs tab** — full-height server log with search, severity filter
+  (all/warnings/errors), follow toggle, copy and diagnostics export.
+- **More recommended models** — picks per use case: fastest, everyday (8–9B),
+  top quality and coding.
+- **Live "Trending on Hugging Face"** list in the Models tab.
+
+### Changed
+- **Models tab redesigned** — cards instead of a dense list, split into
+  Recommended / Browse / My models.
+- **Recommendations are hardware-aware** — chosen from the AMD VRAM tiers real
+  Intel Macs and Hackintoshes use.
+- **Catalog refreshed** — added Llama-3.1-8B, GLM-4-9B and Gemma-4 (12B and the
+  26B-A4B MoE).
+
+### Fixed
+- **Long answers no longer slow down or stall generation.** The chat reader was
+  decoupled from rendering, so a slow frame can't backpressure the engine; the
+  streamed text is now drawn incrementally instead of fully re-parsed each token.
+
 ## [0.81.18] - 2026-06-16
 
 ### Fixed

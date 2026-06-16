@@ -136,19 +136,53 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var recommendationCard: some View {
-        if let (model, est) = Catalog.recommended(for: hardware) {
+        let recs = Catalog.recommendations(for: hardware)
+        if !recs.isEmpty {
             Card(title: loc.t("Recomendado para tu equipo", "Recommended for your machine"),
                  icon: "star.fill") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(model.name).font(.headline)
-                        Text(model.detail(loc.isSpanish)).font(.caption).foregroundStyle(.secondary)
-                        EstimateLine(est: est)
+                Text(loc.t("Tu equipo corre bien varios modelos; elige según lo que necesites.",
+                           "Your machine runs several models well — pick by what you need."))
+                    .font(.caption).foregroundStyle(.secondary)
+                VStack(spacing: 0) {
+                    ForEach(Array(recs.enumerated()), id: \.element.id) { idx, rec in
+                        if idx > 0 { Divider().padding(.vertical, 9) }
+                        recommendationRow(rec)
                     }
-                    Spacer()
-                    CatalogActionButton(model: model, est: est)
                 }
+                .padding(.top, 4)
             }
+        }
+    }
+
+    private func recommendationRow(_ rec: Catalog.Recommendation) -> some View {
+        let style = roleStyle(rec.role)
+        return HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Label(style.text, systemImage: style.icon)
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(style.color.opacity(0.18), in: Capsule())
+                        .foregroundStyle(style.color)
+                    Text(rec.model.name).font(.subheadline.weight(.semibold))
+                    Text(String(format: "%.1f GB", rec.model.spec.fileGB))
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if rec.model.spec.isMoE { MoEBadge() }
+                }
+                Text(rec.model.detail(loc.isSpanish)).font(.caption).foregroundStyle(.secondary)
+                EstimateLine(est: rec.est)
+            }
+            Spacer(minLength: 8)
+            CatalogActionButton(model: rec.model, est: rec.est)
+        }
+    }
+
+    private func roleStyle(_ role: Catalog.Recommendation.Role) -> (text: String, icon: String, color: Color) {
+        switch role {
+        case .fast:     return (loc.t("Más rápido", "Fastest"), "hare.fill", .green)
+        case .balanced: return (loc.t("Equilibrado", "Balanced"), "scalemass.fill", .blue)
+        case .quality:  return (loc.t("Máxima calidad", "Top quality"), "sparkles", .purple)
+        case .coding:   return (loc.t("Programación", "Coding"), "chevron.left.forwardslash.chevron.right", .orange)
         }
     }
 

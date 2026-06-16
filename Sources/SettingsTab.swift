@@ -7,6 +7,7 @@ struct SettingsView: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var profileStore: ProfileStore
+    @EnvironmentObject var control: ControlPanelState
 
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
     @AppStorage(SettingsKeys.faAmd) private var faAmd = false
@@ -258,67 +259,16 @@ struct SettingsView: View {
             }
 
             Section(loc.t("Registro del servidor", "Server log")) {
-                HStack {
-                    Button {
-                        exportDiagnostics()
-                    } label: {
-                        Label(loc.t("Exportar diagnóstico…", "Export diagnostics…"),
-                              systemImage: "square.and.arrow.up")
-                    }
-                    .help(loc.t("Genera un archivo con tu hardware, configuración y el registro reciente, listo para adjuntar a un reporte de problema.",
-                                "Creates a file with your hardware, settings and recent log, ready to attach to an issue report."))
-                    Button {
-                        NSWorkspace.shared.activateFileViewerSelecting([server.logFileURL])
-                    } label: {
-                        Label(loc.t("Log completo en Finder", "Full log in Finder"),
-                              systemImage: "doc.text.magnifyingglass")
-                    }
-                    .help(loc.t("El registro completo persiste en disco con rotación automática.",
-                                "The complete log persists on disk with automatic rotation."))
+                Button {
+                    control.section = .logs
+                } label: {
+                    Label(loc.t("Abrir registro completo", "Open full log"),
+                          systemImage: "list.bullet.rectangle")
                 }
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        Text(server.log.isEmpty ? loc.t("(sin salida todavía)", "(no output yet)") : server.log)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .id("logEnd")
-                    }
-                    .frame(height: 200)
-                    .onChange(of: server.log) { _, _ in proxy.scrollTo("logEnd", anchor: .bottom) }
-                }
+                .help(loc.t("El registro del servidor, con búsqueda, filtros y exportación, está en la pestaña Registro.",
+                            "The server log — with search, filters and export — lives in the Logs tab."))
             }
         }
         .formStyle(.grouped)
-    }
-
-    private func exportDiagnostics() {
-        let settings = ServerSettings.fromDefaults()
-        let logTail = (try? String(contentsOf: server.logFileURL, encoding: .utf8))?
-            .split(separator: "\n").suffix(250).joined(separator: "\n") ?? server.log
-        let gpu = hardware.bestGPU.map { "\($0.name) (\($0.vramMB) MB VRAM)" } ?? "—"
-        let report = """
-        ToshLLM \(AppInfo.version) — diagnostics
-        Date: \(Date().formatted(.iso8601))
-
-        ## Hardware
-        CPU: \(hardware.cpuBrand) (\(hardware.physicalCores)c/\(hardware.logicalCores)t)
-        RAM: \(Int(hardware.ramGB)) GB
-        GPU: \(gpu)
-        Arch: \(hardware.arch)
-
-        ## Configuration
-        model: \(URL(fileURLWithPath: settings.modelPath).lastPathComponent)
-        engine: \(settings.serverBinary)
-        args: \(settings.arguments.joined(separator: " "))
-
-        ## Recent log
-        \(logTail)
-        """
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "toshllm-diagnostics.txt"
-        if panel.runModal() == .OK, let url = panel.url {
-            try? report.write(to: url, atomically: true, encoding: .utf8)
-        }
     }
 }
