@@ -68,8 +68,13 @@ struct ServerSettings {
         args += ["--cache-ram", String(cacheRAM)]
         // Reuse shifted KV chunks when a prompt diverges mid-way (agent
         // clients edit their prompts between turns); harmlessly ignored
-        // where unsupported.
-        args += ["--cache-reuse", "256"]
+        // where unsupported. The experimental AMD Flash Attention kernel reads
+        // the KV cache directly and does not account for the chunk shifting that
+        // --cache-reuse performs on a quantized cache (it segfaults on the next
+        // attention op), so skip it while that kernel is active.
+        if !faAmd {
+            args += ["--cache-reuse", "256"]
+        }
         if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }

@@ -97,7 +97,14 @@ Measured on an RX 6700 XT (decode, `tg`, llama-bench), GPU kernel vs the CPU fal
 | Qwen3-8B, turbo3 (head 128) | 1k | 3.9 t/s | **30.3 t/s** |
 | 9B coder, turbo3 (head 256) | 1k | 13.6 t/s | **30.8 t/s** |
 
-Prompt processing still runs on the CPU (the prefill kernel genuinely needs the missing hardware feature), so this accelerates generation, not the initial prompt. It remains experimental and off by default. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
+The same kernel handles **prompt processing** too: although it is the "vec" decode kernel rather than the matrix-unit "mm" kernel a fully-equipped GPU would use for prefill, running it on the GPU still crushes the CPU fallback that quantized KV would otherwise force — and, unlike the CPU path, it stays flat with depth:
+
+| KV (8B), prompt processing | pp2048 CPU | pp2048 AMD kernel |
+|---|---:|---:|
+| q8_0 | 40 t/s | **100 t/s** |
+| turbo3 | 6 t/s | **97 t/s** |
+
+It remains experimental and off by default. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
 
 ## Performance reference
 

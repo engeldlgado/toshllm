@@ -251,7 +251,14 @@ final class ChatStore: ObservableObject {
             // flushes happens locally so the UI never re-renders per token.
             func flush(force: Bool = false) async {
                 let now = Date()
-                guard force || now.timeIntervalSince(lastFlush) > 0.08 else { return }
+                // Re-rendering the whole Markdown transcript on the main thread
+                // gets costlier as the answer grows, and each flush awaits the
+                // main actor — so a fixed 12 Hz lets a long response's render
+                // fall behind generation (and keep rendering after it ends).
+                // Scale the interval with length so the UI stays in step.
+                let n = visible.count
+                let interval: TimeInterval = n > 12000 ? 0.6 : n > 6000 ? 0.35 : n > 2500 ? 0.18 : 0.08
+                guard force || now.timeIntervalSince(lastFlush) > interval else { return }
                 lastFlush = now
                 if let cut = stamps.firstIndex(where: { now.timeIntervalSince($0) < 3 }) {
                     stamps.removeFirst(cut)
@@ -279,6 +286,11 @@ final class ChatStore: ObservableObject {
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                // Idle timeout between SSE packets. A long prompt over a quantized
+                // KV cache prefills on the CPU (Flash Attention needs a hardware
+                // feature AMD lacks) and can take minutes with no token arriving,
+                // so keep a generous 3-minute guard instead of the 60s default.
+                req.timeoutInterval = 180
                 if let key = ServerSettings.activeAPIKey() {
                     req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
                 }

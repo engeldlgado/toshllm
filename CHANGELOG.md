@@ -3,6 +3,26 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.15] - 2026-06-15
+
+### Added
+- **AMD Flash Attention kernel now runs prompt processing on the GPU too**, not
+  just generation. For quantized/turbo KV (which forces Flash Attention) the CPU
+  fallback collapses with depth — e.g. turbo prefill at 2k tokens ~6 t/s — while
+  the GPU kernel stays flat at ~100 t/s (q8 2.5×, turbo 16× faster at 2k).
+  Validated with needle-in-haystack retrieval over long contexts. This removes
+  the multi-minute prompt-processing stalls on long conversations.
+
+### Fixed
+- **Crash with the AMD kernel + quantized KV cache.** `--cache-reuse` shifts KV
+  chunks when a prompt diverges mid-way (e.g. on auto-compact); the kernel reads
+  the quantized cache directly and did not account for that shift, segfaulting on
+  the next attention op. Cache reuse is now disabled while the AMD kernel is active.
+- **Chat could time out on long prompts.** The streaming idle timeout was raised
+  to 3 minutes as a safety net (largely moot now that prompt processing runs on GPU).
+- **Slow/laggy chat rendering on long answers.** The Markdown re-render now flushes
+  adaptively (less often as the answer grows) so it keeps pace with generation.
+
 ## [0.81.14] - 2026-06-15
 
 ### Added
