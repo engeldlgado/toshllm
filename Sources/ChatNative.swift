@@ -186,6 +186,10 @@ final class ChatStore: ObservableObject {
     private var watchdog: Task<Void, Never>?
     private var lastStreamActivity = Date()
     private var sawFirstToken = false
+    /// Which conversation's KV is currently loaded in the engine's slot 0, when
+    /// disk cache persistence is on. Reset to nil whenever a fresh engine starts
+    /// (empty slots), so the next turn restores the active conversation.
+    private var slotConvID: UUID?
 
     private var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -202,6 +206,12 @@ final class ChatStore: ObservableObject {
             currentID = empty.id
         } else {
             newConversation()
+        }
+        pruneOrphanSlots()
+        // A fresh engine has empty KV slots: forget which conversation slot 0
+        // held, so the next turn restores the active one's persisted cache.
+        NotificationCenter.default.addObserver(forName: .engineDidStart, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.slotConvID = nil }
         }
     }
 
@@ -221,6 +231,10 @@ final class ChatStore: ObservableObject {
         conversations.removeAll { $0.id == c.id }
         if currentID == c.id { currentID = conversations.first?.id }
         if conversations.isEmpty { newConversation() }
+        // Drop its persisted KV slot file too, and forget it if it was loaded.
+        try? FileManager.default.removeItem(
+            at: ServerSettings.slotCacheDir.appendingPathComponent(Self.slotFile(c.id)))
+        if slotConvID == c.id { slotConvID = nil }
         save()
     }
 
@@ -358,6 +372,10 @@ final class ChatStore: ObservableObject {
             }
 
             do {
+                // Restore this conversation's persisted KV (if any) so the slot
+                // holds the unchanged history and only the new turn is prefilled.
+                await self?.prepareSlot(convID: convID, port: port)
+
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -383,6 +401,8 @@ final class ChatStore: ObservableObject {
                 if !thinking {
                     body["chat_template_kwargs"] = ["enable_thinking": false]
                 }
+                // Pin to slot 0 so the saved/restored KV always matches the chat.
+                if self?.slotPersistEnabled == true { body["id_slot"] = 0 }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                 let (bytes, response) = try await ChatStore.streamingSession.bytes(for: req)
@@ -487,6 +507,11 @@ final class ChatStore: ObservableObject {
                 store?.finish(conversation: convID, text: finalText, speed: finalSpeed)
                 store?.compactIfNeeded(conversation: convID, port: port)
             }
+            // Persist the conversation's KV after a real answer, so reopening it
+            // (or restarting the engine) skips re-prefilling the history.
+            if !wasCancelled && !didReportError && hasVisibleAnswer {
+                await self?.saveSlot(convID: convID, port: port)
+            }
             pump.cancel()
         }
     }
@@ -515,6 +540,64 @@ final class ChatStore: ObservableObject {
         watchdog?.cancel()
         watchdog = nil
         save()
+    }
+
+    // MARK: KV slot persistence (turbo engine)
+
+    /// On when the disk-cache setting is enabled and the turbo engine is selected
+    /// (the only engine where slot save/restore is fast on AMD). Read live from
+    /// defaults so toggling it in Settings takes effect on the next turn.
+    nonisolated var slotPersistEnabled: Bool {
+        let d = UserDefaults.standard
+        guard d.bool(forKey: SettingsKeys.persistCache) else { return false }
+        return ServerSettings.isTurbo(d.string(forKey: SettingsKeys.serverBinary) ?? "")
+    }
+
+    nonisolated private static func slotFile(_ id: UUID) -> String { "\(id.uuidString).bin" }
+
+    /// POST /slots/0?action=save|restore (best-effort; a missing file on restore
+    /// just means a cold prefill, which is harmless).
+    nonisolated private func slotAction(_ action: String, convID: UUID, port: Int) async {
+        guard var comps = URLComponents(string: "http://127.0.0.1:\(port)/slots/0") else { return }
+        comps.queryItems = [URLQueryItem(name: "action", value: action)]
+        guard let url = comps.url else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let key = ServerSettings.activeAPIKey() {
+            req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+        }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["filename": Self.slotFile(convID)])
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
+    /// Before a turn: if slot 0 doesn't already hold this conversation, restore
+    /// its persisted KV so only the new tokens get prefilled.
+    func prepareSlot(convID: UUID, port: Int) async {
+        guard slotPersistEnabled, slotConvID != convID else { return }
+        await slotAction("restore", convID: convID, port: port)
+        slotConvID = convID
+    }
+
+    /// After a turn completes: persist the conversation's KV to disk.
+    nonisolated func saveSlot(convID: UUID, port: Int) async {
+        guard slotPersistEnabled else { return }
+        await slotAction("save", convID: convID, port: port)
+    }
+
+    /// Drop slot files with no matching conversation (deleted while disabled, or
+    /// left over). Bounds disk use to the conversations that still exist.
+    private func pruneOrphanSlots() {
+        let dir = ServerSettings.slotCacheDir
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        let ids = Set(conversations.map { $0.id.uuidString })
+        for f in files where f.pathExtension == "bin" {
+            let base = f.deletingPathExtension().lastPathComponent
+            // Only prune per-conversation slot files (named by UUID); leave other
+            // files like the external-client prefix (external.bin) untouched.
+            guard UUID(uuidString: base) != nil else { continue }
+            if !ids.contains(base) { try? FileManager.default.removeItem(at: f) }
+        }
     }
 
     // MARK: stall watchdog

@@ -11,6 +11,7 @@ struct SettingsView: View {
 
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
     @AppStorage(SettingsKeys.faAmd) private var faAmd = false
+    @AppStorage(SettingsKeys.persistCache) private var persistCache = false
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
@@ -23,6 +24,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.concurrencyDisable) private var concurrencyDisable = ServerSettings.defaultConcurrencyDisable
     @AppStorage(SettingsKeys.vramReserve) private var vramReserve = 1024
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
+    @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
     @AppStorage(SettingsKeys.extraArgs) private var extraArgs = ""
     @AppStorage(SettingsKeys.cacheTypeK) private var cacheTypeK = "f16"
     @AppStorage(SettingsKeys.cacheTypeV) private var cacheTypeV = "f16"
@@ -137,6 +139,21 @@ struct SettingsView: View {
                 }
                 .help(loc.t("Qué GPU usa el servidor si tienes varias. 'Predeterminada' deja elegir a Metal.",
                             "Which GPU the server uses if you have several. 'Default' lets Metal choose."))
+                .disabled(multiGPU)
+                if hardware.gpus.count > 1 {
+                    Toggle(loc.t("Repartir el modelo entre todas las GPUs (experimental)",
+                                 "Split model across all GPUs (experimental)"), isOn: $multiGPU)
+                        .help(loc.t("Divide las capas del modelo entre todas las GPUs detectadas (--split-mode layer) en vez de usar una sola, p. ej. para cargar un modelo que no cabe en una. Anula el selector de arriba.",
+                                    "Splits the model's layers across all detected GPUs (--split-mode layer) instead of using one, e.g. to load a model that doesn't fit on a single card. Overrides the picker above."))
+                    if multiGPU {
+                        Label(loc.t("⚠️ Experimental y sin validar en GPU AMD/Metal: el reparto entre GPUs es una ruta distinta que podría dar salida incorrecta o colgar el motor. Verifica que la generación sea coherente y vigila la estabilidad. Necesita más pruebas.",
+                                    "⚠️ Experimental and unvalidated on AMD/Metal: cross-GPU splitting is a different path that could produce wrong output or hang the engine. Check that generation is coherent and watch stability. Needs more testing."),
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .labelStyle(.titleAndIcon)
+                    }
+                }
                 Stepper(loc.t("Capas en GPU (-ngl): \(ngl)", "GPU layers (-ngl): \(ngl)"),
                         value: $ngl, in: 0...99)
                     .help(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM); bájalo solo si la VRAM se desborda.",
@@ -251,6 +268,9 @@ struct SettingsView: View {
                     Toggle(loc.t("Kernel Flash Attention AMD", "AMD Flash Attention kernel"), isOn: $faAmd)
                         .help(loc.t("Activa un kernel Metal propio que ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD (define TOSH_FA_AMD y fuerza -fa activado), para cabezas de 128 y 256. Imprescindible con KV cuantizado/turbo: como ese KV obliga a -fa, sin este kernel la atención cae a CPU y se desploma (p. ej. prefill turbo ~6 → ~100 t/s; generación ~4 → ~30 t/s).",
                                     "Enables a custom Metal kernel that runs attention — both prompt processing and generation — on the AMD GPU (sets TOSH_FA_AMD and forces -fa on), for head dim 128 and 256. Essential with quantized/turbo KV: since that KV requires -fa, without this kernel attention falls back to CPU and collapses (e.g. turbo prefill ~6 → ~100 t/s; generation ~4 → ~30 t/s)."))
+                    Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
+                        .help(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
+                                    "Saves each conversation's KV cache to disk, so reopening a chat or restarting the app skips re-processing the prompt (saves several seconds per turn on long prompts). Requires the AMD Flash Attention kernel; with quantized KV (q8_0/q4_0) the file is smaller and restore is faster. Files live in Application Support and are removed when you delete the conversation."))
                 }
                 if engineSelection.wrappedValue == "custom" {
                     TextField(loc.t("Ruta del llama-server externo", "External llama-server path"), text: $serverBinary)

@@ -3,6 +3,24 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.23] - 2026-06-17
+
+### Added
+- **Remember conversations (disk cache)** — optional, on the experimental engine
+  (Settings). Persists each chat's KV cache, so reopening it or restarting the app
+  skips re-processing the prompt. Reload is byte-exact and verified faithful (same
+  output, even with sampling); on a long chat it reloads in well under a second
+  instead of re-prefilling.
+- **Faster cold start for external clients** (VS Code / Cline): the engine now
+  pre-warms its cache across restarts, so the first request skips the multi-minute
+  prefill of the big fixed prompt (experimental engine, non-MTP models).
+- **Split model across all GPUs** (experimental) — splits the model's layers over
+  every detected GPU instead of one, for machines with multiple cards. Shows a
+  visible warning: it's unvalidated on AMD/Metal and needs testing.
+
+### Changed
+- Unit tests now run locally via `./scripts/test.sh` (points at Xcode for XCTest).
+
 ## [0.81.22] - 2026-06-17
 
 ### Changed

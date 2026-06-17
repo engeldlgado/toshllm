@@ -1,6 +1,11 @@
 import Foundation
 import Metal
 
+extension Notification.Name {
+    /// Posted when a fresh engine process has launched (KV slots are empty).
+    static let engineDidStart = Notification.Name("toshEngineDidStart")
+}
+
 struct GPUDevice: Identifiable, Hashable {
     let index: Int
     let name: String
@@ -46,6 +51,34 @@ struct ServerSettings {
     /// Flash-Attention kernel (gated by the TOSH_FA_AMD env var in the engine).
     /// Forces `-fa 1`; prefill falls back to CPU, so prompt processing is slower.
     var faAmd: Bool = false
+    /// Persist each conversation's KV cache to disk (`--slot-save-path`) so
+    /// reopening a chat — or restarting the app/engine — skips re-processing the
+    /// prompt. Only effective on the turbo engine with the AMD FA kernel: without
+    /// FA, llama.cpp stores the V cache transposed and slot save/restore copies it
+    /// row-by-row, which on AMD's staging path is unusably slow (~13 s vs ~0.1 s).
+    /// Gated to the turbo engine in Settings.
+    var persistCache: Bool = false
+    /// EXPERIMENTAL, needs more testing. Split one model's layers across all
+    /// detected GPUs (`--split-mode layer`) instead of pinning to one. The modern
+    /// Metal backend registers each AMD GPU as a separate device (MTL0, MTL1…), so
+    /// this is possible in principle, but it is UNVALIDATED on AMD/Metal: cross-GPU
+    /// copies are a different path than the host↔device staging the patch covers and
+    /// could corrupt or deadlock. Works the same on both engines. Off by default.
+    var multiGPU: Bool = false
+
+    /// True when the selected binary is the bundled or dev turbo engine.
+    static func isTurbo(_ binary: String) -> Bool {
+        binary.contains("bin-turbo") || binary == turboBinary
+    }
+    var isTurboEngine: Bool { Self.isTurbo(serverBinary) }
+
+    /// Directory where per-conversation KV slot files live.
+    static var slotCacheDir: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ToshLLM/slots")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
 
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
 
@@ -76,6 +109,16 @@ struct ServerSettings {
             args += ["--cache-reuse", "256"]
         }
         if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
+        // EXPERIMENTAL multi-GPU: split layers across all detected Metal devices.
+        // Leaves device selection to llama.cpp (we also skip the single-device env
+        // below). Unvalidated on AMD — see the multiGPU doc comment.
+        if multiGPU { args += ["--split-mode", "layer"] }
+        // Persist KV slots to disk so reopening a chat skips re-prefill. Only on
+        // the turbo engine, where the AMD FA kernel keeps the V cache contiguous
+        // (the official engine's transposed-V save/restore is unusably slow on AMD).
+        if persistCache && isTurboEngine {
+            args += ["--slot-save-path", Self.slotCacheDir.path]
+        }
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         if specMTP && Self.modelHasMTP(at: modelPath) {
@@ -97,7 +140,8 @@ struct ServerSettings {
         var env = ProcessInfo.processInfo.environment
         env["GGML_METAL_CONCURRENCY_DISABLE"] = concurrencyDisable ? "1" : nil
         env["GGML_METAL_VRAM_RESERVE_MB"] = String(vramReserveMB)
-        if gpuIndex >= 0 { env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex) }
+        // Multi-GPU needs all devices visible, so don't pin to a single index.
+        if gpuIndex >= 0 && !multiGPU { env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex) }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
         return env.compactMapValues { $0 }
     }
@@ -163,7 +207,9 @@ struct ServerSettings {
             parallelSlots: int(SettingsKeys.parallelSlots, 1),
             apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),
             specMTP: bool(SettingsKeys.specMTP, false),
-            faAmd: bool(SettingsKeys.faAmd, false))
+            faAmd: bool(SettingsKeys.faAmd, false),
+            persistCache: bool(SettingsKeys.persistCache, false),
+            multiGPU: bool(SettingsKeys.multiGPU, false))
     }
 
     /// Whether a GGUF ships the MTP (multi-token prediction) head. Detected by
@@ -258,6 +304,16 @@ final class ServerController: ObservableObject {
     private var lastStoppedPID: Int32?
     private var currentPort = 8080
     private let fileLog = RotatingFileLog(name: "server.log")
+    /// Whether to pre-warm slot 0 across restarts for external clients (VS Code /
+    /// Cline send a fixed 15-19k-token prefix every request; restoring it makes
+    /// the first request instant instead of a multi-minute prefill). Set per launch:
+    /// needs disk-cache persistence, the turbo engine, and a non-MTP model (MTP's
+    /// extra KV breaks slot restore). The native chat manages its own per-conversation
+    /// slots and simply overrides slot 0 on its first turn, so there's no conflict.
+    private var prewarmActive = false
+    /// Single fixed file for the external-client prefix (not a conversation UUID,
+    /// so the chat's orphan-prune leaves it alone).
+    static var externalSlotFile: URL { ServerSettings.slotCacheDir.appendingPathComponent("external.bin") }
 
     var logFileURL: URL { fileLog.fileURL }
 
@@ -325,6 +381,9 @@ final class ServerController: ObservableObject {
     private func launch(_ settings: ServerSettings) {
         guard state == .starting else { return }   // user hit Stop meanwhile
 
+        prewarmActive = settings.persistCache && settings.isTurboEngine
+            && !ServerSettings.modelHasMTP(at: settings.modelPath)
+
         let p = Process()
         p.executableURL = URL(fileURLWithPath: settings.serverBinary)
         p.arguments = settings.arguments
@@ -360,6 +419,9 @@ final class ServerController: ObservableObject {
             try p.run()
             process = p
             EngineLock.write(pid: p.processIdentifier)
+            // A fresh engine starts with empty KV slots; tell the chat so it
+            // re-restores the active conversation's persisted cache on next turn.
+            NotificationCenter.default.post(name: .engineDidStart, object: nil)
             watchHealth(port: settings.port)
         } catch {
             state = .failed("No se pudo lanzar: \(error.localizedDescription)")
@@ -397,19 +459,51 @@ final class ServerController: ObservableObject {
         if let p = process {
             let pid = p.processIdentifier
             lastStoppedPID = pid
-            p.terminate()
-            // SIGTERM can stall mid-generation; make sure the engine (and its
-            // multi-GB working set) actually exits and frees the memory. The
-            // lockfile is cleared by the termination handler on real exit, so
-            // an engine that survives until app quit is reaped on next launch.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) {
+            let prewarm = prewarmActive
+            let port = currentPort
+            // SIGKILL fallback fires regardless of pid in case the (deferred)
+            // terminate stalls — the engine's multi-GB working set must be freed.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6) {
                 if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            }
+            if prewarm {
+                // Snapshot slot 0 to disk before killing the engine, so the next
+                // launch can restore the fixed external-client prefix. Best-effort,
+                // bounded; terminate runs even if the save fails or times out.
+                Task.detached {
+                    await ServerController.slotAction("save", port: port,
+                                                      file: ServerController.externalSlotFile.lastPathComponent)
+                    p.terminate()
+                }
+            } else {
+                p.terminate()
             }
         } else {
             EngineLock.clear()
         }
         process = nil
         state = .stopped
+    }
+
+    /// POST /slots/0?action=save|restore (best-effort, short timeout). Used to
+    /// pre-warm the external-client prefix across engine restarts.
+    nonisolated static func slotAction(_ action: String, port: Int, file: String) async {
+        guard var comps = URLComponents(string: "http://127.0.0.1:\(port)/slots/0") else { return }
+        comps.queryItems = [URLQueryItem(name: "action", value: action)]
+        guard let url = comps.url else { return }
+        var req = URLRequest(url: url, timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let key = ServerSettings.activeAPIKey() { req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization") }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["filename": file])
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
+    /// Restore the saved external-client prefix into slot 0 (only if a file exists).
+    private func restoreExternalSlot(port: Int) async {
+        guard prewarmActive,
+              FileManager.default.fileExists(atPath: Self.externalSlotFile.path) else { return }
+        await Self.slotAction("restore", port: port, file: Self.externalSlotFile.lastPathComponent)
     }
 
     private var isFailed: Bool { if case .failed = state { return true }; return false }
@@ -423,6 +517,9 @@ final class ServerController: ObservableObject {
                 if let (data, _) = try? await URLSession.shared.data(from: url),
                    String(data: data, encoding: .utf8)?.contains("ok") == true {
                     await MainActor.run { self?.state = .running }
+                    // Pre-warm slot 0 with the last session's prefix so an external
+                    // client's first request skips the multi-minute cold prefill.
+                    await self?.restoreExternalSlot(port: port)
                     return
                 }
                 try? await Task.sleep(for: .seconds(2))

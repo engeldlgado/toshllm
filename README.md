@@ -49,6 +49,13 @@ It opens, detects your hardware, and recommends models that will actually run we
 - **Every parameter explained** — bilingual tooltips and built-in docs (English/Spanish)
 - **Profiles, menu bar mode, auto-start** — save full configurations and switch with one click
 
+### In testing 🧪
+
+These are new and still being validated — enable them in Settings, but expect rough edges:
+
+- **Remember conversations (disk cache)** *(experimental engine)* — persists each chat's KV cache so reopening it, or restarting the app, skips re-processing the prompt; the reload is byte-exact, and a long chat comes back in under a second instead of re-prefilling. Also pre-warms the cache for external clients (VS Code/Cline), so their first request skips the multi-minute cold prefill.
+- **Split model across all GPUs** *(experimental, both engines)* — splits the model's layers over every detected GPU, for machines with multiple cards. Unvalidated on AMD/Metal so far; the UI flags it and it needs real multi-GPU testing.
+
 ### A native chat that stays out of your way
 
 Persistent conversations, Markdown with one-click code copy, and a live tokens/sec readout so you always know how fast the model is going.
@@ -111,6 +118,7 @@ cd toshllm
 ./scripts/build-engines.sh      # clones llama.cpp, applies AMD patches, builds static engines
 ./make-app.sh                   # builds the SwiftUI app and packages dist/ToshLLM.app
 ./scripts/make-dmg.sh v0.81.1   # optional: create an installable DMG
+./scripts/test.sh               # optional: run the unit tests (needs Xcode for XCTest)
 ```
 
 The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for Metal drivers that cap host-visible allocations (now also covering the asynchronous tensor read path that MTP exercises, which previously aborted mid-generation). The other key stability setting (`GGML_METAL_CONCURRENCY_DISABLE`) is already supported upstream and the app sets it automatically.
@@ -238,6 +246,13 @@ Casi todas las herramientas de LLM locales en macOS apuntan a Apple Silicon; los
 - **API compatible con OpenAI** en `http://127.0.0.1:8080`
 - **Cada parámetro explicado** — tooltips bilingües y documentación integrada
 - **Perfiles, modo barra de menú y auto-inicio**
+
+#### En pruebas 🧪
+
+Funciones nuevas, aún en validación — actívalas en Ajustes, pero pueden tener detalles por pulir:
+
+- **Recordar conversaciones (caché en disco)** *(motor experimental)* — guarda la caché KV de cada chat, así al reabrirlo o reiniciar la app no se reprocesa el prompt; la restauración es byte-exacta y un chat largo vuelve en menos de un segundo. También pre-calienta la caché para clientes externos (VS Code/Cline), evitando el prefill frío de varios minutos en la primera petición.
+- **Repartir el modelo entre varias GPUs** *(experimental, ambos motores)* — divide las capas del modelo entre todas las GPUs detectadas, para equipos con varias tarjetas. Sin validar aún en AMD/Metal; la UI lo advierte y necesita pruebas reales con multi-GPU.
 
 ### Instalación
 
