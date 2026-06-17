@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.22] - 2026-06-17
+
+### Changed
+- **Default language is now English.** A fresh install starts in English; your
+  choice in Settings is remembered and always wins.
+
 ## [0.81.21] - 2026-06-16
 
 ### Fixed

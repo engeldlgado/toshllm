@@ -14,7 +14,8 @@ import SwiftUI
 /// regenerate the English key template translators start from.
 final class Localizer: ObservableObject {
     /// Active language code ("es", "en", or any bundled community code).
-    @Published var language: String = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "es" {
+    /// Defaults to English; the user can switch in Settings.
+    @Published var language: String = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en" {
         didSet {
             UserDefaults.standard.set(language, forKey: SettingsKeys.language)
             loadOverlay()

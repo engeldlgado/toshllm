@@ -267,7 +267,7 @@ final class ServerController: ObservableObject {
     /// passed through, so the bundled console matches the language picked in
     /// Settings and shows the GPU actually in use (instead of guessing).
     var webChatURL: URL {
-        let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "es"
+        let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en"
         var comps = URLComponents(string: "http://127.0.0.1:\(currentPort)/")!
         var items = [URLQueryItem(name: "lang", value: lang)]
         if let gpu = ServerController.availableGPUs().max(by: { $0.vramMB < $1.vramMB })?.name {
