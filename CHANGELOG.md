@@ -3,6 +3,17 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.21] - 2026-06-16
+
+### Fixed
+- **Gemma 4 no longer runs its attention on the CPU.** Its global-attention
+  layers use head dim 512, which the AMD Flash-Attention kernel didn't cover, so
+  they fell back to the CPU during prompt processing. The kernel now handles head
+  dim 512 (NSG=8) and auto-enables for these models on the experimental engine.
+  - With quantized KV (q8_0) the global layers go ~8 → ~36 tokens/s (≈4× over the
+    CPU fallback); output verified coherent.
+  - No regression on existing models (4B/8B head 128, 9B coder head 256 unchanged).
+
 ## [0.81.20] - 2026-06-16
 
 ### Added

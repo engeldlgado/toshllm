@@ -55,7 +55,7 @@ struct ServerSettings {
             "-ngl", String(ngl),
             "-c", String(ctx),
             "-t", String(threads),
-            "-fa", faAmd ? "1" : flashAttn,
+            "-fa", effectiveFaAmd ? "1" : flashAttn,
             "--host", "127.0.0.1",
             "--port", String(port),
         ]
@@ -72,7 +72,7 @@ struct ServerSettings {
         // the KV cache directly and does not account for the chunk shifting that
         // --cache-reuse performs on a quantized cache (it segfaults on the next
         // attention op), so skip it while that kernel is active.
-        if !faAmd {
+        if !effectiveFaAmd {
             args += ["--cache-reuse", "256"]
         }
         if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
@@ -98,7 +98,7 @@ struct ServerSettings {
         env["GGML_METAL_CONCURRENCY_DISABLE"] = concurrencyDisable ? "1" : nil
         env["GGML_METAL_VRAM_RESERVE_MB"] = String(vramReserveMB)
         if gpuIndex >= 0 { env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex) }
-        if faAmd { env["TOSH_FA_AMD"] = "1" }
+        if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
         return env.compactMapValues { $0 }
     }
 
@@ -174,6 +174,50 @@ struct ServerSettings {
     /// or "MTP": that word lives in the model's `general.name` (these repos are
     /// named "…-MTP-GGUF"), which would make every model a false positive.
     /// Cached per path+size so repeated calls are free.
+    /// True when the model's attention head dim exceeds 256 (Gemma 4's global
+    /// layers use key_length 512). The AMD Flash-Attention kernel only covers
+    /// head dims 128/256/512, and on the bundled official engine only 128/256 —
+    /// so this drives auto-enabling the kernel on the turbo engine, where
+    /// otherwise those layers fall back to CPU. Reads the real uint32 value from
+    /// the GGUF header (`<arch>.attention.key_length`), skipping the `_swa`
+    /// sibling. Cached per path+size.
+    nonisolated static func modelHasBigHeadDim(at path: String) -> Bool {
+        struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0)
+        if let cached = Cache.store[key] { return cached }
+
+        var big = false
+        if let handle = FileHandle(forReadingAtPath: path),
+           let head = try? handle.read(upToCount: 4 * 1024 * 1024) {
+            try? handle.close()
+            let marker = Data("attention.key_length".utf8)
+            var from = head.startIndex
+            while let r = head.range(of: marker, in: from ..< head.endIndex) {
+                from = head.index(after: r.lowerBound)
+                guard let valEnd = head.index(r.upperBound, offsetBy: 8, limitedBy: head.endIndex)
+                else { break }
+                let b = [UInt8](head[r.upperBound ..< valEnd])   // value_type (u32) + value (u32), LE
+                let vt = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
+                guard vt == 4 else { continue }   // GGUF_TYPE_UINT32; else this was key_length_swa
+                let val = UInt32(b[4]) | UInt32(b[5]) << 8 | UInt32(b[6]) << 16 | UInt32(b[7]) << 24
+                if val > 256 { big = true; break }
+            }
+        }
+        Cache.store[key] = big
+        return big
+    }
+
+    /// faAmd as the user set it, OR auto-enabled for big-head-dim models (Gemma
+    /// 4) when running the turbo engine — without the AMD kernel their global
+    /// layers (head_dim 512) fall back to CPU during prompt processing. Gated to
+    /// `bin-turbo` because only that engine ships the dk512 kernel; forcing it on
+    /// the official engine (which lacks it) would push those layers to CPU under
+    /// `-fa 1`, worse than its `-fa 0` GPU path.
+    var effectiveFaAmd: Bool {
+        faAmd || (serverBinary.contains("bin-turbo") && Self.modelHasBigHeadDim(at: modelPath))
+    }
+
     nonisolated static func modelHasMTP(at path: String) -> Bool {
         struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)

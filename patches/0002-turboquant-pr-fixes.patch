@@ -124,7 +124,7 @@ index 32d97cd5..26cc90d1 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 693e2ff6..1d0ece92 100644
+index 693e2ff6..f041714c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -128,6 +128,28 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
@@ -194,7 +194,7 @@ index 693e2ff6..1d0ece92 100644
 +                const bool kv_ok = k_in && v_in && pair_ok;
 +                const int64_t dk = op->src[0]->ne[0];
 +                const bool simple =
-+                    (dk == 128 || dk == 256) &&
++                    (dk == 128 || dk == 256 || dk == 512) &&
 +                    op->src[2]->ne[0] == dk &&   // DK == DV (one head-dim template)
 +                    kv_ok &&
 +                    op->src[3] != NULL &&   // additive mask present
@@ -362,7 +362,7 @@ index 693e2ff6..1d0ece92 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 3e1c5833..e40fc835 100644
+index 3e1c5833..f298ef4b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -2716,6 +2716,34 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
@@ -412,7 +412,7 @@ index 3e1c5833..e40fc835 100644
 +    // exactly those the turbo engine allows: equal type, turbo x turbo (any
 +    // levels), or q8_0 <-> turbo. f16/q4_0 are symmetric-only.
 +    char fa_amd_pipeline[80] = {0};
-+    if (ne00 == ne20 && (ne00 == 128 || ne00 == 256)) {
++    if (ne00 == ne20 && (ne00 == 128 || ne00 == 256 || ne00 == 512)) {
 +        const char * ks = ggml_metal_fa_amd_type_suffix(op->src[1]->type);
 +        const char * vs = ggml_metal_fa_amd_type_suffix(op->src[2]->type);
 +        if (ks && vs && ggml_metal_fa_amd_pair_ok(op->src[1]->type, op->src[2]->type)) {
@@ -479,7 +479,7 @@ index 3e1c5833..e40fc835 100644
 +        // must match the template instantiation for this head dim (see the
 +        // FA_AMD_PAIR macro): 32 for DK=128, 16 for DK=256, which keeps the
 +        // sh_acc threadgroup buffer at 16 KiB either way.
-+        const int fa_amd_nsg = (ne00 == 128) ? 32 : 16;
++        const int fa_amd_nsg = (ne00 == 128) ? 32 : (ne00 == 256) ? 16 : 8;
 +        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, 32, fa_amd_nsg, 1);
 +
 +        return 1;
@@ -489,10 +489,10 @@ index 3e1c5833..e40fc835 100644
      // Intercept before the normal VEC/non-VEC path when conditions are met:
      //   - V is turbo3, K is q8_0 or turbo3
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 344657df..5fbd51d2 100644
+index 344657df..94c0b265 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
-@@ -8500,6 +8500,187 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -8500,6 +8500,190 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NS20
  }
  
@@ -650,9 +650,12 @@ index 344657df..5fbd51d2 100644
 +// both supported head dims for a given (K,V) type pair. NSG is picked per head
 +// dim so the sh_acc threadgroup buffer stays at 16 KiB (safe on any GPU): 32
 +// simdgroups for DK=128, 16 for DK=256.
++// DK=512 (NSG=8) added EXPERIMENTALLY for Gemma 4 global-attention layers.
++// NSG keeps sh_acc at 16 KiB: 32 for DK=128, 16 for DK=256, 8 for DK=512.
 +#define FA_AMD_PAIR(nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST(128, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST(256, 16, nm, kt, nkk, dkf, vt, nkv, dvf)
++    FA_AMD_INST(256, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST(512,  8, nm, kt, nkk, dkf, vt, nkv, dvf)
 +
 +// symmetric pairs
 +FA_AMD_PAIR("kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)
@@ -839,3 +842,243 @@ index e77b39cc..60d9020d 100644
  endif()
  
  # Run the provisioning script every build so source changes in tools/ui/ are
+diff --git a/tools/ui/package-lock.json b/tools/ui/package-lock.json
+index 4d012c81..6c5e0800 100644
+--- a/tools/ui/package-lock.json
++++ b/tools/ui/package-lock.json
+@@ -938,6 +938,7 @@
+ 			"integrity": "sha512-oJrXtQiAXLvT9clCf1K4kxp3eKsQhIaZqxEyowkBcsvZDdZkbWrVmnGknxs5flTD0VGsxrxKgBCZty1EzoiMzA==",
+ 			"dev": true,
+ 			"license": "Apache-2.0",
++			"peer": true,
+ 			"dependencies": {
+ 				"@swc/helpers": "^0.5.0"
+ 			}
+@@ -2229,6 +2230,7 @@
+ 			"integrity": "sha512-W9R51zUCd2iHOQBg/D93+bdpYv6kbtFx+kft5X8lPKQl6yEu0aKs9i5N5GyCASOhIApgx/tkqZIJ7vgM4cqrHA==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"ts-dedent": "^2.0.0",
+ 				"type-fest": "~2.19"
+@@ -2312,6 +2314,7 @@
+ 			"integrity": "sha512-mQjlkNo+rJvpln7V2IGY2j99BqhcFbS4UN0AQNKNYfhBAFZTuCDAdW3a1sgf330mvtNvsBXn3HpAhcmvdJTcIQ==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@standard-schema/spec": "^1.0.0",
+ 				"@sveltejs/acorn-typescript": "^1.0.5",
+@@ -2354,6 +2357,7 @@
+ 			"integrity": "sha512-YZs/OSKOQAQCnJvM/P+F1URotNnYNeU3P2s4oIpzm1uFaqUEqRxUB0g5ejMjEb5Gjb9/PiBI5Ktrq4rUUF8UVQ==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@sveltejs/vite-plugin-svelte-inspector": "^5.0.0",
+ 				"debug": "^4.4.1",
+@@ -2769,6 +2773,7 @@
+ 			"integrity": "sha512-pemlzrSESWbdAloYml3bAJMEfNh1Z7EduzqPKprCH5S341frlpYnUEW0H72dLxa6IsYr+mPno20GiSm+h9dEdQ==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@babel/code-frame": "^7.10.4",
+ 				"@babel/runtime": "^7.12.5",
+@@ -2921,6 +2926,7 @@
+ 			"integrity": "sha512-+0/4J266CBGPUq/ELg7QUHhN25WYjE0wYTPSQJn1xeu8DOlIOPxXxrNGiLmfAWl7HMMgWFWXpt9IDjMWrF5Iow==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"undici-types": "~7.16.0"
+ 			}
+@@ -2993,6 +2999,7 @@
+ 			"integrity": "sha512-IgSWvLobTDOjnaxAfDTIHaECbkNlAlKv2j5SjpB2v7QHKv1FIfjwMy8FsDbVfDX/KjmCmYICcw7uGaXLhtsLNg==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@typescript-eslint/scope-manager": "8.56.0",
+ 				"@typescript-eslint/types": "8.56.0",
+@@ -3228,6 +3235,7 @@
+ 			"integrity": "sha512-tJxiPrWmzH8a+w9nLKlQMzAKX/7VjFs50MWgcAj7p9XQ7AQ9/35fByFYptgPELyLw+0aixTnC4pUWV+APcZ/kw==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@testing-library/dom": "^10.4.0",
+ 				"@testing-library/user-event": "^14.6.1",
+@@ -3355,6 +3363,7 @@
+ 			"integrity": "sha512-oukfKT9Mk41LreEW09vt45f8wx7DordoWUZMYdY/cyAk7w5TWkTRCNZYF7sX7n2wB7jyGAl74OxgwhPgKaqDMQ==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@vitest/utils": "3.2.4",
+ 				"pathe": "^2.0.3",
+@@ -3425,6 +3434,7 @@
+ 			"resolved": "https://registry.npmjs.org/acorn/-/acorn-8.15.0.tgz",
+ 			"integrity": "sha512-NZyJarBfL7nWwIq+FDL6Zp/yHEhePMNnnJ0y3qfieCrmNvYct8uvtiV41UvlSe6apAfk0fY1FbWx+NwfmpvtTg==",
+ 			"license": "MIT",
++			"peer": true,
+ 			"bin": {
+ 				"acorn": "bin/acorn"
+ 			},
+@@ -4142,8 +4152,7 @@
+ 			"resolved": "https://registry.npmjs.org/csstype/-/csstype-3.1.3.tgz",
+ 			"integrity": "sha512-M1uQkMl8rQK/szD0LNhtqxIPLpimGm8sOBwU7lLnCpSbTyY3yeU1Vc7l4KT5zT4s/yOxHH5O7tIuuLOCnLADRw==",
+ 			"dev": true,
+-			"license": "MIT",
+-			"peer": true
++			"license": "MIT"
+ 		},
+ 		"node_modules/debug": {
+ 			"version": "4.4.3",
+@@ -4453,6 +4462,7 @@
+ 			"dev": true,
+ 			"hasInstallScript": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"bin": {
+ 				"esbuild": "bin/esbuild"
+ 			},
+@@ -4513,6 +4523,7 @@
+ 			"integrity": "sha512-LEyamqS7W5HB3ujJyvi0HQK/dtVINZvd5mAAp9eT5S/ujByGjiZLCzPcHVzuXbpJDJF/cxwHlfceVUDZ2lnSTw==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@eslint-community/eslint-utils": "^4.8.0",
+ 				"@eslint-community/regexpp": "^4.12.1",
+@@ -5545,6 +5556,7 @@
+ 			"resolved": "https://registry.npmjs.org/hono/-/hono-4.12.19.tgz",
+ 			"integrity": "sha512-xa3eYXYXx68XTT4hZ7dRzsXBhaq85ToSrlUJNoR0gwz/1Ap/CNwX47wfvV7pc/xWhjKVVkLT7zBJy8chhNguqQ==",
+ 			"license": "MIT",
++			"peer": true,
+ 			"engines": {
+ 				"node": ">=16.9.0"
+ 			}
+@@ -7962,6 +7974,7 @@
+ 				}
+ 			],
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"nanoid": "^3.3.11",
+ 				"picocolors": "^1.1.1",
+@@ -8095,6 +8108,7 @@
+ 			"integrity": "sha512-I7AIg5boAr5R0FFtJ6rCfD+LFsWHp81dolrFD8S79U9tb8Az2nGrJncnMSnys+bpQJfRUzqs9hnA81OAA3hCuQ==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"bin": {
+ 				"prettier": "bin/prettier.cjs"
+ 			},
+@@ -8111,6 +8125,7 @@
+ 			"integrity": "sha512-pn1ra/0mPObzqoIQn/vUTR3ZZI6UuZ0sHqMK5x2jMLGrs53h0sXhkVuDcrlssHwIMk7FYrMjHBPoUSyyEEDlBQ==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"peerDependencies": {
+ 				"prettier": "^3.0.0",
+ 				"svelte": "^3.2.0 || ^4.0.0-next.0 || ^5.0.0-next.0"
+@@ -8342,6 +8357,7 @@
+ 			"integrity": "sha512-FS+XFBNvn3GTAWq26joslQgWNoFu08F4kl0J4CgdNKADkdSGXQyTCnKteIAJy96Br6YbpEU1LSzV5dYtjMkMDg==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"engines": {
+ 				"node": ">=0.10.0"
+ 			}
+@@ -8352,6 +8368,7 @@
+ 			"integrity": "sha512-Xs1hdnE+DyKgeHJeJznQmYMIBG3TKIHJJT95Q58nHLSrElKlGQqDTR2HQ9fx5CN/Gk6Vh/kupBTDLU11/nDk/g==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"scheduler": "^0.26.0"
+ 			},
+@@ -8626,6 +8643,7 @@
+ 			"integrity": "sha512-VmtB2rFU/GroZ4oL8+ZqXgSA38O6GR8KSIvWmEFv63pQ0G6KaBH9s07PO8XTXP4vI+3UJUEypOfjkGfmSBBR0w==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@types/estree": "1.0.8"
+ 			},
+@@ -8741,6 +8759,7 @@
+ 			"integrity": "sha512-elOcIZRTM76dvxNAjqYrucTSI0teAF/L2Lv0s6f6b7FOwcwIuA357bIE871580AjHJuSvLIRUosgV+lIWx6Rgg==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"chokidar": "^4.0.0",
+ 				"immutable": "^5.0.2",
+@@ -9035,6 +9054,7 @@
+ 			"integrity": "sha512-tMoRAts9EVqf+mEMPLC6z1DPyHbcPe+CV1MhLN55IKsl0HxNjvVGK44rVPSePbltPE6vIsn4bdRj6CCUt8SJwQ==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@storybook/global": "^5.0.0",
+ 				"@storybook/icons": "^2.0.1",
+@@ -9249,6 +9269,7 @@
+ 			"resolved": "https://registry.npmjs.org/svelte/-/svelte-5.55.7.tgz",
+ 			"integrity": "sha512-ymI5ykLPwIHW839E053FQbI1G+jnRFJEw3Kv5Y4njixVWywQBx+NUFpkkKyk5LIb36Fg9DVXSYpqiGekLD0hyw==",
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@jridgewell/remapping": "^2.3.4",
+ 				"@jridgewell/sourcemap-codec": "^1.5.0",
+@@ -9496,6 +9517,7 @@
+ 			"integrity": "sha512-gBXpgUm/3rp1lMZZrM/w7D8GKqshif0zAymAhbCyIt8KMe+0v9DQ7cdYLR4FHH/cKpdTXb+A/tKKU3eolfsI+g==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"funding": {
+ 				"type": "github",
+ 				"url": "https://github.com/sponsors/dcastil"
+@@ -9526,7 +9548,8 @@
+ 			"resolved": "https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.1.11.tgz",
+ 			"integrity": "sha512-2E9TBm6MDD/xKYe+dvJZAmg3yxIEDNRc0jwlNyDg/4Fil2QcSLjFKGVff0lAf1jjeaArlG/M75Ey/EYr/OJtBA==",
+ 			"dev": true,
+-			"license": "MIT"
++			"license": "MIT",
++			"peer": true
+ 		},
+ 		"node_modules/tapable": {
+ 			"version": "2.2.2",
+@@ -9803,6 +9826,7 @@
+ 			"integrity": "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ==",
+ 			"dev": true,
+ 			"license": "Apache-2.0",
++			"peer": true,
+ 			"bin": {
+ 				"tsc": "bin/tsc",
+ 				"tsserver": "bin/tsserver"
+@@ -10196,6 +10220,7 @@
+ 			"integrity": "sha512-Bby3NOsna2jsjfLVOHKes8sGwgl4TT0E6vvpYgnAYDIF/tie7MRaFthmKuHx1NSXjiTueXH3do80FMQgvEktRg==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"esbuild": "^0.27.0",
+ 				"fdir": "^6.5.0",
+@@ -10356,6 +10381,7 @@
+ 			"integrity": "sha512-LUCP5ev3GURDysTWiP47wRRUpLKMOfPh+yKTx3kVIEiu5KOMeqzpnYNsKyOoVrULivR8tLcks4+lga33Whn90A==",
+ 			"dev": true,
+ 			"license": "MIT",
++			"peer": true,
+ 			"dependencies": {
+ 				"@types/chai": "^5.2.2",
+ 				"@vitest/expect": "3.2.4",
+@@ -10677,6 +10703,7 @@
+ 			"resolved": "https://registry.npmjs.org/zod/-/zod-4.2.1.tgz",
+ 			"integrity": "sha512-0wZ1IRqGGhMP76gLqz8EyfBXKk0J2qo2+H3fi4mcUP/KtTocoX08nmIAHl1Z2kJIZbZee8KOpBCSNPRgauucjw==",
+ 			"license": "MIT",
++			"peer": true,
+ 			"funding": {
+ 				"url": "https://github.com/sponsors/colinhacks"
+ 			}

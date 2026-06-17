@@ -89,7 +89,7 @@ A recurring limitation on discrete AMD GPUs under Metal is that **Flash Attentio
 
 ToshLLM ships a from-scratch **AMD decode attention kernel** (Metal) as an opt-in toggle on the experimental engine. It keeps a deliberately simple structure (one `float4` slice of the head per SIMD lane, simdgroups splitting the KV stream, online-softmax merge) that was validated bit-for-bit against a CPU reference. It supports head dims **128 and 256**, KV types **f16, q8_0, q4_0 and turbo2/3/4** (including the asymmetric pairs the TurboQuant engine allows), and is gated behind an environment flag so the default engine is unchanged.
 
-The kernel splits the KV stream across as many simdgroups as the threadgroup-memory budget allows (32 for head dim 128, 16 for head dim 256), turning the long serial decode loop into short parallel ones — a win that grows with context depth. On an RX 6700 XT with a turbo KV cache, generation at 4096 tokens of context improves from 19 → 33 t/s on an 8B (+75%) and 26 → 31 t/s on the 9B coder (+17%); at 2048 tokens, +42% and +11%. Prompt processing stays within ~3% and output is bit-for-bit unchanged.
+The kernel splits the KV stream across as many simdgroups as the threadgroup-memory budget allows (32 for head dim 128, 16 for 256, 8 for 512 — the head dim Gemma 4's global layers use), turning the long serial decode loop into short parallel ones — a win that grows with context depth. On an RX 6700 XT with a turbo KV cache, generation at 4096 tokens of context improves from 19 → 33 t/s on an 8B (+75%) and 26 → 31 t/s on the 9B coder (+17%); at 2048 tokens, +42% and +11%. Prompt processing stays within ~3% and output is bit-for-bit unchanged.
 
 Measured on an RX 6700 XT (decode, `tg`, llama-bench), GPU kernel vs the CPU fallback that quantized KV would otherwise force:
 
@@ -110,16 +110,20 @@ It remains experimental and off by default. Vulkan/MoltenVK was also evaluated a
 
 ## Performance reference
 
-Measured on RX 6700 XT (12 GB) + DDR4, macOS:
+Best result per model, measured on RX 6700 XT (12 GB) + DDR4, macOS:
 
 | Model | Configuration | Prompt (t/s) | Generation (t/s) |
 |---|---|---:|---:|
-| Qwen3-8B Q4 | all-GPU | 101 | 57 |
+| Qwen3-4B Q4 | all-GPU (head 128) | 183 | **91** |
+| Qwen3-8B Q4 | all-GPU (head 128) | 106 | **59** |
+| Qwen3.5-9B Q4 | all-GPU | 82 | **40** |
+| Gemma-4 12B Q4 | head 512, AMD FA on GPU | 66 | **36** |
+| 9B coder Q5 (MTP) | head 256, AMD FA | 59 | **34** |
+| Gemma-4 26B-A4B Q4 | MoE hybrid (`ncmoe 15`) | 82 | **20** |
 | Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 24`) | 123 | 18.6 |
 | Qwen3.6-35B-A3B Q4 | + MTP speculative | — | **25.7** |
-| Qwen3.6-35B-A3B Q4 | TurboQuant XL context | 68 | 15.7 |
 
-Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double these generation numbers.
+Gemma 4's global-attention layers use head dim 512; the AMD Flash-Attention kernel runs them on the GPU (auto-enabled), so they don't fall back to the CPU. Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double those generation numbers.
 
 ### Community benchmarks
 
