@@ -3,6 +3,29 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.24] - 2026-06-17
+
+### Fixed
+- **Crash with prompt cache reuse + quantized KV.** A KV-cache shift on a standard
+  quantized cache (q8_0/q4_0) dereferenced a null tensor in the rope-shift path and
+  crashed the engine. Fixed in both engines (patches 0001 and 0002).
+
+### Added
+- **Prompt cache reuse** toggle (Settings) — reuses the cache across mid-prompt edits
+  (coding assistants) and trimmed reasoning instead of reprocessing. Fast but
+  approximate; turn it off for exact, reproducible results.
+- **Styled, pinnable tooltips** — the ⓘ next to each setting opens a formatted
+  explanation on a short hover, and a click keeps it open.
+
+### Changed
+- **Settings are now self-consistent** — incompatible options disable or hide each
+  other (turbo KV types hide while cache reuse is on; Flash Attention follows the AMD
+  kernel; disk cache requires the AMD kernel).
+- **KV cache guidance corrected for the AMD Flash Attention kernel** — with the kernel,
+  use symmetric types (q8_0/q8_0 or q4_0/q4_0) for full speed; the q8_0-keys/f16-values
+  combo falls back to the CPU. Tooltips and docs updated; kernel head-dim coverage now
+  noted as 128/256/512 (Gemma 4).
+
 ## [0.81.23] - 2026-06-17
 
 ### Added

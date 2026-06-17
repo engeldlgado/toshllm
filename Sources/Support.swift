@@ -33,6 +33,7 @@ enum SettingsKeys {
     static let faAmd = "faAmd"
     static let persistCache = "persistCache"
     static let multiGPU = "multiGPU"
+    static let cacheReuse = "cacheReuse"
     static let apiKeyEnabled = "apiKeyEnabled"
     static let menuBarIcon = "menuBarIcon"
     static let autoStart = "autoStart"

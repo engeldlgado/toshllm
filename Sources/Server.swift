@@ -65,6 +65,11 @@ struct ServerSettings {
     /// copies are a different path than the host↔device staging the patch covers and
     /// could corrupt or deadlock. Works the same on both engines. Off by default.
     var multiGPU: Bool = false
+    /// Reuse shifted KV chunks across mid-prompt divergences (agent edits, a
+    /// stripped <think> block). Fast but approximate — the KV shift is not a
+    /// bit-exact reconstruction — so the user can turn it off for exact results.
+    /// Force-disabled for turbo2/3/4 KV (crashes on a shift). On by default.
+    var cacheReuse: Bool = true
 
     /// True when the selected binary is the bundled or dev turbo engine.
     static func isTurbo(_ binary: String) -> Bool {
@@ -99,13 +104,16 @@ struct ServerSettings {
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if mlock { args.append("--mlock") }
         args += ["--cache-ram", String(cacheRAM)]
-        // Reuse shifted KV chunks when a prompt diverges mid-way (agent
-        // clients edit their prompts between turns); harmlessly ignored
-        // where unsupported. The experimental AMD Flash Attention kernel reads
-        // the KV cache directly and does not account for the chunk shifting that
-        // --cache-reuse performs on a quantized cache (it segfaults on the next
-        // attention op), so skip it while that kernel is active.
-        if !effectiveFaAmd {
+        // Reuse shifted KV chunks when a prompt diverges mid-way: agent clients
+        // edit their prompts between turns, and a reasoning turn's <think> is
+        // stripped from the resent history (a removed middle chunk) — KV shifting
+        // skips re-prefilling it. Fast but approximate (the shifted KV isn't a
+        // bit-exact reconstruction), so it's user-toggleable. Safe with f16 and
+        // standard quantized KV (q8_0/q4_0), including the AMD FA kernel; the
+        // TurboQuant rotation types (turbo2/3/4) still crash on a shift (no
+        // f32->turbo requantize kernel), so it's force-disabled for those.
+        let turboKV = cacheTypeK.hasPrefix("turbo") || cacheTypeV.hasPrefix("turbo")
+        if cacheReuse && !turboKV {
             args += ["--cache-reuse", "256"]
         }
         if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
@@ -209,7 +217,8 @@ struct ServerSettings {
             specMTP: bool(SettingsKeys.specMTP, false),
             faAmd: bool(SettingsKeys.faAmd, false),
             persistCache: bool(SettingsKeys.persistCache, false),
-            multiGPU: bool(SettingsKeys.multiGPU, false))
+            multiGPU: bool(SettingsKeys.multiGPU, false),
+            cacheReuse: bool(SettingsKeys.cacheReuse, true))
     }
 
     /// Whether a GGUF ships the MTP (multi-token prediction) head. Detected by

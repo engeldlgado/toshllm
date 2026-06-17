@@ -25,6 +25,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.vramReserve) private var vramReserve = 1024
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
+    @AppStorage(SettingsKeys.cacheReuse) private var cacheReuse = true
     @AppStorage(SettingsKeys.extraArgs) private var extraArgs = ""
     @AppStorage(SettingsKeys.cacheTypeK) private var cacheTypeK = "f16"
     @AppStorage(SettingsKeys.cacheTypeV) private var cacheTypeV = "f16"
@@ -41,9 +42,15 @@ struct SettingsView: View {
 
     // TurboQuant KV types only exist in the experimental engine (llama.cpp PR 23962) or external builds
     private var availableKVTypes: [String] {
-        serverBinary == ServerSettings.defaultBinary
+        let base = serverBinary == ServerSettings.defaultBinary
             ? ServerSettings.kvCacheTypes
             : ServerSettings.kvCacheTypes + ["turbo4", "turbo3", "turbo2"]
+        // cache-reuse crashes with turbo KV (no f32->turbo requantize kernel),
+        // so the turbo types aren't offered while cache-reuse is on.
+        return cacheReuse ? base.filter { !$0.hasPrefix("turbo") } : base
+    }
+    private var turboKVAvailable: Bool {
+        serverBinary != ServerSettings.defaultBinary
     }
 
     private var engineSelection: Binding<String> {
@@ -70,16 +77,16 @@ struct SettingsView: View {
                         Text(loc.displayName(code)).tag(code)
                     }
                 }
-                .help(loc.t("Idioma de toda la interfaz de ToshLLM. Los idiomas aportados por la comunidad aparecen automáticamente.",
+                .infoTip(loc.t("Idioma de toda la interfaz de ToshLLM. Los idiomas aportados por la comunidad aparecen automáticamente.",
                             "Language for the entire ToshLLM interface. Community-contributed languages appear here automatically."))
                 Toggle(loc.t("Icono en la barra de menús", "Menu bar icon"), isOn: $menuBarIcon)
-                    .help(loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
+                    .infoTip(loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
                                 "Shows a menu bar icon with server status and quick controls, even with the window closed."))
                 Toggle(loc.t("Iniciar servidor al abrir la app", "Start server on app launch"), isOn: $autoStart)
-                    .help(loc.t("Arranca automáticamente el último modelo configurado al abrir ToshLLM.",
+                    .infoTip(loc.t("Arranca automáticamente el último modelo configurado al abrir ToshLLM.",
                                 "Automatically starts the last configured model when ToshLLM opens."))
                 Toggle(loc.t("Proteger la API con clave", "Protect the API with a key"), isOn: $apiKeyEnabled)
-                    .help(loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
+                    .infoTip(loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
                                 "Generates a key (stored in the Keychain) required on every request. The in-app chat uses it automatically; useful on shared Macs."))
                 if apiKeyEnabled {
                     HStack {
@@ -92,7 +99,7 @@ struct SettingsView: View {
                             NSPasteboard.general.setString(Keychain.apiKey(), forType: .string)
                         } label: { Image(systemName: "doc.on.doc") }
                             .buttonStyle(.borderless)
-                            .help(loc.t("Copiar para usarla desde otros clientes (Authorization: Bearer …).",
+                            .infoTip(loc.t("Copiar para usarla desde otros clientes (Authorization: Bearer …).",
                                         "Copy to use from other clients (Authorization: Bearer …)."))
                     }
                     .font(.caption)
@@ -109,7 +116,7 @@ struct SettingsView: View {
                         profileName = ""
                     }
                     .disabled(profileName.trimmingCharacters(in: .whitespaces).isEmpty)
-                    .help(loc.t("Guarda toda la configuración actual (modelo incluido) con este nombre.",
+                    .infoTip(loc.t("Guarda toda la configuración actual (modelo incluido) con este nombre.",
                                 "Saves the entire current configuration (model included) under this name."))
                 }
                 ForEach(profileStore.profiles) { p in
@@ -121,11 +128,11 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Button(loc.t("Aplicar", "Apply")) { profileStore.apply(p) }
-                            .help(loc.t("Carga esta configuración. Reinicia el servidor para usarla.",
+                            .infoTip(loc.t("Carga esta configuración. Reinicia el servidor para usarla.",
                                         "Loads this configuration. Restart the server to use it."))
                         Button { profileStore.delete(p) } label: { Image(systemName: "trash") }
                             .buttonStyle(.borderless).foregroundStyle(.secondary)
-                            .help(loc.t("Eliminar este perfil.", "Delete this profile."))
+                            .infoTip(loc.t("Eliminar este perfil.", "Delete this profile."))
                     }
                 }
             }
@@ -137,13 +144,13 @@ struct SettingsView: View {
                         Text("\(g.index): \(g.name) · \(g.vramMB / 1024) GB").tag(g.index)
                     }
                 }
-                .help(loc.t("Qué GPU usa el servidor si tienes varias. 'Predeterminada' deja elegir a Metal.",
+                .infoTip(loc.t("Qué GPU usa el servidor si tienes varias. 'Predeterminada' deja elegir a Metal.",
                             "Which GPU the server uses if you have several. 'Default' lets Metal choose."))
                 .disabled(multiGPU)
                 if hardware.gpus.count > 1 {
                     Toggle(loc.t("Repartir el modelo entre todas las GPUs (experimental)",
                                  "Split model across all GPUs (experimental)"), isOn: $multiGPU)
-                        .help(loc.t("Divide las capas del modelo entre todas las GPUs detectadas (--split-mode layer) en vez de usar una sola, p. ej. para cargar un modelo que no cabe en una. Anula el selector de arriba.",
+                        .infoTip(loc.t("Divide las capas del modelo entre todas las GPUs detectadas (--split-mode layer) en vez de usar una sola, p. ej. para cargar un modelo que no cabe en una. Anula el selector de arriba.",
                                     "Splits the model's layers across all detected GPUs (--split-mode layer) instead of using one, e.g. to load a model that doesn't fit on a single card. Overrides the picker above."))
                     if multiGPU {
                         Label(loc.t("⚠️ Experimental y sin validar en GPU AMD/Metal: el reparto entre GPUs es una ruta distinta que podría dar salida incorrecta o colgar el motor. Verifica que la generación sea coherente y vigila la estabilidad. Necesita más pruebas.",
@@ -156,22 +163,22 @@ struct SettingsView: View {
                 }
                 Stepper(loc.t("Capas en GPU (-ngl): \(ngl)", "GPU layers (-ngl): \(ngl)"),
                         value: $ngl, in: 0...99)
-                    .help(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM); bájalo solo si la VRAM se desborda.",
+                    .infoTip(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM); bájalo solo si la VRAM se desborda.",
                                 "How many model layers go to the GPU. 99 = all (recommended if they fit in VRAM); lower it only if VRAM overflows."))
                 Stepper(loc.t("Expertos MoE en CPU: \(ncmoe)", "MoE experts on CPU: \(ncmoe)"),
                         value: $ncmoe, in: 0...99)
-                    .help(loc.t("Solo modelos MoE: capas cuyos 'expertos' viven en RAM y los procesa el CPU. Se ajusta solo al elegir modelo; súbelo si la VRAM se satura, bájalo si te sobra.",
+                    .infoTip(loc.t("Solo modelos MoE: capas cuyos 'expertos' viven en RAM y los procesa el CPU. Se ajusta solo al elegir modelo; súbelo si la VRAM se satura, bájalo si te sobra.",
                                 "MoE models only: layers whose 'experts' live in RAM and run on the CPU. Auto-set when picking a model; raise if VRAM saturates, lower if you have headroom."))
                 Stepper(loc.t("Reserva de VRAM: \(vramReserve) MB", "VRAM reserve: \(vramReserve) MB"),
                         value: $vramReserve, in: 256...4096, step: 256)
-                    .help(loc.t("VRAM que se deja libre para el sistema y la interfaz. 1024 MB es un margen seguro.",
+                    .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. 1024 MB es un margen seguro.",
                                 "VRAM left free for the system and UI. 1024 MB is a safe margin."))
                 Toggle(loc.t("Copiar pesos a VRAM (--no-mmap, recomendado)",
                              "Copy weights to VRAM (--no-mmap, recommended)"), isOn: $noMmap)
-                    .help(loc.t("Copia los pesos a la VRAM en vez de leerlos por PCIe en cada token. En GPU dedicada multiplica la velocidad (~6×). Desactívalo solo para depurar.",
+                    .infoTip(loc.t("Copia los pesos a la VRAM en vez de leerlos por PCIe en cada token. En GPU dedicada multiplica la velocidad (~6×). Desactívalo solo para depurar.",
                                 "Copies weights into VRAM instead of reading them over PCIe per token. On a discrete GPU this multiplies speed (~6×). Disable only for debugging."))
                 Toggle(loc.t("Bloquear modelo en RAM (--mlock)", "Lock model in RAM (--mlock)"), isOn: $mlock)
-                    .help(loc.t("Impide que macOS mueva el modelo a swap o lo comprima: estabilidad de velocidad constante. Útil con modelos MoE grandes; requiere RAM suficiente.",
+                    .infoTip(loc.t("Impide que macOS mueva el modelo a swap o lo comprima: estabilidad de velocidad constante. Útil con modelos MoE grandes; requiere RAM suficiente.",
                                 "Prevents macOS from swapping or compressing the model: consistent speed. Useful with large MoE models; requires enough free RAM."))
                 Picker(loc.t("Caché de prompts en RAM", "Prompt cache in RAM"), selection: $cacheRAM) {
                     Text(loc.t("Desactivada", "Disabled")).tag(0)
@@ -180,7 +187,7 @@ struct SettingsView: View {
                     Text("4 GB").tag(4096)
                     Text("8 GB").tag(8192)
                 }
-                .help(loc.t("RAM extra donde el motor recuerda conversaciones recientes para no reprocesarlas al cambiar de chat o cliente. Sin límite el motor usa hasta 8 GB: junto a un modelo grande lleva al equipo a swap y la velocidad se degrada con el uso. 2 GB es un buen equilibrio.",
+                .infoTip(loc.t("RAM extra donde el motor recuerda conversaciones recientes para no reprocesarlas al cambiar de chat o cliente. Sin límite el motor usa hasta 8 GB: junto a un modelo grande lleva al equipo a swap y la velocidad se degrada con el uso. 2 GB es un buen equilibrio.",
                             "Extra RAM where the engine remembers recent conversations to avoid reprocessing them when switching chats or clients. Unlimited, the engine uses up to 8 GB: next to a large model that pushes the machine into swap and speed degrades over time. 2 GB is a good balance."))
             }
 
@@ -190,7 +197,7 @@ struct SettingsView: View {
                         Text("\(n / 1024)k tokens").tag(n)
                     }
                 }
-                .help(loc.t("Tamaño máximo de la conversación en tokens. Más contexto = más memoria para el KV cache (mira los tipos de abajo para compensar).",
+                .infoTip(loc.t("Tamaño máximo de la conversación en tokens. Más contexto = más memoria para el KV cache (mira los tipos de abajo para compensar).",
                             "Maximum conversation size in tokens. More context = more KV cache memory (see the types below to compensate)."))
                 if ctx >= 131072 {
                     Label(loc.t("Contexto muy grande (para pruebas). El KV cache puede no caber en VRAM/RAM; en GPU AMD sin Flash Attention la generación se ralentiza con la profundidad. Cuantiza las claves (q8_0) para compensar; para uso normal 16–32k.",
@@ -200,29 +207,60 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Toggle(loc.t("Autocompactar conversaciones largas", "Auto-compact long conversations"), isOn: $chatAutoCompact)
-                    .help(loc.t("Al superar ~70% del contexto, el chat resume los mensajes antiguos con el propio modelo y envía solo el resumen + los mensajes recientes. La conversación completa sigue visible y guardada.",
+                    .infoTip(loc.t("Al superar ~70% del contexto, el chat resume los mensajes antiguos con el propio modelo y envía solo el resumen + los mensajes recientes. La conversación completa sigue visible y guardada.",
                                 "Past ~70% of the context, the chat summarizes older messages with the model itself and sends only the summary + recent messages. The full conversation stays visible and saved."))
                 Picker(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)"), selection: $cacheTypeK) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }
-                .help(loc.t("Cuantización de las claves del KV cache. En GPU AMD: q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado); q4_0 a un cuarto. Los tipos turbo* (TurboQuant) requieren el motor externo experimental.",
-                            "Quantization for KV cache keys. On AMD GPUs: q8_0 halves key memory at almost no speed cost (recommended); q4_0 quarters it. turbo* types (TurboQuant) require the experimental external engine."))
+                .infoTip(faAmd
+                    ? loc.t("Cuantización de las claves del KV cache. Con el kernel Flash Attention AMD usa tipos SIMÉTRICOS (claves y valores del mismo tipo): q8_0/q8_0 (mitad de memoria) o q4_0/q4_0 (un cuarto), ambos a velocidad plena en GPU. Evita mezclar (p. ej. claves q8_0 + valores f16): el kernel no cubre ese par asimétrico y la atención cae a CPU (~4× más lento).",
+                            "Quantization for KV cache keys. With the AMD Flash Attention kernel use SYMMETRIC types (keys and values the same): q8_0/q8_0 (half memory) or q4_0/q4_0 (a quarter), both at full GPU speed. Avoid mixing (e.g. q8_0 keys + f16 values): the kernel doesn't cover that asymmetric pair and attention falls back to the CPU (~4× slower).")
+                    : loc.t("Cuantización de las claves del KV cache. En GPU AMD (sin el kernel Flash Attention AMD): q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado), dejando los valores en f16; q4_0 a un cuarto. Los tipos turbo* (TurboQuant) requieren el motor experimental.",
+                            "Quantization for KV cache keys. On AMD GPUs (without the AMD Flash Attention kernel): q8_0 halves key memory at almost no speed cost (recommended), keeping values at f16; q4_0 quarters it. turbo* types (TurboQuant) require the experimental engine."))
                 Picker(loc.t("KV cache: valores (-ctv)", "KV cache: values (-ctv)"), selection: $cacheTypeV) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }
-                .help(loc.t("Cuantización de los valores del KV cache. ⚠️ En GPU AMD esto fuerza Flash Attention en CPU: la generación baja ~3× (de ~50 a ~15-19 t/s en un 8B). Úsalo solo cuando necesites contexto enorme; si no, déjalo en f16 y cuantiza solo las claves.",
-                            "Quantization for KV cache values. ⚠️ On AMD GPUs this forces Flash Attention onto the CPU: generation drops ~3× (from ~50 to ~15-19 t/s on an 8B). Use only when you need huge context; otherwise keep f16 and quantize keys only."))
+                .infoTip(faAmd
+                    ? loc.t("Cuantización de los valores del KV cache. Con el kernel Flash Attention AMD, cuantiza valores Y claves al MISMO tipo (q8_0/q8_0 o q4_0/q4_0) para máxima compresión a velocidad plena en GPU. ⚠️ NO dejes los valores en f16 con claves cuantizadas: ese par asimétrico no lo cubre el kernel y la atención cae a CPU (~4× más lento).",
+                            "Quantization for KV cache values. With the AMD Flash Attention kernel, quantize values AND keys to the SAME type (q8_0/q8_0 or q4_0/q4_0) for maximum compression at full GPU speed. ⚠️ Do NOT leave values at f16 with quantized keys: that asymmetric pair isn't covered by the kernel and attention falls back to the CPU (~4× slower).")
+                    : loc.t("Cuantización de los valores del KV cache. ⚠️ En GPU AMD (sin el kernel Flash Attention AMD) esto fuerza Flash Attention en CPU: la generación baja ~3× (de ~50 a ~15-19 t/s en un 8B). Úsalo solo cuando necesites contexto enorme; si no, déjalo en f16 y cuantiza solo las claves.",
+                            "Quantization for KV cache values. ⚠️ On AMD GPUs (without the AMD Flash Attention kernel) this forces Flash Attention onto the CPU: generation drops ~3× (from ~50 to ~15-19 t/s on an 8B). Use only when you need huge context; otherwise keep f16 and quantize keys only."))
+                Toggle(loc.t("Reuso de caché de prompt (rápido)", "Prompt cache reuse (fast)"), isOn: $cacheReuse)
+                    .onChange(of: cacheReuse) { _, on in
+                        // Turbo KV is incompatible with cache-reuse; snap a stale
+                        // turbo selection back to safe types when it's turned on.
+                        if on {
+                            if cacheTypeK.hasPrefix("turbo") { cacheTypeK = "q8_0" }
+                            if cacheTypeV.hasPrefix("turbo") { cacheTypeV = "f16" }
+                        }
+                    }
+                    .infoTip(loc.t("Cuando reescribes/editas el prompt (asistentes de código) o se recorta el razonamiento entre turnos, reutiliza la caché desplazándola en vez de reprocesar — mucho más rápido. Es una aproximación: la salida sigue coherente pero puede variar levemente frente a un cálculo exacto. Desactívalo si quieres resultados idénticos y reproducibles. Incompatible con los tipos KV turbo2/3/4.",
+                                "When the prompt is rewritten/edited (coding assistants) or the reasoning is trimmed between turns, it reuses the cache by shifting it instead of reprocessing — much faster. It's an approximation: output stays coherent but can differ slightly from an exact recompute. Turn it off for identical, reproducible results. Incompatible with the turbo2/3/4 KV types."))
+                if cacheReuse && turboKVAvailable {
+                    Label(loc.t("Los tipos KV turbo2/3/4 no aparecen mientras el reuso de caché está activo (son incompatibles). Desactívalo para usarlos.",
+                                "The turbo2/3/4 KV types are hidden while cache reuse is on (incompatible). Turn it off to use them."),
+                          systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Stepper(loc.t("Hilos de CPU: \(threads)", "CPU threads: \(threads)"),
                         value: $threads, in: 1...16)
-                    .help(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Los núcleos físicos (\(hardware.physicalCores)) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
+                    .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Los núcleos físicos (\(hardware.physicalCores)) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
                                 "Threads for the CPU side (MoE experts, tokenization). Physical cores (\(hardware.physicalCores)) are usually optimal; more threads won't help if RAM bandwidth is the limit."))
                 Picker("Flash Attention", selection: $flashAttn) {
                     Text("auto").tag("auto"); Text("on").tag("on"); Text("off").tag("off")
                 }
-                .help(loc.t("Atención optimizada en memoria. 'auto' la activa solo donde el backend la soporta bien (recomendado en GPU AMD). Necesaria para cuantizar los valores del KV cache.",
+                .disabled(faAmd)
+                .infoTip(loc.t("Atención optimizada en memoria. 'auto' la activa solo donde el backend la soporta bien (recomendado en GPU AMD). Necesaria para cuantizar los valores del KV cache.",
                             "Memory-efficient attention. 'auto' enables it only where the backend supports it well (recommended on AMD GPUs). Required for quantized KV cache values."))
+                if faAmd {
+                    Label(loc.t("El kernel Flash Attention AMD lo fuerza a 'on'.",
+                                "The AMD Flash Attention kernel forces this to 'on'."),
+                          systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Toggle(loc.t("Aceleración MTP (especulativa)", "MTP acceleration (speculative)"), isOn: $specMTP)
-                    .help(loc.t("Multi-token prediction: ~+30% de generación sin pérdida de calidad. Requiere un GGUF con cabezal MTP (variantes '-MTP-'); con otros modelos se ignora automáticamente.",
+                    .infoTip(loc.t("Multi-token prediction: ~+30% de generación sin pérdida de calidad. Requiere un GGUF con cabezal MTP (variantes '-MTP-'); con otros modelos se ignora automáticamente.",
                                 "Multi-token prediction: ~+30% generation with zero quality loss. Requires a GGUF with the MTP head ('-MTP-' variants); silently skipped for other models."))
                 if specMTP && !modelPath.isEmpty && !ServerSettings.modelHasMTP(at: modelPath) {
                     Label(loc.t("El modelo actual no trae cabezal MTP: la opción se ignorará.",
@@ -236,24 +274,24 @@ struct SettingsView: View {
                     Text("4").tag(4)
                     Text("Auto").tag(0)
                 }
-                .help(loc.t("Cuántas peticiones procesa el motor a la vez. Con 1, las peticiones hacen cola en vez de competir por la GPU, y un prompt enorme interrumpido por el timeout de un cliente (VS Code) se retoma donde iba al reintentar. Sube el valor solo si varios clientes usan el servidor a la vez.",
+                .infoTip(loc.t("Cuántas peticiones procesa el motor a la vez. Con 1, las peticiones hacen cola en vez de competir por la GPU, y un prompt enorme interrumpido por el timeout de un cliente (VS Code) se retoma donde iba al reintentar. Sube el valor solo si varios clientes usan el servidor a la vez.",
                             "How many requests the engine processes at once. With 1, requests queue instead of competing for the GPU, and a huge prompt interrupted by a client timeout (VS Code) resumes where it was on retry. Raise it only if several clients use the server at the same time."))
                 Toggle(loc.t("Razonamiento como texto (clientes externos)",
                              "Reasoning as plain text (external clients)"), isOn: $reasoningInline)
-                    .help(loc.t("Envía el razonamiento dentro de la respuesta (<think>…) en vez del campo aparte reasoning_content. Actívalo si un cliente externo (VS Code, plugins) se queda 'pensando' sin mostrar nada. El chat de la app entiende ambos formatos.",
+                    .infoTip(loc.t("Envía el razonamiento dentro de la respuesta (<think>…) en vez del campo aparte reasoning_content. Actívalo si un cliente externo (VS Code, plugins) se queda 'pensando' sin mostrar nada. El chat de la app entiende ambos formatos.",
                                 "Sends the reasoning inline in the response (<think>…) instead of the separate reasoning_content field. Enable it if an external client (VS Code, plugins) appears stuck 'thinking' showing nothing. The in-app chat understands both formats."))
                 Toggle(loc.t("Plantilla de chat (--jinja)", "Chat template (--jinja)"), isOn: $jinja)
-                    .help(loc.t("Usa la plantilla de chat oficial del modelo (formato de mensajes, herramientas). Déjalo activado salvo problemas con un modelo concreto.",
+                    .infoTip(loc.t("Usa la plantilla de chat oficial del modelo (formato de mensajes, herramientas). Déjalo activado salvo problemas con un modelo concreto.",
                                 "Uses the model's official chat template (message format, tools). Keep it on unless a specific model misbehaves."))
                 Toggle(loc.t("Estabilidad AMD dGPU (concurrencia desactivada)",
                              "AMD dGPU stability (concurrency disabled)"), isOn: $concurrencyDisable)
-                    .help(loc.t("Imprescindible en GPUs AMD discretas: sin esto la salida se corrompe (texto basura).",
+                    .infoTip(loc.t("Imprescindible en GPUs AMD discretas: sin esto la salida se corrompe (texto basura).",
                                 "Required on discrete AMD GPUs: output corrupts (garbage text) without it."))
             }
 
             Section(loc.t("Avanzado", "Advanced")) {
                 TextField(loc.t("Puerto", "Port"), value: $port, format: .number)
-                    .help(loc.t("Puerto local del servidor (API compatible con OpenAI y chat web).",
+                    .infoTip(loc.t("Puerto local del servidor (API compatible con OpenAI y chat web).",
                                 "Local server port (OpenAI-compatible API and web chat)."))
                 Picker(loc.t("Motor de inferencia", "Inference engine"), selection: engineSelection) {
                     Text(loc.t("Integrado (oficial)", "Bundled (official)")).tag("bundled")
@@ -262,25 +300,32 @@ struct SettingsView: View {
                     }
                     Text(loc.t("Externo…", "External…")).tag("custom")
                 }
-                .help(loc.t("Integrado: llama.cpp oficial, recomendado. Experimental (TurboQuant): motor experimental con KV cache turbo2/3/4 (~6× más contexto, pero la generación baja ~3× en GPU AMD) e incluye el kernel Flash Attention AMD activable abajo. Externo: cualquier llama-server tuyo.",
+                .infoTip(loc.t("Integrado: llama.cpp oficial, recomendado. Experimental (TurboQuant): motor experimental con KV cache turbo2/3/4 (~6× más contexto, pero la generación baja ~3× en GPU AMD) e incluye el kernel Flash Attention AMD activable abajo. Externo: cualquier llama-server tuyo.",
                             "Bundled: official llama.cpp, recommended. Experimental (TurboQuant): experimental engine with turbo2/3/4 KV cache (~6× more context, but generation drops ~3× on AMD GPUs); also bundles the AMD Flash Attention kernel you can enable below. External: any llama-server of yours."))
                 if engineSelection.wrappedValue == "turbo" {
                     Toggle(loc.t("Kernel Flash Attention AMD", "AMD Flash Attention kernel"), isOn: $faAmd)
-                        .help(loc.t("Activa un kernel Metal propio que ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD (define TOSH_FA_AMD y fuerza -fa activado), para cabezas de 128 y 256. Imprescindible con KV cuantizado/turbo: como ese KV obliga a -fa, sin este kernel la atención cae a CPU y se desploma (p. ej. prefill turbo ~6 → ~100 t/s; generación ~4 → ~30 t/s).",
-                                    "Enables a custom Metal kernel that runs attention — both prompt processing and generation — on the AMD GPU (sets TOSH_FA_AMD and forces -fa on), for head dim 128 and 256. Essential with quantized/turbo KV: since that KV requires -fa, without this kernel attention falls back to CPU and collapses (e.g. turbo prefill ~6 → ~100 t/s; generation ~4 → ~30 t/s)."))
+                        .infoTip(loc.t("Activa un kernel Metal propio que ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD (define TOSH_FA_AMD y fuerza -fa activado), para cabezas de 128, 256 y 512 (cubre Gemma 4). Imprescindible con KV cuantizado/turbo: como ese KV obliga a -fa, sin este kernel la atención cae a CPU y se desploma (p. ej. prefill turbo ~6 → ~100 t/s; generación ~4 → ~30 t/s). Con el kernel usa KV simétrica (q8_0/q8_0); el par q8_0/f16 no está cubierto y cae a CPU.",
+                                    "Enables a custom Metal kernel that runs attention — both prompt processing and generation — on the AMD GPU (sets TOSH_FA_AMD and forces -fa on), for head dim 128, 256 and 512 (covers Gemma 4). Essential with quantized/turbo KV: since that KV requires -fa, without this kernel attention falls back to CPU and collapses (e.g. turbo prefill ~6 → ~100 t/s; generation ~4 → ~30 t/s). With the kernel use symmetric KV (q8_0/q8_0); the q8_0/f16 pair isn't covered and falls back to CPU."))
                     Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
-                        .help(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
+                        .disabled(!faAmd)
+                        .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
                                     "Saves each conversation's KV cache to disk, so reopening a chat or restarting the app skips re-processing the prompt (saves several seconds per turn on long prompts). Requires the AMD Flash Attention kernel; with quantized KV (q8_0/q4_0) the file is smaller and restore is faster. Files live in Application Support and are removed when you delete the conversation."))
+                    if !faAmd {
+                        Label(loc.t("Requiere activar el kernel Flash Attention AMD (arriba).",
+                                    "Requires enabling the AMD Flash Attention kernel (above)."),
+                              systemImage: "info.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if engineSelection.wrappedValue == "custom" {
                     TextField(loc.t("Ruta del llama-server externo", "External llama-server path"), text: $serverBinary)
                         .font(.system(.caption, design: .monospaced))
-                        .help(loc.t("Ruta a un llama-server alternativo para probar otras builds.",
+                        .infoTip(loc.t("Ruta a un llama-server alternativo para probar otras builds.",
                                     "Path to an alternative llama-server to test other builds."))
                 }
                 TextField(loc.t("Argumentos extra", "Extra arguments"), text: $extraArgs)
                     .font(.system(.caption, design: .monospaced))
-                    .help(loc.t("Argumentos adicionales de llama-server separados por espacios (para opciones que la app no expone).",
+                    .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios (para opciones que la app no expone).",
                                 "Additional llama-server arguments, space-separated (for options the app doesn't expose)."))
                 Text(loc.t("Los cambios se aplican al reiniciar el servidor.",
                            "Changes take effect when the server restarts."))
@@ -294,10 +339,65 @@ struct SettingsView: View {
                     Label(loc.t("Abrir registro completo", "Open full log"),
                           systemImage: "list.bullet.rectangle")
                 }
-                .help(loc.t("El registro del servidor, con búsqueda, filtros y exportación, está en la pestaña Registro.",
+                .infoTip(loc.t("El registro del servidor, con búsqueda, filtros y exportación, está en la pestaña Registro.",
                             "The server log — with search, filters and export — lives in the Logs tab."))
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - InfoTip
+
+/// A small ⓘ next to a setting that reveals a styled explanation. Shows on a
+/// short hover and can be pinned open with a click (click again or click away to
+/// dismiss). Replaces the unstyleable native `.help()` tooltip.
+struct InfoTip: View {
+    let text: String
+    @State private var shown = false
+    @State private var pinned = false
+    @State private var hoverWork: DispatchWorkItem?
+
+    var body: some View {
+        Image(systemName: "info.circle")
+            .imageScale(.medium)
+            .foregroundStyle(shown ? Color.accentColor : .secondary)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                hoverWork?.cancel()
+                if inside {
+                    let work = DispatchWorkItem { shown = true }
+                    hoverWork = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)  // short hover
+                } else if !pinned {
+                    shown = false
+                }
+            }
+            .onTapGesture {
+                hoverWork?.cancel()
+                pinned.toggle()
+                shown = pinned
+            }
+            .popover(isPresented: $shown, arrowEdge: .bottom) {
+                Text(text)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(14)
+                    .frame(width: 320)
+                    .onDisappear { pinned = false }
+            }
+            .accessibilityLabel(Text(text))
+    }
+}
+
+extension View {
+    /// Drop-in replacement for `.help(_:)` that shows a styled, pinnable popover
+    /// via an ⓘ button placed at the trailing edge of the row.
+    func infoTip(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            self
+            InfoTip(text: text)
+        }
     }
 }

@@ -683,6 +683,33 @@ index 344657df..94c0b265 100644
  // note: I think the s_t can be half instead of float, because the Q*K scaling is done before storing to shared mem
  //       in the other (non-vec) kernel, we need s_t to also be float because we scale during the soft_max
  //
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index e9300b18..8e569121 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -2057,15 +2057,19 @@ ggml_tensor * llama_kv_cache::build_rope_shift(
+         // dequantize to f32 -> RoPE -> quantize back
+         tmp = ggml_cast(ctx, cur, GGML_TYPE_F32);
+ 
+-        // rotate back
+-        tmp = ggml_mul_mat_aux(ctx, tmp, rot);
++        // rotate back. `rot` (k_rot) only exists for the TurboQuant K-rotation
++        // scheme (turbo2/3/4); it is null for a standard quantized KV cache
++        // (q8_0/q4_0), in which case we use the plain dequant->RoPE->requant path.
++        // Without this guard, a KV shift (cache-reuse / context-shift) on a
++        // standard quantized cache dereferenced a null tensor and crashed.
++        if (rot) tmp = ggml_mul_mat_aux(ctx, tmp, rot);
+ 
+         tmp = ggml_rope_ext(ctx, tmp,
+                 shift, factors, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                 yarn_ext_factor, yarn_attn_factor, yarn_beta_fast, yarn_beta_slow);
+ 
+         // rotate fwd
+-        tmp = ggml_mul_mat_aux(ctx, tmp, rot);
++        if (rot) tmp = ggml_mul_mat_aux(ctx, tmp, rot);
+ 
+         tmp = ggml_cpy(ctx, tmp, cur);
+     } else {
 diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
 index fa49cc84..799c2f6f 100644
 --- a/src/llama-quant.cpp
