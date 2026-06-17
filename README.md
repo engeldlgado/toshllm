@@ -110,7 +110,20 @@ It remains experimental and off by default. Vulkan/MoltenVK was also evaluated a
 
 ## Performance reference
 
-Best result per model on the **experimental TurboQuant engine with the AMD Flash-Attention kernel enabled**, measured on RX 6700 XT (12 GB) + DDR4, macOS:
+Measured on RX 6700 XT (12 GB) + DDR4, macOS:
+
+| Model | Configuration | Prompt (t/s) | Generation (t/s) |
+|---|---|---:|---:|
+| Qwen3-8B Q4 | all-GPU | 101 | 57 |
+| Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 24`) | 123 | 18.6 |
+| Qwen3.6-35B-A3B Q4 | + MTP speculative | — | **25.7** |
+| Qwen3.6-35B-A3B Q4 | TurboQuant XL context | 68 | 15.7 |
+
+Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double these generation numbers.
+
+### TurboQuant engine + AMD Flash Attention
+
+Best result per model on the experimental TurboQuant engine with the AMD Flash-Attention kernel enabled — it keeps attention on the GPU across head dims 128/256/512, including Gemma 4's head-dim-512 global layers (auto-enabled), which otherwise fall back to the CPU:
 
 | Model | Attention | Prompt (t/s) | Generation (t/s) |
 |---|---|---:|---:|
@@ -118,8 +131,6 @@ Best result per model on the **experimental TurboQuant engine with the AMD Flash
 | Qwen3-8B Q4 | head 128 | 106 | **59** |
 | Gemma-4 12B Q4 | head 512 | 66 | **36** |
 | Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 28`) | 111 | **17** |
-
-All numbers use the AMD FA kernel, which keeps attention on the GPU across head dims 128/256/512 — including Gemma 4's head-dim-512 global layers (auto-enabled), which otherwise fall back to the CPU. Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double those generation numbers.
 
 ### Community benchmarks
 
