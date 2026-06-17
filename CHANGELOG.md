@@ -21,10 +21,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Settings are now self-consistent** — incompatible options disable or hide each
   other (turbo KV types hide while cache reuse is on; Flash Attention follows the AMD
   kernel; disk cache requires the AMD kernel).
-- **KV cache guidance corrected for the AMD Flash Attention kernel** — with the kernel,
-  use symmetric types (q8_0/q8_0 or q4_0/q4_0) for full speed; the q8_0-keys/f16-values
-  combo falls back to the CPU. Tooltips and docs updated; kernel head-dim coverage now
-  noted as 128/256/512 (Gemma 4).
+- **AMD Flash Attention kernel now covers all standard KV combinations** (experimental
+  engine): f16/q8_0/q4_0 in any keys/values mix run on the GPU — so you can compress the
+  keys while keeping values at full precision (q8_0/f16) without falling back to the CPU.
+  Tooltips and docs updated; kernel head-dim coverage noted as 128/256/512 (Gemma 4).
 
 ## [0.81.23] - 2026-06-17
 

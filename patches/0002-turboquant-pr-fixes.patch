@@ -124,7 +124,7 @@ index 32d97cd5..26cc90d1 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 693e2ff6..f041714c 100644
+index 693e2ff6..9b668875 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -128,6 +128,28 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
@@ -156,7 +156,21 @@ index 693e2ff6..f041714c 100644
  #else
  
  #ifdef SWIFT_PACKAGE
-@@ -1285,6 +1307,50 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1258,7 +1280,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                                          op->src[2]->type == GGML_TYPE_TURBO4_0);
+                 const bool k_is_q8 = (op->src[1]->type == GGML_TYPE_Q8_0);
+                 const bool v_is_q8 = (op->src[2]->type == GGML_TYPE_Q8_0);
+-                const bool supported = (k_is_turbo && v_is_turbo) ||
++                // - any standard pair (f16/q8_0/q4_0 in any K/V combination), all
++                //   instantiated as AMD kernels (k<...>_v<...>)
++                const bool k_std = (op->src[1]->type == GGML_TYPE_F16 || op->src[1]->type == GGML_TYPE_Q8_0 || op->src[1]->type == GGML_TYPE_Q4_0);
++                const bool v_std = (op->src[2]->type == GGML_TYPE_F16 || op->src[2]->type == GGML_TYPE_Q8_0 || op->src[2]->type == GGML_TYPE_Q4_0);
++                const bool supported = (k_std && v_std) ||
++                                       (k_is_turbo && v_is_turbo) ||
+                                        (k_is_q8 && v_is_turbo) ||
+                                        (k_is_turbo && v_is_q8);
+                 if (!supported) {
+@@ -1285,6 +1312,53 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
@@ -187,7 +201,10 @@ index 693e2ff6..f041714c 100644
 +                                   vt == GGML_TYPE_TURBO2_0 || vt == GGML_TYPE_TURBO3_0 || vt == GGML_TYPE_TURBO4_0);
 +                const bool k_turbo = (kt == GGML_TYPE_TURBO2_0 || kt == GGML_TYPE_TURBO3_0 || kt == GGML_TYPE_TURBO4_0);
 +                const bool v_turbo = (vt == GGML_TYPE_TURBO2_0 || vt == GGML_TYPE_TURBO3_0 || vt == GGML_TYPE_TURBO4_0);
++                const bool k_std2 = (kt == GGML_TYPE_F16 || kt == GGML_TYPE_Q8_0 || kt == GGML_TYPE_Q4_0);
++                const bool v_std2 = (vt == GGML_TYPE_F16 || vt == GGML_TYPE_Q8_0 || vt == GGML_TYPE_Q4_0);
 +                const bool pair_ok = (kt == vt) ||
++                                     (k_std2 && v_std2) ||           // any standard pair
 +                                     (k_turbo && v_turbo) ||
 +                                     (kt == GGML_TYPE_Q8_0 && v_turbo) ||
 +                                     (k_turbo && vt == GGML_TYPE_Q8_0);
@@ -207,7 +224,7 @@ index 693e2ff6..f041714c 100644
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
          case GGML_OP_SSM_SCAN:
-@@ -1759,6 +1825,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1759,6 +1833,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
  }
  
  void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -218,7 +235,7 @@ index 693e2ff6..f041714c 100644
      if (buf->is_shared) {
          memcpy((char *) tensor->data + offset, data, size);
          return;
-@@ -1772,12 +1842,52 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1772,12 +1850,52 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -273,7 +290,7 @@ index 693e2ff6..f041714c 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1813,6 +1923,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1813,6 +1931,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -284,7 +301,7 @@ index 693e2ff6..f041714c 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1829,24 +1943,64 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1829,24 +1951,64 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -362,10 +379,10 @@ index 693e2ff6..f041714c 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 3e1c5833..f298ef4b 100644
+index 3e1c5833..825f8c71 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2716,6 +2716,34 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
+@@ -2716,6 +2716,37 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
      return (ne01 < 20) && (ne00 % 32 == 0);
  }
  
@@ -383,9 +400,9 @@ index 3e1c5833..f298ef4b 100644
 +    }
 +}
 +
-+// Which (K,V) type pairs the AMD vec FA kernel is instantiated for: equal types,
-+// turbo x turbo (any levels), or q8_0 <-> turbo (matching the turbo engine's own
-+// allowed asymmetric set). f16 and q4_0 are symmetric-only.
++// Which (K,V) type pairs the AMD vec FA kernel is instantiated for: any standard
++// pair (f16 / q8_0 / q4_0 in any K/V combination), turbo x turbo (any levels), or
++// q8_0 <-> turbo. Mixed standard<->turbo (other than q8_0) is not instantiated.
 +static bool ggml_metal_fa_amd_pair_ok(enum ggml_type kt, enum ggml_type vt) {
 +    if (kt == vt) {
 +        return true;
@@ -394,13 +411,32 @@ index 3e1c5833..f298ef4b 100644
 +    const bool v_turbo = (vt == GGML_TYPE_TURBO2_0 || vt == GGML_TYPE_TURBO3_0 || vt == GGML_TYPE_TURBO4_0);
 +    const bool k_q8    = (kt == GGML_TYPE_Q8_0);
 +    const bool v_q8    = (vt == GGML_TYPE_Q8_0);
-+    return (k_turbo && v_turbo) || (k_q8 && v_turbo) || (k_turbo && v_q8);
++    // any standard pair (f16/q8_0/q4_0 in any combination) — all instantiated
++    const bool k_std = (kt == GGML_TYPE_F16 || kt == GGML_TYPE_Q8_0 || kt == GGML_TYPE_Q4_0);
++    const bool v_std = (vt == GGML_TYPE_F16 || vt == GGML_TYPE_Q8_0 || vt == GGML_TYPE_Q4_0);
++    return (k_std && v_std) || (k_turbo && v_turbo) || (k_q8 && v_turbo) || (k_turbo && v_q8);
 +}
 +
  // TurboFlash: two-pass fused asymmetric attention for turbo3 V decode
  // Returns true when V=turbo3, single-token decode (ne01==1), and K is q8_0 or turbo3
  static bool ggml_metal_op_flash_attn_ext_use_turbo_flash(const ggml_tensor * op) {
-@@ -2970,6 +2998,87 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2913,10 +2944,13 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             const bool v_is_turbo = (type_v == GGML_TYPE_TURBO2_0 || type_v == GGML_TYPE_TURBO3_0 || type_v == GGML_TYPE_TURBO4_0);
+             const bool k_is_q8 = (type_k == GGML_TYPE_Q8_0);
+             const bool v_is_q8 = (type_v == GGML_TYPE_Q8_0);
+-            const bool supported = (k_is_turbo && v_is_turbo) ||
++            const bool k_std = (type_k == GGML_TYPE_F16 || type_k == GGML_TYPE_Q8_0 || type_k == GGML_TYPE_Q4_0);
++            const bool v_std = (type_v == GGML_TYPE_F16 || type_v == GGML_TYPE_Q8_0 || type_v == GGML_TYPE_Q4_0);
++            const bool supported = (k_std && v_std) ||
++                                   (k_is_turbo && v_is_turbo) ||
+                                    (k_is_q8 && v_is_turbo) ||
+                                    (k_is_turbo && v_is_q8);
+-            GGML_ASSERT(supported && "asymmetric K/V types only supported for turbo and q8_0 mixed pairs");
++            GGML_ASSERT(supported && "asymmetric K/V types only supported for standard (f16/q8_0/q4_0) and turbo/q8_0 mixed pairs");
+         }
+     }
+ 
+@@ -2970,6 +3004,87 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      ggml_metal_buffer_id bid_tmp = bid_blk;
      bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
  
@@ -489,10 +525,10 @@ index 3e1c5833..f298ef4b 100644
      // Intercept before the normal VEC/non-VEC path when conditions are met:
      //   - V is turbo3, K is q8_0 or turbo3
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 344657df..94c0b265 100644
+index 344657df..1591a354 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
-@@ -8500,6 +8500,190 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -8500,6 +8500,198 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NS20
  }
  
@@ -661,6 +697,14 @@ index 344657df..94c0b265 100644
 +FA_AMD_PAIR("kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)
 +FA_AMD_PAIR("kq8_0_vq8_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
 +FA_AMD_PAIR("kq4_0_vq4_0",       block_q4_0,     8,  dequantize_q4_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
++// asymmetric standard pairs (any mix of f16 / q8_0 / q4_0 for K and V), so every
++// standard K/V combination runs on the GPU instead of falling back to the CPU.
++FA_AMD_PAIR("kq8_0_vf16",        block_q8_0,     8,  dequantize_q8_0_t4,     half4,          1,  dequantize_f16_t4)
++FA_AMD_PAIR("kq4_0_vf16",        block_q4_0,     8,  dequantize_q4_0_t4,     half4,          1,  dequantize_f16_t4)
++FA_AMD_PAIR("kf16_vq8_0",        half4,          1,  dequantize_f16_t4,      block_q8_0,     8,  dequantize_q8_0_t4)
++FA_AMD_PAIR("kf16_vq4_0",        half4,          1,  dequantize_f16_t4,      block_q4_0,     8,  dequantize_q4_0_t4)
++FA_AMD_PAIR("kq8_0_vq4_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
++FA_AMD_PAIR("kq4_0_vq8_0",       block_q4_0,     8,  dequantize_q4_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
 +FA_AMD_PAIR("kturbo2_vturbo2",   block_turbo2_0, 32, dequantize_turbo2_0_t4, block_turbo2_0, 32, dequantize_turbo2_0_t4)
 +FA_AMD_PAIR("kturbo3_vturbo3",   block_turbo3_0, 32, dequantize_turbo3_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
 +FA_AMD_PAIR("kturbo4_vturbo4",   block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)

@@ -98,7 +98,7 @@ El parámetro **Expertos MoE en CPU** (`--n-cpu-moe`) controla cuántas capas de
 
 **KV cache claves/valores (-ctk / -ctv)** — Cuantización de la memoria de atención. La mejor combinación depende de si usas el kernel **Flash Attention AMD**:
 - **Sin el kernel** (motor oficial): cuantiza solo las claves — `q8_0` (mitad de memoria, costo casi nulo, recomendado) o `q4_0` (un cuarto), dejando los valores en `f16`. Cuantizar también los valores obligaría a Flash Attention en CPU (~3× más lento).
-- **Con el kernel** (Experimental + Flash Attention AMD): usa tipos **simétricos** (claves y valores del mismo tipo): `q8_0/q8_0` o `q4_0/q4_0`, a velocidad plena en GPU. Evita `q8_0` claves + `f16` valores: ese par asimétrico no lo cubre el kernel y la atención cae a CPU (~4× más lento).
+- **Con el kernel** (Experimental + Flash Attention AMD): cualquier combinación estándar (`f16`/`q8_0`/`q4_0` en claves y valores) corre en GPU a velocidad plena. Máximo ahorro: `q8_0/q8_0` o `q4_0/q4_0`; comprimir solo las claves y mantener calidad en los valores: `q8_0/f16` o `q4_0/f16`.
 
 **Flash Attention** — Atención eficiente en memoria. `auto` es lo correcto en GPU AMD.
 
@@ -113,7 +113,7 @@ La app incluye **dos motores** y admite externos (Ajustes → Avanzado):
 
 **Experimental (TurboQuant)** — Motor con cuantización extrema del KV cache (tipos `turbo2/3/4`, basados en investigación de compresión presentada en ICLR 2026). Reduce la memoria de contexto hasta ~6×, permitiendo contextos de 100k+ tokens en GPUs de 12 GB. Costo: la generación baja (~15% en MoE grandes, mucho más en modelos pequeños). La mejor combinación medida: claves `turbo4` + valores `turbo3`.
 
-Al elegir este motor aparece el interruptor **Kernel Flash Attention AMD**. Ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD mediante un kernel Metal propio (cabezas de 128, 256 y 512 —cubre Gemma 4—; tipos de KV f16, q8_0, q4_0 y turbo2/3/4, en pares simétricos). Es clave con KV cuantizado o turbo: como esos tipos **obligan** a Flash Attention, sin el kernel la atención cae a CPU y se desploma con la profundidad (prefill turbo a 2k medido ~6 t/s, generación ~14 t/s); con el kernel todo se queda en GPU (~100 t/s de prompt; la generación aguanta la profundidad: ~33 t/s a 4k de contexto en un 8B, +75% frente a la versión previa del kernel).
+Al elegir este motor aparece el interruptor **Kernel Flash Attention AMD**. Ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD mediante un kernel Metal propio (cabezas de 128, 256 y 512 —cubre Gemma 4—; tipos de KV f16, q8_0, q4_0 en cualquier combinación claves/valores, y turbo2/3/4). Es clave con KV cuantizado o turbo: como esos tipos **obligan** a Flash Attention, sin el kernel la atención cae a CPU y se desploma con la profundidad (prefill turbo a 2k medido ~6 t/s, generación ~14 t/s); con el kernel todo se queda en GPU (~100 t/s de prompt; la generación aguanta la profundidad: ~33 t/s a 4k de contexto en un 8B, +75% frente a la versión previa del kernel).
 
 **Externo** — Cualquier binario `llama-server` tuyo, para probar builds propias.
 """),
@@ -268,7 +268,7 @@ The **MoE experts on CPU** parameter (`--n-cpu-moe`) controls how many expert la
 
 **KV cache keys/values (-ctk / -ctv)** — Quantization of attention memory. The best combo depends on whether you use the **AMD Flash Attention kernel**:
 - **Without the kernel** (official engine): quantize keys only — `q8_0` (half the memory at near-zero cost, recommended) or `q4_0` (a quarter), keeping values at `f16`. Quantizing values too would force Flash Attention onto the CPU (~3× slower).
-- **With the kernel** (Experimental + AMD Flash Attention): use **symmetric** types (keys and values the same): `q8_0/q8_0` or `q4_0/q4_0`, at full GPU speed. Avoid `q8_0` keys + `f16` values: that asymmetric pair isn't covered by the kernel and attention falls back to the CPU (~4× slower).
+- **With the kernel** (Experimental + AMD Flash Attention): any standard combination (`f16`/`q8_0`/`q4_0` for keys and values) runs on the GPU at full speed. Maximum savings: `q8_0/q8_0` or `q4_0/q4_0`; compress only the keys while keeping value quality: `q8_0/f16` or `q4_0/f16`.
 
 **Flash Attention** — Memory-efficient attention. `auto` is right on AMD GPUs.
 
@@ -283,7 +283,7 @@ The app ships **two engines** and supports external ones (Settings → Advanced)
 
 **Experimental (TurboQuant)** — Engine with extreme KV cache quantization (`turbo2/3/4` types, based on compression research presented at ICLR 2026). Cuts context memory up to ~6×, enabling 100k+ token contexts on 12 GB GPUs. Cost: generation drops (~15% on large MoE, much more on small models). Best measured combo: keys `turbo4` + values `turbo3`.
 
-Selecting this engine reveals the **AMD Flash Attention kernel** toggle. It runs attention — both prompt processing and generation — on the AMD GPU via a custom Metal kernel (head dims 128, 256 and 512 — covers Gemma 4; KV types f16, q8_0, q4_0 and turbo2/3/4, in symmetric pairs). It matters most with quantized or turbo KV: those types **require** Flash Attention, so without the kernel attention falls back to the CPU and collapses with depth (turbo prefill at 2k measured ~6 t/s, generation ~14 t/s); with it everything stays on the GPU (~100 t/s prompt; generation holds up with depth: ~33 t/s at 4k context on an 8B, +75% over the previous kernel revision).
+Selecting this engine reveals the **AMD Flash Attention kernel** toggle. It runs attention — both prompt processing and generation — on the AMD GPU via a custom Metal kernel (head dims 128, 256 and 512 — covers Gemma 4; KV types f16, q8_0, q4_0 in any keys/values combination, and turbo2/3/4). It matters most with quantized or turbo KV: those types **require** Flash Attention, so without the kernel attention falls back to the CPU and collapses with depth (turbo prefill at 2k measured ~6 t/s, generation ~14 t/s); with it everything stays on the GPU (~100 t/s prompt; generation holds up with depth: ~33 t/s at 4k context on an 8B, +75% over the previous kernel revision).
 
 **External** — Any `llama-server` binary of yours, for testing custom builds.
 """),
