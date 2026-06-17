@@ -116,12 +116,8 @@ Best result per model on the **experimental TurboQuant engine with the AMD Flash
 |---|---|---:|---:|
 | Qwen3-4B Q4 | head 128 | 183 | **91** |
 | Qwen3-8B Q4 | head 128 | 106 | **59** |
-| Qwen3.5-9B Q4 | head 128 | 82 | **40** |
 | Gemma-4 12B Q4 | head 512 | 66 | **36** |
-| 9B coder Q5 (MTP) | head 256 | 59 | **34** |
-| Gemma-4 26B-A4B Q4 | MoE, `ncmoe 15` | 82 | **20** |
-| Qwen3.6-35B-A3B Q4 | MoE, `ncmoe 24` | 123 | 18.6 |
-| Qwen3.6-35B-A3B Q4 | MoE + MTP speculative | — | **25.7** |
+| Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 28`) | 111 | **17** |
 
 All numbers use the AMD FA kernel, which keeps attention on the GPU across head dims 128/256/512 — including Gemma 4's head-dim-512 global layers (auto-enabled), which otherwise fall back to the CPU. Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double those generation numbers.
 
