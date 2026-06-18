@@ -1,19 +1,24 @@
 name: Translations
 
-# Validates community translation files and verifies the status table in
-# Assets/lang/README.md is up to date. Runs only when translations or their
-# scripts change, so unrelated PRs are unaffected.
+# Validates community translation files, keeps the English template in sync with
+# the UI strings in the Swift sources, and verifies the status table. Runs only
+# when sources, translations or their scripts change (unrelated pushes are
+# skipped by the path filter); when nothing new is found the checks just pass.
 on:
   pull_request:
     paths:
+      - "Sources/**"
       - "Assets/lang/**"
+      - "scripts/extract-strings.py"
       - "scripts/check-translations.py"
       - "scripts/translation-status.py"
       - "scripts/sync-translations.py"
   push:
     branches: [main, master]
     paths:
+      - "Sources/**"
       - "Assets/lang/**"
+      - "scripts/extract-strings.py"
       - "scripts/check-translations.py"
       - "scripts/translation-status.py"
       - "scripts/sync-translations.py"
@@ -31,6 +36,15 @@ jobs:
 
       - name: Validate translation files
         run: python3 scripts/check-translations.py
+
+      - name: Verify the template matches the UI strings in the sources
+        run: |
+          python3 scripts/extract-strings.py
+          if ! git diff --quiet -- Assets/lang/_template.json; then
+            echo "::error::New UI strings aren't in the translation template. Run 'python3 scripts/extract-strings.py && python3 scripts/sync-translations.py' and commit, or enable the auto-sync hook once: 'git config core.hooksPath scripts/hooks'."
+            git --no-pager diff -- Assets/lang/_template.json
+            exit 1
+          fi
 
       - name: Verify files list every template key
         run: |

@@ -4,21 +4,33 @@
 # Enable it once in your clone with:
 #     git config core.hooksPath scripts/hooks
 #
-# When a commit touches a community translation file it validates the file and
-# refreshes the status table in Assets/lang/README.md, re-staging the README so
-# the table is always committed up to date. It does nothing for other commits.
+# Keeps the translation files in sync with the code automatically:
+#   - When a commit touches Swift sources, it regenerates the English template
+#     from `t("es","en")` calls and syncs every community `lang/<code>.json` so
+#     new UI strings appear (empty) for translators and ship in the release.
+#   - When a commit touches a community translation file, it validates it.
+# In both cases it refreshes the status table in Assets/lang/README.md and
+# re-stages whatever it changed, so the commit always carries up-to-date files.
 
-staged=$(git diff --cached --name-only --diff-filter=ACM | grep '^Assets/lang/.*\.json$')
-[ -z "$staged" ] && exit 0
+changed_src=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^Sources/.*\.swift$')
+changed_lang=$(git diff --cached --name-only --diff-filter=ACM | grep '^Assets/lang/.*\.json$')
+[ -z "$changed_src" ] && [ -z "$changed_lang" ] && exit 0
 
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "pre-commit: python3 not found; skipping translation checks."
+    echo "pre-commit: python3 not found; skipping translation sync."
     exit 0
 fi
 
-# 1. Validate the translation files; block the commit if any is broken.
+# 1. Source strings changed -> regenerate the template and propagate to languages.
+if [ -n "$changed_src" ]; then
+    python3 scripts/extract-strings.py
+    python3 scripts/sync-translations.py
+    git add Assets/lang/_template.json Assets/lang/*.json
+fi
+
+# 2. Validate the translation files; block the commit if any is broken.
 python3 scripts/check-translations.py || exit 1
 
-# 2. Refresh the status table and include it in this commit.
+# 3. Refresh the status table and include it in this commit.
 python3 scripts/translation-status.py
 git add Assets/lang/README.md
