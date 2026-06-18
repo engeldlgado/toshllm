@@ -58,38 +58,37 @@ hand.
    empty value.
 2. Fill in the translations. You can translate as many or as few strings as you
    want; anything you leave empty stays in English.
-3. Update the status table and open a pull request:
-
-       python3 scripts/translation-status.py
-
+3. Open a pull request. If you enabled the Git hook (see below), the status
+   table updates itself on commit; otherwise run `python3 scripts/translation-status.py`
+   once before pushing.
 4. Build the app with `./make-app.sh`. Your language appears in
    Settings > Language on its own.
 
 That is all that is needed. You do not have to touch any Swift code.
 
+## Update an existing translation
+
+Open the language file and fill in the blanks — that is all. Every file already
+lists **every** interface string (new ones are kept in sync for you), so you
+never have to compare against the template or run any script to find what is
+missing: empty values are exactly the to-do list.
+
 ## How pull requests are checked
 
-Every pull request that touches a translation file runs an automatic check. It
-fails if a file has broken JSON or a key that is not in the template, or if the
-status table above was not regenerated. So before pushing, run:
+A pull request that touches a translation file runs an automatic check that fails
+on broken JSON, a key not in the template, or an out-of-date status table.
 
-    python3 scripts/check-translations.py
-    python3 scripts/translation-status.py
-
-If you would rather have this happen on every commit automatically, the
-repository also ships an optional Git hook. Enable it once in your clone:
+The easiest way to never worry about it is to enable the project's Git hook
+**once** in your clone:
 
     git config core.hooksPath scripts/hooks
 
-## Update an existing translation
+After that you just edit the JSON and commit — the hook validates the file and
+refreshes the status table for you on every commit. If you prefer not to use the
+hook, run these two before pushing instead:
 
-Open the language file and edit the values. To add strings that were introduced
-in a newer version of the app, regenerate the template first:
-
-    python3 scripts/extract-strings.py
-
-This rewrites `_template.json` with the current list of strings. Compare it with
-your language file and add whatever is missing.
+    python3 scripts/check-translations.py
+    python3 scripts/translation-status.py
 
 ## Notes
 
