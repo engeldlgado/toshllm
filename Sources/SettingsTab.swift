@@ -8,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var profileStore: ProfileStore
     @EnvironmentObject var control: ControlPanelState
+    @EnvironmentObject var models: ModelStore
 
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
     @AppStorage(SettingsKeys.faAmd) private var faAmd = false
@@ -35,6 +36,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.reasoningInline) private var reasoningInline = false
     @AppStorage(SettingsKeys.specMTP) private var specMTP = false
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
+    @AppStorage(SettingsKeys.modelsDir) private var modelsDir = ""
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
     @AppStorage(SettingsKeys.autoStart) private var autoStart = false
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
@@ -67,6 +69,20 @@ struct SettingsView: View {
                 default: serverBinary = ""; faAmd = false
                 }
             })
+    }
+
+    private func chooseModelsFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = loc.t("Elegir", "Choose")
+        panel.directoryURL = models.directory
+        if panel.runModal() == .OK, let url = panel.url {
+            modelsDir = url.path
+            models.refresh()
+        }
     }
 
     var body: some View {
@@ -103,6 +119,25 @@ struct SettingsView: View {
                                         "Copy to use from other clients (Authorization: Bearer …)."))
                     }
                     .font(.caption)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(loc.t("Carpeta de modelos", "Models folder"))
+                        Spacer()
+                        Button(loc.t("Cambiar…", "Change…")) { chooseModelsFolder() }
+                        if !modelsDir.isEmpty {
+                            Button(loc.t("Restablecer", "Reset")) {
+                                modelsDir = ""
+                                models.refresh()
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    .infoTip(loc.t("Carpeta donde se descargan, buscan y eliminan los modelos .gguf. Por defecto es ~/models. Al cambiarla, los modelos ya descargados en la carpeta anterior no se mueven; muévelos a mano si los quieres en la nueva.",
+                                "Folder where .gguf models are downloaded, scanned and deleted. Defaults to ~/models. When you change it, models already in the old folder are not moved; move them yourself if you want them in the new one."))
+                    Text(models.directory.path)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                 }
             }
 

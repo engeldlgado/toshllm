@@ -66,7 +66,7 @@ La etiqueta de cada modelo indica su compatibilidad:
 
 **Chat** — Conversaciones con el modelo: historial persistente, múltiples conversaciones (⌘N), prompt de sistema, regenerar respuestas, copiar mensajes y bloques de código, velocidad por mensaje.
 
-**Modelos** — Modelos locales detectados en `~/models`, catálogo curado con estimaciones de memoria para tu equipo, buscador de Hugging Face y descargas con progreso. Puedes eliminar modelos (van a la Papelera).
+**Modelos** — Modelos locales detectados en `~/models` (puedes cambiar la carpeta en Ajustes), catálogo curado con estimaciones de memoria para tu equipo, buscador de Hugging Face y descargas con progreso. Puedes eliminar modelos (van a la Papelera).
 
 **Benchmarks** — Mide la velocidad real del modelo activo (procesamiento de prompt y generación) con tu configuración actual. Guarda historial comparativo con gráfica.
 
@@ -236,7 +236,7 @@ Each model's badge shows compatibility:
 
 **Chat** — Conversations with the model: persistent history, multiple chats (⌘N), system prompt, regenerate responses, copy messages and code blocks, per-message speed.
 
-**Models** — Local models detected in `~/models`, curated catalog with memory estimates for your machine, Hugging Face search and downloads with progress. You can delete models (they go to Trash).
+**Models** — Local models detected in `~/models` (you can change the folder in Settings), curated catalog with memory estimates for your machine, Hugging Face search and downloads with progress. You can delete models (they go to Trash).
 
 **Benchmarks** — Measures real speed of the active model (prompt processing and generation) with your current settings. Keeps comparative history with a chart.
 

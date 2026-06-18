@@ -99,7 +99,11 @@ struct ServerSettings {
         ]
         if ncmoe > 0 { args += ["--n-cpu-moe", String(ncmoe)] }
         if noMmap { args.append("--no-mmap") }
-        if jinja { args.append("--jinja") }
+        // Vision: if the model has a sibling multimodal projector, load it so the
+        // model can read attached images. Requires the chat template (--jinja).
+        let mmproj = Self.mmprojPath(forModel: modelPath)
+        if let mmproj { args += ["--mmproj", mmproj] }
+        if jinja || mmproj != nil { args.append("--jinja") }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if mlock { args.append("--mlock") }
@@ -287,6 +291,33 @@ struct ServerSettings {
         }
         Cache.store[key] = found
         return found
+    }
+
+    /// Finds the multimodal projector (mmproj) paired with a model, if any, by
+    /// looking in the model's folder for a `*mmproj*.gguf` whose name best matches
+    /// the model (longest common prefix), falling back to the sole projector.
+    /// Enables vision (image input) automatically — no manual setting needed.
+    nonisolated static func mmprojPath(forModel modelPath: String) -> String? {
+        guard !modelPath.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: modelPath)
+        let name = url.deletingPathExtension().lastPathComponent
+        if name.lowercased().contains("mmproj") { return nil }  // the model itself is not a projector
+        let dir = url.deletingLastPathComponent()
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return nil }
+        let projectors = files.filter {
+            $0.pathExtension.lowercased() == "gguf" && $0.lastPathComponent.lowercased().contains("mmproj")
+        }
+        guard !projectors.isEmpty else { return nil }
+
+        func norm(_ s: String) -> String { String(s.lowercased().filter { $0.isLetter || $0.isNumber }) }
+        let mn = norm(name)
+        func lcp(_ a: String, _ b: String) -> Int { zip(a, b).prefix { $0 == $1 }.count }
+        let scored = projectors.map { p -> (URL, Int) in
+            let stem = p.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "mmproj", with: "")
+            return (p, lcp(mn, norm(stem)))
+        }
+        if let best = scored.max(by: { $0.1 < $1.1 }), best.1 >= 4 { return best.0.path }
+        return projectors.count == 1 ? projectors[0].path : nil
     }
 
     /// The API key the chat must send, when protection is enabled in Settings.

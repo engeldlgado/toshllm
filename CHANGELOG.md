@@ -3,6 +3,29 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.25] - 2026-06-18
+
+### Added
+- **Attach PDFs, scanned PDFs and more file types in chat.** PDF text is extracted
+  automatically; scanned PDFs (no text layer) are read on-device with OCR. Text files
+  in more encodings are accepted, and other binaries contribute their readable strings.
+- **Image input for vision models (experimental).** If the loaded model has a paired
+  multimodal projector (an `mmproj-*.gguf` next to it), you can attach images and ask
+  about them; the projector is detected and loaded automatically on both engines. The
+  vision encoder runs partly on the CPU on AMD GPUs (some Metal ops unsupported), so it
+  works but isn't fully GPU-accelerated.
+- **Configurable models folder.** Choose where models are downloaded and scanned
+  (Settings → Application), instead of the fixed `~/models`.
+
+### Changed
+- **Higher chat response cap.** The response-token options now go up to the full
+  configured context (e.g. 16k at the default, 32k+ when you raise the context).
+- **Clearer "context full" handling.** Large attachments now warn before sending (with
+  an estimate vs the context size), and the message explains it counts files + history.
+
+### Fixed
+- Multi-file attachment errors are now reported per file instead of a single generic line.
+
 ## [0.81.24] - 2026-06-17
 
 ### Fixed

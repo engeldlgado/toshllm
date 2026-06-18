@@ -11,6 +11,7 @@ enum SettingsKeys {
     static let language = "lang"
     static let serverBinary = "serverBinary"
     static let modelPath = "modelPath"
+    static let modelsDir = "modelsDir"
     static let port = "port"
     static let ngl = "ngl"
     static let ncmoe = "ncmoe"

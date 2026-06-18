@@ -208,14 +208,25 @@ final class ModelStore: ObservableObject {
     @Published var models: [LocalModel] = []
     @Published var downloads: [DownloadItem] = []
 
-    let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("models")
+    /// The fixed default location, used when the user hasn't picked a custom folder.
+    static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("models")
+
+    /// Where models are scanned, downloaded and deleted. Defaults to `~/models`,
+    /// overridable from Settings (persisted in `SettingsKeys.modelsDir`).
+    var directory: URL {
+        let custom = UserDefaults.standard.string(forKey: SettingsKeys.modelsDir) ?? ""
+        return custom.isEmpty ? Self.defaultDirectory : URL(fileURLWithPath: custom, isDirectory: true)
+    }
 
     func refresh() {
         let fm = FileManager.default
         try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
         models = files
-            .filter { $0.pathExtension.lowercased() == "gguf" }
+            // .gguf models, excluding multimodal projectors (mmproj-*.gguf): those
+            // are loaded automatically alongside their model for vision, not picked.
+            .filter { $0.pathExtension.lowercased() == "gguf"
+                && !$0.lastPathComponent.lowercased().contains("mmproj") }
             .compactMap { url in
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
                 return LocalModel(url: url, name: url.lastPathComponent, sizeBytes: size)

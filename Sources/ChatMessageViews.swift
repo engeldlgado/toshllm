@@ -101,6 +101,17 @@ struct MessageBubble: View, Equatable {
 
                 // body
                 VStack(alignment: .leading, spacing: 6) {
+                    if let imgs = message.imageURIs, !imgs.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(Array(imgs.enumerated()), id: \.offset) { _, uri in
+                                if let img = NativeChatView.nsImage(fromDataURI: uri) {
+                                    Image(nsImage: img).resizable().scaledToFill()
+                                        .frame(width: 120, height: 120)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+                            }
+                        }
+                    }
                     if let files = message.attachments, !files.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(files) { a in

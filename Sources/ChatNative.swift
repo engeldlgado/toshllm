@@ -1,4 +1,6 @@
 import SwiftUI
+import PDFKit
+import Vision
 
 // MARK: - Model
 
@@ -23,6 +25,8 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var genSpeed: Double?     // t/s for this response
     // Optional keeps pre-attachment JSON decodable.
     var attachments: [ChatAttachment]? = nil
+    // Attached images as data URIs (data:image/jpeg;base64,…) for vision models.
+    var imageURIs: [String]? = nil
 
     /// Content as sent over the wire: attached files as fenced blocks first,
     /// then the typed text.
@@ -254,12 +258,14 @@ final class ChatStore: ObservableObject {
 
     // MARK: sending
 
-    func send(text: String, attachments: [ChatAttachment] = [], port: Int, temperature: Double,
+    func send(text: String, attachments: [ChatAttachment] = [], images: [String] = [],
+              port: Int, temperature: Double,
               maxTokens: Int, system: String, thinking: Bool) {
         guard !generating, let i = currentIndex else { return }
         lastError = nil
         conversations[i].messages.append(ChatMessage(role: "user", content: text,
-                                                     attachments: attachments.isEmpty ? nil : attachments))
+                                                     attachments: attachments.isEmpty ? nil : attachments,
+                                                     imageURIs: images.isEmpty ? nil : images))
         if conversations[i].title.isEmpty {
             conversations[i].title = text.isEmpty
                 ? (attachments.first?.name ?? "…")
@@ -294,8 +300,17 @@ final class ChatStore: ObservableObject {
         // last user turn, disables it even when the template doesn't; other
         // models simply ignore the trailing token. Belt-and-braces — only sent
         // for this request, never persisted to the visible conversation.
-        if !thinking, let last = history.lastIndex(where: { $0["role"] == "user" }) {
-            history[last]["content"] = (history[last]["content"] ?? "") + "\n/no_think"
+        if !thinking, let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
+            if let s = history[last]["content"] as? String {
+                history[last]["content"] = s + "\n/no_think"
+            } else if var parts = history[last]["content"] as? [[String: Any]] {
+                if let ti = parts.firstIndex(where: { ($0["type"] as? String) == "text" }) {
+                    parts[ti]["text"] = ((parts[ti]["text"] as? String) ?? "") + "\n/no_think"
+                } else {
+                    parts.insert(["type": "text", "text": "/no_think"], at: 0)
+                }
+                history[last]["content"] = parts
+            }
         }
 
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
@@ -654,8 +669,8 @@ final class ChatStore: ObservableObject {
     /// compacted turns folded in, then the messages that remain uncompacted,
     /// stripped of reasoning blocks (saves context).
     nonisolated static func requestHistory(system: String, summary: String?,
-                                           messages: [ChatMessage], from start: Int) -> [[String: String]] {
-        var history: [[String: String]] = []
+                                           messages: [ChatMessage], from start: Int) -> [[String: Any]] {
+        var history: [[String: Any]] = []
         var sys = system.trimmingCharacters(in: .whitespaces)
         if let summary, !summary.isEmpty {
             sys += (sys.isEmpty ? "" : "\n\n")
@@ -663,11 +678,19 @@ final class ChatStore: ObservableObject {
         }
         if !sys.isEmpty { history.append(["role": "system", "content": sys]) }
         let safeStart = min(max(0, start), messages.count)
-        history += messages[safeStart...].compactMap { m in
-            let content = m.role == "assistant" ? m.parts.body : m.wireContent
+        history += messages[safeStart...].compactMap { m -> [String: Any]? in
+            let text = m.role == "assistant" ? m.parts.body : m.wireContent
             guard m.role != "assistant"
-                    || !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return ["role": m.role, "content": content]
+                    || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            // A user turn with images uses the OpenAI multimodal content array
+            // (text part + image_url parts); everything else stays a plain string.
+            if m.role == "user", let imgs = m.imageURIs, !imgs.isEmpty {
+                var parts: [[String: Any]] = []
+                if !text.isEmpty { parts.append(["type": "text", "text": text]) }
+                for uri in imgs { parts.append(["type": "image_url", "image_url": ["url": uri]]) }
+                return ["role": m.role, "content": parts]
+            }
+            return ["role": m.role, "content": text]
         }
         return history
     }
@@ -798,7 +821,7 @@ final class ChatStore: ObservableObject {
             message = m
         }
         if message.lowercased().contains("context") {
-            return "Contexto lleno: inicia una conversación nueva o sube el contexto en Ajustes / context full: start a new chat or raise the context size in Settings"
+            return "Contexto lleno: el mensaje, los archivos adjuntos y el historial juntos superan el contexto. Sube el contexto en Ajustes, adjunta menos o inicia un chat nuevo / context full: your message, attached files and history together exceed the context. Raise the context size in Settings, attach less, or start a new chat"
         }
         return "HTTP \(status): \(message.prefix(300))"
     }
@@ -893,14 +916,17 @@ struct NativeChatView: View {
     @AppStorage(SettingsKeys.ctx) private var contextLimit = 16384
     @State private var draft = ""
     @State private var attachments: [ChatAttachment] = []
+    @State private var images: [String] = []   // attached images as data URIs (vision models)
     @State private var attachError: String?
+    @State private var ocrPending = 0
+    @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @State private var showSystem = false
     @State private var pinnedToBottom = true
     @State private var followClock = ScrollFollowClock()
     @FocusState private var inputFocused: Bool
 
     private var maxTokenOptions: [Int] {
-        [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072].filter { $0 < contextLimit }
+        [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072].filter { $0 <= contextLimit }
     }
 
     private var maxTokensIsLarge: Bool {
@@ -963,8 +989,8 @@ struct NativeChatView: View {
                                 .foregroundStyle(.pink.opacity(0.8))
                             Text(loc.t("¿En qué puedo ayudarte?", "What can I help with?"))
                                 .font(.title2.weight(.semibold))
-                            Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo. Adjunta archivos con el clip para preguntar sobre tu código.",
-                                       "Everything runs on your GPU, never leaving your machine. Attach files with the paperclip to ask about your code."))
+                            Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo. Adjunta código, texto o PDF con el clip para preguntar sobre ellos.",
+                                       "Everything runs on your GPU, never leaving your machine. Attach code, text or PDF files with the paperclip to ask about them."))
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -1109,6 +1135,16 @@ struct NativeChatView: View {
         VStack(spacing: 8) {
             statusStrip
             if !attachments.isEmpty { attachmentChips }
+            if !images.isEmpty { imageChips }
+            if ocrPending > 0 {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(loc.t("Extrayendo texto de PDF escaneado por OCR…",
+                               "Extracting text from scanned PDF via OCR…"))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if let attachError {
                 Label(attachError, systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.red)
@@ -1164,8 +1200,9 @@ struct NativeChatView: View {
     }
 
     private var canSend: Bool {
-        !chat.generating
-            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+        !chat.generating && ocrPending == 0
+            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !attachments.isEmpty || !images.isEmpty)
     }
 
     private var paramsButton: some View {
@@ -1247,8 +1284,36 @@ struct NativeChatView: View {
         .buttonStyle(.borderless)
         .padding(.bottom, 6)
         .disabled(chat.generating)
-        .help(loc.t("Adjuntar archivos de texto o código a este mensaje. También puedes arrastrarlos al área de escritura.",
-                    "Attach text or code files to this message. You can also drag them onto the input area."))
+        .help(loc.t("Adjuntar archivos: texto, código y PDF (se extrae su texto; los PDF escaneados por OCR); de otros binarios se extraen las cadenas legibles. Imágenes solo si el modelo tiene visión (su mmproj). También puedes arrastrarlos al área de escritura.",
+                    "Attach files: text, code and PDF (text is extracted; scanned PDFs via OCR); other binaries contribute their readable strings. Images only if the model has vision (its mmproj). You can also drag them onto the input area."))
+    }
+
+    static func nsImage(fromDataURI uri: String) -> NSImage? {
+        guard let comma = uri.firstIndex(of: ","),
+              let data = Data(base64Encoded: String(uri[uri.index(after: comma)...])) else { return nil }
+        return NSImage(data: data)
+    }
+
+    private var imageChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(images.enumerated()), id: \.offset) { idx, uri in
+                    ZStack(alignment: .topTrailing) {
+                        if let img = Self.nsImage(fromDataURI: uri) {
+                            Image(nsImage: img).resizable().scaledToFill()
+                                .frame(width: 54, height: 54)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        Button { images.remove(at: idx) } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.white, .black.opacity(0.55))
+                        }
+                        .buttonStyle(.plain).padding(2)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
     }
 
     private var attachmentChips: some View {
@@ -1275,21 +1340,38 @@ struct NativeChatView: View {
                     .help(loc.t("Se enviará al modelo junto con tu mensaje (~\(a.estimatedTokens) tokens).",
                                 "Sent to the model along with your message (~\(a.estimatedTokens) tokens)."))
                 }
-                if attachmentsTooLarge {
-                    Label(loc.t("Adjuntos grandes: pueden llenar el contexto",
-                                "Large attachments: they may fill the context"),
+                if attachmentsExceedContext {
+                    Label(loc.t("Adjuntos ~\(attachmentTokens / 1000)k tokens > contexto \(contextLimit / 1000)k: sube el contexto en Ajustes o quita archivos",
+                                "Attachments ~\(attachmentTokens / 1000)k tokens > context \(contextLimit / 1000)k: raise the context in Settings or remove files"),
+                          systemImage: "exclamationmark.octagon.fill")
+                        .font(.caption2).foregroundStyle(.red)
+                        .help(loc.t("Lo adjunto no cabe en el contexto configurado, así que el envío fallará con 'contexto lleno'. Sube el contexto en Ajustes, quita archivos o inicia un chat nuevo.",
+                                    "The attachments don't fit the configured context, so sending will fail with 'context full'. Raise the context in Settings, remove files or start a new chat."))
+                } else if attachmentsTooLarge {
+                    Label(loc.t("Adjuntos ~\(attachmentTokens / 1000)k tokens: pueden llenar el contexto (\(contextLimit / 1000)k)",
+                                "Attachments ~\(attachmentTokens / 1000)k tokens: may fill the context (\(contextLimit / 1000)k)"),
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption2).foregroundStyle(.orange)
-                        .help(loc.t("El total estimado supera la mitad del contexto configurado en Ajustes.",
-                                    "The estimated total exceeds half the context configured in Settings."))
+                        .help(loc.t("El total estimado supera la mitad del contexto configurado en Ajustes; con el historial podría llenarlo.",
+                                    "The estimated total exceeds half the context configured in Settings; with the history it could fill it."))
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var attachmentTokens: Int {
+        attachments.reduce(0) { $0 + $1.estimatedTokens }
+    }
+
     private var attachmentsTooLarge: Bool {
-        contextLimit > 0 && attachments.reduce(0) { $0 + $1.estimatedTokens } > contextLimit / 2
+        contextLimit > 0 && attachmentTokens > contextLimit / 2
+    }
+
+    /// The attachments alone already exceed the configured context, so the send
+    /// will fail with the server's "context full" error — warn before sending.
+    private var attachmentsExceedContext: Bool {
+        contextLimit > 0 && attachmentTokens >= contextLimit
     }
 
     /// A multiline TextField re-measures its whole contents on every
@@ -1311,19 +1393,181 @@ struct NativeChatView: View {
         if panel.runModal() == .OK { addAttachments(urls: panel.urls) }
     }
 
+    // Read cap (raw bytes) and extracted-text cap. Text beyond the latter is
+    // truncated with a note; the proactive context warning catches huge totals.
+    private static let maxAttachBytes = 12 * 1024 * 1024
+    private static let maxAttachChars = 400_000
+
     private func addAttachments(urls: [URL]) {
-        attachError = nil
+        var errors: [String] = []
         for url in urls {
-            guard let data = try? Data(contentsOf: url), data.count <= 512 * 1024,
-                  !data.prefix(8192).contains(0),
-                  let text = String(data: data, encoding: .utf8) else {
-                attachError = loc.t("\(url.lastPathComponent): solo archivos de texto de hasta 512 KB",
-                                    "\(url.lastPathComponent): only text files up to 512 KB")
-                continue
+            let name = url.lastPathComponent
+            guard let data = try? Data(contentsOf: url) else {
+                errors.append(loc.t("\(name): no se pudo leer", "\(name): couldn't read it")); continue
             }
-            guard !attachments.contains(where: { $0.name == url.lastPathComponent && $0.content == text }) else { continue }
-            attachments.append(ChatAttachment(name: url.lastPathComponent, content: text))
+            guard data.count <= Self.maxAttachBytes else {
+                errors.append(loc.t("\(name): demasiado grande (máx 12 MB)", "\(name): too large (max 12 MB)")); continue
+            }
+
+            let ext = (name as NSString).pathExtension.lowercased()
+
+            // Images → vision (only if the loaded model has a multimodal projector).
+            if ["png", "jpg", "jpeg", "heic", "heif", "gif", "bmp", "tiff", "tif", "webp"].contains(ext) {
+                guard visionAvailable else {
+                    errors.append(loc.t("\(name): el modelo actual no admite imágenes (carga un modelo con visión y su mmproj)",
+                                        "\(name): the current model can't read images (load a vision model with its mmproj)")); continue
+                }
+                guard let uri = Self.imageDataURI(from: data) else {
+                    errors.append(loc.t("\(name): no se pudo procesar la imagen", "\(name): couldn't process the image")); continue
+                }
+                images.append(uri); continue
+            }
+
+            var text: String
+            if ext == "pdf" || data.prefix(5) == Data("%PDF-".utf8) {
+                guard let pdf = PDFDocument(data: data) else {
+                    errors.append(loc.t("\(name): no se pudo abrir el PDF", "\(name): couldn't open the PDF")); continue
+                }
+                if let s = pdf.string, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    text = s
+                } else {
+                    // No text layer (scanned PDF) → OCR the page images on-device
+                    // (Vision framework), asynchronously so the UI doesn't block.
+                    let pendingID = UUID()
+                    attachments.append(ChatAttachment(id: pendingID, name: name,
+                        content: loc.t("(extrayendo texto por OCR…)", "(extracting text via OCR…)")))
+                    ocrPending += 1
+                    Task { @MainActor in
+                        let ocr = await Self.ocrPDF(data: data, maxPages: 20, maxChars: Self.maxAttachChars)
+                        ocrPending -= 1
+                        guard let idx = attachments.firstIndex(where: { $0.id == pendingID }) else { return }
+                        if ocr.isEmpty {
+                            attachments.remove(at: idx)
+                            attachError = (attachError.map { $0 + "\n" } ?? "")
+                                + loc.t("\(name): el OCR no encontró texto", "\(name): OCR found no text")
+                        } else {
+                            attachments[idx].content = loc.t("[Texto extraído por OCR — \(name)]\n\n",
+                                                             "[Text extracted via OCR — \(name)]\n\n") + ocr
+                        }
+                    }
+                    continue
+                }
+            } else if let decoded = Self.decodeText(data) {
+                text = decoded
+            } else {
+                // Binary: raw bytes are useless to a text model, so extract its
+                // printable strings (symbols, embedded text) instead.
+                let s = Self.printableStrings(from: data, limit: Self.maxAttachChars)
+                guard !s.isEmpty else {
+                    errors.append(loc.t("\(name): binario sin texto legible", "\(name): binary with no readable text")); continue
+                }
+                text = loc.t("[Cadenas extraídas de un binario — \(name)]\n\n",
+                             "[Strings extracted from a binary — \(name)]\n\n") + s
+            }
+
+            if text.count > Self.maxAttachChars {
+                text = String(text.prefix(Self.maxAttachChars))
+                    + loc.t("\n\n[…contenido truncado…]", "\n\n[…content truncated…]")
+            }
+            guard !attachments.contains(where: { $0.name == name && $0.content == text }) else { continue }
+            attachments.append(ChatAttachment(name: name, content: text))
         }
+        attachError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+    }
+
+    /// Decode a file as text, trying UTF-8/UTF-16, then a single-byte encoding
+    /// (Latin-1/Windows-1252) only when the bytes look like text. Returns nil
+    /// for binary data (handled separately via string extraction).
+    private static func decodeText(_ data: Data) -> String? {
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
+            return String(data: data, encoding: .utf16)
+        }
+        if let s = String(data: data, encoding: .utf8) { return s }
+        let sample = data.prefix(8192)
+        if !sample.contains(0) {
+            let bad = sample.filter { $0 != 0x09 && $0 != 0x0A && $0 != 0x0D && ($0 < 0x20 || $0 == 0x7F) }.count
+            if Double(bad) / Double(max(1, sample.count)) < 0.05 {
+                return String(data: data, encoding: .windowsCP1252) ?? String(data: data, encoding: .isoLatin1)
+            }
+        }
+        return nil
+    }
+
+    /// True when the loaded model has a paired multimodal projector (vision).
+    private var visionAvailable: Bool { ServerSettings.mmprojPath(forModel: modelPath) != nil }
+
+    /// Downscale an image (preserving aspect, max dimension) and re-encode as a
+    /// JPEG data URI for the OpenAI multimodal `image_url` field — keeps the
+    /// request and the persisted conversation from ballooning.
+    private static func imageDataURI(from data: Data, maxDim: CGFloat = 1024) -> String? {
+        guard let img = NSImage(data: data),
+              let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let w = CGFloat(cg.width), h = CGFloat(cg.height)
+        let scale = min(1, maxDim / max(w, h))
+        let nw = max(1, Int(w * scale)), nh = max(1, Int(h * scale))
+        guard let ctx = CGContext(data: nil, width: nw, height: nh, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: nw, height: nh))
+        guard let out = ctx.makeImage() else { return nil }
+        let rep = NSBitmapImageRep(cgImage: out)
+        guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else { return nil }
+        return "data:image/jpeg;base64," + jpeg.base64EncodedString()
+    }
+
+    /// OCR a scanned (text-less) PDF on-device with the Vision framework. Renders
+    /// each page to a bitmap via Core Graphics (thread-safe, off the main actor)
+    /// and recognizes text. Bounded by page and character caps.
+    private static func ocrPDF(data: Data, maxPages: Int, maxChars: Int) async -> String {
+        await Task.detached(priority: .userInitiated) { () -> String in
+            guard let doc = PDFDocument(data: data) else { return "" }
+            var out = ""
+            for i in 0..<min(doc.pageCount, maxPages) {
+                guard let page = doc.page(at: i) else { continue }
+                let rect = page.bounds(for: .mediaBox)
+                let scale: CGFloat = 2
+                let w = Int(rect.width * scale), h = Int(rect.height * scale)
+                guard w > 0, h > 0,
+                      let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                          bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { continue }
+                ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+                ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+                ctx.scaleBy(x: scale, y: scale)
+                ctx.translateBy(x: -rect.minX, y: -rect.minY)
+                page.draw(with: .mediaBox, to: ctx)
+                guard let cg = ctx.makeImage() else { continue }
+                let req = VNRecognizeTextRequest()
+                req.recognitionLevel = .accurate
+                req.recognitionLanguages = ["es-ES", "en-US"]
+                req.usesLanguageCorrection = true
+                let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+                try? handler.perform([req])
+                for obs in req.results ?? [] {
+                    if let top = obs.topCandidates(1).first { out += top.string + "\n" }
+                }
+                if out.count >= maxChars { break }
+            }
+            return String(out.prefix(maxChars))
+        }.value
+    }
+
+    /// `strings`-style extraction: runs of >= 4 printable ASCII chars, one per line.
+    private static func printableStrings(from data: Data, limit: Int) -> String {
+        var out = ""
+        var run: [UInt8] = []
+        for b in data {
+            if b == 0x09 || (b >= 0x20 && b < 0x7F) {
+                run.append(b)
+            } else {
+                if run.count >= 4 { out += String(decoding: run, as: UTF8.self) + "\n" }
+                run.removeAll(keepingCapacity: true)
+                if out.count >= limit { break }
+            }
+        }
+        if run.count >= 4 && out.count < limit { out += String(decoding: run, as: UTF8.self) }
+        return out
     }
 
     /// One slim line above the composer; present only while there is
@@ -1383,10 +1627,12 @@ struct NativeChatView: View {
         guard canSend else { return }
         draft = ""
         let files = attachments
+        let imgs = images
         attachments = []
+        images = []
         attachError = nil
         pinnedToBottom = true
-        chat.send(text: text, attachments: files, port: port, temperature: temperature,
+        chat.send(text: text, attachments: files, images: imgs, port: port, temperature: temperature,
                   maxTokens: maxTokens, system: systemPrompt, thinking: thinkingEnabled)
     }
 }

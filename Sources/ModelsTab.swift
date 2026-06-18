@@ -256,6 +256,10 @@ private struct MyModelsTab: View {
     @State private var customURL = ""
     @State private var pendingDelete: LocalModel?
 
+    private var modelsFolderShort: String {
+        (models.directory.path as NSString).abbreviatingWithTildeInPath
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if !models.downloads.isEmpty {
@@ -269,7 +273,8 @@ private struct MyModelsTab: View {
             }
 
             SectionHeader(icon: "internaldrive",
-                          title: loc.t("Archivos locales en ~/models", "Local files in ~/models"),
+                          title: loc.t("Archivos locales en \(modelsFolderShort)",
+                                       "Local files in \(modelsFolderShort)"),
                           subtitle: nil)
             if models.models.isEmpty {
                 Text(loc.t("No hay modelos .gguf todavía. Descarga uno desde Recomendados o Buscar.",
