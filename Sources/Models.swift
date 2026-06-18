@@ -260,14 +260,67 @@ final class ModelStore: ObservableObject {
         let item = DownloadItem(remote: remote, destination: dest)
         item.onFinish = { [weak self] in self?.refresh() }
         downloads.append(item)
+        // Vision models ship a separate projector (mmproj). When downloading the
+        // model, fetch its sibling mmproj too so vision works without manual steps.
+        if !remote.lastPathComponent.lowercased().contains("mmproj") {
+            Task { await autoFetchProjector(for: remote) }
+        }
+    }
+
+    /// If `modelURL` points at a Hugging Face GGUF whose repo also contains an
+    /// `*mmproj*.gguf` (multimodal projector), download that projector to the same
+    /// folder. No-op for non-HF URLs, non-vision repos, or when it's already local.
+    func autoFetchProjector(for modelURL: URL) async {
+        guard modelURL.host?.contains("huggingface.co") == true else { return }
+        let comps = modelURL.pathComponents   // ["/", owner, repo, "resolve", branch, file…]
+        guard let r = comps.firstIndex(of: "resolve"), r >= 2, comps.count > r + 1 else { return }
+        let repo = comps[r - 2] + "/" + comps[r - 1]
+        let branch = comps[r + 1]
+        guard let api = URL(string: "https://huggingface.co/api/models/\(repo)/tree/\(branch)"),
+              let (data, _) = try? await URLSession.shared.data(from: api),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+        let projectors = entries.compactMap { $0["path"] as? String }
+            .filter { $0.lowercased().contains("mmproj") && $0.lowercased().hasSuffix(".gguf") }
+        // Prefer a quantized projector (smaller) over f16 when both exist.
+        guard let proj = projectors.first(where: { $0.lowercased().contains("q8") }) ?? projectors.first else { return }
+        let projDest = directory.appendingPathComponent((proj as NSString).lastPathComponent)
+        guard !FileManager.default.fileExists(atPath: projDest.path),
+              !downloads.contains(where: { $0.destination == projDest && $0.error == nil }) else { return }
+        download(urlString: "https://huggingface.co/\(repo)/resolve/\(branch)/\(proj)")
     }
 
     func clearFinishedDownloads() {
         downloads.removeAll { $0.finished || $0.error != nil }
     }
 
-    /// Moves the model to the Trash (recoverable).
+    /// For a local model that is a known catalog vision model whose multimodal
+    /// projector isn't present in the folder, returns the catalog entry so the UI
+    /// can offer to download the missing mmproj.
+    func missingVisionProjector(for model: LocalModel) -> CatalogModel? {
+        guard let cat = Catalog.models.first(where: { $0.fileName == model.name }), cat.isVision else { return nil }
+        guard ServerSettings.mmprojPath(forModel: model.url.path) == nil else { return nil }   // already paired
+        return cat
+    }
+
+    /// Download the multimodal projector for a catalog vision model into the folder.
+    func downloadProjector(for cat: CatalogModel) {
+        guard let url = URL(string: cat.urlString) else { return }
+        Task { await autoFetchProjector(for: url) }
+    }
+
+    /// Retry a failed download by replacing it with a fresh transfer (new session
+    /// + re-fetched metadata), reusing the same source URL.
+    func retry(_ item: DownloadItem) {
+        downloads.removeAll { $0.id == item.id }
+        download(urlString: item.remote.absoluteString)
+    }
+
+    /// Moves the model to the Trash (recoverable). For a vision model, its paired
+    /// multimodal projector (mmproj) is removed too, so no orphan file is left.
     func delete(_ model: LocalModel) {
+        if let proj = ServerSettings.mmprojPath(forModel: model.url.path) {
+            try? FileManager.default.trashItem(at: URL(fileURLWithPath: proj), resultingItemURL: nil)
+        }
         try? FileManager.default.trashItem(at: model.url, resultingItemURL: nil)
         refresh()
     }

@@ -55,13 +55,47 @@ private struct ModelGrid<Content: View>: View {
 
 private struct RecommendedTab: View {
     @EnvironmentObject var loc: Localizer
+    @State private var filter: CatalogFilter = .all
+
+    enum CatalogFilter: CaseIterable, Hashable { case all, vision, coder, moe }
+
+    private func label(_ f: CatalogFilter) -> String {
+        switch f {
+        case .all: return loc.t("Todos", "All")
+        case .vision: return loc.t("Visión", "Vision")
+        case .coder: return "Coder"
+        case .moe: return "MoE"
+        }
+    }
+    private func matches(_ m: CatalogModel) -> Bool {
+        switch filter {
+        case .all: return true
+        case .vision: return m.isVision
+        case .coder: return m.isCoder
+        case .moe: return m.isMoE
+        }
+    }
 
     var body: some View {
-        let recs = Catalog.recommendations(for: hardware)
+        let recs = Catalog.recommendations(for: hardware).filter { matches($0.model) }
         let recIDs = Set(recs.map(\.id))
-        let rest = Catalog.models.filter { !recIDs.contains($0.id) }
+        let rest = Catalog.models.filter { !recIDs.contains($0.id) && matches($0) }
 
         VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 6) {
+                ForEach(CatalogFilter.allCases, id: \.self) { f in
+                    Button { filter = f } label: {
+                        Text(label(f)).font(.caption)
+                            .padding(.horizontal, 10).padding(.vertical, 4)
+                            .background(filter == f ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.18),
+                                        in: Capsule())
+                            .overlay(Capsule().strokeBorder(filter == f ? Color.accentColor : .clear, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer(minLength: 0)
+            }
+
             if !recs.isEmpty {
                 SectionHeader(icon: "star.fill",
                               title: loc.t("Para tu equipo", "For your machine"),
@@ -168,6 +202,11 @@ private struct RepoCard: View {
                     Image(systemName: search.expanded == repo.id ? "chevron.down" : "chevron.right")
                         .font(.caption).foregroundStyle(.secondary).frame(width: 12)
                     Text(repo.id).font(.callout.weight(.medium)).lineLimit(1)
+                    // Once expanded, the file list is loaded; a sibling mmproj means
+                    // it's a vision model (the projector is fetched with the model).
+                    if (search.files[repo.id] ?? []).contains(where: { $0.path.lowercased().contains("mmproj") }) {
+                        TagBadge(text: loc.t("Visión", "Vision"), color: .purple)
+                    }
                     Spacer()
                     if let l = repo.likes {
                         Label("\(l)", systemImage: "heart").font(.caption2).foregroundStyle(.secondary)
@@ -314,6 +353,11 @@ private struct MyModelsTab: View {
                 pendingDelete = nil
             }
             Button(loc.t("Cancelar", "Cancel"), role: .cancel) { pendingDelete = nil }
+        } message: {
+            if let m = pendingDelete, ServerSettings.mmprojPath(forModel: m.url.path) != nil {
+                Text(loc.t("Se eliminará también su archivo de visión (mmproj).",
+                           "Its vision file (mmproj) will be removed too."))
+            }
         }
     }
 }
@@ -332,7 +376,9 @@ private struct CatalogCard: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 if let role { RoleChip(role: role) }
-                if model.spec.isMoE { MoEBadge() }
+                if model.isMoE { MoEBadge() }
+                if model.isVision { TagBadge(text: loc.t("Visión", "Vision"), color: .purple) }
+                if model.isCoder { TagBadge(text: "Coder", color: .blue) }
                 Spacer(minLength: 0)
                 Text(String(format: "%.1f GB", model.spec.fileGB))
                     .font(.caption2).foregroundStyle(.secondary)
@@ -357,20 +403,38 @@ private struct LocalModelCard: View {
     let model: LocalModel
     @Binding var pendingDelete: LocalModel?
     @EnvironmentObject var loc: Localizer
+    @EnvironmentObject var models: ModelStore
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
 
     var body: some View {
         let est = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: model), hw: hardware)
         let active = modelPath == model.url.path
+        // A local model is vision-capable if a projector is paired in the folder.
+        // If not paired but it's a known catalog vision model, offer to fetch it.
+        let hasProjector = ServerSettings.mmprojPath(forModel: model.url.path) != nil
+        let visionCat: CatalogModel? = hasProjector
+            ? nil : Catalog.models.first { $0.fileName == model.name && $0.isVision }
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 if model.isMoE { MoEBadge() }
+                if hasProjector { TagBadge(text: loc.t("Visión", "Vision"), color: .purple) }
                 Spacer(minLength: 0)
                 Text(model.sizeGB).font(.caption2).foregroundStyle(.secondary)
             }
             Text(model.name).font(.subheadline.weight(active ? .semibold : .medium)).lineLimit(2)
             EstimateLine(est: est)
+            if let visionCat,
+               !models.downloads.contains(where: { $0.fileName.lowercased().contains("mmproj") && $0.error == nil }) {
+                Button { models.downloadProjector(for: visionCat) } label: {
+                    Label(loc.t("Descargar archivo de visión", "Download vision file"),
+                          systemImage: "photo.badge.arrow.down")
+                        .font(.caption2)
+                }
+                .buttonStyle(.borderless).foregroundStyle(.purple)
+                .help(loc.t("Este modelo admite imágenes pero falta su proyector (mmproj). Descárgalo para habilitar la visión.",
+                            "This model supports images but its projector (mmproj) is missing. Download it to enable vision."))
+            }
             Spacer(minLength: 2)
             HStack(spacing: 8) {
                 if active {
@@ -450,15 +514,23 @@ private struct RoleChip: View {
 }
 
 struct MoEBadge: View {
+    var body: some View { TagBadge(text: "MoE", color: .pink) }
+}
+
+/// Small capsule tag (MoE / Vision / Coder) shown on model cards.
+struct TagBadge: View {
+    let text: String
+    let color: Color
     var body: some View {
-        Text("MoE").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
-            .background(.pink.opacity(0.2), in: Capsule())
+        Text(text).font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+            .background(color.opacity(0.2), in: Capsule())
     }
 }
 
 struct DownloadRow: View {
     @ObservedObject var item: DownloadItem
     @EnvironmentObject var loc: Localizer
+    @EnvironmentObject var models: ModelStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -479,7 +551,12 @@ struct DownloadRow: View {
                         .foregroundStyle(.green).font(.caption)
                 case .failed(let message):
                     Text(message).font(.caption).foregroundStyle(.red)
-                        .lineLimit(2).frame(maxWidth: 340, alignment: .trailing)
+                        .lineLimit(2).frame(maxWidth: 300, alignment: .trailing)
+                    Button { models.retry(item) } label: {
+                        Label(loc.t("Reintentar", "Retry"), systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(loc.t("Reintentar la descarga desde cero.", "Retry the download from scratch."))
                 case .downloading, .paused:
                     Text(String(format: "%.0f / %.0f MB", item.receivedMB, item.totalMB))
                         .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)

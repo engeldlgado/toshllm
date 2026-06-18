@@ -6,9 +6,12 @@ struct CatalogModel: Identifiable {
     let detailEN: String
     let urlString: String
     let spec: ModelSpec
+    var isVision: Bool = false   // multimodal: reads images (ships an mmproj projector)
 
     var id: String { name }
     var fileName: String { URL(string: urlString)!.lastPathComponent }
+    var isMoE: Bool { spec.isMoE }
+    var isCoder: Bool { name.localizedCaseInsensitiveContains("coder") }
 
     func detail(_ spanish: Bool) -> String { spanish ? detailES : detailEN }
 }
@@ -44,7 +47,7 @@ enum Catalog {
             detailES: "Gemma 4 de Google: multimodal y muy bueno en español",
             detailEN: "Google's Gemma 4: multimodal, strong multilingual",
             urlString: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q4_K_M.gguf",
-            spec: ModelSpec(fileGB: 7.1, paramsB: 12.0, layers: 48, isMoE: false)),
+            spec: ModelSpec(fileGB: 7.1, paramsB: 12.0, layers: 48, isMoE: false), isVision: true),
         CatalogModel(
             name: "Qwen3-14B",
             detailES: "Denso grande; cabe justo en 12 GB de VRAM",
@@ -62,7 +65,7 @@ enum Catalog {
             detailES: "MoE de Gemma 4 (4B activos): calidad alta en híbrido",
             detailEN: "Gemma 4 MoE (4B active): high quality in hybrid",
             urlString: "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
-            spec: ModelSpec(fileGB: 17.0, paramsB: 26.0, layers: 48, isMoE: true)),
+            spec: ModelSpec(fileGB: 17.0, paramsB: 26.0, layers: 48, isMoE: true), isVision: true),
         CatalogModel(
             name: "Qwen3-30B-A3B Instruct",
             detailES: "MoE (3B activos): la mejor calidad para este equipo",

@@ -3,6 +3,21 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.26] - 2026-06-18
+
+### Added
+- **Vision / Coder / MoE badges and filters in the catalog.** Models are tagged and
+  the Models tab can filter by All / Vision / Coder / MoE. Hugging Face search results
+  show a "Vision" badge when expanded (if the repo ships a multimodal projector).
+- **Automatic vision-projector download.** Downloading a vision model also fetches its
+  `mmproj` automatically. If a vision model is already downloaded but its projector is
+  missing, a "Download vision file" button on its card gets it.
+- **Retry button** for failed model downloads.
+
+### Changed
+- **Chat parameter tooltips match Settings** — Reasoning, Creativity, Response tokens
+  and the system prompt now use the same pinnable ⓘ info popovers as Settings.
+
 ## [0.81.25] - 2026-06-18
 
 ### Added

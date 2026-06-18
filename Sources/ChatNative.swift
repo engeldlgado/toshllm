@@ -1227,7 +1227,7 @@ struct NativeChatView: View {
             Toggle(isOn: $thinkingEnabled) {
                 Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
             }
-            .help(loc.t("Los modelos razonadores piensan antes de responder (esos tokens cuentan dentro del límite de respuesta). Al desactivarlo se envía enable_thinking:false y /no_think; algunos modelos entrenados solo para razonar (p. ej. R1) pueden seguir pensando de todos modos.",
+            .infoTip(loc.t("Los modelos razonadores piensan antes de responder (esos tokens cuentan dentro del límite de respuesta). Al desactivarlo se envía enable_thinking:false y /no_think; algunos modelos entrenados solo para razonar (p. ej. R1) pueden seguir pensando de todos modos.",
                         "Reasoning models think before answering (those tokens count toward the response limit). Turning it off sends enable_thinking:false and /no_think; some reasoning-only models (e.g. R1) may still think regardless."))
 
             HStack(spacing: 8) {
@@ -1237,7 +1237,7 @@ struct NativeChatView: View {
                     .font(.system(.caption, design: .monospaced))
                     .frame(width: 34)
             }
-            .help(loc.t("Temperatura: 0 = más determinista; valores altos = respuestas más variadas.",
+            .infoTip(loc.t("Temperatura: 0 = más determinista; valores altos = respuestas más variadas.",
                         "Temperature: 0 = more deterministic; higher values = more varied responses."))
 
             Picker(selection: $maxTokens) {
@@ -1246,7 +1246,7 @@ struct NativeChatView: View {
                 Label(loc.t("Tokens de respuesta", "Response tokens"),
                       systemImage: "text.line.last.and.arrowtriangle.forward")
             }
-            .help(loc.t("Máximo de tokens que el modelo puede generar en este turno, incluyendo razonamiento y respuesta visible. No aumenta el contexto. Recomendado: 2.048–4.096.",
+            .infoTip(loc.t("Máximo de tokens que el modelo puede generar en este turno, incluyendo razonamiento y respuesta visible. No aumenta el contexto. Recomendado: 2.048–4.096.",
                         "Maximum tokens the model may generate this turn, including reasoning and visible answer. It does not increase context. Recommended: 2,048–4,096."))
             if maxTokensIsLarge {
                 Label(loc.t("Este límite reserva más de la mitad del contexto para una sola respuesta.",
@@ -1259,14 +1259,14 @@ struct NativeChatView: View {
 
             Label(loc.t("Prompt de sistema", "System prompt"), systemImage: "gearshape")
                 .font(.subheadline.weight(.medium))
+                .infoTip(loc.t("Instrucciones permanentes para el modelo.",
+                               "Permanent instructions for the model."))
             TextEditor(text: $systemPrompt)
                 .font(.system(size: 12))
                 .frame(height: 90)
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
-                .help(loc.t("Instrucciones permanentes para el modelo.",
-                            "Permanent instructions for the model."))
             Text(loc.t("Se aplica a los mensajes nuevos de todas las conversaciones.",
                        "Applies to new messages in all conversations."))
                 .font(.caption2).foregroundStyle(.secondary)
