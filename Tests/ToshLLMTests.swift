@@ -251,17 +251,17 @@ final class CompactionTests: XCTestCase {
         let history = ChatStore.requestHistory(system: "Eres útil.", summary: "Hablamos de A y B.",
                                                messages: messages, from: 8)
         XCTAssertEqual(history.count, 5)   // system + 4 recent messages
-        XCTAssertEqual(history.first?["role"], "system")
-        XCTAssertTrue(history.first!["content"]!.contains("Eres útil."))
-        XCTAssertTrue(history.first!["content"]!.contains("Hablamos de A y B."))
-        XCTAssertEqual(history[1]["content"], "pregunta 4")
+        XCTAssertEqual(history.first?["role"] as? String, "system")
+        XCTAssertTrue((history.first!["content"] as? String)?.contains("Eres útil.") == true)
+        XCTAssertTrue((history.first!["content"] as? String)?.contains("Hablamos de A y B.") == true)
+        XCTAssertEqual(history[1]["content"] as? String, "pregunta 4")
     }
 
     func testRequestHistoryWithoutSummaryOrSystemHasNoSystemMessage() {
         let history = ChatStore.requestHistory(system: "  ", summary: nil,
                                                messages: makeMessages(2), from: 0)
         XCTAssertEqual(history.count, 4)
-        XCTAssertEqual(history.first?["role"], "user")
+        XCTAssertEqual(history.first?["role"] as? String, "user")
     }
 
     func testRequestHistoryDropsReasoningOnlyAssistantMessage() {
@@ -272,8 +272,8 @@ final class CompactionTests: XCTestCase {
         ]
         let history = ChatStore.requestHistory(system: "", summary: nil,
                                                messages: messages, from: 0)
-        XCTAssertEqual(history.map { $0["role"]! }, ["user", "user"])
-        XCTAssertEqual(history.last?["content"], "¿qué pasó?")
+        XCTAssertEqual(history.map { $0["role"] as? String ?? "" }, ["user", "user"])
+        XCTAssertEqual(history.last?["content"] as? String, "¿qué pasó?")
     }
 
     func testAttachmentsAreFoldedIntoTheWireHistory() {
@@ -281,7 +281,7 @@ final class CompactionTests: XCTestCase {
                               attachments: [ChatAttachment(name: "main.swift", content: "print(1)")])
         let history = ChatStore.requestHistory(system: "", summary: nil, messages: [msg], from: 0)
         XCTAssertEqual(history.count, 1)
-        let wire = history[0]["content"]!
+        let wire = history[0]["content"] as? String ?? ""
         XCTAssertTrue(wire.contains("main.swift"))
         XCTAssertTrue(wire.contains("```swift\nprint(1)\n```"))
         XCTAssertTrue(wire.hasSuffix("¿Qué hace este código?"))

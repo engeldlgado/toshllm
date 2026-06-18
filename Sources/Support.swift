@@ -88,7 +88,7 @@ final class RotatingFileLog: @unchecked Sendable {
                     FileManager.default.createFile(atPath: url.path, contents: nil)
                 }
                 handle = try? FileHandle(forWritingTo: url)
-                try? handle?.seekToEnd()
+                _ = try? handle?.seekToEnd()
             }
             guard let handle else { return }
             try? handle.write(contentsOf: Data(text.utf8))
