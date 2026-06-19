@@ -45,7 +45,9 @@ final class DownloadItem: NSObject, ObservableObject, Identifiable, URLSessionDo
     init(remote: URL, destination: URL) {
         self.remote = remote
         self.destination = destination
-        self.fileName = remote.lastPathComponent
+        // The saved name, which may differ from the remote (e.g. projectors are
+        // renamed to <model>.mmproj.gguf). The UI keys progress off this.
+        self.fileName = destination.lastPathComponent
         super.init()
         Task { await prepare() }
     }
@@ -253,16 +255,22 @@ final class ModelStore: ObservableObject {
         downloads.last { $0.fileName == fileName && !$0.finished }
     }
 
-    func download(urlString: String) {
+    /// Downloads `urlString` into the models folder. `preferredName`, when set,
+    /// overrides the saved filename — used for multimodal projectors, which ship
+    /// under generic, collision-prone names (e.g. `mmproj-F16.gguf`, identical
+    /// across repos). Saving them as `<model>.mmproj.gguf` makes the model→
+    /// projector pairing deterministic and avoids cross-repo filename clashes.
+    func download(urlString: String, preferredName: String? = nil) {
         guard let remote = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
               remote.scheme?.hasPrefix("http") == true else { return }
-        let dest = directory.appendingPathComponent(remote.lastPathComponent)
+        let fileName = preferredName ?? remote.lastPathComponent
+        let dest = directory.appendingPathComponent(fileName)
         let item = DownloadItem(remote: remote, destination: dest)
         item.onFinish = { [weak self] in self?.refresh() }
         downloads.append(item)
         // Vision models ship a separate projector (mmproj). When downloading the
         // model, fetch its sibling mmproj too so vision works without manual steps.
-        if !remote.lastPathComponent.lowercased().contains("mmproj") {
+        if !fileName.lowercased().contains("mmproj") {
             Task { await autoFetchProjector(for: remote) }
         }
     }
@@ -281,12 +289,24 @@ final class ModelStore: ObservableObject {
               let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
         let projectors = entries.compactMap { $0["path"] as? String }
             .filter { $0.lowercased().contains("mmproj") && $0.lowercased().hasSuffix(".gguf") }
-        // Prefer a quantized projector (smaller) over f16 when both exist.
-        guard let proj = projectors.first(where: { $0.lowercased().contains("q8") }) ?? projectors.first else { return }
-        let projDest = directory.appendingPathComponent((proj as NSString).lastPathComponent)
+        // Pick the best projector for Metal-on-AMD. The vision encoder runs partly
+        // on CPU here, so precision barely matters: prefer the smallest sane one —
+        // q8 if present, else f16 (avoid bf16, which Metal ops don't like, and f32,
+        // which is twice the size for no gain). Fall back to whatever's there.
+        func has(_ s: String, _ k: String) -> Bool { s.lowercased().contains(k) }
+        let proj = projectors.first { has($0, "q8") }
+            ?? projectors.first { has($0, "f16") && !has($0, "bf16") }
+            ?? projectors.first { !has($0, "f32") && !has($0, "bf16") }
+            ?? projectors.first
+        guard let proj else { return }
+        // Save under a model-specific name so pairing is unambiguous and projectors
+        // from different repos (all named e.g. mmproj-F16.gguf) never collide.
+        let modelStem = modelURL.deletingPathExtension().lastPathComponent
+        let projName = "\(modelStem).mmproj.gguf"
+        let projDest = directory.appendingPathComponent(projName)
         guard !FileManager.default.fileExists(atPath: projDest.path),
               !downloads.contains(where: { $0.destination == projDest && $0.error == nil }) else { return }
-        download(urlString: "https://huggingface.co/\(repo)/resolve/\(branch)/\(proj)")
+        download(urlString: "https://huggingface.co/\(repo)/resolve/\(branch)/\(proj)", preferredName: projName)
     }
 
     func clearFinishedDownloads() {
@@ -312,7 +332,11 @@ final class ModelStore: ObservableObject {
     /// + re-fetched metadata), reusing the same source URL.
     func retry(_ item: DownloadItem) {
         downloads.removeAll { $0.id == item.id }
-        download(urlString: item.remote.absoluteString)
+        // Preserve the saved name when it was renamed (e.g. projectors), so the
+        // retry lands on the same destination instead of the generic remote name.
+        let remoteName = item.remote.lastPathComponent
+        let preferred = item.destination.lastPathComponent == remoteName ? nil : item.destination.lastPathComponent
+        download(urlString: item.remote.absoluteString, preferredName: preferred)
     }
 
     /// Moves the model to the Trash (recoverable). For a vision model, its paired

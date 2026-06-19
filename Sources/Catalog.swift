@@ -25,6 +25,20 @@ enum Catalog {
             urlString: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
             spec: ModelSpec(fileGB: 2.4, paramsB: 4.0, layers: 36, isMoE: false)),
         CatalogModel(
+            name: "Gemma-3-4B Vision",
+            detailES: "Pareja de visión oficial de llama.cpp, compacta y multilingüe",
+            detailEN: "Official llama.cpp vision pair, compact and multilingual",
+            urlString: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+            spec: ModelSpec(fileGB: 2.3, paramsB: 4.0, layers: 34, isMoE: false),
+            isVision: true),
+        CatalogModel(
+            name: "Moondream2 Vision",
+            detailES: "Visión diminuta y veloz (ggml-org): ideal para describir imágenes",
+            detailEN: "Tiny, fast vision model (ggml-org): great for image captioning",
+            urlString: "https://huggingface.co/ggml-org/moondream2-20250414-GGUF/resolve/main/moondream2-text-model-f16_ct-vicuna.gguf",
+            spec: ModelSpec(fileGB: 2.84, paramsB: 1.9, layers: 24, isMoE: false),
+            isVision: true),
+        CatalogModel(
             name: "Llama-3.1-8B",
             detailES: "Clásico de Meta: sólido y muy compatible",
             detailEN: "Meta's classic: solid and widely compatible",
@@ -48,6 +62,12 @@ enum Catalog {
             detailEN: "Google's Gemma 4: multimodal, strong multilingual",
             urlString: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q4_K_M.gguf",
             spec: ModelSpec(fileGB: 7.1, paramsB: 12.0, layers: 48, isMoE: false), isVision: true),
+        CatalogModel(
+            name: "Pixtral-12B Vision",
+            detailES: "Visión de Mistral (ggml-org): fuerte en lectura de imágenes y OCR",
+            detailEN: "Mistral's vision model (ggml-org): strong image understanding and OCR",
+            urlString: "https://huggingface.co/ggml-org/pixtral-12b-GGUF/resolve/main/pixtral-12b-Q4_K_M.gguf",
+            spec: ModelSpec(fileGB: 7.48, paramsB: 12.0, layers: 40, isMoE: false), isVision: true),
         CatalogModel(
             name: "Qwen3-14B",
             detailES: "Denso grande; cabe justo en 12 GB de VRAM",

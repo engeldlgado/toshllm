@@ -172,8 +172,15 @@ struct ServerSettings {
         var env = ProcessInfo.processInfo.environment
         env["GGML_METAL_CONCURRENCY_DISABLE"] = concurrencyDisable ? "1" : nil
         env["GGML_METAL_VRAM_RESERVE_MB"] = String(vramReserveMB)
-        // Multi-GPU needs all devices visible, so don't pin to a single index.
-        if gpuIndex >= 0 && !multiGPU { env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex) }
+        // Physical GPU selection (consumed by the patched Metal backend, which maps
+        // these to MTLCopyAllDevices() — the same order as the app's GPU picker).
+        if multiGPU {
+            // Register every physical GPU so --split-mode layer spans separate cards.
+            env["GGML_METAL_DEVICES"] = String(max(2, ServerController.availableGPUs().count))
+        } else if gpuIndex >= 0 {
+            // Pin the engine to one physical GPU by index.
+            env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex)
+        }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
         return env.compactMapValues { $0 }
     }

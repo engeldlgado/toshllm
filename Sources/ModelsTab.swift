@@ -193,6 +193,13 @@ private struct RepoCard: View {
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
 
+    private var isVisionRepo: Bool {
+        (search.files[repo.id] ?? []).contains { $0.path.lowercased().contains("mmproj") }
+    }
+    private var verifiedVision: Bool {
+        Catalog.models.contains { $0.isVision && $0.urlString.contains(repo.id) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
@@ -204,8 +211,23 @@ private struct RepoCard: View {
                     Text(repo.id).font(.callout.weight(.medium)).lineLimit(1)
                     // Once expanded, the file list is loaded; a sibling mmproj means
                     // it's a vision model (the projector is fetched with the model).
-                    if (search.files[repo.id] ?? []).contains(where: { $0.path.lowercased().contains("mmproj") }) {
+                    if isVisionRepo {
                         TagBadge(text: loc.t("Visión", "Vision"), color: .purple)
+                        if verifiedVision {
+                            Label(loc.t("Verificado", "Verified"), systemImage: "checkmark.seal.fill")
+                                .labelStyle(.titleAndIcon)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(Color.green.opacity(0.16), in: Capsule())
+                                .foregroundStyle(.green)
+                        } else {
+                            Label(loc.t("Sin verificar", "Unverified"), systemImage: "exclamationmark.triangle.fill")
+                                .labelStyle(.titleAndIcon)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.18), in: Capsule())
+                                .foregroundStyle(.orange)
+                        }
                     }
                     Spacer()
                     if let l = repo.likes {
@@ -223,6 +245,19 @@ private struct RepoCard: View {
 
             if search.expanded == repo.id {
                 Divider()
+                if isVisionRepo && !verifiedVision {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(loc.t("Visión sin verificar. Se descargará el proyector (mmproj) que mejor coincida, pero no se garantiza la compatibilidad. Si la visión falla, comprueba que el mmproj corresponda a este modelo.",
+                                   "Unverified vision. The best-matching projector (mmproj) will be downloaded, but compatibility isn't guaranteed. If vision fails, check that the mmproj matches this model."))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.caption)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.12))
+                }
                 Group {
                     if let files = search.files[repo.id] {
                         if files.isEmpty {

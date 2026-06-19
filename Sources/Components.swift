@@ -76,6 +76,7 @@ struct CatalogActionButton: View {
 struct InlineDownloadProgress: View {
     @ObservedObject var item: DownloadItem
     @EnvironmentObject var loc: Localizer
+    @EnvironmentObject var models: ModelStore
 
     var body: some View {
         switch item.phase {
@@ -111,8 +112,15 @@ struct InlineDownloadProgress: View {
             Label(loc.t("Listo", "Done"), systemImage: "checkmark.seal.fill")
                 .foregroundStyle(.green).font(.caption)
         case .failed(let message):
-            Label(loc.t("Error", "Failed"), systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.red).font(.caption).help(message)
+            HStack(spacing: 7) {
+                Label(loc.t("Error", "Failed"), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red).font(.caption).help(message)
+                Button { models.retry(item) } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help(loc.t("Reintentar la descarga desde cero.", "Retry the download from scratch."))
+            }
         }
     }
 }

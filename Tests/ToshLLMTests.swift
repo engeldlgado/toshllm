@@ -118,6 +118,35 @@ final class ServerSettingsTests: XCTestCase {
                        "llama.cpp does not support cache-reuse with multimodal prompts")
     }
 
+    func testRenamedProjectorsPairUnambiguouslyInSharedFolder() throws {
+        // Repos ship projectors under generic, identical names (mmproj-F16.gguf),
+        // so the downloader saves them as <model>.mmproj.gguf. Two vision models
+        // plus their two model-named projectors must each pair to the right one,
+        // with no cross-pairing — the bug we're fixing.
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("toshllm-pair-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        func touch(_ name: String) -> String {
+            let u = dir.appendingPathComponent(name)
+            FileManager.default.createFile(atPath: u.path, contents: Data())
+            return u.path
+        }
+        let m12 = touch("gemma-4-12b-it-Q4_K_M.gguf")
+        let m26 = touch("gemma-4-26B-A4B-it-UD-Q4_K_M.gguf")
+        let p12 = touch("gemma-4-12b-it-Q4_K_M.mmproj.gguf")
+        let p26 = touch("gemma-4-26B-A4B-it-UD-Q4_K_M.mmproj.gguf")
+
+        func resolved(_ p: String?) -> String? {
+            p.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+        }
+        XCTAssertEqual(resolved(ServerSettings.mmprojPath(forModel: m12)), resolved(p12))
+        XCTAssertEqual(resolved(ServerSettings.mmprojPath(forModel: m26)), resolved(p26))
+        // The projector files themselves are never treated as models.
+        XCTAssertNil(ServerSettings.mmprojPath(forModel: p12))
+    }
+
     func testKVQuantAndMlockArguments() {
         var s = makeSettings()
         s.cacheTypeK = "q8_0"

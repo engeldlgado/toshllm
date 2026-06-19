@@ -3,6 +3,33 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.28] - 2026-06-19
+
+### Added
+- **Real GPU selection and multi-GPU split on Metal.** The bundled Metal backend always
+  used the macOS system-default GPU and ignored the picker; both engines are now patched
+  so the GPU picker pins the engine to the exact physical card and "Split across all GPUs"
+  registers every physical GPU so a model's layers can actually span separate cards. The
+  default path (no selection, no split) is unchanged. Cross-GPU split on AMD/Metal is still
+  experimental and unvalidated — keep an eye on coherence and stability.
+- **Verified vision catalog picks** from the ggml-org multimodal collection: Moondream2
+  (tiny/fast) and Pixtral-12B (strong OCR), alongside a small Gemma-3-4B vision pair.
+
+### Fixed
+- **Failed downloads can be retried.** A retry button now appears inline on a failed
+  download (catalog and search results), instead of leaving the card stuck on "Error" with
+  no way back to the download action.
+- **Multimodal projector (mmproj) detection is reliable.** Projectors are saved under a
+  model-specific name (`<model>.mmproj.gguf`) instead of the generic, collision-prone repo
+  name (e.g. `mmproj-F16.gguf`), so pairing is unambiguous even with several models in one
+  folder, and deleting a vision model removes its projector too. The auto-fetch now prefers
+  q8/f16 projectors over bf16/f32 on AMD/Metal.
+
+### Changed
+- **Unverified vision is clearly flagged.** Vision models outside the curated catalog show
+  a visible "Unverified" badge and an inline warning (no hover required) that the
+  auto-selected projector's compatibility isn't guaranteed.
+
 ## [0.81.27] - 2026-06-19
 
 ### Added
