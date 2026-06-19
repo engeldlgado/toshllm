@@ -10,6 +10,7 @@ struct GPUDevice: Identifiable, Hashable {
     let index: Int
     let name: String
     let vramMB: Int
+    var isExternal: Bool = false   // eGPU (MTLDeviceLocation.external)
     var id: Int { index }
 }
 
@@ -70,6 +71,11 @@ struct ServerSettings {
     /// copies are a different path than the host↔device staging the patch covers and
     /// could corrupt or deadlock. Works the same on both engines. Off by default.
     var multiGPU: Bool = false
+    /// Force VRAM-resident (private) Metal buffers. The backend forces shared
+    /// (system-memory) buffers for external GPUs, which streams weights over
+    /// Thunderbolt every op (~0.8 t/s); this overrides that for the default-GPU
+    /// case where the app can't tell macOS picked an eGPU. Off by default.
+    var forcePrivateBuffers: Bool = false
     /// Reuse shifted KV chunks across mid-prompt divergences (agent edits, a
     /// stripped <think> block). Fast but approximate — the KV shift is not a
     /// bit-exact reconstruction — so the user can turn it off for exact results.
@@ -174,12 +180,22 @@ struct ServerSettings {
         env["GGML_METAL_VRAM_RESERVE_MB"] = String(vramReserveMB)
         // Physical GPU selection (consumed by the patched Metal backend, which maps
         // these to MTLCopyAllDevices() — the same order as the app's GPU picker).
+        let gpus = ServerController.availableGPUs()
         if multiGPU {
             // Register every physical GPU so --split-mode layer spans separate cards.
-            env["GGML_METAL_DEVICES"] = String(max(2, ServerController.availableGPUs().count))
+            env["GGML_METAL_DEVICES"] = String(max(2, gpus.count))
         } else if gpuIndex >= 0 {
             // Pin the engine to one physical GPU by index.
             env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex)
+        }
+        // eGPU fix: the Metal backend forces system-memory (shared) buffers for external
+        // GPUs, so weights stream over Thunderbolt every op (~0.8 t/s). Forcing private
+        // VRAM-resident buffers restores normal speed. Auto-enable it when the selected
+        // card is external; the manual override covers the default case (macOS picks).
+        let selectedExternal = !multiGPU && gpuIndex >= 0 && gpus.first { $0.index == gpuIndex }?.isExternal == true
+        let anyExternalInSplit = multiGPU && gpus.contains { $0.isExternal }
+        if forcePrivateBuffers || selectedExternal || anyExternalInSplit {
+            env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
         return env.compactMapValues { $0 }
@@ -250,6 +266,7 @@ struct ServerSettings {
             faAmd: bool(SettingsKeys.faAmd, false),
             persistCache: bool(SettingsKeys.persistCache, false),
             multiGPU: bool(SettingsKeys.multiGPU, false),
+            forcePrivateBuffers: bool(SettingsKeys.forcePrivateBuffers, false),
             cacheReuse: bool(SettingsKeys.cacheReuse, true))
     }
 
@@ -410,8 +427,15 @@ final class ServerController: ObservableObject {
     nonisolated static func availableGPUs() -> [GPUDevice] {
         MTLCopyAllDevices().enumerated().map { i, dev in
             GPUDevice(index: i, name: dev.name,
-                      vramMB: Int(dev.recommendedMaxWorkingSetSize / 1_048_576))
+                      vramMB: Int(dev.recommendedMaxWorkingSetSize / 1_048_576),
+                      isExternal: dev.location == .external)
         }
+    }
+
+    /// Whether any detected GPU is an external eGPU. Used to surface the
+    /// VRAM-resident-weights option, which fixes eGPU slowness over Thunderbolt.
+    nonisolated static func hasExternalGPU() -> Bool {
+        availableGPUs().contains { $0.isExternal }
     }
 
     func start(_ settings: ServerSettings) {
@@ -448,6 +472,46 @@ final class ServerController: ObservableObject {
             }
             self?.launch(settings)
         }
+    }
+
+    /// A self-contained header written to the top of the server log: app version,
+    /// engine, model, detected GPUs and the resolved settings/env/args. Makes a log
+    /// a tester pastes enough to debug without round-trips. The API key is redacted.
+    nonisolated static func startupBanner(settings: ServerSettings) -> String {
+        func redact(_ items: [String]) -> [String] {
+            var out = items
+            if let i = out.firstIndex(of: "--api-key"), i + 1 < out.count { out[i + 1] = "***" }
+            return out
+        }
+        let engine: String
+        switch settings.serverBinary {
+        case ServerSettings.defaultBinary: engine = "bundled (official)"
+        case ServerSettings.turboBinary:   engine = "turbo (experimental)"
+        default:                           engine = "external"
+        }
+        let gpus = availableGPUs().map {
+            "    [\($0.index)] \($0.name) · \($0.vramMB / 1024) GB\($0.isExternal ? " · EXTERNAL/eGPU" : "")"
+        }.joined(separator: "\n")
+        let envKeys = ["GGML_METAL_CONCURRENCY_DISABLE", "GGML_METAL_VRAM_RESERVE_MB",
+                       "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES",
+                       "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD"]
+        let env = settings.environment
+        let envLine = envKeys.compactMap { k in env[k].map { "\(k)=\($0)" } }.joined(separator: " ")
+        let gpuSel = settings.multiGPU ? "split-all" : (settings.gpuIndex >= 0 ? "index \(settings.gpuIndex)" : "default (macOS picks)")
+        return """
+        ========================================================
+         ToshLLM \(AppInfo.version) — server start (\(ServerSettings.isAppleSilicon ? "arm64" : "x86_64"))
+         engine : \(engine)
+         model  : \((settings.modelPath as NSString).lastPathComponent)
+         GPUs detected:
+        \(gpus.isEmpty ? "    (none)" : gpus)
+         GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
+         settings: ngl=\(settings.ngl) ncmoe=\(settings.ncmoe) ctx=\(settings.ctx) fa=\(settings.flashAttn) ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV) cacheRAM=\(settings.cacheRAM) concurrencyDisable=\(settings.concurrencyDisable)
+         env: \(envLine)
+         args: \(redact(settings.arguments).joined(separator: " "))
+        ========================================================
+
+        """
     }
 
     private func launch(_ settings: ServerSettings) {
@@ -488,6 +552,7 @@ final class ServerController: ObservableObject {
             }
         }
 
+        consume(Self.startupBanner(settings: settings))
         do {
             try p.run()
             process = p

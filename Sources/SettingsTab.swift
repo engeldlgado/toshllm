@@ -26,6 +26,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.vramReserve) private var vramReserve = 1024
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
+    @AppStorage(SettingsKeys.forcePrivateBuffers) private var forcePrivateBuffers = false
     @AppStorage(SettingsKeys.cacheReuse) private var cacheReuse = true
     @AppStorage(SettingsKeys.extraArgs) private var extraArgs = ""
     @AppStorage(SettingsKeys.cacheTypeK) private var cacheTypeK = "f16"
@@ -223,6 +224,15 @@ struct SettingsView: View {
                             .foregroundStyle(.orange)
                             .labelStyle(.titleAndIcon)
                     }
+                }
+                // eGPU fix: shown only when an external GPU is present. When the user
+                // pins the picker to an eGPU it's automatic; this covers the default
+                // case (macOS picks the eGPU and the app can't tell).
+                if ServerController.hasExternalGPU() {
+                    Toggle(loc.t("Pesos residentes en VRAM (recomendado para eGPU)",
+                                 "VRAM-resident weights (recommended for eGPU)"), isOn: $forcePrivateBuffers)
+                        .infoTip(loc.t("El motor Metal usa memoria compartida (del sistema) en GPUs externas, lo que transfiere los pesos por Thunderbolt en cada operación y desploma la velocidad (~0.8 t/s). Esto fuerza buffers privados en VRAM. Si fijas una eGPU en el selector de arriba ya se activa solo; usa esto cuando dejas 'Predeterminada' y macOS elige la eGPU.",
+                                    "The Metal backend uses shared (system) memory on external GPUs, which streams weights over Thunderbolt every op and tanks speed (~0.8 t/s). This forces private VRAM buffers. If you pin an eGPU in the picker above it's automatic; use this when you leave 'Default' and macOS picks the eGPU."))
                 }
                 Stepper(loc.t("Capas en GPU (-ngl): \(ngl)", "GPU layers (-ngl): \(ngl)"),
                         value: $ngl, in: 0...99)

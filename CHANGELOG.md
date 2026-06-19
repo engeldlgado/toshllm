@@ -3,6 +3,23 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.29] - 2026-06-19
+
+### Fixed
+- **External GPUs (eGPU) run at full speed.** The Metal backend forces shared
+  (system-memory) buffers for external GPUs, so weights stream over Thunderbolt every
+  op (~0.8 t/s). ToshLLM now forces private, VRAM-resident buffers
+  (`GGML_METAL_SHARED_BUFFERS_DISABLE`) automatically when an external GPU is selected,
+  with a manual "VRAM-resident weights" toggle (shown only when an eGPU is present) for
+  the default case where macOS picks the eGPU. Likely also clears the
+  `failed to decode prompt batch (res = -3)` benchmark error on eGPUs.
+
+### Added
+- **Self-contained server log header.** Each server start now logs the app version,
+  engine, model, detected GPUs (flagging external/eGPU), the GPU selection, the resolved
+  settings and the exact args/env (API key redacted) — so a single pasted log is enough
+  to debug a remote setup.
+
 ## [0.81.28] - 2026-06-19
 
 ### Added
