@@ -140,6 +140,8 @@ Funciona con el motor Integrado. El perfil "Diario (MTP)" ya lo configura todo.
         DocSection(title: "API para desarrolladores", icon: "terminal", body: """
 Con el servidor activo, tienes una **API compatible con OpenAI** en `http://127.0.0.1:8080` (puerto configurable). Funciona con cualquier librería o app que hable ese protocolo.
 
+Por defecto solo responde en esta Mac. Para exponer la API local en la red, activa **Descubrible en red local** en Ajustes y reinicia el servidor. ToshLLM escuchará en todas las interfaces y anunciará `ToshLLM API` mediante Bonjour. Conecta usando `http://<IP-de-la-Mac>:8080/v1` y activa **Proteger la API con clave** antes de exponerla, especialmente fuera de una red confiable.
+
 Ejemplo con curl:
 
 ```bash
@@ -154,13 +156,15 @@ curl http://127.0.0.1:8080/v1/chat/completions \\
 
 Endpoints útiles:
 - `POST /v1/chat/completions` — chat (streaming opcional)
-- `GET /v1/models` — modelo cargado
+- `GET /v1/models` — modelo cargado y capacidades anunciadas
 - `GET /health` — estado del servidor
+
+**Imágenes / visión:** carga un modelo con su `mmproj` y envía contenido OpenAI `image_url` (URL remota o `data:image/...;base64,...`). Los clientes configurables, como Raycast, también deben anunciar que el modelo admite visión. Usa como nombre de modelo el `id` devuelto por `/v1/models`. Cuando hay un `mmproj`, ToshLLM desactiva cache-reuse y la caché persistente de conversaciones porque `llama.cpp` no admite guardar/restaurar slots multimodales; la caché normal en memoria permanece activa.
 
 También hay un chat web minimalista en la raíz (`http://127.0.0.1:8080`) para usar desde el navegador.
 
 **Conectar VS Code y asistentes de código** (Continue, Cline, Copilot con modelo propio…):
-- URL base: `http://127.0.0.1:8080/v1` · nombre de modelo: cualquiera · clave API: la de Ajustes solo si activaste la protección.
+- URL base: `http://127.0.0.1:8080/v1` · nombre de modelo: el `id` de `/v1/models` · clave API: la de Ajustes solo si activaste la protección.
 - **Sube el Contexto a 32k o más**: estos clientes envían prompts enormes (instrucciones + archivos abiertos) y con 16k el servidor rechaza la petición. Compensa la memoria cuantizando las claves del KV cache a `q8_0`.
 - Los modelos razonadores "piensan" antes de responder y muchos clientes no muestran esa fase: parece que **se quedó colgado** cuando en realidad está generando. Activa "Razonamiento como texto" en Ajustes → Inferencia, o usa un modelo no razonador para código.
 - La **primera respuesta tarda**: en esta clase de GPU el prompt se procesa a ~80-120 t/s, así que 16k tokens son 2-4 minutos. **Limita los tokens de entrada del cliente** (p. ej. `maxInputTokens: 8000`) para que la primera petición baje a ~1-2 min; las siguientes reutilizan la caché y son incrementales.
@@ -310,6 +314,8 @@ Works with the Bundled engine. The "Daily (MTP)" profile configures everything.
         DocSection(title: "API for developers", icon: "terminal", body: """
 With the server running, you get an **OpenAI-compatible API** at `http://127.0.0.1:8080` (configurable port). Works with any library or app that speaks the protocol.
 
+By default it only accepts connections from this Mac. To expose the local API on the network, enable **Discoverable on local network** in Settings and restart the server. ToshLLM will listen on all interfaces and advertise `ToshLLM API` through Bonjour. Connect to `http://<Mac-IP>:8080/v1`, and enable **Protect the API with a key** before exposing it, especially outside a trusted network.
+
 Example with curl:
 
 ```bash
@@ -324,13 +330,15 @@ curl http://127.0.0.1:8080/v1/chat/completions \\
 
 Useful endpoints:
 - `POST /v1/chat/completions` — chat (optional streaming)
-- `GET /v1/models` — loaded model
+- `GET /v1/models` — loaded model and advertised capabilities
 - `GET /health` — server status
+
+**Images / vision:** load a model with its `mmproj` and send OpenAI `image_url` content (a remote URL or `data:image/...;base64,...`). Configurable clients such as Raycast must also declare that the model supports vision. Use the model `id` returned by `/v1/models`. While an `mmproj` is loaded, ToshLLM disables cache-reuse and persistent conversation caching because `llama.cpp` cannot save/restore multimodal slots; normal in-memory prompt caching remains enabled.
 
 There's also a minimal web chat at the root (`http://127.0.0.1:8080`) for browser use.
 
 **Connecting VS Code and coding assistants** (Continue, Cline, Copilot with a custom model…):
-- Base URL: `http://127.0.0.1:8080/v1` · model name: anything · API key: the one in Settings only if you enabled protection.
+- Base URL: `http://127.0.0.1:8080/v1` · model name: the `id` from `/v1/models` · API key: the one in Settings only if you enabled protection.
 - **Raise Context to 32k or more**: these clients send huge prompts (instructions + open files) and at 16k the server rejects the request. Offset the memory by quantizing KV cache keys to `q8_0`.
 - Reasoning models "think" before answering and many clients don't display that phase: it **looks hung** while it's actually generating. Enable "Reasoning as plain text" in Settings → Inference, or use a non-reasoning model for coding.
 - The **first response takes a while**: on this class of GPU prompts process at ~80-120 t/s, so 16k tokens take 2-4 minutes. **Limit the client's input tokens** (e.g. `maxInputTokens: 8000`) so the first request drops to ~1-2 min; later ones reuse the cache and are incremental.

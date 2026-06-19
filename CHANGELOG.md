@@ -3,6 +3,23 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.27] - 2026-06-19
+
+### Added
+- **Optional local-network API discovery.** A new toggle in Settings and the menu-bar
+  panel binds the server to the LAN and advertises `ToshLLM API` through Bonjour. It is
+  off by default, requires a server restart, and warns when API-key protection is off.
+- **LAN and multimodal API guidance** in the built-in bilingual documentation, including
+  local-network URLs, `/v1/models`, OpenAI `image_url` input and vision-cache limitations.
+
+### Fixed
+- **Multi-GPU benchmarks now use every selected GPU on both engines.** Benchmark runs
+  inherit the server's GPU, KV-cache, Flash Attention and MoE options, including
+  `--split-mode layer`, instead of silently using an independently-built argument list.
+- **Vision models no longer trigger unsupported slot operations.** ToshLLM skips disk
+  slot persistence, prewarming and cache-reuse when an `mmproj` is loaded, preventing
+  `This feature is not supported by multimodal` errors from `llama.cpp`.
+
 ## [0.81.26] - 2026-06-18
 
 ### Added

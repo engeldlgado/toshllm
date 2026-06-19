@@ -44,6 +44,11 @@ struct ServerSettings {
     /// crucial for coding assistants that send huge prompts.
     var parallelSlots: Int = 1
     var apiKeyEnabled: Bool = false
+    /// Expose the HTTP server beyond loopback and advertise it with Bonjour.
+    /// Off by default: when enabled, any device on the local network can reach
+    /// the OpenAI-compatible API, so pairing it with `apiKeyEnabled` is strongly
+    /// recommended.
+    var localNetworkDiscovery: Bool = false
     /// MTP self-speculative decoding (+30% generation). Only applied when the
     /// selected GGUF actually ships the MTP head; silently skipped otherwise.
     var specMTP: Bool = false
@@ -76,6 +81,7 @@ struct ServerSettings {
         binary.contains("bin-turbo") || binary == turboBinary
     }
     var isTurboEngine: Bool { Self.isTurbo(serverBinary) }
+    var isMultimodal: Bool { Self.mmprojPath(forModel: modelPath) != nil }
 
     /// Directory where per-conversation KV slot files live.
     static var slotCacheDir: URL {
@@ -94,7 +100,7 @@ struct ServerSettings {
             "-c", String(ctx),
             "-t", String(threads),
             "-fa", effectiveFaAmd ? "1" : flashAttn,
-            "--host", "127.0.0.1",
+            "--host", localNetworkDiscovery ? "0.0.0.0" : "127.0.0.1",
             "--port", String(port),
         ]
         if ncmoe > 0 { args += ["--n-cpu-moe", String(ncmoe)] }
@@ -117,7 +123,7 @@ struct ServerSettings {
         // TurboQuant rotation types (turbo2/3/4) still crash on a shift (no
         // f32->turbo requantize kernel), so it's force-disabled for those.
         let turboKV = cacheTypeK.hasPrefix("turbo") || cacheTypeV.hasPrefix("turbo")
-        if cacheReuse && !turboKV {
+        if cacheReuse && !turboKV && mmproj == nil {
             args += ["--cache-reuse", "256"]
         }
         if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
@@ -138,6 +144,20 @@ struct ServerSettings {
         }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
         args += ShellWords.split(extraArgs)
+        return args
+    }
+
+    /// Arguments for `llama-bench`. Kept separate from `llama-server` arguments
+    /// because server-only flags (`--host`, `--port`, chat UI, slot cache, etc.)
+    /// are not valid for the benchmark tool, but benchmark must still honor the
+    /// GPU/memory options that affect performance.
+    var benchmarkArguments: [String] {
+        var args = ["-m", modelPath, "-ngl", String(ngl), "--mmap", "0", "-r", "2"]
+        if ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
+        if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
+        if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
+        if effectiveFaAmd || flashAttn == "on" || cacheTypeV != "f16" { args += ["-fa", "1"] }
+        if multiGPU { args += ["--split-mode", "layer"] }
         return args
     }
 
@@ -218,6 +238,7 @@ struct ServerSettings {
             reasoningInline: bool(SettingsKeys.reasoningInline, false),
             parallelSlots: int(SettingsKeys.parallelSlots, 1),
             apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),
+            localNetworkDiscovery: bool(SettingsKeys.localNetworkDiscovery, false),
             specMTP: bool(SettingsKeys.specMTP, false),
             faAmd: bool(SettingsKeys.faAmd, false),
             persistCache: bool(SettingsKeys.persistCache, false),
@@ -343,6 +364,8 @@ final class ServerController: ObservableObject {
     private var healthTask: Task<Void, Never>?
     private var lastStoppedPID: Int32?
     private var currentPort = 8080
+    private var discoveryService: NetService?
+    private var discoveryEnabled = false
     private let fileLog = RotatingFileLog(name: "server.log")
     /// Whether to pre-warm slot 0 across restarts for external clients (VS Code /
     /// Cline send a fixed 15-19k-token prefix every request; restoring it makes
@@ -401,6 +424,8 @@ final class ServerController: ObservableObject {
         genHistory = []
         requestCount = 0
         currentPort = settings.port
+        discoveryEnabled = settings.localNetworkDiscovery
+        stopDiscovery()
         state = .starting
 
         // A stopped engine can take seconds to die (SIGTERM mid-generation)
@@ -421,7 +446,7 @@ final class ServerController: ObservableObject {
     private func launch(_ settings: ServerSettings) {
         guard state == .starting else { return }   // user hit Stop meanwhile
 
-        prewarmActive = settings.persistCache && settings.isTurboEngine
+        prewarmActive = settings.persistCache && settings.isTurboEngine && !settings.isMultimodal
             && !ServerSettings.modelHasMTP(at: settings.modelPath)
 
         let p = Process()
@@ -444,6 +469,7 @@ final class ServerController: ObservableObject {
                 // the new engine's state, health watch or PID lockfile.
                 guard self.process === proc else { return }
                 self.healthTask?.cancel()
+                self.stopDiscovery()
                 EngineLock.clear()
                 if case .failed = self.state { return }
                 if proc.terminationStatus == 0 || proc.terminationStatus == 15 {
@@ -496,6 +522,7 @@ final class ServerController: ObservableObject {
 
     func stop() {
         healthTask?.cancel()
+        stopDiscovery()
         if let p = process {
             let pid = p.processIdentifier
             lastStoppedPID = pid
@@ -556,7 +583,10 @@ final class ServerController: ObservableObject {
                 if Task.isCancelled { return }
                 if let (data, _) = try? await URLSession.shared.data(from: url),
                    String(data: data, encoding: .utf8)?.contains("ok") == true {
-                    await MainActor.run { self?.state = .running }
+                    await MainActor.run {
+                        self?.state = .running
+                        self?.startDiscoveryIfNeeded(port: port)
+                    }
                     // Pre-warm slot 0 with the last session's prefix so an external
                     // client's first request skips the multi-minute cold prefill.
                     await self?.restoreExternalSlot(port: port)
@@ -566,9 +596,29 @@ final class ServerController: ObservableObject {
             }
             await MainActor.run {
                 self?.state = .failed("El servidor no respondió al health check")
+                self?.stopDiscovery()
                 self?.process?.terminate()
             }
         }
+    }
+
+    private func startDiscoveryIfNeeded(port: Int) {
+        guard discoveryEnabled else { return }
+        stopDiscovery()
+        let service = NetService(domain: "local.", type: "_http._tcp.", name: "ToshLLM API", port: Int32(port))
+        let txt: [String: Data] = [
+            "path": Data("/v1".utf8),
+            "protocol": Data("openai-compatible".utf8),
+            "auth": Data((UserDefaults.standard.bool(forKey: SettingsKeys.apiKeyEnabled) ? "bearer" : "none").utf8),
+        ]
+        service.setTXTRecord(NetService.data(fromTXTRecord: txt))
+        service.publish()
+        discoveryService = service
+    }
+
+    private func stopDiscovery() {
+        discoveryService?.stop()
+        discoveryService = nil
     }
 
     private func consume(_ text: String) {

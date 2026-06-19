@@ -78,6 +78,7 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertTrue(args.contains("--no-mmap"))
         XCTAssertTrue(args.contains("--jinja"))
         XCTAssertTrue(args.contains("--n-cpu-moe"))
+        XCTAssertEqual(args[args.firstIndex(of: "--host")! + 1], "127.0.0.1")
         XCTAssertFalse(args.contains("-ctk"), "f16 no debe emitir -ctk")
         XCTAssertFalse(args.contains("--mlock"))
         // The engine's 8 GiB host prompt cache must always be capped.
@@ -95,6 +96,26 @@ final class ServerSettingsTests: XCTestCase {
         let args = s.arguments
         XCTAssertEqual(args[args.firstIndex(of: "--cache-ram")! + 1], "0")
         XCTAssertEqual(args[args.firstIndex(of: "--reasoning-format")! + 1], "none")
+    }
+
+    func testVisionModelDisablesCacheReuseAndDetectsMultimodal() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("toshllm-vision-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let model = dir.appendingPathComponent("gemma-3-4b-it-Q4_K_M.gguf")
+        let mmproj = dir.appendingPathComponent("mmproj-gemma-3-4b-it-Q4_K_M.gguf")
+        FileManager.default.createFile(atPath: model.path, contents: Data())
+        FileManager.default.createFile(atPath: mmproj.path, contents: Data())
+
+        var s = makeSettings()
+        s.modelPath = model.path
+        s.cacheReuse = true
+
+        XCTAssertTrue(s.isMultimodal)
+        XCTAssertTrue(s.arguments.contains("--mmproj"))
+        XCTAssertFalse(s.arguments.contains("--cache-reuse"),
+                       "llama.cpp does not support cache-reuse with multimodal prompts")
     }
 
     func testKVQuantAndMlockArguments() {
@@ -128,6 +149,40 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(env["GGML_METAL_CONCURRENCY_DISABLE"], "1")
         XCTAssertEqual(env["GGML_METAL_VRAM_RESERVE_MB"], "1024")
         XCTAssertNil(env["GGML_METAL_DEVICE_INDEX"], "gpuIndex -1 no debe fijar índice")
+    }
+
+    func testSingleGPUSelectionPinsDeviceUnlessMultiGPUIsEnabled() {
+        var s = makeSettings()
+        s.gpuIndex = 1
+        XCTAssertEqual(s.environment["GGML_METAL_DEVICE_INDEX"], "1")
+
+        s.multiGPU = true
+        XCTAssertNil(s.environment["GGML_METAL_DEVICE_INDEX"],
+                     "multi-GPU necesita que todos los dispositivos Metal sigan visibles")
+    }
+
+    func testServerAndBenchmarkEnableMultiGPUSplitMode() {
+        var s = makeSettings()
+        s.multiGPU = true
+
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--split-mode")! + 1], "layer")
+        XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "--split-mode")! + 1], "layer")
+    }
+
+    func testLocalNetworkDiscoveryBindsServerToAllInterfaces() {
+        var s = makeSettings()
+        s.localNetworkDiscovery = true
+
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--host")! + 1], "0.0.0.0")
+    }
+
+    func testBenchmarkForcesFlashAttentionForEffectiveAmdKernel() {
+        var s = makeSettings()
+        s.faAmd = true
+        s.flashAttn = "auto"
+        s.cacheTypeV = "f16"
+
+        XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "-fa")! + 1], "1")
     }
 }
 

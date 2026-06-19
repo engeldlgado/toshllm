@@ -103,6 +103,12 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <dict>
         <key>NSAllowsLocalNetworking</key> <true/>
     </dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ToshLLM can expose and advertise its local OpenAI-compatible API to devices on your trusted local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_http._tcp.</string>
+    </array>
 </dict>
 </plist>
 EOF

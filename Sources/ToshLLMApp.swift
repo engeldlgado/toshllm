@@ -113,6 +113,13 @@ struct ToshLLMApp: App {
 struct MenuBarView: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var loc: Localizer
+    @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
+
+    private var serverIsStopped: Bool {
+        if case .stopped = server.state { return true }
+        if case .failed = server.state { return true }
+        return false
+    }
 
     var body: some View {
         Group {
@@ -133,6 +140,16 @@ struct MenuBarView: View {
                     server.start(.fromDefaults())
                 }
                 .disabled((UserDefaults.standard.string(forKey: "modelPath") ?? "").isEmpty)
+            }
+
+            Divider()
+
+            Toggle(loc.t("Descubrible en red local", "Discoverable on local network"),
+                   isOn: $localNetworkDiscovery)
+                .disabled(!serverIsStopped)
+            if !serverIsStopped {
+                Text(loc.t("Reinicia para cambiar la red", "Restart to change networking"))
+                    .font(.caption)
             }
 
             Divider()

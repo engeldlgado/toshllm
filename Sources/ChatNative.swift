@@ -565,7 +565,8 @@ final class ChatStore: ObservableObject {
     nonisolated var slotPersistEnabled: Bool {
         let d = UserDefaults.standard
         guard d.bool(forKey: SettingsKeys.persistCache) else { return false }
-        return ServerSettings.isTurbo(d.string(forKey: SettingsKeys.serverBinary) ?? "")
+        guard ServerSettings.isTurbo(d.string(forKey: SettingsKeys.serverBinary) ?? "") else { return false }
+        return ServerSettings.mmprojPath(forModel: d.string(forKey: SettingsKeys.modelPath) ?? "") == nil
     }
 
     nonisolated private static func slotFile(_ id: UUID) -> String { "\(id.uuidString).bin" }
@@ -1734,4 +1735,3 @@ struct ConversationListView: View {
         }
     }
 }
-

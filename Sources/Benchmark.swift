@@ -61,12 +61,7 @@ final class BenchmarkController: ObservableObject {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: benchPath)
-        var args = ["-m", settings.modelPath, "-ngl", String(settings.ngl), "--mmap", "0", "-r", "2"]
-        if settings.ncmoe > 0 { args += ["-ncmoe", String(settings.ncmoe)] }
-        if settings.cacheTypeK != "f16" { args += ["-ctk", settings.cacheTypeK] }
-        if settings.cacheTypeV != "f16" { args += ["-ctv", settings.cacheTypeV] }
-        if settings.flashAttn == "on" || settings.cacheTypeV != "f16" { args += ["-fa", "1"] }
-        p.arguments = args
+        p.arguments = settings.benchmarkArguments
         p.environment = settings.environment
 
         let pipe = Pipe()
@@ -134,12 +129,7 @@ final class BenchmarkController: ObservableObject {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: benchPath)
-        var args = ["-m", settings.modelPath, "-ngl", String(settings.ngl), "--mmap", "0", "-r", "2"]
-        if settings.ncmoe > 0 { args += ["-ncmoe", String(settings.ncmoe)] }
-        if settings.cacheTypeK != "f16" { args += ["-ctk", settings.cacheTypeK] }
-        if settings.cacheTypeV != "f16" { args += ["-ctv", settings.cacheTypeV] }
-        if settings.flashAttn == "on" || settings.cacheTypeV != "f16" { args += ["-fa", "1"] }
-        p.arguments = args
+        p.arguments = settings.benchmarkArguments
         p.environment = settings.environment
         let pipe = Pipe()
         p.standardOutput = pipe

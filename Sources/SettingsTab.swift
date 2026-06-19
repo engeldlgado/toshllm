@@ -40,6 +40,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
     @AppStorage(SettingsKeys.autoStart) private var autoStart = false
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
+    @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
     @State private var profileName = ""
 
     // TurboQuant KV types only exist in the experimental engine (llama.cpp PR 23962) or external builds
@@ -53,6 +54,14 @@ struct SettingsView: View {
     }
     private var turboKVAvailable: Bool {
         serverBinary != ServerSettings.defaultBinary
+    }
+    private var serverIsStopped: Bool {
+        if case .stopped = server.state { return true }
+        if case .failed = server.state { return true }
+        return false
+    }
+    private var currentModelIsVision: Bool {
+        ServerSettings.mmprojPath(forModel: modelPath) != nil
     }
 
     private var engineSelection: Binding<String> {
@@ -104,6 +113,25 @@ struct SettingsView: View {
                 Toggle(loc.t("Proteger la API con clave", "Protect the API with a key"), isOn: $apiKeyEnabled)
                     .infoTip(loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
                                 "Generates a key (stored in the Keychain) required on every request. The in-app chat uses it automatically; useful on shared Macs."))
+                Toggle(loc.t("Descubrible en red local", "Discoverable on local network"), isOn: $localNetworkDiscovery)
+                    .disabled(!serverIsStopped)
+                    .infoTip(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour como 'ToshLLM API'. Actívalo solo en redes confiables; se aplica al reiniciar el servidor.",
+                                "Makes the server listen on the local network and advertises it with Bonjour as 'ToshLLM API'. Enable only on trusted networks; takes effect when the server restarts."))
+                if localNetworkDiscovery && !apiKeyEnabled {
+                    Label(loc.t("Recomendado: activa 'Proteger la API con clave' antes de exponer el servidor en la red local.",
+                                "Recommended: enable 'Protect the API with a key' before exposing the server on the local network."),
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !serverIsStopped {
+                    Label(loc.t("Los cambios de red se aplican al reiniciar el servidor.",
+                                "Network changes take effect after restarting the server."),
+                          systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if apiKeyEnabled {
                     HStack {
                         Text(loc.t("Clave", "Key")).foregroundStyle(.secondary)
@@ -342,10 +370,15 @@ struct SettingsView: View {
                         .infoTip(loc.t("Activa un kernel Metal propio que ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD (define TOSH_FA_AMD y fuerza -fa activado), para cabezas de 128, 256 y 512 (cubre Gemma 4). Imprescindible con KV cuantizado/turbo: como ese KV obliga a -fa, sin este kernel la atención cae a CPU y se desploma (p. ej. prefill turbo ~6 → ~100 t/s; generación ~4 → ~30 t/s). Cubre cualquier KV estándar (f16/q8_0/q4_0) en cualquier combinación claves/valores.",
                                     "Enables a custom Metal kernel that runs attention — both prompt processing and generation — on the AMD GPU (sets TOSH_FA_AMD and forces -fa on), for head dim 128, 256 and 512 (covers Gemma 4). Essential with quantized/turbo KV: since that KV requires -fa, without this kernel attention falls back to CPU and collapses (e.g. turbo prefill ~6 → ~100 t/s; generation ~4 → ~30 t/s). Covers any standard KV (f16/q8_0/q4_0) in any keys/values combination."))
                     Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
-                        .disabled(!faAmd)
+                        .disabled(!faAmd || currentModelIsVision)
                         .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
                                     "Saves each conversation's KV cache to disk, so reopening a chat or restarting the app skips re-processing the prompt (saves several seconds per turn on long prompts). Requires the AMD Flash Attention kernel; with quantized KV (q8_0/q4_0) the file is smaller and restore is faster. Files live in Application Support and are removed when you delete the conversation."))
-                    if !faAmd {
+                    if currentModelIsVision {
+                        Label(loc.t("No disponible con modelos de visión: llama.cpp no permite guardar/restaurar slots cuando hay mmproj.",
+                                    "Not available with vision models: llama.cpp cannot save/restore slots when mmproj is loaded."),
+                              systemImage: "info.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else if !faAmd {
                         Label(loc.t("Requiere activar el kernel Flash Attention AMD (arriba).",
                                     "Requires enabling the AMD Flash Attention kernel (above)."),
                               systemImage: "info.circle")

@@ -45,7 +45,7 @@ It opens, detects your hardware, and recommends models that will actually run we
 - **MTP speculative decoding** — +34% generation speed with compatible models, zero quality loss
 - **Dual engines** — official llama.cpp + experimental **TurboQuant** engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), with an optional **AMD Flash Attention kernel** that keeps decode attention on the GPU for quantized/turbo KV (see the [research note](#research-flash-attention-on-amd))
 - **Benchmarks** — measure prompt/generation speed per configuration, with history and side-by-side comparison charts
-- **OpenAI-compatible API** — use it from any client or library at `http://127.0.0.1:8080`
+- **OpenAI-compatible API** — use it at `http://127.0.0.1:8080`, with optional local-network access and Bonjour discovery
 - **Every parameter explained** — bilingual tooltips and built-in docs (English/Spanish)
 - **Profiles, menu bar mode, auto-start** — save full configurations and switch with one click
 
@@ -56,6 +56,7 @@ These are new and still being validated — enable them in Settings, but expect 
 - **Remember conversations (disk cache)** *(experimental engine)* — persists each chat's KV cache so reopening it, or restarting the app, skips re-processing the prompt; the reload is byte-exact, and a long chat comes back in under a second instead of re-prefilling. Also pre-warms the cache for external clients (VS Code/Cline), so their first request skips the multi-minute cold prefill.
 - **Prompt cache reuse** *(experimental engine)* — reuses the cache across mid-prompt edits (coding assistants) and trimmed reasoning instead of reprocessing. Fast but approximate; toggle it off in Settings for exact, reproducible output.
 - **Split model across all GPUs** *(experimental, both engines)* — splits the model's layers over every detected GPU, for machines with multiple cards. Unvalidated on AMD/Metal so far; the UI flags it and it needs real multi-GPU testing.
+- **LAN discovery** — optionally binds the API to the local network and advertises `ToshLLM API` via Bonjour. API-key protection is strongly recommended before enabling it.
 
 ### A native chat that stays out of your way
 
@@ -107,6 +108,7 @@ The built-in benchmark runs prompt and generation tests for any configuration an
 ToshLLM is **beta** and under active development. It's solid for daily use, but you may still hit rough edges — please report anything you find in [Issues](https://github.com/engeldlgado/toshllm/issues) (you can export diagnostics from **Settings → Server log**). Two limitations are worth knowing up front:
 
 - **External clients (VS Code Copilot, Cline, Continue…):** these send a fixed 15–19k-token prompt (system instructions + tool definitions) with *every* request. On GPUs without Metal Flash Attention that means minutes of prompt processing per cold request, which saturates the GPU and can thermally throttle it. Recent versions mitigate this (single slot with resumable prefill, prompt-cache reuse, inline reasoning) and more is on the way. The built-in chat isn't affected — it only sends your conversation.
+- **Vision cache:** `llama.cpp` does not support saving/restoring slots or cache-reuse while an `mmproj` is loaded. ToshLLM disables those features automatically for vision models; normal in-memory prompt caching still works.
 - **Large MoE models on AMD GPUs:** Mixture-of-Experts models that don't fully fit in VRAM (e.g. 26B/35B with `--n-cpu-moe` offload) shuttle data between GPU and CPU on every token. On discrete AMD GPUs under Metal this can eventually deadlock the driver mid-generation. ToshLLM ships a **watchdog** that detects the stall, frees memory, and suggests switching to a dense model. **Dense models (e.g. 8B, fully in VRAM) are stable and recommended**; large MoE-with-offload is best avoided. *(Characterized on an RX 6700 XT with the [NootRX](https://github.com/ChefKissInc/NootRX) kext; behavior may differ on other AMD setups.)*
 
 ## Build from source
@@ -244,7 +246,7 @@ Casi todas las herramientas de LLM locales en macOS apuntan a Apple Silicon; los
 - **Decodificación especulativa MTP** — +34% de velocidad de generación sin pérdida de calidad
 - **Motores duales** — llama.cpp oficial + motor experimental **TurboQuant** (caché KV hasta ~16%, contextos de 100k+ tokens), con kernel opcional de **Flash Attention para AMD**
 - **Benchmarks** — mide velocidad de prompt y generación por configuración, con historial y gráficas comparativas
-- **API compatible con OpenAI** en `http://127.0.0.1:8080`
+- **API compatible con OpenAI** en `http://127.0.0.1:8080`, con acceso opcional por red local y descubrimiento Bonjour
 - **Cada parámetro explicado** — tooltips bilingües y documentación integrada
 - **Perfiles, modo barra de menú y auto-inicio**
 
@@ -254,6 +256,7 @@ Funciones nuevas, aún en validación — actívalas en Ajustes, pero pueden ten
 
 - **Recordar conversaciones (caché en disco)** *(motor experimental)* — guarda la caché KV de cada chat, así al reabrirlo o reiniciar la app no se reprocesa el prompt; la restauración es byte-exacta y un chat largo vuelve en menos de un segundo. También pre-calienta la caché para clientes externos (VS Code/Cline), evitando el prefill frío de varios minutos en la primera petición.
 - **Repartir el modelo entre varias GPUs** *(experimental, ambos motores)* — divide las capas del modelo entre todas las GPUs detectadas, para equipos con varias tarjetas. Sin validar aún en AMD/Metal; la UI lo advierte y necesita pruebas reales con multi-GPU.
+- **Descubrimiento en red local** — opcionalmente expone la API en la LAN y anuncia `ToshLLM API` mediante Bonjour. Se recomienda proteger la API con clave antes de activarlo.
 
 ### Instalación
 
@@ -267,6 +270,7 @@ Descarga el `.dmg` desde [Releases](https://github.com/engeldlgado/toshllm/relea
 - **Hackintosh:** las GPUs AMD RDNA 2 funcionan muy bien con el kext [NootRX](https://github.com/ChefKissInc/NootRX).
 - **Beta:** funciona para uso diario pero pueden aparecer detalles por pulir; reporta lo que encuentres en [Issues](https://github.com/engeldlgado/toshllm/issues) (exporta diagnósticos desde Ajustes → Registro del servidor).
 - **Limitaciones conocidas:** los clientes externos (VS Code, Cline…) envían un prompt fijo de 15-19k tokens en cada petición, lo que en frío satura la GPU varios minutos (el chat integrado no se ve afectado); y los modelos MoE grandes con offload pueden bloquear el driver AMD a mitad de generación — un watchdog lo detecta y recomienda cambiar a un modelo denso, que es lo más estable en este hardware.
+- **Caché con visión:** `llama.cpp` no permite guardar/restaurar slots ni usar cache-reuse mientras hay un `mmproj` cargado. ToshLLM desactiva esas funciones automáticamente para modelos de visión; la caché normal en memoria sigue funcionando.
 
 ### Licencia
 
