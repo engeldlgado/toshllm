@@ -141,7 +141,7 @@ index 4a3ebb55..1920df85 100644
      bool has_tensor;
      bool use_residency_sets;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 05d7f430..dc20d823 100644
+index 05d7f430..ff651b51 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -128,6 +128,28 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
@@ -204,7 +204,7 @@ index 05d7f430..dc20d823 100644
  
          if (dev->mtl_device) {
              dev->mtl_queue = [dev->mtl_device newCommandQueue];
-@@ -693,8 +737,63 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -693,8 +737,58 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
              dev->addr_virt = 0x000000400ULL;
  
              dev->props.device = device;
@@ -246,29 +246,24 @@ index 05d7f430..dc20d823 100644
 +                dev->props.has_simdgroup_reduction = false;
 +            }
 +
-+#ifdef GGML_TOSH_WAVE64_SAFEMODE
-+            // wave64 (AMD GCN/Vega) safe mode: the simdgroup-based kernels assume a
-+            // 32-wide simdgroup. On a non-Apple device that reports a wider SIMD group,
-+            // those fast paths produce garbage, so disable them and let the affected ops
-+            // fall back to correct (slower) paths. No-op on 32-wide devices (Apple/RDNA).
-+            // Compiled in only for the legacy engine build; override at runtime with
-+            // GGML_METAL_WAVE64_UNSAFE=1 to force the fast paths on.
-+            if (dev->props.simd_width != 32 &&
-+                ![dev->mtl_device supportsFamily:MTLGPUFamilyApple1] &&
-+                getenv("GGML_METAL_WAVE64_UNSAFE") == NULL) {
-+                GGML_LOG_INFO("%s: SIMD width %d != 32 on a non-Apple GPU; disabling simdgroup "
-+                              "reduction fast paths for correctness (set GGML_METAL_WAVE64_UNSAFE=1 to override)\n",
-+                              __func__, dev->props.simd_width);
++            // wave64 (AMD GCN/Vega) safe mode — OPT-IN via env, compiled into every build
++            // but OFF by default, so wave32 users (Apple / AMD RDNA) are never affected.
++            // The simdgroup-based kernels assume a 32-wide simdgroup; on a non-Apple GPU
++            // that reports a wider SIMD group those fast paths produce garbage, so disabling
++            // them lets the affected ops fall back to correct (slower) paths. Enable with
++            // GGML_METAL_WAVE64_SAFEMODE=1 (e.g. typed in the app's Extra arguments field).
++            if (getenv("GGML_METAL_WAVE64_SAFEMODE") != NULL &&
++                dev->props.simd_width != 32 &&
++                ![dev->mtl_device supportsFamily:MTLGPUFamilyApple1]) {
 +                fprintf(stderr, "ggml_metal: wave64 safe mode ON (SIMD width %d, non-Apple GPU): "
-+                                "simdgroup fast paths disabled for correct output; set GGML_METAL_WAVE64_UNSAFE=1 to override\n",
++                                "simdgroup fast paths disabled for correct output\n",
 +                        dev->props.simd_width);
 +                dev->props.has_simdgroup_reduction = false;
 +            }
-+#endif
  
              dev->props.has_simdgroup_mm = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
-@@ -1233,6 +1332,28 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1233,6 +1327,28 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
@@ -297,7 +292,7 @@ index 05d7f430..dc20d823 100644
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
          case GGML_OP_SSM_SCAN:
-@@ -1697,6 +1818,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1697,6 +1813,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
  }
  
  void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -308,7 +303,7 @@ index 05d7f430..dc20d823 100644
      if (buf->is_shared) {
          memcpy((char *) tensor->data + offset, data, size);
          return;
-@@ -1710,12 +1835,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1710,12 +1830,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -366,7 +361,7 @@ index 05d7f430..dc20d823 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1751,6 +1919,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1751,6 +1914,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -377,7 +372,7 @@ index 05d7f430..dc20d823 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1767,24 +1939,67 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1767,24 +1934,67 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  

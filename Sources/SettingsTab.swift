@@ -43,6 +43,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
     @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
     @State private var profileName = ""
+    @State private var showResetConfirm = false
 
     // TurboQuant KV types only exist in the experimental engine (llama.cpp PR 23962) or external builds
     private var availableKVTypes: [String] {
@@ -96,6 +97,40 @@ struct SettingsView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button(role: .destructive) { showResetConfirm = true } label: {
+                    Label(loc.t("Restablecer opciones por defecto", "Reset options to defaults"),
+                          systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .help(loc.t("Devuelve todas las opciones (motor, GPU, inferencia, chat) a sus valores por defecto. No elimina modelos ni cambia la carpeta de modelos.",
+                            "Returns every option (engine, GPU, inference, chat) to its default value. It does not delete models or change the models folder."))
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+
+            settingsForm
+        }
+        .confirmationDialog(
+            loc.t("¿Restablecer todas las opciones a sus valores por defecto?",
+                  "Reset all options to their defaults?"),
+            isPresented: $showResetConfirm, titleVisibility: .visible
+        ) {
+            Button(loc.t("Restablecer", "Reset"), role: .destructive) {
+                SettingsKeys.resetOptionsToDefaults()
+            }
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(loc.t("Tus modelos descargados y la carpeta de modelos se conservan.",
+                       "Your downloaded models and models folder are kept."))
+        }
+    }
+
+    private var settingsForm: some View {
         Form {
             Section(loc.t("Aplicación", "Application")) {
                 Picker(loc.t("Idioma", "Language"), selection: $loc.language) {
@@ -317,9 +352,10 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Stepper(loc.t("Hilos de CPU: \(threads)", "CPU threads: \(threads)"),
-                        value: $threads, in: 1...16)
-                    .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Los núcleos físicos (\(hardware.physicalCores)) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
-                                "Threads for the CPU side (MoE experts, tokenization). Physical cores (\(hardware.physicalCores)) are usually optimal; more threads won't help if RAM bandwidth is the limit."))
+                        value: $threads, in: 1...max(1, hardware.logicalCores))
+                    .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Tu equipo tiene \(hardware.logicalCores) hilos; los núcleos físicos (\(hardware.physicalCores)) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
+                                "Threads for the CPU side (MoE experts, tokenization). Your machine has \(hardware.logicalCores) threads; physical cores (\(hardware.physicalCores)) are usually optimal; more threads won't help if RAM bandwidth is the limit."))
+                    .onAppear { if threads > hardware.logicalCores { threads = max(1, hardware.logicalCores) } }
                 Picker("Flash Attention", selection: $flashAttn) {
                     Text("auto").tag("auto"); Text("on").tag("on"); Text("off").tag("off")
                 }
@@ -363,7 +399,7 @@ struct SettingsView: View {
             }
 
             Section(loc.t("Avanzado", "Advanced")) {
-                TextField(loc.t("Puerto", "Port"), value: $port, format: .number)
+                TextField(loc.t("Puerto", "Port"), value: $port, format: .number.grouping(.never))
                     .infoTip(loc.t("Puerto local del servidor (API compatible con OpenAI y chat web).",
                                 "Local server port (OpenAI-compatible API and web chat)."))
                 Picker(loc.t("Motor de inferencia", "Inference engine"), selection: engineSelection) {
@@ -403,8 +439,8 @@ struct SettingsView: View {
                 }
                 TextField(loc.t("Argumentos extra", "Extra arguments"), text: $extraArgs)
                     .font(.system(.caption, design: .monospaced))
-                    .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios (para opciones que la app no expone).",
-                                "Additional llama-server arguments, space-separated (for options the app doesn't expose)."))
+                    .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios (para opciones que la app no expone). Un token con forma CLAVE=VALOR se aplica como variable de entorno del motor, no como argumento. Ej.: en tarjetas AMD GCN/Vega (Vega 56/64, RX 580, Radeon VII) que dan texto corrupto, escribe GGML_METAL_WAVE64_SAFEMODE=1 para forzar salida coherente (más lento).",
+                                "Additional llama-server arguments, space-separated (for options the app doesn't expose). A token shaped like KEY=VALUE is applied as an engine environment variable instead of an argument. E.g. on AMD GCN/Vega cards (Vega 56/64, RX 580, Radeon VII) that produce garbled text, type GGML_METAL_WAVE64_SAFEMODE=1 to force coherent output (slower)."))
                 Text(loc.t("Los cambios se aplican al reiniciar el servidor.",
                            "Changes take effect when the server restarts."))
                     .font(.caption).foregroundStyle(.secondary)
@@ -432,6 +468,9 @@ struct SettingsView: View {
 /// dismiss). Replaces the unstyleable native `.help()` tooltip.
 struct InfoTip: View {
     let text: String
+    /// When false (hover-reveal mode) the ⓘ is hidden until the host row is hovered
+    /// or the popover is open — used outside Settings so the icon doesn't clutter.
+    var forceVisible: Bool = true
     @State private var shown = false
     @State private var pinned = false
     @State private var hoverWork: DispatchWorkItem?
@@ -440,6 +479,8 @@ struct InfoTip: View {
         Image(systemName: "info.circle")
             .imageScale(.medium)
             .foregroundStyle(shown ? Color.accentColor : .secondary)
+            .opacity(forceVisible || shown ? 1 : 0)
+            .animation(.easeInOut(duration: 0.15), value: forceVisible)
             .contentShape(Rectangle())
             .onHover { inside in
                 hoverWork?.cancel()
@@ -470,12 +511,27 @@ struct InfoTip: View {
 }
 
 extension View {
-    /// Drop-in replacement for `.help(_:)` that shows a styled, pinnable popover
-    /// via an ⓘ button placed at the trailing edge of the row.
-    func infoTip(_ text: String) -> some View {
+    /// Drop-in replacement for `.help(_:)` that shows a styled, pinnable popover via
+    /// an ⓘ button at the trailing edge of the row. In Settings the ⓘ is always
+    /// visible; pass `revealOnHover: true` elsewhere so the ⓘ only fades in while the
+    /// row is hovered (the styled tooltip without a permanent icon cluttering the UI).
+    func infoTip(_ text: String, revealOnHover: Bool = false) -> some View {
+        InfoTipRow(text: text, revealOnHover: revealOnHover) { self }
+    }
+}
+
+/// Hosts a view plus its ⓘ, tracking row hover so the icon can be revealed on demand.
+private struct InfoTipRow<Content: View>: View {
+    let text: String
+    let revealOnHover: Bool
+    @ViewBuilder var content: Content
+    @State private var hovering = false
+
+    var body: some View {
         HStack(spacing: 8) {
-            self
-            InfoTip(text: text)
+            content
+            InfoTip(text: text, forceVisible: !revealOnHover || hovering)
         }
+        .onHover { hovering = $0 }
     }
 }

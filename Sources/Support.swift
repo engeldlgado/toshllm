@@ -46,6 +46,26 @@ enum SettingsKeys {
     static let chatThinking = "chatThinking"
     static let chatAutoCompact = "chatAutoCompact"
     static let onboardingDone = "onboardingDone"
+
+    /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
+    /// so `@AppStorage` falls back to its declared defaults. The models folder, the
+    /// selected model and onboarding state are deliberately NOT included, so a reset
+    /// never hides or deletes downloaded models. Profiles and the Keychain API key
+    /// live outside UserDefaults and are untouched.
+    static let resettableOptionKeys = [
+        port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
+        vramReserve, gpuIndex, extraArgs, cacheTypeK, cacheTypeV, mlock, cacheRAM,
+        parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU,
+        forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
+        menuBarIcon, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
+        chatAutoCompact,
+    ]
+
+    /// Clears every tunable option so they revert to defaults, keeping models intact.
+    static func resetOptionsToDefaults() {
+        let defaults = UserDefaults.standard
+        for key in resettableOptionKeys { defaults.removeObject(forKey: key) }
+    }
 }
 
 // MARK: - Logging
@@ -70,26 +90,50 @@ enum AppSupport {
 
 /// Rotating plain-text log for the engine output, so crashes can be diagnosed
 /// after the fact and exported from Settings.
+/// Per-session log files kept under Application Support/logs, named with the start
+/// timestamp (e.g. `server-2026-06-19_15-30-45.log`). Each server run writes its own
+/// file, so a Mac crash leaves the session's log intact for later inspection. Files
+/// older than `retentionDays` are pruned automatically so they don't pile up.
 final class RotatingFileLog: @unchecked Sendable {
-    private let url: URL
+    private let dir: URL
+    private let prefix: String
     private let maxBytes: UInt64
+    private let retentionDays: Int
     private let queue = DispatchQueue(label: "toshllm.filelog")
     private var handle: FileHandle?
+    private var currentURL: URL
 
-    init(name: String, maxBytes: UInt64 = 5 * 1024 * 1024) {
-        self.url = AppSupport.directory.appendingPathComponent(name)
+    init(name: String, maxBytes: UInt64 = 10 * 1024 * 1024, retentionDays: Int = 3) {
+        self.prefix = (name as NSString).deletingPathExtension   // "server.log" -> "server"
         self.maxBytes = maxBytes
+        self.retentionDays = retentionDays
+        self.dir = AppSupport.directory.appendingPathComponent("logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        self.currentURL = dir.appendingPathComponent("\(prefix).log")   // until a session starts
+        queue.async { [self] in cleanup() }   // prune stale logs at launch too
     }
 
-    var fileURL: URL { url }
+    var fileURL: URL { queue.sync { currentURL } }
+    var directory: URL { dir }
+
+    /// Begins a new timestamped per-session file and prunes files past the retention
+    /// window. Call once per server start so each run is isolated and crash-safe.
+    func startSession() {
+        queue.async { [self] in
+            try? handle?.close(); handle = nil
+            let stamp = Self.stampFormatter.string(from: Date())
+            currentURL = dir.appendingPathComponent("\(prefix)-\(stamp).log")
+            cleanup()
+        }
+    }
 
     func append(_ text: String) {
         queue.async { [self] in
             if handle == nil {
-                if !FileManager.default.fileExists(atPath: url.path) {
-                    FileManager.default.createFile(atPath: url.path, contents: nil)
+                if !FileManager.default.fileExists(atPath: currentURL.path) {
+                    FileManager.default.createFile(atPath: currentURL.path, contents: nil)
                 }
-                handle = try? FileHandle(forWritingTo: url)
+                handle = try? FileHandle(forWritingTo: currentURL)
                 _ = try? handle?.seekToEnd()
             }
             guard let handle else { return }
@@ -100,13 +144,34 @@ final class RotatingFileLog: @unchecked Sendable {
         }
     }
 
+    /// Within a single session, cap growth: move the current file aside once and
+    /// keep writing, so one runaway run can't fill the disk.
     private func rotate() {
         try? handle?.close()
         handle = nil
-        let old = url.deletingPathExtension().appendingPathExtension("old.log")
-        try? FileManager.default.removeItem(at: old)
-        try? FileManager.default.moveItem(at: url, to: old)
+        let prev = currentURL.deletingPathExtension().appendingPathExtension("prev.log")
+        try? FileManager.default.removeItem(at: prev)
+        try? FileManager.default.moveItem(at: currentURL, to: prev)
     }
+
+    /// Deletes session log files older than the retention window.
+    private func cleanup() {
+        let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86_400)
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        for f in files where f.lastPathComponent.hasPrefix(prefix) && f.pathExtension == "log" {
+            let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let mod, mod < cutoff { try? fm.removeItem(at: f) }
+        }
+    }
+
+    private static let stampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
 }
 
 // MARK: - Shell-words argument parsing

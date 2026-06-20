@@ -10,6 +10,9 @@ struct DashboardView: View {
     @EnvironmentObject var profileStore: ProfileStore
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
+    @AppStorage(SettingsKeys.port) private var port = 8080
+    @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
+    @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
 
     @EnvironmentObject var updates: UpdateChecker
 
@@ -21,6 +24,7 @@ struct DashboardView: View {
                     hardwareCard
                     serverCard
                 }
+                .fixedSize(horizontal: false, vertical: true)
                 recommendationCard
             }
             .padding()
@@ -61,7 +65,7 @@ struct DashboardView: View {
     }
 
     private var hardwareCard: some View {
-        Card(title: loc.t("Tu equipo", "Your machine"), icon: "desktopcomputer") {
+        Card(title: loc.t("Tu equipo", "Your machine"), icon: "desktopcomputer", fill: true) {
             row("cpu", hardware.cpuBrand
                 .replacingOccurrences(of: "(R)", with: "")
                 .replacingOccurrences(of: "(TM)", with: ""))
@@ -72,6 +76,8 @@ struct DashboardView: View {
             if let gpu = hardware.bestGPU {
                 row("rectangle.on.rectangle", "\(gpu.name) · \(gpu.vramMB / 1024) GB VRAM")
             }
+            if !hardware.model.isEmpty { row("desktopcomputer", hardware.model) }
+            if !hardware.osVersion.isEmpty { row("apple.logo", hardware.osVersion) }
             row("bolt.fill", ServerSettings.isAppleSilicon
                 ? loc.t("Backend: Metal (Apple Silicon)", "Backend: Metal (Apple Silicon)")
                 : loc.t("Backend: Metal (build AMD parcheado)", "Backend: Metal (patched AMD build)"))
@@ -79,7 +85,7 @@ struct DashboardView: View {
     }
 
     private var serverCard: some View {
-        Card(title: loc.t("Servidor", "Server"), icon: "server.rack") {
+        Card(title: loc.t("Servidor", "Server"), icon: "server.rack", fill: true) {
             let active = models.models.first { $0.url.path == modelPath }
             row("shippingbox", active?.name ?? loc.t("Sin modelo seleccionado", "No model selected"))
             if ncmoe > 0 {
@@ -87,6 +93,43 @@ struct DashboardView: View {
                                  "MoE experts on CPU: \(ncmoe) layers"))
             }
             row("number", loc.t("Peticiones: \(server.requestCount)", "Requests: \(server.requestCount)"))
+
+            // Quick access to the two settings most often changed when sharing the
+            // server. Locked while running — they apply on the next start. Same row
+            // layout as above (18-pt icon column) so everything lines up.
+            let serverBusy = server.state == .running || server.state == .starting
+            // Shown on hover only while running, so the section never grows/shrinks
+            // (no layout jump) when the server starts or stops.
+            let restartNote = serverBusy
+                ? loc.t(" Se aplica al reiniciar el servidor.", " Applies when the server restarts.")
+                : ""
+            Divider().padding(.vertical, 3)
+            HStack(spacing: 8) {
+                Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
+                Text(loc.t("Puerto", "Port")).font(.callout)
+                Spacer(minLength: 8)
+                TextField("", value: $port, format: .number.grouping(.never))
+                    .multilineTextAlignment(.trailing).frame(width: 72)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(serverBusy)
+            }
+            .help(loc.t("Puerto local del servidor (API y chat web).",
+                        "Local server port (API and web chat).") + restartNote)
+            HStack(spacing: 8) {
+                Image(systemName: "wifi").frame(width: 18).foregroundStyle(.secondary)
+                Text(loc.t("Descubrible en red local", "Discoverable on local network")).font(.callout)
+                // Inline ⓘ (no extra row → no vertical jump). Styled, reliable popover.
+                if localNetworkDiscovery && !apiKeyEnabled {
+                    InfoTip(text: loc.t("Recomendado: protege la API con clave antes de exponerla en la red local.",
+                                        "Recommended: protect the API with a key before exposing it on the local network."))
+                }
+                Spacer(minLength: 8)
+                Toggle("", isOn: $localNetworkDiscovery)
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    .disabled(serverBusy)
+            }
+            .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour.",
+                        "Makes the server listen on the local network and advertises it via Bonjour.") + restartNote)
 
             if !profileStore.profiles.isEmpty {
                 Menu {
@@ -156,24 +199,28 @@ struct DashboardView: View {
 
     private func recommendationRow(_ rec: Catalog.Recommendation) -> some View {
         let style = roleStyle(rec.role)
-        return HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+        return HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
                     Label(style.text, systemImage: style.icon)
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(style.color.opacity(0.18), in: Capsule())
                         .foregroundStyle(style.color)
-                    Text(rec.model.name).font(.subheadline.weight(.semibold))
+                        .fixedSize()
+                    Text(rec.model.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                     Text(String(format: "%.1f GB", rec.model.spec.fileGB))
                         .font(.caption2).foregroundStyle(.secondary)
                     if rec.model.spec.isMoE { MoEBadge() }
                 }
-                Text(rec.model.detail(loc.isSpanish)).font(.caption).foregroundStyle(.secondary)
+                Text(rec.model.detail(loc.isSpanish))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 EstimateLine(est: rec.est)
             }
-            Spacer(minLength: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
             CatalogActionButton(model: rec.model, est: rec.est)
+                .fixedSize()
         }
     }
 
@@ -198,6 +245,9 @@ struct DashboardView: View {
 struct Card<Content: View>: View {
     let title: String
     let icon: String
+    /// When true the card stretches to fill the tallest sibling in its row, so
+    /// side-by-side cards line up even with different amounts of content.
+    var fill: Bool = false
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -208,7 +258,7 @@ struct Card<Content: View>: View {
             content
         }
         .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: fill ? .infinity : nil, alignment: .topLeading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
     }
 }

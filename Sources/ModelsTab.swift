@@ -7,6 +7,7 @@ struct ModelsView: View {
     @EnvironmentObject var search: SearchStore
     @EnvironmentObject var loc: Localizer
     @State private var tab: Tab = .recommended
+    @State private var refreshing = false
 
     enum Tab: Hashable { case recommended, browse, mine }
 
@@ -33,9 +34,17 @@ struct ModelsView: View {
             }
         }
         .toolbar {
-            Button { models.refresh() } label: {
-                Label(loc.t("Actualizar", "Refresh"), systemImage: "arrow.clockwise")
+            Button {
+                models.refresh()
+                withAnimation { refreshing = true }
+                Task { try? await Task.sleep(for: .seconds(0.8)); withAnimation { refreshing = false } }
+            } label: {
+                Label(refreshing ? loc.t("Actualizado", "Refreshed") : loc.t("Actualizar", "Refresh"),
+                      systemImage: refreshing ? "checkmark" : "arrow.clockwise")
             }
+            .disabled(refreshing)
+            .help(loc.t("Vuelve a escanear la carpeta de modelos para detectar archivos añadidos o eliminados.",
+                        "Re-scans the models folder to pick up files added or removed outside the app."))
         }
     }
 }

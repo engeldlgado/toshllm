@@ -9,6 +9,8 @@ struct HardwareInfo {
     let logicalCores: Int
     let ramGB: Double
     let arch: String
+    let model: String        // e.g. "Mac Pro (MacPro7,1)"
+    let osVersion: String    // e.g. "macOS 15.5 Sequoia"
     let gpus: [GPUDevice]
 
     var bestGPU: GPUDevice? { gpus.max(by: { $0.vramMB < $1.vramMB }) }
@@ -38,8 +40,35 @@ struct HardwareInfo {
             arch: sysctlString("hw.machine").isEmpty
                 ? (sysctlInt("hw.optional.arm64") == 1 ? "arm64" : "x86_64")
                 : sysctlString("hw.machine"),
+            model: modelName(sysctlString("hw.model")),
+            osVersion: osVersionName(),
             gpus: ServerController.availableGPUs()
         )
+    }
+
+    /// A friendly Mac model from the `hw.model` SMBIOS identifier (e.g. MacPro7,1).
+    private static func modelName(_ id: String) -> String {
+        guard !id.isEmpty else { return "" }
+        let lower = id.lowercased()
+        let pairs: [(String, String)] = [
+            ("macpro", "Mac Pro"), ("macmini", "Mac mini"), ("imacpro", "iMac Pro"),
+            ("imac", "iMac"), ("macbookpro", "MacBook Pro"), ("macbookair", "MacBook Air"),
+            ("macbook", "MacBook"), ("mac", "Mac"),
+        ]
+        guard let friendly = pairs.first(where: { lower.hasPrefix($0.0) })?.1 else { return id }
+        return "\(friendly) (\(id))"
+    }
+
+    /// e.g. "macOS 15.5 Sequoia".
+    private static func osVersionName() -> String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        let names = [11: "Big Sur", 12: "Monterey", 13: "Ventura", 14: "Sonoma",
+                     15: "Sequoia", 26: "Tahoe"]
+        let num = v.patchVersion == 0
+            ? "\(v.majorVersion).\(v.minorVersion)"
+            : "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+        if let name = names[v.majorVersion] { return "macOS \(num) \(name)" }
+        return "macOS \(num)"
     }
 }
 

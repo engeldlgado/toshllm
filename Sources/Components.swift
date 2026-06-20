@@ -8,12 +8,16 @@ struct EstimateLine: View {
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        HStack(spacing: 10) {
-            badge
-            Text(String(format: "VRAM ~%.1f GB", est.vramGB))
-            if est.ramGB >= 1 { Text(String(format: "RAM ~%.1f GB", est.ramGB)) }
-            Text(est.expectedSpeed)
-            if est.suggestedNcmoe > 0 { Text("ncmoe \(est.suggestedNcmoe)") }
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                badge
+                Text(est.expectedSpeed)
+            }
+            HStack(spacing: 10) {
+                Text(String(format: "VRAM ~%.1f GB", est.vramGB))
+                if est.ramGB >= 1 { Text(String(format: "RAM ~%.1f GB", est.ramGB)) }
+                if est.suggestedNcmoe > 0 { Text("ncmoe \(est.suggestedNcmoe)") }
+            }
         }
         .font(.system(.caption, design: .monospaced))
         .foregroundStyle(.secondary)
@@ -30,6 +34,7 @@ struct EstimateLine: View {
         }()
         return Text(text)
             .font(.caption2.weight(.medium))
+            .lineLimit(1).fixedSize()
             .padding(.horizontal, 6).padding(.vertical, 1.5)
             .background(color.opacity(0.18), in: Capsule())
             .foregroundStyle(color)

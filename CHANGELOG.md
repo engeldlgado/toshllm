@@ -3,6 +3,29 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.30] - 2026-06-20
+
+### Added
+- **GCN/Vega (wave64) safe mode**, opt-in on the official engine: type
+  `GGML_METAL_WAVE64_SAFEMODE=1` in Extra arguments (any `KEY=VALUE` there is now passed
+  as an engine env var). Validated coherent on an RX 580; off by default, no-op on
+  Apple/RDNA. Extra arguments now route uppercase `KEY=VALUE` tokens to the environment.
+- **Per-session server logs** with date-and-time filenames (survive a crash) that
+  auto-delete after 3 days, plus a self-contained log header (version, engine, model,
+  GPUs, args/env). Start/stop the server and pick a model from the Logs tab.
+- **System info on the dashboard**: Mac model and macOS version.
+- **Reset options to defaults** button (keeps models and the models folder).
+
+### Fixed
+- **eGPU full speed**: forces VRAM-resident buffers on external GPUs (was streaming over
+  Thunderbolt at ~0.8 t/s), automatically when an eGPU is selected, with a manual toggle.
+- CPU-threads selector capped to the machine's actual thread count.
+- Port no longer shows a thousands separator (8080, not 8.080).
+
+### Changed
+- UI polish: dashboard cards aligned to equal height, server quick-settings (port,
+  discoverability) without layout jumps, cleaner model estimate rows.
+
 ## [0.81.29] - 2026-06-19
 
 ### Fixed

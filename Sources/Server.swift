@@ -149,8 +149,32 @@ struct ServerSettings {
             args += ["--spec-type", "draft-mtp"]
         }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
-        args += ShellWords.split(extraArgs)
+        args += extraArgTokens.cli
         return args
+    }
+
+    /// Splits the Extra arguments field: a token shaped like `KEY=VALUE` whose name
+    /// is an UPPERCASE env-style identifier (`[A-Z_][A-Z0-9_]*`) becomes an environment
+    /// variable — so an advanced user can flip an engine env knob (e.g.
+    /// `GGML_METAL_WAVE64_SAFEMODE=1` for GCN/Vega cards) without a dedicated UI field.
+    /// Everything else stays a llama-server CLI argument, including lowercase flag
+    /// values that contain `=` (e.g. `--override-kv key=str:foo`), which is why the
+    /// name must be uppercase to qualify as env.
+    var extraArgTokens: (env: [String: String], cli: [String]) {
+        func isEnvName(_ s: Substring) -> Bool {
+            guard let first = s.first, first == "_" || (first.isLetter && first.isUppercase) else { return false }
+            return s.allSatisfy { $0 == "_" || $0.isNumber || ($0.isLetter && $0.isUppercase) }
+        }
+        var env: [String: String] = [:]
+        var cli: [String] = []
+        for tok in ShellWords.split(extraArgs) {
+            if let eq = tok.firstIndex(of: "="), eq != tok.startIndex, isEnvName(tok[..<eq]) {
+                env[String(tok[..<eq])] = String(tok[tok.index(after: eq)...])
+            } else {
+                cli.append(tok)
+            }
+        }
+        return (env, cli)
     }
 
     /// Arguments for `llama-bench`. Kept separate from `llama-server` arguments
@@ -198,6 +222,9 @@ struct ServerSettings {
             env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
+        // KEY=VALUE tokens from Extra arguments become env vars (e.g. the GCN/Vega
+        // wave64 safe-mode flag). Applied last so the user can override the above.
+        for (k, v) in extraArgTokens.env { env[k] = v }
         return env.compactMapValues { $0 }
     }
 
@@ -552,6 +579,7 @@ final class ServerController: ObservableObject {
             }
         }
 
+        fileLog.startSession()   // new timestamped per-session file, prunes old ones
         consume(Self.startupBanner(settings: settings))
         do {
             try p.run()

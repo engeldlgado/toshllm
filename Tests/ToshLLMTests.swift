@@ -7,7 +7,7 @@ final class EstimatorTests: XCTestCase {
     /// Reference hardware: the development machine (RX 6700 XT 12 GB + 32 GB RAM).
     private let referenceHW = HardwareInfo(
         cpuBrand: "Test CPU", physicalCores: 6, logicalCores: 12,
-        ramGB: 32, arch: "x86_64",
+        ramGB: 32, arch: "x86_64", model: "", osVersion: "",
         gpus: [GPUDevice(index: 0, name: "Test GPU", vramMB: 12868)])
 
     func testDenseModelThatFitsIsIdeal() {
@@ -39,7 +39,7 @@ final class EstimatorTests: XCTestCase {
     func testMoETooBigForRAMIsRejected() {
         let smallRAM = HardwareInfo(
             cpuBrand: "Test", physicalCores: 4, logicalCores: 8,
-            ramGB: 8, arch: "x86_64",
+            ramGB: 8, arch: "x86_64", model: "", osVersion: "",
             gpus: [GPUDevice(index: 0, name: "GPU", vramMB: 8192)])
         let spec = ModelSpec(fileGB: 19.5, paramsB: 35.4, layers: 40, isMoE: true)
         XCTAssertEqual(Estimator.estimate(spec: spec, hw: smallRAM).level, .no)
@@ -145,6 +145,21 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(resolved(ServerSettings.mmprojPath(forModel: m26)), resolved(p26))
         // The projector files themselves are never treated as models.
         XCTAssertNil(ServerSettings.mmprojPath(forModel: p12))
+    }
+
+    func testExtraArgsSplitEnvFromCliTokens() {
+        var s = makeSettings()
+        s.extraArgs = "GGML_METAL_WAVE64_SAFEMODE=1 --foo=bar --verbose -x"
+        let t = s.extraArgTokens
+        // KEY=VALUE (valid env name) becomes an env var, applied to the process.
+        XCTAssertEqual(t.env["GGML_METAL_WAVE64_SAFEMODE"], "1")
+        XCTAssertEqual(s.environment["GGML_METAL_WAVE64_SAFEMODE"], "1")
+        // --foo=bar keeps the leading dash → stays a CLI flag, never an env var.
+        XCTAssertEqual(t.cli, ["--foo=bar", "--verbose", "-x"])
+        XCTAssertNil(t.env["--foo"])
+        // The env assignment is not leaked into llama-server's argument list.
+        XCTAssertFalse(s.arguments.contains("GGML_METAL_WAVE64_SAFEMODE=1"))
+        XCTAssertTrue(s.arguments.contains("--verbose"))
     }
 
     func testKVQuantAndMlockArguments() {
@@ -495,7 +510,7 @@ final class UpdateCheckerTests: XCTestCase {
 final class CatalogTests: XCTestCase {
     private let referenceHW = HardwareInfo(
         cpuBrand: "Test", physicalCores: 6, logicalCores: 12,
-        ramGB: 32, arch: "x86_64",
+        ramGB: 32, arch: "x86_64", model: "", osVersion: "",
         gpus: [GPUDevice(index: 0, name: "GPU", vramMB: 12868)])
 
     func testCatalogURLsAreWellFormed() {

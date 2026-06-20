@@ -7,7 +7,10 @@ import SwiftUI
 /// 200 px panel that used to live inside Settings.
 struct LogsView: View {
     @EnvironmentObject var server: ServerController
+    @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
+    @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
+    @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
 
     @State private var query = ""
     /// Minimum severity to show: 0 = everything, 1 = warnings+, 2 = errors only.
@@ -27,6 +30,7 @@ struct LogsView: View {
 
     private var controls: some View {
         VStack(spacing: 8) {
+            serverControls
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.caption)
@@ -81,8 +85,8 @@ struct LogsView: View {
                 } label: {
                     Label(loc.t("Archivo en Finder", "File in Finder"), systemImage: "doc.text.magnifyingglass")
                 }
-                .help(loc.t("El registro completo persiste en disco con rotación automática.",
-                            "The complete log persists on disk with automatic rotation."))
+                .help(loc.t("Cada sesión del servidor se guarda en su propio archivo con fecha y hora, así un cierre inesperado o un cuelgue de la Mac conserva el registro. Se borran solos a los 3 días.",
+                            "Each server session is saved to its own date-and-time file, so an unexpected quit or a Mac freeze keeps the log. They auto-delete after 3 days."))
 
                 Button { exportDiagnostics() } label: {
                     Label(loc.t("Exportar diagnóstico…", "Export diagnostics…"), systemImage: "square.and.arrow.up")
@@ -100,6 +104,66 @@ struct LogsView: View {
             .buttonStyle(.borderless)
         }
         .padding(12)
+    }
+
+    // MARK: server controls
+
+    /// Start/stop the server and pick a model right here, so you can drive a debug
+    /// session without leaving the log you're watching.
+    private var serverControls: some View {
+        HStack(spacing: 10) {
+            Menu {
+                if models.models.isEmpty {
+                    Text(loc.t("No hay modelos descargados", "No downloaded models"))
+                } else {
+                    ForEach(models.models) { m in
+                        Button {
+                            modelPath = m.url.path
+                            ncmoe = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: m), hw: hardware).suggestedNcmoe
+                        } label: {
+                            Label(m.name, systemImage: modelPath == m.url.path ? "checkmark" : "cpu")
+                        }
+                    }
+                }
+            } label: {
+                Label(selectedModelName, systemImage: "cpu")
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            .menuStyle(.borderlessButton)
+            .help(loc.t("Selecciona el modelo a cargar.", "Pick the model to load."))
+
+            Spacer()
+
+            statusDot
+            switch server.state {
+            case .running, .starting:
+                Button(role: .destructive) { server.stop() } label: {
+                    Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
+                }
+            default:
+                Button { server.start(.fromDefaults()) } label: {
+                    Label(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(modelPath.isEmpty)
+            }
+        }
+        .font(.callout)
+        .padding(.bottom, 2)
+    }
+
+    private var selectedModelName: String {
+        guard !modelPath.isEmpty else { return loc.t("Seleccionar modelo…", "Select model…") }
+        return URL(fileURLWithPath: modelPath).lastPathComponent
+    }
+
+    @ViewBuilder private var statusDot: some View {
+        switch server.state {
+        case .running:  Circle().fill(.green).frame(width: 8, height: 8)
+        case .starting: Circle().fill(.orange).frame(width: 8, height: 8)
+        case .failed:   Circle().fill(.red).frame(width: 8, height: 8)
+        case .stopped:  Circle().fill(.secondary).frame(width: 8, height: 8)
+        }
     }
 
     // MARK: log body
