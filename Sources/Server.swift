@@ -133,6 +133,12 @@ struct ServerSettings {
             args += ["--cache-reuse", "256"]
         }
         if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
+        // With an explicit --parallel N (N>1), llama-server splits the context
+        // pool across slots (e.g. 16384 → 8192 each) instead of sharing it; only
+        // --parallel "auto" auto-enables unified KV. Pass --kv-unified ourselves so
+        // the N slots share one pool: the main chat keeps the full context window
+        // and concurrent API requests don't multiply KV memory.
+        if parallelSlots > 1 { args.append("--kv-unified") }
         // EXPERIMENTAL multi-GPU: split layers across all detected Metal devices.
         // Leaves device selection to llama.cpp (we also skip the single-device env
         // below). Unvalidated on AMD — see the multiGPU doc comment.

@@ -79,22 +79,34 @@ struct StreamError: LocalizedError {
 final class LiveStream: ObservableObject {
     @Published var visibleText = ""
     @Published var displayedReasoning = ""
+    @Published var reasoningTail = ""
     @Published var hasReasoning = false
     @Published var reasoningExpanded = false
     @Published var speed: Double?
+    /// Prompt-processing progress 0…1 before the first token; nil otherwise.
+    @Published var prefillProgress: Double?
 
     private var latestReasoning = ""
     private var lastReasoningPublish = Date.distantPast
     private let reasoningPublishInterval: TimeInterval = 0.5
+    private var lastTailPublish = Date.distantPast
+    private let tailPublishInterval: TimeInterval = 0.3
 
     func reset() {
         visibleText = ""
         displayedReasoning = ""
+        reasoningTail = ""
         hasReasoning = false
         reasoningExpanded = false
         latestReasoning = ""
         lastReasoningPublish = .distantPast
+        lastTailPublish = .distantPast
         speed = nil
+        prefillProgress = nil
+    }
+
+    func setPrefillProgress(_ p: Double?) {
+        if prefillProgress != p { prefillProgress = p }
     }
 
     func update(reasoning: String, visible: String, speed: Double?, now: Date = Date()) {
@@ -109,8 +121,28 @@ final class LiveStream: ObservableObject {
             displayedReasoning = reasoning
             lastReasoningPublish = now
         }
+        // One-line live tail so collapsed "Thinking…" visibly progresses (cheap).
+        if !reasoningExpanded, visible.isEmpty, !reasoning.isEmpty,
+           now.timeIntervalSince(lastTailPublish) >= tailPublishInterval {
+            let tail = Self.tailSnippet(reasoning)
+            if reasoningTail != tail { reasoningTail = tail }
+            lastTailPublish = now
+        }
         if visibleText != visible { visibleText = visible }
         if let speed { self.speed = speed }
+    }
+
+    /// Tail of the reasoning as one flowing line, capped to recent chars at a
+    /// word boundary, so the peek scrolls continuously instead of jumping lines.
+    private static func tailSnippet(_ s: String, limit: Int = 200) -> String {
+        let flat = s.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "  ")
+        if flat.count <= limit { return flat }
+        var cut = String(flat.suffix(limit))
+        if let space = cut.firstIndex(of: " ") { cut = String(cut[cut.index(after: space)...]) }
+        return "… " + cut
     }
 
     func setReasoningExpanded(_ expanded: Bool, now: Date = Date()) {
@@ -132,6 +164,7 @@ final class StreamBuffer: @unchecked Sendable {
     private var reasoning = ""
     private var visible = ""
     private var speed: Double?
+    private var progress: Double?
     private var dirty = false
     private var done = false
 
@@ -144,17 +177,21 @@ final class StreamBuffer: @unchecked Sendable {
         lock.unlock()
     }
 
+    func writeProgress(_ p: Double?) {
+        lock.lock(); progress = p; dirty = true; lock.unlock()
+    }
+
     func finish() {
         lock.lock(); done = true; dirty = true; lock.unlock()
     }
 
     /// The latest snapshot if it changed since the last take (or the stream
     /// ended); nil when there is nothing new to render.
-    func take() -> (reasoning: String, visible: String, speed: Double?, done: Bool)? {
+    func take() -> (reasoning: String, visible: String, speed: Double?, progress: Double?, done: Bool)? {
         lock.lock(); defer { lock.unlock() }
         guard dirty else { return nil }
         dirty = false
-        return (reasoning, visible, speed, done)
+        return (reasoning, visible, speed, progress, done)
     }
 }
 
@@ -163,6 +200,8 @@ final class ChatStore: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var currentID: UUID?
     @Published var generating = false
+    /// Conversation currently streaming, so its live bubble only shows there.
+    @Published var generatingConvID: UUID?
     @Published var compacting = false
     @Published var lastError: String?
     let live = LiveStream()
@@ -283,6 +322,7 @@ final class ChatStore: ObservableObject {
 
     private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
         generating = true
+        generatingConvID = conversations[i].id
         live.reset()
         startWatchdog(port: port)
         // The user can switch or delete conversations mid-stream; the result
@@ -330,6 +370,8 @@ final class ChatStore: ObservableObject {
                 }
                 if snap.done { break }   // finish() publishes the final transcript
                 self?.live.update(reasoning: snap.reasoning, visible: snap.visible, speed: snap.speed)
+                let prefilling = snap.reasoning.isEmpty && snap.visible.isEmpty
+                self?.live.setPrefillProgress(prefilling ? snap.progress : nil)
                 self?.noteStreamActivity()
                 let n = snap.visible.count
                 let ms = n > 12000 ? 600 : n > 6000 ? 350 : n > 2500 ? 180 : 80
@@ -412,6 +454,8 @@ final class ChatStore: ObservableObject {
                     "cache_prompt": true,
                     // Ask for a final usage chunk to drive the context meter.
                     "stream_options": ["include_usage": true],
+                    // Stream prompt-processing progress (in `prompt_progress`).
+                    "return_progress": true,
                 ]
                 if !thinking {
                     body["chat_template_kwargs"] = ["enable_thinking": false]
@@ -451,6 +495,13 @@ final class ChatStore: ObservableObject {
                     if let u = obj["usage"] as? [String: Any],
                        let p = u["prompt_tokens"] as? Int, let c = u["completion_tokens"] as? Int {
                         usage = (p, c)
+                    }
+
+                    // {total, cache, processed, time_ms} → processed/total bar.
+                    if let pp = obj["prompt_progress"] as? [String: Any],
+                       let processed = pp["processed"] as? Int,
+                       let totalTok = pp["total"] as? Int, totalTok > 0 {
+                        buffer.writeProgress(min(1.0, Double(processed) / Double(totalTok)))
                     }
 
                     guard let choices = obj["choices"] as? [[String: Any]],
@@ -550,6 +601,7 @@ final class ChatStore: ObservableObject {
         // Publish the completed transcript before replacing StreamingBubble.
         // Otherwise SwiftUI can briefly create and retain an empty bubble.
         generating = false
+        generatingConvID = nil
         live.reset()
         task = nil
         watchdog?.cancel()
@@ -656,6 +708,7 @@ final class ChatStore: ObservableObject {
         ServerController.shared.stop()
         lastError = Self.stallMessage
         generating = false
+        generatingConvID = nil
         live.reset()
         save()
     }
@@ -897,11 +950,6 @@ final class ChatStore: ObservableObject {
 
 // MARK: - Main chat view
 
-/// Holds the last auto-follow scroll time. A reference type so updating it from
-/// the streaming callback doesn't reassign a @State value (which would
-/// invalidate the whole transcript view on every token).
-private final class ScrollFollowClock { var last = Date.distantPast }
-
 /// The chat detail: transcript and composer. The conversation list lives in
 /// `ConversationListView` (the split-view sidebar); both share the ChatStore
 /// from the environment, injected by ChatMainView.
@@ -922,8 +970,8 @@ struct NativeChatView: View {
     @State private var ocrPending = 0
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @State private var showSystem = false
-    @State private var pinnedToBottom = true
-    @State private var followClock = ScrollFollowClock()
+    // True while the newest message is on screen (inverted scroll rests here).
+    @State private var atBottom = true
     @FocusState private var inputFocused: Bool
 
     private var maxTokenOptions: [Int] {
@@ -978,155 +1026,125 @@ struct NativeChatView: View {
         return c.messages[n].id
     }
 
+    // Inverted scroll: the whole stack and every row are flipped, and messages
+    // are listed newest-first, so the conversation's end sits at the scroll's
+    // natural origin. Opening, following the stream and scrolling up to read all
+    // work without any scrollTo or anchor management — the pattern messaging apps
+    // use. Avoids the LazyVStack + scrollPosition blank bug (FB/Apple thread).
     private var messagesScroll: some View {
-        GeometryReader { viewport in
-            ScrollViewReader { proxy in
+        let messages = chat.current?.messages ?? []
+        let newestID = messages.last?.id
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 14) {
-                    if chat.current?.messages.isEmpty ?? true {
-                        VStack(spacing: 10) {
-                            Image(systemName: "bubble.left.and.text.bubble.right")
-                                .font(.system(size: 34))
-                                .foregroundStyle(.pink.opacity(0.8))
-                            Text(loc.t("¿En qué puedo ayudarte?", "What can I help with?"))
-                                .font(.title2.weight(.semibold))
-                            Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo. Adjunta código, texto o PDF con el clip para preguntar sobre ellos.",
-                                       "Everything runs on your GPU, never leaving your machine. Attach code, text or PDF files with the paperclip to ask about them."))
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: 420)
-                        }
-                        .padding(.top, 100)
-                    }
-                    ForEach(chat.current?.messages ?? []) { msg in
-                        let isLast = msg.id == chat.current?.messages.last?.id
-                        let isLastUser = msg.role == "user"
-                            && msg.id == chat.current?.messages.last(where: { $0.role == "user" })?.id
-                        if msg.id == compactionBoundaryID {
-                            Label(loc.t("Mensajes anteriores resumidos para liberar contexto",
-                                        "Earlier messages summarized to free context"),
-                                  systemImage: "archivebox")
-                                .font(.caption2).foregroundStyle(.secondary)
-                                .help(loc.t("Lo anterior a esta marca se envía al modelo como un resumen automático; aquí sigue visible íntegro.",
-                                            "History above this mark is sent to the model as an automatic summary; it remains fully visible here."))
-                        }
-                        if chat.generating && isLast && msg.role == "assistant" {
-                            StreamingBubble(live: chat.live, message: msg) {
-                                // Following the stream means scrolling to the
-                                // bottom marker, which forces the ScrollView to
-                                // measure the whole transcript. On a long
-                                // conversation that layout pass is heavy and, on
-                                // a discrete GPU shared with Metal inference,
-                                // stalls generation. Throttle the follow so it
-                                // costs a few passes per second, not one per
-                                // token; the final position is settled when
-                                // generation ends (onChange of chat.generating).
-                                guard pinnedToBottom else { return }
-                                let now = Date()
-                                // scrollTo re-measures the whole transcript, a
-                                // pass that grows with the answer. Back off the
-                                // follow rate as the answer gets longer so the
-                                // per-second layout cost stays bounded (that
-                                // cost, not the backend, is what made very long
-                                // answers render progressively slower). The
-                                // position is settled when generation ends.
-                                let n = chat.live.visibleText.count
-                                let interval: TimeInterval = n > 12000 ? 1.0 : n > 6000 ? 0.6 : 0.3
-                                guard now.timeIntervalSince(followClock.last) > interval else { return }
-                                followClock.last = now
-                                proxy.scrollTo("chatBottom", anchor: .bottom)
-                            }
-                            // StreamingBubble and the completed MessageBubble
-                            // must not share identity. Reusing the streaming
-                            // subtree after live.text is cleared leaves an
-                            // empty spinner even though the answer was saved.
-                            .id("streaming-\(msg.id.uuidString)")
-                        } else {
-                            MessageBubble(
-                                message: msg,
-                                streaming: false,
-                                liveSpeed: nil,
-                                isLastAssistant: msg.role == "assistant" && isLast,
-                                isLastUser: isLastUser,
-                                canRegenerate: !chat.generating,
-                                onRegenerate: {
-                                    pinnedToBottom = true
-                                    chat.regenerate(port: port, temperature: temperature,
-                                                    maxTokens: maxTokens, system: systemPrompt,
-                                                    thinking: thinkingEnabled)
-                                },
-                                onEdit: {
-                                    if let m = chat.popLastExchange() {
-                                        draft = m.content
-                                        attachments = m.attachments ?? []
-                                        inputFocused = true
-                                    }
-                                })
-                                .equatable()
-                                .id("finished-\(msg.id.uuidString)")
-                        }
-                    }
+                    Color.clear.frame(height: 1).id(Self.bottomID)
                     if let err = chat.lastError {
                         Label(err, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.red)
+                            .flippedUpsideDown()
                     }
-                    Color.clear.frame(height: 1).id("chatBottom")
-                        .background(GeometryReader { g in
-                            Color.clear.preference(key: BottomMarkerKey.self,
-                                                   value: g.frame(in: .named("chatScroll")).minY)
-                        })
+                    ForEach(messages.reversed()) { msg in
+                        messageRow(msg, isNewest: msg.id == newestID)
+                            .flippedUpsideDown()
+                            .id(msg.id)
+                            .onAppear { if msg.id == newestID { atBottom = true } }
+                            .onDisappear { if msg.id == newestID { atBottom = false } }
+                    }
                 }
                 .padding()
             }
-            .coordinateSpace(name: "chatScroll")
-            // Follow the stream only while the user is already at the bottom;
-            // scrolling up to read pauses the auto-follow until they return.
-            .onPreferenceChange(BottomMarkerKey.self) { y in
-                // Generous margin (~0.6 screen): a single streamed flush can
-                // add a tall block (e.g. a code fence) all at once, pushing the
-                // bottom marker far down. With a small margin that flips the
-                // pin off and auto-follow dead-locks (it only re-pins by
-                // scrolling, which it won't do while unpinned). The slack keeps
-                // following the stream; a deliberate scroll-up past it unpins.
-                let pinned = y <= viewport.size.height * 1.6
-                if pinned != pinnedToBottom { pinnedToBottom = pinned }
+            .flippedUpsideDown()
+            .overlay {
+                if messages.isEmpty { emptyChatState }
             }
             .overlay(alignment: .bottomTrailing) {
-                if !pinnedToBottom {
-                    Button {
-                        pinnedToBottom = true
-                        proxy.scrollTo("chatBottom", anchor: .bottom)
-                    } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 34, height: 34)
-                            .glassSurface(in: Circle(), interactive: true)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(14)
-                    .help(loc.t("Ir al final de la conversación y seguir la respuesta.",
-                                "Jump to the end of the conversation and follow the response."))
-                }
-            }
-            .onChange(of: chat.current?.messages.last?.content) { _, _ in
-                if pinnedToBottom { proxy.scrollTo("chatBottom", anchor: .bottom) }
+                if !atBottom { jumpToBottomButton { proxy.scrollTo(Self.bottomID) } }
             }
             .onChange(of: chat.currentID) { _, _ in
-                pinnedToBottom = true
-                proxy.scrollTo("chatBottom", anchor: .bottom)
+                atBottom = true
+                proxy.scrollTo(Self.bottomID)
                 inputFocused = true
             }
-            // When generation ends, the streaming bubble is swapped for the
-            // finished one (different identity/height); settle the position so
-            // that swap doesn't leave a visible jump.
-            .onChange(of: chat.generating) { _, generating in
-                if !generating && pinnedToBottom {
-                    DispatchQueue.main.async { proxy.scrollTo("chatBottom", anchor: .bottom) }
-                }
+            // A new turn (send/regenerate) jumps to the bottom.
+            .onChange(of: chat.current?.messages.last?.id) { _, _ in
+                atBottom = true
+                proxy.scrollTo(Self.bottomID)
             }
+        }
+    }
+
+    private static let bottomID = "convBottom"
+
+    @ViewBuilder
+    private func messageRow(_ msg: ChatMessage, isNewest: Bool) -> some View {
+        let isLastUser = msg.role == "user"
+            && msg.id == chat.current?.messages.last(where: { $0.role == "user" })?.id
+        VStack(alignment: .leading, spacing: 14) {
+            if msg.id == compactionBoundaryID {
+                Label(loc.t("Mensajes anteriores resumidos para liberar contexto",
+                            "Earlier messages summarized to free context"),
+                      systemImage: "archivebox")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .help(loc.t("Lo anterior a esta marca se envía al modelo como un resumen automático; aquí sigue visible íntegro.",
+                                "History above this mark is sent to the model as an automatic summary; it remains fully visible here."))
             }
+            if chat.generating && chat.current?.id == chat.generatingConvID
+                && isNewest && msg.role == "assistant" {
+                StreamingBubble(live: chat.live, message: msg) { }
+            } else {
+                MessageBubble(
+                    message: msg,
+                    streaming: false,
+                    liveSpeed: nil,
+                    isLastAssistant: msg.role == "assistant" && isNewest,
+                    isLastUser: isLastUser,
+                    canRegenerate: !chat.generating,
+                    onRegenerate: {
+                        chat.regenerate(port: port, temperature: temperature,
+                                        maxTokens: maxTokens, system: systemPrompt,
+                                        thinking: thinkingEnabled)
+                    },
+                    onEdit: {
+                        if let m = chat.popLastExchange() {
+                            draft = m.content
+                            attachments = m.attachments ?? []
+                            inputFocused = true
+                        }
+                    })
+                    .equatable()
+            }
+        }
+    }
+
+    private func jumpToBottomButton(_ action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.25)) { action() }
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 34, height: 34)
+                .glassSurface(in: Circle(), interactive: true)
+        }
+        .buttonStyle(.plain)
+        .padding(14)
+        .help(loc.t("Ir al final de la conversación y seguir la respuesta.",
+                    "Jump to the end of the conversation and follow the response."))
+    }
+
+    private var emptyChatState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "bubble.left.and.text.bubble.right")
+                .font(.system(size: 34))
+                .foregroundStyle(.pink.opacity(0.8))
+            Text(loc.t("¿En qué puedo ayudarte?", "What can I help with?"))
+                .font(.title2.weight(.semibold))
+            Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo. Adjunta código, texto o PDF con el clip para preguntar sobre ellos.",
+                       "Everything runs on your GPU, never leaving your machine. Attach code, text or PDF files with the paperclip to ask about them."))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
         }
     }
 
@@ -1632,7 +1650,7 @@ struct NativeChatView: View {
         attachments = []
         images = []
         attachError = nil
-        pinnedToBottom = true
+        atBottom = true
         chat.send(text: text, attachments: files, images: imgs, port: port, temperature: temperature,
                   maxTokens: maxTokens, system: systemPrompt, thinking: thinkingEnabled)
     }

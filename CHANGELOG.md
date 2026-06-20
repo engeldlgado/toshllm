@@ -3,6 +3,22 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.31] - 2026-06-20
+
+### Improved
+- **Chat UI improvements and better chat performance**: smoother streaming, a
+  rewritten transcript scroll with reliable auto-follow and scroll-to-bottom, a
+  live prefill status, and assorted polish.
+
+### Added
+- Optional **smooth typing** animation (Settings).
+
+### Fixed
+- Chat no longer blanks out when switching or reopening conversations.
+- A reply being generated no longer appears in other conversations.
+- Concurrent requests share one KV pool, so extra slots don't shrink the chat's
+  context window.
+
 ## [0.81.30] - 2026-06-20
 
 ### Added

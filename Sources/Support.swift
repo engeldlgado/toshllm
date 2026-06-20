@@ -45,6 +45,7 @@ enum SettingsKeys {
     static let chatSystem = "chatSystem"
     static let chatThinking = "chatThinking"
     static let chatAutoCompact = "chatAutoCompact"
+    static let smoothTyping = "smoothTyping"
     static let onboardingDone = "onboardingDone"
 
     /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
@@ -58,7 +59,7 @@ enum SettingsKeys {
         parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
-        chatAutoCompact,
+        chatAutoCompact, smoothTyping,
     ]
 
     /// Clears every tunable option so they revert to defaults, keeping models intact.

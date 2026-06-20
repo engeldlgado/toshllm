@@ -1,5 +1,28 @@
 import SwiftUI
 
+/// Flips a view vertically. Applied to the scroll view and each row, it inverts
+/// the scroll (newest at the bottom) while keeping row content upright.
+extension View {
+    func flippedUpsideDown() -> some View {
+        rotationEffect(.radians(.pi)).scaleEffect(x: -1, y: 1, anchor: .center)
+    }
+}
+
+/// Header row for the collapsible reasoning section: brain icon, title and a
+/// chevron that rotates with the open state.
+func reasoningHeader(_ title: String, expanded: Bool) -> some View {
+    HStack(spacing: 6) {
+        Image(systemName: "brain")
+        Text(title)
+        Image(systemName: "chevron.down")
+            .font(.system(size: 9, weight: .semibold))
+            .rotationEffect(.degrees(expanded ? 0 : -90))
+    }
+    .font(.caption)
+    .foregroundStyle(.blue)
+    .contentShape(Rectangle())
+}
+
 // MARK: - Message bubble
 
 struct MessageBubble: View, Equatable {
@@ -127,17 +150,20 @@ struct MessageBubble: View, Equatable {
                     let parts = message.parts
                     let isThinkingLive = streaming && parts.body.isEmpty && parts.thinking != nil
                     if let think = parts.thinking, !think.isEmpty {
-                        DisclosureGroup(isExpanded: $thinkExpanded) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) { thinkExpanded.toggle() }
+                            } label: {
+                                reasoningHeader(isThinkingLive ? loc.t("Razonando…", "Thinking…")
+                                                               : loc.t("Razonamiento", "Reasoning"),
+                                                expanded: thinkExpanded)
+                            }
+                            .buttonStyle(.plain)
                             if thinkExpanded {
                                 Text(think)
                                     .font(.caption).foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }
-                        } label: {
-                            Label(isThinkingLive ? loc.t("Razonando…", "Thinking…")
-                                                 : loc.t("Razonamiento", "Reasoning"),
-                                  systemImage: "brain")
-                                .font(.caption).foregroundStyle(.blue)
                         }
                     }
                     if !parts.body.isEmpty || parts.thinking == nil {
@@ -174,14 +200,6 @@ struct MessageBubble: View, Equatable {
     }
 }
 
-/// Position of the transcript's bottom sentinel within the scroll viewport,
-/// used to detect whether the user is at the bottom (auto-follow) or reading
-/// older messages (no scroll hijacking).
-struct BottomMarkerKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
 /// Hosts the in-progress assistant bubble: the only transcript view that
 /// observes LiveStream, so per-flush updates re-render just this subtree.
 struct StreamingBubble: View {
@@ -212,10 +230,18 @@ struct StreamingMessageBubble: View {
     @ObservedObject var live: LiveStream
     let message: ChatMessage
     @EnvironmentObject var loc: Localizer
+    @AppStorage(SettingsKeys.smoothTyping) private var smoothTyping = true
 
-    private var reasoningBinding: Binding<Bool> {
-        Binding(get: { live.reasoningExpanded },
-                set: { live.setReasoningExpanded($0) })
+    // Open instantly (animating the large transcript's layout felt like a hang);
+    // closing keeps its animation.
+    private func toggleReasoning() {
+        if live.reasoningExpanded {
+            live.setReasoningExpanded(false)
+        } else {
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) { live.setReasoningExpanded(true) }
+        }
     }
 
     var body: some View {
@@ -235,33 +261,61 @@ struct StreamingMessageBubble: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     if live.hasReasoning {
-                        DisclosureGroup(isExpanded: reasoningBinding) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Button {
+                                toggleReasoning()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    reasoningHeader(live.visibleText.isEmpty ? loc.t("Razonando…", "Thinking…")
+                                                                             : loc.t("Razonamiento", "Reasoning"),
+                                                    expanded: live.reasoningExpanded)
+                                    if live.reasoningExpanded && live.visibleText.isEmpty {
+                                        Text(loc.t("actualización ligera", "light updates"))
+                                            .font(.caption).foregroundStyle(.tertiary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            // Collapsed live peek: a quiet two-line tail so the wait
+                            // shows the model is actively thinking; fixed height.
+                            if !live.reasoningExpanded, live.visibleText.isEmpty,
+                               !live.reasoningTail.isEmpty {
+                                Text(verbatim: live.reasoningTail)
+                                    .font(.caption2.italic())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2, reservesSpace: true)
+                                    .truncationMode(.head)
+                                    .contentTransition(.opacity)
+                                    .animation(.easeOut(duration: 0.28), value: live.reasoningTail)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.leading, 7)
+                                    .overlay(alignment: .leading) {
+                                        Capsule().fill(.blue.opacity(0.35))
+                                            .frame(width: 2)
+                                            .padding(.vertical, 1)
+                                    }
+                                    .padding(.top, 1)
+                            }
                             if live.reasoningExpanded {
                                 Text(live.displayedReasoning)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Label(live.visibleText.isEmpty ? loc.t("Razonando…", "Thinking…")
-                                                               : loc.t("Razonamiento", "Reasoning"),
-                                      systemImage: "brain")
-                                if live.reasoningExpanded && live.visibleText.isEmpty {
-                                    Text(loc.t("actualización ligera", "light updates"))
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                            .font(.caption).foregroundStyle(.blue)
                         }
                     }
 
                     if !live.visibleText.isEmpty {
-                        RichText(text: live.visibleText, streaming: true)
+                        StreamingRichText(text: live.visibleText, smooth: smoothTyping)
                     }
 
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
+                        // Label the prefill phase so the pre-first-token wait reads
+                        // as work, not a hang. Reasoning/answer have their own labels.
+                        if !live.hasReasoning && live.visibleText.isEmpty {
+                            PrefillStatusLabel(progress: live.prefillProgress)
+                        }
                         if let speed = live.speed {
                             Text(String(format: "%.1f t/s", speed))
                                 .font(.system(size: 10, design: .monospaced))
@@ -275,6 +329,83 @@ struct StreamingMessageBubble: View {
 
             Spacer(minLength: 70)
         }
+    }
+}
+
+/// Typewriter reveal: shows a steadily growing prefix of `text` so bursty tokens
+/// read as smooth typing. Only the plain tail re-renders, so cost stays low. When
+/// `smooth` is off, renders directly.
+struct StreamingRichText: View {
+    let text: String
+    let smooth: Bool
+    @State private var revealed = 0
+
+    private let tick = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Group {
+            if smooth {
+                RichText(text: String(text.prefix(revealed)), streaming: true)
+                    .onReceive(tick) { _ in
+                        let target = text.count
+                        guard revealed < target else { return }
+                        // Ease-out catch-up so it never lags far behind fast generation.
+                        revealed = min(target, revealed + max(1, (target - revealed) / 8))
+                    }
+                    .onChange(of: text) { _, newValue in
+                        if revealed > newValue.count { revealed = newValue.count }
+                    }
+            } else {
+                RichText(text: text, streaming: true)
+            }
+        }
+    }
+}
+
+/// Prefill-phase status: a phrase that reflects how far prompt processing has
+/// got. When the server reports progress the phrase tracks it (e.g. "Almost
+/// there…" past 90%); otherwise it cycles on a timer.
+struct PrefillStatusLabel: View {
+    let progress: Double?
+    @EnvironmentObject var loc: Localizer
+
+    // Ordered by the progress at which each takes over.
+    private let phrases: [(String, String)] = [
+        ("Procesando el prompt…", "Processing the prompt…"),
+        ("Leyendo el contexto…",  "Reading the context…"),
+        ("Repasando el historial…", "Going over the history…"),
+        ("Preparando la respuesta…", "Preparing the answer…"),
+        ("Casi listo…", "Almost there…"),
+    ]
+
+    private func phraseIndex(for p: Double) -> Int {
+        switch p {
+        case ..<0.25: return 0
+        case ..<0.50: return 1
+        case ..<0.70: return 2
+        case ..<0.90: return 3
+        default:      return 4
+        }
+    }
+
+    var body: some View {
+        Group {
+            if let p = progress {
+                let i = phraseIndex(for: p)
+                Text(loc.t(phrases[i].0, phrases[i].1))
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.4), value: i)
+            } else {
+                TimelineView(.periodic(from: .now, by: 2.2)) { context in
+                    let i = Int(context.date.timeIntervalSinceReferenceDate / 2.2) % phrases.count
+                    Text(loc.t(phrases[i].0, phrases[i].1))
+                        .contentTransition(.opacity)
+                        .animation(.easeInOut(duration: 0.4), value: i)
+                }
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }
 

@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
     @AppStorage(SettingsKeys.ctx) private var ctx = 16384
     @AppStorage(SettingsKeys.chatAutoCompact) private var chatAutoCompact = true
+    @AppStorage(SettingsKeys.smoothTyping) private var smoothTyping = true
     @AppStorage(SettingsKeys.threads) private var threads = 6
     @AppStorage(SettingsKeys.flashAttn) private var flashAttn = "auto"
     @AppStorage(SettingsKeys.noMmap) private var noMmap = true
@@ -317,6 +318,9 @@ struct SettingsView: View {
                 Toggle(loc.t("Autocompactar conversaciones largas", "Auto-compact long conversations"), isOn: $chatAutoCompact)
                     .infoTip(loc.t("Al superar ~70% del contexto, el chat resume los mensajes antiguos con el propio modelo y envía solo el resumen + los mensajes recientes. La conversación completa sigue visible y guardada.",
                                 "Past ~70% of the context, the chat summarizes older messages with the model itself and sends only the summary + recent messages. The full conversation stays visible and saved."))
+                Toggle(loc.t("Animación de escritura fluida", "Smooth typing animation"), isOn: $smoothTyping)
+                    .infoTip(loc.t("Revela la respuesta carácter a carácter a ritmo constante (efecto máquina de escribir), en vez de a saltos según llegan los tokens. Si notas que la generación se ralentiza en tu GPU, desactívalo para volver al renderizado directo (más rápido).",
+                                "Reveals the answer character by character at a steady rate (typewriter effect) instead of in bursts as tokens arrive. If you notice generation slowing on your GPU, turn it off to return to direct rendering (faster)."))
                 Picker(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)"), selection: $cacheTypeK) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }
