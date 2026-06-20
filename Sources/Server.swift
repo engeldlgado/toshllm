@@ -371,9 +371,41 @@ struct ServerSettings {
         return found
     }
 
-    /// Finds the multimodal projector (mmproj) paired with a model, if any, by
-    /// looking in the model's folder for a `*mmproj*.gguf` whose name best matches
-    /// the model (longest common prefix), falling back to the sole projector.
+    /// First uint32 value for a GGUF metadata key ending in `keySuffix` (the header
+    /// stores `key_len, key, value_type, value`; we match the key suffix, then read
+    /// the value_type + value right after it). Cached per path+size.
+    nonisolated static func ggufUInt32(_ keySuffix: String, at path: String) -> UInt32? {
+        struct Cache { nonisolated(unsafe) static var store: [String: UInt32?] = [:] }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0) + ":" + keySuffix
+        if let cached = Cache.store[key] { return cached }
+
+        var result: UInt32? = nil
+        if let handle = FileHandle(forReadingAtPath: path),
+           let head = try? handle.read(upToCount: 8 * 1024 * 1024) {
+            try? handle.close()
+            let marker = Data(keySuffix.utf8)
+            var from = head.startIndex
+            while let r = head.range(of: marker, in: from ..< head.endIndex) {
+                from = head.index(after: r.lowerBound)
+                guard let valEnd = head.index(r.upperBound, offsetBy: 8, limitedBy: head.endIndex) else { break }
+                let b = [UInt8](head[r.upperBound ..< valEnd])   // value_type (u32) + value (u32), LE
+                let vt = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
+                guard vt == 4 else { continue }   // GGUF_TYPE_UINT32
+                result = UInt32(b[4]) | UInt32(b[5]) << 8 | UInt32(b[6]) << 16 | UInt32(b[7]) << 24
+                break
+            }
+        }
+        Cache.store[key] = result
+        return result
+    }
+
+    /// Finds the multimodal projector (mmproj) paired with a model, if any. A
+    /// projector only fits if its output dim (`clip.vision.projection_dim`) equals
+    /// the text model's `embedding_length` — that's what the runtime requires, and
+    /// it stops a same-family-but-different-size projector (e.g. Qwen3.6-35B's
+    /// mmproj) from being paired with another model (Qwen3-8B) just because the
+    /// names share a prefix. Among compatible projectors the best name match wins.
     /// Enables vision (image input) automatically — no manual setting needed.
     nonisolated static func mmprojPath(forModel modelPath: String) -> String? {
         guard !modelPath.isEmpty else { return nil }
@@ -382,10 +414,23 @@ struct ServerSettings {
         if name.lowercased().contains("mmproj") { return nil }  // the model itself is not a projector
         let dir = url.deletingLastPathComponent()
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return nil }
-        let projectors = files.filter {
+        var projectors = files.filter {
             $0.pathExtension.lowercased() == "gguf" && $0.lastPathComponent.lowercased().contains("mmproj")
         }
         guard !projectors.isEmpty else { return nil }
+
+        // Embedding-dim compatibility: keep only projectors whose projection_dim
+        // matches the model's embedding_length. Projectors we can't read are kept
+        // (don't punish unreadable headers); if the model's dim is known and NO
+        // projector matches it, the model has no compatible projector.
+        if let modelEmbd = ggufUInt32("embedding_length", at: modelPath) {
+            let compatible = projectors.filter { p in
+                guard let proj = ggufUInt32("projection_dim", at: p.path) else { return true }
+                return proj == modelEmbd
+            }
+            if compatible.isEmpty { return nil }
+            projectors = compatible
+        }
 
         func norm(_ s: String) -> String { String(s.lowercased().filter { $0.isLetter || $0.isNumber }) }
         let mn = norm(name)

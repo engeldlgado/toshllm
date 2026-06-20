@@ -43,7 +43,7 @@ It opens, detects your hardware, and recommends models that will actually run we
 - **Model manager** — a curated catalog with **per-model VRAM/RAM estimates for *your* hardware**, plus Hugging Face search, downloads with live progress, and one-click delete
 - **MoE-aware** — automatic `--n-cpu-moe` calculation so 35B-class Mixture-of-Experts models run well on 12 GB GPUs
 - **MTP speculative decoding** — +34% generation speed with compatible models, zero quality loss
-- **Dual engines** — official llama.cpp + experimental **TurboQuant** engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), with an optional **AMD Flash Attention kernel** that keeps decode attention on the GPU for quantized/turbo KV (see the [research note](#research-flash-attention-on-amd))
+- **Dual engines** — official llama.cpp + experimental **TurboQuant** engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), with an optional **AMD Flash Attention kernel** that keeps decode attention on the GPU for quantized/turbo KV (see the [research note](#research-amd-gpus-on-metal))
 - **Benchmarks** — measure prompt/generation speed per configuration, with history and side-by-side comparison charts
 - **OpenAI-compatible API** — use it at `http://127.0.0.1:8080`, with optional local-network access and Bonjour discovery
 - **Every parameter explained** — bilingual tooltips and built-in docs (English/Spanish)
@@ -56,7 +56,6 @@ These are new and still being validated — enable them in Settings, but expect 
 - **Remember conversations (disk cache)** *(experimental engine)* — persists each chat's KV cache so reopening it, or restarting the app, skips re-processing the prompt; the reload is byte-exact, and a long chat comes back in under a second instead of re-prefilling. Also pre-warms the cache for external clients (VS Code/Cline), so their first request skips the multi-minute cold prefill.
 - **Prompt cache reuse** *(experimental engine)* — reuses the cache across mid-prompt edits (coding assistants) and trimmed reasoning instead of reprocessing. Fast but approximate; toggle it off in Settings for exact, reproducible output.
 - **Split model across all GPUs** *(experimental, both engines)* — splits the model's layers over every detected GPU, for machines with multiple cards. Unvalidated on AMD/Metal so far; the UI flags it and it needs real multi-GPU testing.
-- **LAN discovery** — optionally binds the API to the local network and advertises `ToshLLM API` via Bonjour. API-key protection is strongly recommended before enabling it.
 
 ### A native chat that stays out of your way
 
@@ -126,7 +125,9 @@ cd toshllm
 
 The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for Metal drivers that cap host-visible allocations (now also covering the asynchronous tensor read path that MTP exercises, which previously aborted mid-generation). The other key stability setting (`GGML_METAL_CONCURRENCY_DISABLE`) is already supported upstream and the app sets it automatically.
 
-## Research: Flash Attention on AMD
+## Research: AMD GPUs on Metal
+
+### Flash Attention (decode)
 
 A recurring limitation on discrete AMD GPUs under Metal is that **Flash Attention** is gated on hardware features these GPUs report as unavailable (`simdgroup matrix multiply`), and the upstream "vec" decode kernel miscompiles on RDNA 2 (it produces garbage even though each SIMD primitive is correct in isolation). The practical consequence: any quantized or `turbo*` KV cache **requires** Flash Attention, so on AMD that attention silently falls back to the CPU and generation collapses at longer contexts.
 
@@ -151,31 +152,24 @@ The same kernel handles **prompt processing** too: although it is the "vec" deco
 
 It remains experimental and off by default. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
 
-## Performance reference
+### ToshGEMM: tiled prefill matmul on AMD
 
-Measured on RX 6700 XT (12 GB) + DDR4, macOS:
+Prompt processing on AMD was stuck on the slow matrix-vector path, because Metal's matrix-unit `mul_mm` kernel uses `simdgroup_matrix`, which AMD GPUs can't run (it crashes). **ToshGEMM** is a from-scratch tiled matrix-matrix kernel that restores the fast prefill without those cooperative ops. It is auto-selected on AMD RDNA (wave32); Apple Silicon and AMD GCN are unaffected, and it reverts with `GGML_METAL_MM_MANUAL_DISABLE=1`. Output is byte-identical and generation speed is unchanged.
 
-| Model | Configuration | Prompt (t/s) | Generation (t/s) |
-|---|---|---:|---:|
-| Qwen3-8B Q4 | all-GPU | 101 | 57 |
-| Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 24`) | 123 | 18.6 |
-| Qwen3.6-35B-A3B Q4 | + MTP speculative | — | **25.7** |
-| Qwen3.6-35B-A3B Q4 | TurboQuant XL context | 68 | 15.7 |
+Prompt processing on an RX 6700 XT (Qwen3-8B Q4, pp512, t/s, before → ToshGEMM):
 
-Hybrid-MoE generation is RAM-bandwidth-bound: DDR5 systems roughly double these generation numbers.
+| Engine | with Flash Attention | without FA (raw matmul) |
+|---|---|---|
+| Official | 93 → **228** (2.4×) | 99 → **342** (3.4×) |
+| Turbo    | 105 → **309** (2.9×) | 99 → **322** (3.2×) |
 
-### TurboQuant engine + AMD Flash Attention
+For a 1000-token prompt that cuts time-to-first-token from ~10 s to ~4 s (official) and ~9 s to ~3 s (turbo).
 
-Best result per model on the experimental TurboQuant engine with the AMD Flash-Attention kernel enabled — it keeps attention on the GPU across head dims 128/256/512, including Gemma 4's head-dim-512 global layers (auto-enabled), which otherwise fall back to the CPU:
+### Vega / GCN cards (in progress)
 
-| Model | Attention | Prompt (t/s) | Generation (t/s) |
-|---|---|---:|---:|
-| Qwen3-4B Q4 | head 128 | 183 | **91** |
-| Qwen3-8B Q4 | head 128 | 106 | **59** |
-| Gemma-4 12B Q4 | head 512 | 66 | **36** |
-| Qwen3.6-35B-A3B Q4 | MoE hybrid (`ncmoe 28`) | 111 | **17** |
+Older AMD GPUs (GCN: RX 500-series, Vega) use a 64-wide wavefront, while the simdgroup kernels assume 32 — that mismatch produces garbage output. An opt-in **wave64 safe mode** (`GGML_METAL_WAVE64_SAFEMODE=1`) routes the affected ops to correct (slower) fallbacks; it was confirmed coherent on an RX 580 by a tester, and is off by default so wave32 cards (Apple / AMD RDNA) are unaffected. A fast wave64 path (GCN has no simdgroup matrix or reduction, so it needs a custom kernel) is still being worked on — no benchmarks yet.
 
-### Community benchmarks
+## Community benchmarks
 
 Contributed by users running the built-in **Qwen3-4B (Q4_K_M)** benchmark on their own hardware:
 
@@ -256,7 +250,6 @@ Funciones nuevas, aún en validación — actívalas en Ajustes, pero pueden ten
 
 - **Recordar conversaciones (caché en disco)** *(motor experimental)* — guarda la caché KV de cada chat, así al reabrirlo o reiniciar la app no se reprocesa el prompt; la restauración es byte-exacta y un chat largo vuelve en menos de un segundo. También pre-calienta la caché para clientes externos (VS Code/Cline), evitando el prefill frío de varios minutos en la primera petición.
 - **Repartir el modelo entre varias GPUs** *(experimental, ambos motores)* — divide las capas del modelo entre todas las GPUs detectadas, para equipos con varias tarjetas. Sin validar aún en AMD/Metal; la UI lo advierte y necesita pruebas reales con multi-GPU.
-- **Descubrimiento en red local** — opcionalmente expone la API en la LAN y anuncia `ToshLLM API` mediante Bonjour. Se recomienda proteger la API con clave antes de activarlo.
 
 ### Instalación
 

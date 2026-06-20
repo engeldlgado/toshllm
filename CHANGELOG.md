@@ -3,6 +3,18 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.32] - 2026-06-21
+
+### Improved
+- **Faster prompt processing on AMD (ToshGEMM)** — a new tiled matmul kernel replaces
+  the slow fallback path, ~2.4–3× faster prefill / time-to-first-token on AMD GPUs.
+  Output and generation speed are unchanged; auto-enabled on AMD RDNA.
+
+### Fixed
+- **Multimodal projector (mmproj) pairing** — each model now pairs only with a
+  compatible projector, so vision models no longer fail to load by grabbing the wrong one.
+- Minor fixes to profile saving.
+
 ## [0.81.31] - 2026-06-20
 
 ### Improved

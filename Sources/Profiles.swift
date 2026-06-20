@@ -27,6 +27,11 @@ struct Profile: Codable, Identifiable {
     var cacheRAM: Int? = nil
     var reasoningInline: Bool? = nil
     var parallelSlots: Int? = nil
+    var faAmd: Bool? = nil
+    var persistCache: Bool? = nil
+    var multiGPU: Bool? = nil
+    var forcePrivateBuffers: Bool? = nil
+    var cacheReuse: Bool? = nil
 }
 
 @MainActor
@@ -53,7 +58,9 @@ final class ProfileStore: ObservableObject {
                         cacheTypeK: s.cacheTypeK, cacheTypeV: s.cacheTypeV, mlock: s.mlock, port: s.port,
                         specMTP: s.specMTP, engine: engine,
                         cacheRAM: s.cacheRAM, reasoningInline: s.reasoningInline,
-                        parallelSlots: s.parallelSlots)
+                        parallelSlots: s.parallelSlots, faAmd: s.faAmd, persistCache: s.persistCache,
+                        multiGPU: s.multiGPU, forcePrivateBuffers: s.forcePrivateBuffers,
+                        cacheReuse: s.cacheReuse)
         profiles.removeAll { $0.name == name }
         profiles.append(p)
         save()
@@ -81,6 +88,11 @@ final class ProfileStore: ObservableObject {
         if let cram = p.cacheRAM { d.set(cram, forKey: SettingsKeys.cacheRAM) }
         if let inline = p.reasoningInline { d.set(inline, forKey: SettingsKeys.reasoningInline) }
         if let slots = p.parallelSlots { d.set(slots, forKey: SettingsKeys.parallelSlots) }
+        if let v = p.faAmd { d.set(v, forKey: SettingsKeys.faAmd) }
+        if let v = p.persistCache { d.set(v, forKey: SettingsKeys.persistCache) }
+        if let v = p.multiGPU { d.set(v, forKey: SettingsKeys.multiGPU) }
+        if let v = p.forcePrivateBuffers { d.set(v, forKey: SettingsKeys.forcePrivateBuffers) }
+        if let v = p.cacheReuse { d.set(v, forKey: SettingsKeys.cacheReuse) }
         switch p.engine {
         case "bundled": d.set(ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
         case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
