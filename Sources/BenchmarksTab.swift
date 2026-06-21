@@ -78,6 +78,20 @@ struct BenchmarksView: View {
                 }
             }
 
+            // Expert-offload control, only for MoE models. Bound to the shared
+            // ncmoe the run reads, so it applies to this benchmark directly.
+            if !modelPath.isEmpty && ServerSettings.modelIsMoE(at: modelPath) {
+                HStack {
+                    Stepper(loc.t("Expertos MoE en CPU: \(ncmoe)", "MoE experts on CPU: \(ncmoe)"),
+                            value: $ncmoe, in: 0...99)
+                        .frame(maxWidth: 320)
+                        .disabled(bench.running || bench.sweeping)
+                        .help(loc.t("Solo modelos MoE: capas cuyos expertos corren en CPU. Súbelo si la VRAM se satura, bájalo si te sobra. Afecta directamente este benchmark.",
+                                    "MoE models only: layers whose experts run on the CPU. Raise if VRAM saturates, lower if you have headroom. Directly affects this benchmark."))
+                    Spacer()
+                }
+            }
+
             if let best = bench.sweepBest, !bench.sweeping {
                 HStack {
                     Label(bench.sweepStatus, systemImage: "scope")

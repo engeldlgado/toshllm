@@ -124,7 +124,7 @@ index 32d97cd5..26cc90d1 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 9f481caa..402f17cb 100644
+index 9f481caa..40a7458c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -724,7 +724,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
@@ -147,6 +147,17 @@ index 9f481caa..402f17cb 100644
      snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d",
               base, bc_inp, bc_out, ne12, ne13, r2, r3);
  
+@@ -1079,7 +1081,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+ 
+     const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+ 
+-    snprintf(base, 256, "kernel_mul_mm_id_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
++    const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
++
++    snprintf(base, 256, use_mm_manual ? "kernel_mul_mm_id_manual_%s_%s" : "kernel_mul_mm_id_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
+     snprintf(name, 256, "%s_bci=%d", base, bc_inp);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
 index 0000049b..06f7e0bd 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
@@ -464,7 +475,7 @@ index 693e2ff6..8a4b4404 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 3e1c5833..3a662b0a 100644
+index 3e1c5833..a11c9d2c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -2230,7 +2230,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
@@ -476,6 +487,15 @@ index 3e1c5833..3a662b0a 100644
          (ne11 > ne11_mm_min || op->src[0]->type == GGML_TYPE_TQ3_1S || op->src[0]->type == GGML_TYPE_TQ4_1S)) {
          // Route all TQ weights through the rotated mul_mm path.
          // Gemma4 decode still degrades on the fused mul_mv kernel even after the broader
+@@ -2443,7 +2443,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+     // ne21 = n_rows (batch size)
+     const int ne21_mm_id_min = is_tq_weight ? 1 : 32;
+ 
+-    if (props_dev->has_simdgroup_mm && ne00 >= 64 && (ne21 >= ne21_mm_id_min)) {
++    if ((props_dev->has_simdgroup_mm || props_dev->use_mm_manual) && ne00 >= 64 && (ne21 >= ne21_mm_id_min)) {
+         // some Metal matrix data types require aligned pointers
+         // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
+         //switch (op->src[0]->type) {
 @@ -2716,6 +2716,37 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
      return (ne01 < 20) && (ne00 % 32 == 0);
  }
@@ -634,7 +654,7 @@ index a1003b3a..53748453 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 344657df..8e92a4cb 100644
+index 344657df..a0b30291 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -8500,6 +8500,198 @@ kernel void kernel_flash_attn_ext_vec(
@@ -1025,7 +1045,221 @@ index 344657df..8e92a4cb 100644
  #endif // GGML_METAL_HAS_TENSOR
  
  template<short ne20> // n_expert_used
-@@ -12403,6 +12777,62 @@ template [[host_name("kernel_mul_mm_iq1_m_f16")]]   kernel mul_mm_t kernel_mul_m
+@@ -12249,6 +12623,213 @@ kernel void kernel_mul_mm_id(
+     }
+ }
+ 
++#ifndef GGML_METAL_HAS_TENSOR
++// Manual tiled mul_mm_id for GPUs without simdgroup matrix (wave32 AMD/RDNA).
++// Same load + scatter as kernel_mul_mm_id; only the outer product and the
++// threadgroup store are done per-thread instead of via simdgroup matrices.
++template<typename S0, typename S0_4x4, typename S0_8x8, typename S1, typename S1_2x4, typename S1_8x8, typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &), typename T0, typename T0_4x4, typename T1, typename T1_2x4>
++kernel void kernel_mul_mm_id_manual(
++        constant ggml_metal_kargs_mul_mm_id & args,
++        device const char * src0,
++        device const char * src1,
++        device const char * htpe,
++        device const char * hids,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiitg[[thread_index_in_threadgroup]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    threadgroup S0 * sa = (threadgroup S0 *)(shmem);
++    threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
++
++    constexpr int NR0 = 64;
++    constexpr int NR1 = 32;
++
++    constexpr int NK  = 32;
++    constexpr int NL0 = NK/16;
++    constexpr int NL1 = NK/8;
++
++    const int im = tgpig.z; // expert
++    const int r0 = tgpig.y*NR0;
++    const int r1 = tgpig.x*NR1;
++
++    device const uint32_t * tpe_u32 = (device const uint32_t *) (htpe);
++    device const int32_t  * ids_i32 = (device const int32_t  *) (hids);
++
++    const int32_t neh1 = tpe_u32[im];
++
++    if (r1 >= neh1) {
++        return;
++    }
++
++    // if this block is of 64x32 shape or smaller
++    const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
++    const short nr1 = (    neh1 - r1 < NR1) ? (    neh1 - r1) : NR1;
++
++    // a thread shouldn't load data outside of the matrix
++    const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
++    const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1; // 0 .. 31
++
++    const short il0 = (tiitg % NL0);
++
++    short il = il0;
++
++    const int id = ids_i32[im*args.ne21 + r1 + lr1];
++
++    const short i11 = (id % args.ne20) % args.ne11;
++    const short i12 = (id / args.ne20);
++    const short i13 = 0;
++
++    const uint64_t offset0 = im*args.nb02 + i13*args.nb03;
++    const short    offset1 = il0/nl;
++
++    device const block_q * x = (device const block_q *)(src0 + args.nb01*(r0 + lr0) + offset0) + offset1;
++
++    const short iy = 8*(tiitg % NL1);
++
++    device const T1 * y = (device const T1 *)(src1
++        + args.nb13*i13
++        + args.nb12*i12
++        + args.nb11*i11
++        + args.nb10*iy);
++
++    const short lane = tiitg % 32;
++    float acc[8][2];
++    for (short i = 0; i < 8; i++) { acc[i][0] = 0.f; acc[i][1] = 0.f; }
++
++    for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
++        // load data and store to threadgroup memory
++        if (is_same<T0_4x4, block_q>::value && FC_mul_mm_bc_inp) {
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++
++            // no need for dequantization
++            for (short i = 0; i < 16; i++) {
++                const short sx = 2*il0 + i/8;
++                const short sy = (tiitg/NL0)/8;
++
++                const short lx = (tiitg/NL0)%8;
++                const short ly = i%8;
++
++                const short ib = 8*sx + sy;
++
++                *(sa + 64*ib + 8*ly + lx) = loop_k + 16*il + i < args.ne00 ? (S0) *((device T0 *) x + i) : (S0) 0;
++            }
++        } else {
++            S0_4x4 temp_a;
++            dequantize_func(x, il, temp_a);
++
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++
++            FOR_UNROLL (short i = 0; i < 16; i++) {
++                const short sx = 2*il0 + i/8;
++                const short sy = (tiitg/NL0)/8;
++
++                const short lx = (tiitg/NL0)%8;
++                const short ly = i%8;
++
++                const short ib = 8*sx + sy;
++
++                *(sa + 64*ib + 8*ly + lx) = temp_a[i/4][i%4];
++            }
++        }
++
++        if (FC_mul_mm_bc_inp) {
++            for (short i = 0; i < 8; ++i) {
++                const short sx = (tiitg%NL1);
++                const short sy = (tiitg/NL1)/8;
++
++                const short lx = i;
++                const short ly = (tiitg/NL1)%8;
++
++                const short ib = 4*sx + sy;
++
++                *(sb + 64*ib + 8*ly + lx) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
++            }
++        } else {
++            const short sx = (tiitg%NL1);
++            const short sy = (tiitg/NL1)/8;
++
++            const short ly = (tiitg/NL1)%8;
++
++            const short ib = 4*sx + sy;
++
++            *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
++        }
++
++        il = (il + 2 < nl) ? il + 2 : il % 2;
++        x  = (il < 2) ? x + (2 + nl - 1)/nl : x;
++
++        y += NK;
++
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
++        threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
++
++        for (short ik = 0; ik < NK/8; ik++) {
++            for (short i = 0; i < 8; i++) {
++                threadgroup const S1 * pb = lsmb + 64*(i/4);
++                threadgroup const S0 * pa = lsma + 64*(i%4);
++                for (short e = 0; e < 2; e++) {
++                    const short fe = lane + 32*e;
++                    const short r  = fe / 8;
++                    const short c  = fe % 8;
++                    float s = 0.f;
++                    for (short k = 0; k < 8; k++) {
++                        s += (float) pb[8*r + k] * (float) pa[8*k + c];
++                    }
++                    acc[i][e] += s;
++                }
++            }
++
++            lsma += 8*64;
++            lsmb += 4*64;
++        }
++    }
++
++    // block is smaller than 64x32, we should avoid writing data outside of the matrix
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
++
++    // mirror the simdgroup_store layout so the scatter loop below is unchanged
++    for (short i = 0; i < 8; i++) {
++        for (short e = 0; e < 2; e++) {
++            const short fe = lane + 32*e;
++            const short r  = fe / 8;
++            const short c  = fe % 8;
++            temp_str[(8*(i%4) + c) + (8*(i/4) + r)*NR0] = acc[i][e];
++        }
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    for (short j = sgitg; j < nr1; j += 4) {
++        const int id = ids_i32[im*args.ne21 + r1 + j];
++
++        const short ide = id % args.ne20;
++        const short idt = id / args.ne20;
++
++        device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
++        device float4 * D4 = (device float4 *) D;
++
++        threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
++        threadgroup float4 * C4 = (threadgroup float4 *) C;
++
++        int i = tiisg;
++        for (; i < nr0/4; i += 32) {
++            *(D4 + i) = *(C4 + i);
++        }
++
++        i = (4*(nr0/4)) + tiisg;
++        for (; i < nr0; i += 32) {
++            *(D + i) = *(C + i);
++        }
++    }
++}
++#endif // GGML_METAL_HAS_TENSOR
++
+ #define QK_NL 16
+ 
+ //
+@@ -12403,6 +12984,62 @@ template [[host_name("kernel_mul_mm_iq1_m_f16")]]   kernel mul_mm_t kernel_mul_m
  template [[host_name("kernel_mul_mm_iq4_nl_f16")]]  kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
  template [[host_name("kernel_mul_mm_iq4_xs_f16")]]  kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
  
@@ -1087,6 +1321,74 @@ index 344657df..8e92a4cb 100644
 +
  //
  // indirect matrix-matrix multiplication
+ //
+@@ -12468,6 +13105,67 @@ template [[host_name("kernel_mul_mm_id_iq1_m_f16")]]   kernel mul_mm_id kernel_m
+ template [[host_name("kernel_mul_mm_id_iq4_nl_f16")]]  kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
+ template [[host_name("kernel_mul_mm_id_iq4_xs_f16")]]  kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
+ 
++#ifndef GGML_METAL_HAS_TENSOR
++template [[host_name("kernel_mul_mm_id_manual_f32_f32")]]     kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   float4x4,      1,     dequantize_f32,     float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_f16_f32")]]     kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   half4x4,       1,     dequantize_f16,     half,   half4x4,   float, float2x4>;
++#if defined(GGML_METAL_HAS_BF16)
++template [[host_name("kernel_mul_mm_id_manual_bf16_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<bfloat, bfloat4x4, simdgroup_bfloat8x8, bfloat, bfloat2x4, simdgroup_bfloat8x8, bfloat4x4,     1,     dequantize_bf16,    bfloat, bfloat4x4, float, float2x4>;
++#endif
++template [[host_name("kernel_mul_mm_id_manual_q1_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q1_0,    8,     dequantize_q1_0,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q4_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q4_1_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_1,    2,     dequantize_q4_1,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q5_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_0,    2,     dequantize_q5_0,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q5_1_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_1,    2,     dequantize_q5_1,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q8_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q8_0,    2,     dequantize_q8_0,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq3_1s_f32")]]         kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq3_1s,  2,     dequantize_tq3_1s,  float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq3_1s_rotated_f32")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq3_1s,  2,     dequantize_tq3_1s_rotated,  float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq4_1s_f32")]]         kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq4_1s,  2,     dequantize_tq4_1s,  float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq4_1s_rotated_f32")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq4_1s,  2,     dequantize_tq4_1s_rotated,  float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_mxfp4_f32")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q2_K_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q3_K_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q4_K_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_K,    QK_NL, dequantize_q4_K,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q5_K_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_K,    QK_NL, dequantize_q5_K,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q6_K_f32")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q6_K,    QK_NL, dequantize_q6_K,    float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq2_xxs_f32")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq2_xxs, QK_NL, dequantize_iq2_xxs, float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq2_xs_f32")]]  kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq2_xs,  QK_NL, dequantize_iq2_xs,  float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq3_xxs_f32")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq3_xxs, QK_NL, dequantize_iq3_xxs, float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq3_s_f32")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq3_s,   QK_NL, dequantize_iq3_s,   float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq2_s_f32")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq2_s,   QK_NL, dequantize_iq2_s,   float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq1_s_f32")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq1_s,   QK_NL, dequantize_iq1_s,   float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq1_m_f32")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq1_m,   QK_NL, dequantize_iq1_m,   float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq4_nl_f32")]]  kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq4_xs_f32")]]  kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  float, float2x4>;
++
++template [[host_name("kernel_mul_mm_id_manual_f32_f16")]]     kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   float4x4,      1,     dequantize_f32,     float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_f16_f16")]]     kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   half4x4,       1,     dequantize_f16,     half,   half4x4,   half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q1_0_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q1_0,    8,     dequantize_q1_0,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q4_0_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q4_1_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_1,    2,     dequantize_q4_1,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q5_0_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_0,    2,     dequantize_q5_0,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q5_1_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_1,    2,     dequantize_q5_1,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q8_0_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q8_0,    2,     dequantize_q8_0,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq3_1s_f16")]]         kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq3_1s,  2,     dequantize_tq3_1s,  float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq3_1s_rotated_f16")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq3_1s,  2,     dequantize_tq3_1s_rotated,  float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq4_1s_f16")]]         kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq4_1s,  2,     dequantize_tq4_1s,  float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_tq4_1s_rotated_f16")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq4_1s,  2,     dequantize_tq4_1s_rotated,  float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_mxfp4_f16")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q2_K_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q3_K_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q4_K_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_K,    QK_NL, dequantize_q4_K,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q5_K_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_K,    QK_NL, dequantize_q5_K,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_q6_K_f16")]]    kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q6_K,    QK_NL, dequantize_q6_K,    float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq2_xxs_f16")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq2_xxs, QK_NL, dequantize_iq2_xxs, float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq2_xs_f16")]]  kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq2_xs,  QK_NL, dequantize_iq2_xs,  float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq3_xxs_f16")]] kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq3_xxs, QK_NL, dequantize_iq3_xxs, float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq3_s_f16")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq3_s,   QK_NL, dequantize_iq3_s,   float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq2_s_f16")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq2_s,   QK_NL, dequantize_iq2_s,   float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq1_s_f16")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq1_s,   QK_NL, dequantize_iq1_s,   float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq1_m_f16")]]   kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq1_m,   QK_NL, dequantize_iq1_m,   float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq4_nl_f16")]]  kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
++template [[host_name("kernel_mul_mm_id_manual_iq4_xs_f16")]]  kernel mul_mm_id kernel_mul_mm_id_manual<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
++#endif // GGML_METAL_HAS_TENSOR
++
+ //
+ // matrix-vector multiplication
  //
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 index e9300b18..8e569121 100644

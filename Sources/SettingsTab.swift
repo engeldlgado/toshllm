@@ -274,10 +274,14 @@ struct SettingsView: View {
                         value: $ngl, in: 0...99)
                     .infoTip(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM); bájalo solo si la VRAM se desborda.",
                                 "How many model layers go to the GPU. 99 = all (recommended if they fit in VRAM); lower it only if VRAM overflows."))
-                Stepper(loc.t("Expertos MoE en CPU: \(ncmoe)", "MoE experts on CPU: \(ncmoe)"),
+                let modelIsMoE = modelPath.isEmpty || ServerSettings.modelIsMoE(at: modelPath)
+                Stepper(modelIsMoE
+                            ? loc.t("Expertos MoE en CPU: \(ncmoe)", "MoE experts on CPU: \(ncmoe)")
+                            : loc.t("Expertos MoE en CPU: no aplica (modelo denso)", "MoE experts on CPU: N/A (dense model)"),
                         value: $ncmoe, in: 0...99)
-                    .infoTip(loc.t("Solo modelos MoE: capas cuyos 'expertos' viven en RAM y los procesa el CPU. Se ajusta solo al elegir modelo; súbelo si la VRAM se satura, bájalo si te sobra.",
-                                "MoE models only: layers whose 'experts' live in RAM and run on the CPU. Auto-set when picking a model; raise if VRAM saturates, lower if you have headroom."))
+                    .disabled(!modelIsMoE)
+                    .infoTip(loc.t("Solo modelos MoE: capas cuyos 'expertos' viven en RAM y los procesa el CPU. Se ajusta solo al elegir modelo; súbelo si la VRAM se satura, bájalo si te sobra. (Deshabilitado en modelos densos, donde el motor lo ignora.)",
+                                "MoE models only: layers whose 'experts' live in RAM and run on the CPU. Auto-set when picking a model; raise if VRAM saturates, lower if you have headroom. (Disabled on dense models, where the engine ignores it.)"))
                 Stepper(loc.t("Reserva de VRAM: \(vramReserve) MB", "VRAM reserve: \(vramReserve) MB"),
                         value: $vramReserve, in: 256...4096, step: 256)
                     .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. 1024 MB es un margen seguro.",

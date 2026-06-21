@@ -124,7 +124,7 @@ index 32d97cd5..26cc90d1 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 4f4f073c..81a779cf 100644
+index 4f4f073c..47932388 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -695,7 +695,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
@@ -152,6 +152,26 @@ index 4f4f073c..81a779cf 100644
          ggml_metal_cv_set_int16(cv, ne13,  FC_MUL_MM + 3);
          ggml_metal_cv_set_int16(cv, r2,    FC_MUL_MM + 4);
          ggml_metal_cv_set_int16(cv, r3,    FC_MUL_MM + 5);
++        ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+@@ -957,14 +959,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+ 
+     const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+ 
++    const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
++
+     snprintf(base, 256, "kernel_mul_mm_id_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
+-    snprintf(name, 256, "%s_bci=%d", base, bc_inp);
++    snprintf(name, 256, "%s_bci=%d_mm=%d", base, bc_inp, use_mm_manual);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+-        ggml_metal_cv_set_bool(cv, bc_inp, FC_MUL_MM + 0);
++        ggml_metal_cv_set_bool(cv, bc_inp,        FC_MUL_MM + 0);
 +        ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
@@ -503,7 +523,7 @@ index 05d7f430..7707bdde 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index e2ce56e9..3ca69c17 100644
+index e2ce56e9..a9c6241c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -2164,7 +2164,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
@@ -515,6 +535,15 @@ index e2ce56e9..3ca69c17 100644
          //GGML_LOG_INFO("matrix: ne00 = %6d, ne01 = %6d, ne02 = %6d, ne11 = %6d, ne12 = %6d\n", ne00, ne01, ne02, ne11, ne12);
  
          // some Metal matrix data types require aligned pointers
+@@ -2319,7 +2319,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+     // ne21 = n_rows (batch size)
+     const int ne21_mm_id_min = 32;
+ 
+-    if (props_dev->has_simdgroup_mm && ne00 >= 64 && (ne21 >= ne21_mm_id_min)) {
++    if ((props_dev->has_simdgroup_mm || props_dev->use_mm_manual) && ne00 >= 64 && (ne21 >= ne21_mm_id_min)) {
+         // some Metal matrix data types require aligned pointers
+         // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
+         //switch (op->src[0]->type) {
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
 index a1003b3a..53748453 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
@@ -531,7 +560,7 @@ index a1003b3a..53748453 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 0aea6845..5f369946 100644
+index 0aea6845..c64d3d8b 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -7182,6 +7182,101 @@ kernel void kernel_flash_attn_ext_vec(
@@ -722,13 +751,13 @@ index 0aea6845..5f369946 100644
 -                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
 -            }
 +                simdgroup_barrier(mem_flags::mem_none);
- 
--            lsma += 8*64;
--            lsmb += 4*64;
++
 +                FOR_UNROLL (short i = 0; i < 8; i++){
 +                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
 +                }
-+
+ 
+-            lsma += 8*64;
+-            lsmb += 4*64;
 +                lsma += 8*64;
 +                lsmb += 4*64;
 +            }
@@ -767,6 +796,116 @@ index 0aea6845..5f369946 100644
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+@@ -9894,13 +10031,20 @@ kernel void kernel_mul_mm_id(
+         + args.nb10*iy);
+ 
+ #ifndef GGML_METAL_HAS_TENSOR
++    // Manual tiled path for GPUs without simdgroup matrix; simdgroup path otherwise.
++    const short lane = tiitg % 32;
++    float acc[8][2];
+     S0_8x8 ma[4];
+     S1_8x8 mb[2];
+ 
+     simdgroup_float8x8 mc[8];
+ 
+-    for (short i = 0; i < 8; i++){
+-        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
++    if (FC_mul_mm_manual) {
++        for (short i = 0; i < 8; i++) { acc[i][0] = 0.f; acc[i][1] = 0.f; }
++    } else {
++        for (short i = 0; i < 8; i++){
++            mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
++        }
+     }
+ #else
+     auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
+@@ -10057,27 +10201,49 @@ kernel void kernel_mul_mm_id(
+         threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
+         threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
+ 
+-        FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
+-            simdgroup_barrier(mem_flags::mem_none);
++        if (FC_mul_mm_manual) {
++            for (short ik = 0; ik < NK/8; ik++) {
++                for (short i = 0; i < 8; i++) {
++                    threadgroup const S1 * pb = lsmb + 64*(i/4);
++                    threadgroup const S0 * pa = lsma + 64*(i%4);
++                    for (short e = 0; e < 2; e++) {
++                        const short fe = lane + 32*e;
++                        const short r  = fe / 8;
++                        const short c  = fe % 8;
++                        float s = 0.f;
++                        for (short k = 0; k < 8; k++) {
++                            s += (float) pb[8*r + k] * (float) pa[8*k + c];
++                        }
++                        acc[i][e] += s;
++                    }
++                }
+ 
+-            FOR_UNROLL (short i = 0; i < 4; i++) {
+-                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
++                lsma += 8*64;
++                lsmb += 4*64;
+             }
++        } else {
++            FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
++                simdgroup_barrier(mem_flags::mem_none);
+ 
+-            simdgroup_barrier(mem_flags::mem_none);
++                FOR_UNROLL (short i = 0; i < 4; i++) {
++                    simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
++                }
+ 
+-            FOR_UNROLL (short i = 0; i < 2; i++) {
+-                simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+-            }
++                simdgroup_barrier(mem_flags::mem_none);
+ 
+-            simdgroup_barrier(mem_flags::mem_none);
++                FOR_UNROLL (short i = 0; i < 2; i++) {
++                    simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
++                }
+ 
+-            FOR_UNROLL (short i = 0; i < 8; i++){
+-                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
+-            }
++                simdgroup_barrier(mem_flags::mem_none);
++
++                FOR_UNROLL (short i = 0; i < 8; i++){
++                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
++                }
+ 
+-            lsma += 8*64;
+-            lsmb += 4*64;
++                lsma += 8*64;
++                lsmb += 4*64;
++            }
+         }
+ #else
+         auto sA = tA.slice(0, 0);
+@@ -10096,8 +10262,20 @@ kernel void kernel_mul_mm_id(
+ #else
+     threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+ 
+-    for (short i = 0; i < 8; i++) {
+-        simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
++    if (FC_mul_mm_manual) {
++        // mirror the simdgroup_store layout so the scatter loop below is unchanged
++        for (short i = 0; i < 8; i++) {
++            for (short e = 0; e < 2; e++) {
++                const short fe = lane + 32*e;
++                const short r  = fe / 8;
++                const short c  = fe % 8;
++                temp_str[(8*(i%4) + c) + (8*(i/4) + r)*NR0] = acc[i][e];
++            }
++        }
++    } else {
++        for (short i = 0; i < 8; i++) {
++            simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
++        }
+     }
+ #endif
+ 
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 index 2802103b..c921d1a3 100644
 --- a/src/llama-kv-cache.cpp

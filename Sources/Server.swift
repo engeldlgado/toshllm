@@ -371,6 +371,97 @@ struct ServerSettings {
         return found
     }
 
+    /// True when the model's weights use a TurboQuant type (ggml_type 45/46). Read
+    /// from the tensor types, since these GGUFs carry no usable `general.file_type`.
+    /// False on an unparseable header, so we never block a model we can't read.
+    /// Cached per path+size.
+    nonisolated static func modelIsTurboQuantWeights(at path: String) -> Bool {
+        struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0)
+        if let cached = Cache.store[key] { return cached }
+
+        var isTQ = false
+        if let handle = FileHandle(forReadingAtPath: path),
+           let head = try? handle.read(upToCount: 32 * 1024 * 1024) {
+            try? handle.close()
+            isTQ = ggufHasTurboQuantTensors(head)
+        }
+        Cache.store[key] = isTQ
+        return isTQ
+    }
+
+    /// Walks a GGUF header (header → metadata KVs → tensor infos) and returns
+    /// true as soon as a tensor declares a TurboQuant type (45/46). All reads are
+    /// bounds-checked; an overrun (truncated read) returns false.
+    private nonisolated static func ggufHasTurboQuantTensors(_ d: Data) -> Bool {
+        var o = d.startIndex
+        func byte(_ i: Int) -> UInt8? {
+            guard let idx = d.index(o, offsetBy: i, limitedBy: d.endIndex), idx < d.endIndex
+            else { return nil }
+            return d[idx]
+        }
+        func u32() -> UInt32? {
+            guard let e = d.index(o, offsetBy: 4, limitedBy: d.endIndex) else { return nil }
+            var v: UInt32 = 0
+            for i in 0..<4 { v |= UInt32(d[d.index(o, offsetBy: i)]) << (8 * i) }
+            o = e; return v
+        }
+        func u64() -> UInt64? {
+            guard let e = d.index(o, offsetBy: 8, limitedBy: d.endIndex) else { return nil }
+            var v: UInt64 = 0
+            for i in 0..<8 { v |= UInt64(d[d.index(o, offsetBy: i)]) << (8 * i) }
+            o = e; return v
+        }
+        func skip(_ n: UInt64) -> Bool {
+            guard n <= UInt64(Int.max),
+                  let e = d.index(o, offsetBy: Int(n), limitedBy: d.endIndex) else { return false }
+            o = e; return true
+        }
+        func skipString() -> Bool {
+            guard let len = u64() else { return false }
+            return skip(len)
+        }
+        // header: "GGUF" magic, version, tensor count, kv count
+        guard byte(0) == 0x47, byte(1) == 0x47, byte(2) == 0x55, byte(3) == 0x46 else { return false }
+        guard skip(4), u32() != nil, let nTensors = u64(), let nKV = u64() else { return false }
+
+        func skipValue(_ vt: UInt32) -> Bool {
+            switch vt {
+            case 0, 1, 7:    return skip(1)          // int8 / uint8 / bool
+            case 2, 3:       return skip(2)          // int16 / uint16
+            case 4, 5, 6:    return skip(4)          // int32 / uint32 / float32
+            case 10, 11, 12: return skip(8)          // uint64 / int64 / float64
+            case 8:          return skipString()     // string
+            case 9:                                  // array
+                guard let et = u32(), let n = u64() else { return false }
+                if et == 8 {
+                    for _ in 0..<n where !skipString() { return false }
+                    return true
+                }
+                let sz: UInt64
+                switch et {
+                case 0, 1, 7: sz = 1
+                case 2, 3: sz = 2
+                case 4, 5, 6: sz = 4
+                case 10, 11, 12: sz = 8
+                default: return false
+                }
+                return skip(n * sz)
+            default: return false
+            }
+        }
+        for _ in 0..<nKV {
+            guard skipString(), let vt = u32(), skipValue(vt) else { return false }
+        }
+        for _ in 0..<nTensors {
+            guard skipString(), let nd = u32(), skip(UInt64(nd) * 8), let t = u32() else { return false }
+            if t == 45 || t == 46 { return true }    // GGML_TYPE_TQ3_1S / TQ4_1S
+            guard skip(8) else { return false }      // tensor data offset
+        }
+        return false
+    }
+
     /// First uint32 value for a GGUF metadata key ending in `keySuffix` (the header
     /// stores `key_len, key, value_type, value`; we match the key suffix, then read
     /// the value_type + value right after it). Cached per path+size.
@@ -400,6 +491,12 @@ struct ServerSettings {
         return result
     }
 
+    /// True when the model is a Mixture-of-Experts (GGUF `<arch>.expert_count` > 0).
+    /// Gates the `--n-cpu-moe` control, which a dense model ignores.
+    nonisolated static func modelIsMoE(at path: String) -> Bool {
+        (ggufUInt32("expert_count", at: path) ?? 0) > 0
+    }
+
     /// Finds the multimodal projector (mmproj) paired with a model, if any. A
     /// projector only fits if its output dim (`clip.vision.projection_dim`) equals
     /// the text model's `embedding_length` — that's what the runtime requires, and
@@ -407,6 +504,26 @@ struct ServerSettings {
     /// mmproj) from being paired with another model (Qwen3-8B) just because the
     /// names share a prefix. Among compatible projectors the best name match wins.
     /// Enables vision (image input) automatically — no manual setting needed.
+    private static func mmprojPairKey(_ model: String, _ projector: String) -> String {
+        model + "\u{1}" + projector
+    }
+
+    /// Records that `projector` failed to load with `model` (e.g. an unknown CLIP
+    /// projector type), so `mmprojPath` won't auto-attach it again. Persistent.
+    nonisolated static func recordIncompatibleMmproj(model: String, projector: String) {
+        var list = UserDefaults.standard.stringArray(forKey: SettingsKeys.incompatibleMmproj) ?? []
+        let key = mmprojPairKey(model, projector)
+        if !list.contains(key) {
+            list.append(key)
+            UserDefaults.standard.set(list, forKey: SettingsKeys.incompatibleMmproj)
+        }
+    }
+
+    nonisolated static func isIncompatibleMmproj(model: String, projector: String) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: SettingsKeys.incompatibleMmproj) ?? [])
+            .contains(mmprojPairKey(model, projector))
+    }
+
     nonisolated static func mmprojPath(forModel modelPath: String) -> String? {
         guard !modelPath.isEmpty else { return nil }
         let url = URL(fileURLWithPath: modelPath)
@@ -431,6 +548,11 @@ struct ServerSettings {
             if compatible.isEmpty { return nil }
             projectors = compatible
         }
+
+        // Skip projectors recorded as incompatible with this model; a different
+        // one for the same model still gets picked up.
+        projectors = projectors.filter { !isIncompatibleMmproj(model: modelPath, projector: $0.path) }
+        guard !projectors.isEmpty else { return nil }
 
         func norm(_ s: String) -> String { String(s.lowercased().filter { $0.isLetter || $0.isNumber }) }
         let mn = norm(name)
@@ -465,6 +587,9 @@ final class ServerController: ObservableObject {
     private var process: Process?
     private var healthTask: Task<Void, Never>?
     private var lastStoppedPID: Int32?
+    /// After a projector load failure, makes the next launch drop `--mmproj`
+    /// (text-only). Reset on every fresh `start()`.
+    private var retryWithoutMmproj = false
     private var currentPort = 8080
     private var discoveryService: NetService?
     private var discoveryEnabled = false
@@ -526,8 +651,19 @@ final class ServerController: ObservableObject {
             state = .failed("Selecciona un modelo en la pestaña Modelos")
             return
         }
+        // TurboQuant weight quants (tq3_1s/tq4_1s) decode to garbage on this
+        // engine; block the launch instead of serving it. KV-cache TurboQuant
+        // and standard quants are unaffected.
+        if ServerSettings.modelIsTurboQuantWeights(at: settings.modelPath) {
+            let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en"
+            state = .failed(lang == "es"
+                ? "Modelo TurboQuant no soportado: la cuantización de pesos TurboQuant (tq3_1s/tq4_1s) produce salida incorrecta en este motor, tanto en modelos densos como MoE. Usa un modelo en cuantización estándar (Q4_K, Q5_K, Q6_K, Q8_0…)."
+                : "TurboQuant model not supported: TurboQuant weight quantization (tq3_1s/tq4_1s) produces incorrect output on this engine, for both dense and MoE models. Use a standard-quant model (Q4_K, Q5_K, Q6_K, Q8_0…).")
+            return
+        }
 
         log = ""
+        retryWithoutMmproj = false
         promptSpeed = nil
         genSpeed = nil
         genHistory = []
@@ -600,7 +736,11 @@ final class ServerController: ObservableObject {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: settings.serverBinary)
-        p.arguments = settings.arguments
+        var args = settings.arguments
+        if retryWithoutMmproj, let i = args.firstIndex(of: "--mmproj") {
+            args.removeSubrange(i ..< min(i + 2, args.count))   // drop "--mmproj <path>"
+        }
+        p.arguments = args
         p.environment = settings.environment
 
         let pipe = Pipe()
@@ -624,6 +764,24 @@ final class ServerController: ObservableObject {
                 if proc.terminationStatus == 0 || proc.terminationStatus == 15 {
                     self.state = .stopped
                 } else {
+                    // A projector that won't load fails the whole launch; retry
+                    // once without it so the model still runs text-only.
+                    let tail = self.log.suffix(6000).lowercased()
+                    let clipFailed = tail.contains("failed to load clip")
+                        || tail.contains("unknown projector type")
+                        || tail.contains("failed to load multimodal model")
+                    if clipFailed && !self.retryWithoutMmproj && args.contains("--mmproj") {
+                        // Don't auto-attach this projector again for this model.
+                        if let i = args.firstIndex(of: "--mmproj"), i + 1 < args.count {
+                            ServerSettings.recordIncompatibleMmproj(model: settings.modelPath, projector: args[i + 1])
+                        }
+                        self.retryWithoutMmproj = true
+                        EngineLock.clear()
+                        self.consume("\n[ToshLLM] el proyector (mmproj) no se pudo cargar — reintentando solo-texto (visión desactivada) / projector failed to load — retrying text-only (vision disabled)\n")
+                        self.state = .starting
+                        self.launch(settings)
+                        return
+                    }
                     AppLog.server.error("engine exited with status \(proc.terminationStatus)")
                     self.state = .failed(Self.diagnose(self.log, exitCode: proc.terminationStatus))
                 }

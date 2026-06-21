@@ -12,6 +12,9 @@ enum SettingsKeys {
     static let serverBinary = "serverBinary"
     static let modelPath = "modelPath"
     static let modelsDir = "modelsDir"
+    /// Persisted (model, projector) pairs that failed to load, so a bad mmproj
+    /// isn't auto-attached again.
+    static let incompatibleMmproj = "incompatibleMmproj"
     static let port = "port"
     static let ngl = "ngl"
     static let ncmoe = "ncmoe"

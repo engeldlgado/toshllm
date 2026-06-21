@@ -3,6 +3,27 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.33] - 2026-06-21
+
+### Improved
+- **ToshGEMM now accelerates MoE prefill** — the per-expert matmul uses the tiled
+  kernel too, so Mixture-of-Experts models speed up on their GPU-resident experts,
+  not just dense layers (about +22% on top of the dense gain when experts sit in VRAM).
+- **Benchmark: MoE expert-offload control** — adjust "MoE experts on CPU" directly in
+  the Benchmark for MoE models, alongside Find-optimum.
+
+### Fixed
+- **An incompatible projector no longer blocks a model** — if a paired mmproj fails to
+  load, the model now starts text-only instead of refusing to launch, and that pairing
+  is remembered so it isn't retried (a different projector for the model still works).
+- **MoE expert control hidden on dense models** — the "MoE experts on CPU" setting is
+  disabled for non-MoE models, where the engine ignores it anyway.
+
+### Changed
+- **TurboQuant weight models (tq3_1s/tq4_1s) are blocked for now** — they decode to
+  incorrect output on this engine, so the app refuses to load them with a clear message
+  instead of producing garbage. Standard quants are unaffected.
+
 ## [0.81.32] - 2026-06-21
 
 ### Improved

@@ -165,6 +165,16 @@ Prompt processing on an RX 6700 XT (Qwen3-8B Q4, pp512, t/s, before → ToshGEMM
 
 For a 1000-token prompt that cuts time-to-first-token from ~10 s to ~4 s (official) and ~9 s to ~3 s (turbo).
 
+ToshGEMM now also covers **Mixture-of-Experts** prefill: the per-expert matmul (`mul_mm_id`) uses the same tiled kernel, so MoE models get the speedup on whatever experts are GPU-resident, not just their dense/attention layers. On a Qwen3-Coder-30B-A3B (Q4_K_M, pp512, RX 6700 XT, `--n-cpu-moe 20`):
+
+| path | pp512 (t/s) |
+|---|---|
+| matrix-vector (no ToshGEMM) | 90 |
+| dense layers only | 102 (+12%) |
+| dense **+ MoE experts** | **124 (+37%)** |
+
+So the expert matmul adds the larger share (+22% on top of dense) once experts sit on the GPU. That share scales with how many experts fit in VRAM — small when most are offloaded to CPU (the usual case on 12 GB cards), larger on higher-VRAM GPUs. Output stays coherent. *Measured on a single RX 6700 XT; still needs more everyday-use testing across models and VRAM sizes.*
+
 ### Vega / GCN cards (in progress)
 
 Older AMD GPUs (GCN: RX 500-series, Vega) use a 64-wide wavefront, while the simdgroup kernels assume 32 — that mismatch produces garbage output. An opt-in **wave64 safe mode** (`GGML_METAL_WAVE64_SAFEMODE=1`) routes the affected ops to correct (slower) fallbacks; it was confirmed coherent on an RX 580 by a tester, and is off by default so wave32 cards (Apple / AMD RDNA) are unaffected. A fast wave64 path (GCN has no simdgroup matrix or reduction, so it needs a custom kernel) is still being worked on — no benchmarks yet.
