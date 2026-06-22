@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.81.35] - 2026-06-22
 
+### Added
+- **Text-only toggle for vision models** — vision-capable models now show an eye control on
+  the Dashboard. Turn it off to run the model as text-only and free the VRAM its image
+  encoder would otherwise use.
+
 ### Fixed
 - **Multi-GPU split activation hand-off** — the cross-device copy in a layer split used
   an invalid Metal blit (a blit can't reach another device's buffer); it now stages

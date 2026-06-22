@@ -13,6 +13,7 @@ struct DashboardView: View {
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
+    @AppStorage(SettingsKeys.loadVision) private var loadVision = true
 
     @EnvironmentObject var updates: UpdateChecker
 
@@ -170,6 +171,24 @@ struct DashboardView: View {
             }
             .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour.",
                         "Makes the server listen on the local network and advertises it via Bonjour.") + restartNote)
+            // Only for vision-capable models: let the user run text-only to save VRAM.
+            // The eye is colored when vision loads, dimmed when the model runs text-only.
+            if ServerSettings.mmprojPath(forModel: modelPath) != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "photo").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Visión", "Vision")).font(.callout)
+                    Spacer(minLength: 8)
+                    Button { loadVision.toggle() } label: {
+                        Image(systemName: loadVision ? "eye.fill" : "eye.slash")
+                            .imageScale(.large)
+                            .foregroundStyle(loadVision ? Color.accentColor : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(serverBusy)
+                }
+                .help(loc.t("Ojo encendido: carga el proyector para leer imágenes. Apagado: solo texto, libera la VRAM del codificador de imágenes.",
+                            "Eye on: loads the projector so the model can read images. Off: text-only, frees the image encoder's VRAM.") + restartNote)
+            }
 
             HStack {
                 switch server.state {

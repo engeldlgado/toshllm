@@ -81,6 +81,9 @@ struct ServerSettings {
     /// bit-exact reconstruction — so the user can turn it off for exact results.
     /// Force-disabled for turbo2/3/4 KV (crashes on a shift). On by default.
     var cacheReuse: Bool = true
+    /// Load the multimodal projector (mmproj) for vision-capable models. Off skips it
+    /// so a vision model runs text-only and frees the VRAM the image encoder would use.
+    var loadVision: Bool = true
 
     /// True when the selected binary is the bundled or dev turbo engine.
     static func isTurbo(_ binary: String) -> Bool {
@@ -113,7 +116,8 @@ struct ServerSettings {
         if noMmap { args.append("--no-mmap") }
         // Vision: if the model has a sibling multimodal projector, load it so the
         // model can read attached images. Requires the chat template (--jinja).
-        let mmproj = Self.mmprojPath(forModel: modelPath)
+        // Skipped when the user wants text-only, to free the image encoder's VRAM.
+        let mmproj = loadVision ? Self.mmprojPath(forModel: modelPath) : nil
         if let mmproj { args += ["--mmproj", mmproj] }
         if jinja || mmproj != nil { args.append("--jinja") }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
@@ -309,7 +313,8 @@ struct ServerSettings {
             persistCache: bool(SettingsKeys.persistCache, false),
             multiGPU: bool(SettingsKeys.multiGPU, false),
             forcePrivateBuffers: bool(SettingsKeys.forcePrivateBuffers, false),
-            cacheReuse: bool(SettingsKeys.cacheReuse, true))
+            cacheReuse: bool(SettingsKeys.cacheReuse, true),
+            loadVision: bool(SettingsKeys.loadVision, true))
     }
 
     /// Whether a GGUF ships the MTP (multi-token prediction) head. Detected by

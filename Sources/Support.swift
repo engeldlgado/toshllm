@@ -39,6 +39,7 @@ enum SettingsKeys {
     static let multiGPU = "multiGPU"
     static let forcePrivateBuffers = "forcePrivateBuffers"
     static let cacheReuse = "cacheReuse"
+    static let loadVision = "loadVision"
     static let apiKeyEnabled = "apiKeyEnabled"
     static let localNetworkDiscovery = "localNetworkDiscovery"
     static let menuBarIcon = "menuBarIcon"

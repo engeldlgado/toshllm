@@ -102,6 +102,7 @@
   "Extra RAM where the engine remembers recent conversations to avoid reprocessing them when switching chats or clients. Unlimited, the engine uses up to 8 GB: next to a large model that pushes the machine into swap and speed degrades over time. 2 GB is a good balance.": "",
   "Extra arguments": "",
   "Extracting text from scanned PDF via OCR…": "",
+  "Eye on: loads the projector so the model can read images. Off: text-only, frees the image encoder's VRAM.": "",
   "Failed": "",
   "Fastest": "",
   "Filter by each line's minimum severity.": "",
