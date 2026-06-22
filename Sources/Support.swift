@@ -57,7 +57,7 @@ enum SettingsKeys {
     /// never hides or deletes downloaded models. Profiles and the Keychain API key
     /// live outside UserDefaults and are untouched.
     static let resettableOptionKeys = [
-        port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
+        serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
         vramReserve, gpuIndex, extraArgs, cacheTypeK, cacheTypeV, mlock, cacheRAM,
         parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
@@ -142,6 +142,11 @@ final class RotatingFileLog: @unchecked Sendable {
             }
             guard let handle else { return }
             try? handle.write(contentsOf: Data(text.utf8))
+            // Flush to disk so a machine freeze / kernel panic (e.g. an AMD MoE GPU
+            // deadlock) still leaves every line written so far — not just what the
+            // OS happened to flush. A process crash was already safe; this covers
+            // the harder case the logs exist for.
+            try? handle.synchronize()
             if let size = try? handle.offset(), size > maxBytes {
                 rotate()
             }
@@ -176,6 +181,56 @@ final class RotatingFileLog: @unchecked Sendable {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
+}
+
+/// Single accumulating benchmark history file (`benchmarks.txt`), pruned to the
+/// last `retentionDays` of runs so it stays a useful, shareable record without
+/// growing forever. Each run's header carries an ISO date used for pruning.
+final class BenchmarkLog: @unchecked Sendable {
+    let url: URL
+    let directory: URL
+    private let queue = DispatchQueue(label: "toshllm.benchlog")
+    private let retentionDays: Int
+    static let runMarker = "=== ToshLLM benchmark · "
+
+    init(retentionDays: Int = 3) {
+        self.retentionDays = retentionDays
+        directory = AppSupport.directory.appendingPathComponent("logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        url = directory.appendingPathComponent("benchmarks.txt")
+        prune()
+    }
+
+    func append(_ text: String) {
+        queue.async { [self] in
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
+            guard let h = try? FileHandle(forWritingTo: url) else { return }
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: Data(text.utf8))
+            try? h.synchronize()   // survive a machine freeze mid-run
+            try? h.close()
+        }
+    }
+
+    /// Rewrite the file keeping only runs newer than the retention window, keyed
+    /// off the ISO date in each run's header line.
+    func prune() {
+        queue.async { [self] in
+            guard let content = try? String(contentsOf: url, encoding: .utf8),
+                  content.contains(Self.runMarker) else { return }
+            let iso = ISO8601DateFormatter()
+            let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86_400)
+            var kept = ""
+            for block in content.components(separatedBy: Self.runMarker).dropFirst() {
+                guard let end = block.range(of: " ===") else { continue }
+                let date = iso.date(from: String(block[block.startIndex..<end.lowerBound]))
+                // Keep recent runs; keep unparseable ones to avoid losing data.
+                if date == nil || date! >= cutoff { kept += Self.runMarker + block }
+            }
+            try? kept.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
 }
 
 // MARK: - Shell-words argument parsing

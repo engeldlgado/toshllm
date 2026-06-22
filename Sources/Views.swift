@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// Reveal a file in Finder, falling back to opening its folder when the file
+/// doesn't exist yet (a fresh session writes its file lazily, so selecting a
+/// not-yet-created path would otherwise drop the user in their home folder).
+@MainActor func revealInFinder(file: URL, folder: URL) {
+    if FileManager.default.fileExists(atPath: file.path) {
+        NSWorkspace.shared.activateFileViewerSelecting([file])
+    } else {
+        NSWorkspace.shared.open(folder)
+    }
+}
+
 enum Section_: String, CaseIterable, Identifiable {
     case dashboard, chat, models, benchmarks, docs, logs, settings, about
     var id: String { rawValue }

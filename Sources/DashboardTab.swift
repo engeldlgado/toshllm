@@ -84,8 +84,48 @@ struct DashboardView: View {
         }
     }
 
+    private var profileMenu: some View {
+        Menu {
+            if profileStore.activeProfileName != nil {
+                Button {
+                    profileStore.clearActive()
+                    if server.state == .running { server.stop() }
+                } label: {
+                    Label(loc.t("Predeterminado (sin perfil)", "Default (no profile)"),
+                          systemImage: "arrow.uturn.backward")
+                }
+                Divider()
+            }
+            ForEach(profileStore.profiles) { p in
+                Button {
+                    profileStore.apply(p)
+                    if server.state == .running { server.stop() }
+                } label: {
+                    Label(p.name, systemImage: profileStore.activeProfileName == p.name ? "checkmark" : "person.2")
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "person.2").font(.system(size: 10, weight: .semibold))
+                Text(profileStore.activeProfileName ?? loc.t("Perfil", "Profile"))
+                    .font(.caption.weight(.medium)).lineLimit(1)
+                    .frame(maxWidth: 150)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+            }
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(.pink.opacity(0.15), in: Capsule())
+            .foregroundStyle(.pink)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(loc.t("Carga un perfil guardado. Si el servidor está activo, se detiene para aplicar.",
+                    "Loads a saved profile. If the server is running, it stops so the profile applies."))
+    }
+
     private var serverCard: some View {
-        Card(title: loc.t("Servidor", "Server"), icon: "server.rack", fill: true) {
+        Card(title: loc.t("Servidor", "Server"), icon: "server.rack", fill: true,
+             trailing: profileStore.profiles.isEmpty ? nil : AnyView(profileMenu)) {
             let active = models.models.first { $0.url.path == modelPath }
             row("shippingbox", active?.name ?? loc.t("Sin modelo seleccionado", "No model selected"))
             if ncmoe > 0 {
@@ -130,23 +170,6 @@ struct DashboardView: View {
             }
             .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour.",
                         "Makes the server listen on the local network and advertises it via Bonjour.") + restartNote)
-
-            if !profileStore.profiles.isEmpty {
-                Menu {
-                    ForEach(profileStore.profiles) { p in
-                        Button(p.name) {
-                            profileStore.apply(p)
-                            if server.state == .running { server.stop() }
-                        }
-                    }
-                } label: {
-                    Label(loc.t("Aplicar perfil…", "Apply profile…"), systemImage: "person.2")
-                        .font(.callout)
-                }
-                .menuStyle(.borderlessButton)
-                .help(loc.t("Carga un perfil guardado. Si el servidor está activo, se detiene para aplicar.",
-                            "Loads a saved profile. If the server is running, it stops so the profile applies."))
-            }
 
             HStack {
                 switch server.state {
@@ -248,13 +271,22 @@ struct Card<Content: View>: View {
     /// When true the card stretches to fill the tallest sibling in its row, so
     /// side-by-side cards line up even with different amounts of content.
     var fill: Bool = false
+    /// Optional accessory pinned to the top-right of the title row (e.g. a
+    /// profile picker or a "clear" action).
+    var trailing: AnyView? = nil
     @ViewBuilder let content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Label(title, systemImage: icon)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Label(title, systemImage: icon)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                if let trailing {
+                    Spacer(minLength: 8)
+                    trailing
+                }
+            }
             content
         }
         .padding(14)

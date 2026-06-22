@@ -11,6 +11,10 @@ struct BenchResult: Codable, Identifiable {
     var ctk: String?
     var ctv: String?
     var engine: String?
+    /// GPU that ran this benchmark, and the full config snapshot — the snapshot
+    /// lets any past run be saved as a profile, not just the most recent.
+    var gpu: String?
+    var profile: Profile?
 
     var shortModel: String {
         model.replacingOccurrences(of: ".gguf", with: "")
@@ -40,8 +44,30 @@ final class BenchmarkController: ObservableObject {
 
     private var process: Process?
     private let storeKey = "benchHistory"
+    /// Persists every run (full header + llama-bench output) to one `benchmarks.txt`,
+    /// pruned to the last 3 days, so a shareable history survives restarts and a
+    /// crash still leaves the run on file.
+    private let fileLog = BenchmarkLog(retentionDays: 3)
+
+    var benchLogURL: URL { fileLog.url }
+    var benchLogDirectory: URL { fileLog.directory }
 
     init() { load() }
+
+    /// Run header with date, GPU and the exact config — the same text shown on
+    /// screen and written to the log file, so a shared log is self-describing.
+    private func header(for settings: ServerSettings) -> String {
+        let model = URL(fileURLWithPath: settings.modelPath).lastPathComponent
+        return """
+        === ToshLLM benchmark · \(Date().formatted(.iso8601)) ===
+        model:  \(model)
+        GPU:    \(settings.gpuLabel)
+        engine: \(settings.engineTag)\(settings.ncmoe > 0 ? " · ncmoe \(settings.ncmoe)" : "") · K:\(settings.cacheTypeK) V:\(settings.cacheTypeV)
+        args:   \(settings.benchmarkArguments.joined(separator: " "))
+        =========================
+
+        """
+    }
 
     func run(settings: ServerSettings) {
         guard !running else { return }
@@ -56,7 +82,11 @@ final class BenchmarkController: ObservableObject {
             return
         }
 
-        output = ""
+        // Header so both the on-screen log and the saved file record which GPU and
+        // config produced the run.
+        let head = header(for: settings)
+        output = head
+        fileLog.append(head)
         running = true
 
         let p = Process()
@@ -67,9 +97,11 @@ final class BenchmarkController: ObservableObject {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
+        let log = fileLog
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            log.append(text)
             Task { @MainActor in self?.output += text }
         }
         p.terminationHandler = { [weak self] _ in
@@ -115,10 +147,15 @@ final class BenchmarkController: ObservableObject {
                 engine = "externo"
             }
             history.insert(BenchResult(date: .now, model: name, ncmoe: settings.ncmoe, pp: pp, tg: tg,
-                                       ctk: settings.cacheTypeK, ctv: settings.cacheTypeV, engine: engine),
+                                       ctk: settings.cacheTypeK, ctv: settings.cacheTypeV, engine: engine,
+                                       gpu: settings.gpuLabel, profile: settings.makeProfile(name: name)),
                            at: 0)
             save()
+            fileLog.append(String(format: "→ result: pp512 = %.1f t/s · tg128 = %.1f t/s\n\n", pp, tg))
+        } else {
+            fileLog.append("→ result: could not parse pp512/tg128 (run failed or was cancelled)\n\n")
         }
+        fileLog.prune()
     }
 
     /// Runs llama-bench to completion and returns the parsed speeds.
@@ -135,6 +172,7 @@ final class BenchmarkController: ObservableObject {
         p.standardOutput = pipe
         p.standardError = pipe
 
+        fileLog.append(header(for: settings))
         let text: String = await withCheckedContinuation { continuation in
             p.terminationHandler = { _ in
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -143,6 +181,7 @@ final class BenchmarkController: ObservableObject {
             do { try p.run(); self.process = p } catch { continuation.resume(returning: "") }
         }
         process = nil
+        fileLog.append(text)
 
         func speed(_ test: String) -> Double? {
             for line in text.split(separator: "\n") where line.contains(" \(test) ") {
@@ -181,7 +220,9 @@ final class BenchmarkController: ObservableObject {
                 history.insert(BenchResult(date: .now, model: name, ncmoe: candidate,
                                            pp: result.pp, tg: result.tg,
                                            ctk: settings.cacheTypeK, ctv: settings.cacheTypeV,
-                                           engine: engine), at: 0)
+                                           engine: engine, gpu: settings.gpuLabel,
+                                           profile: settings.makeProfile(name: "\(name) ncmoe \(candidate)")),
+                               at: 0)
                 save()
 
                 if let current = best {
@@ -200,6 +241,7 @@ final class BenchmarkController: ObservableObject {
             sweepStatus = best.map { String(format: "Óptimo: ncmoe %d (%.1f t/s)", $0.ncmoe, $0.tg) }
                 ?? "Sweep sin resultados / sweep produced no results"
             sweeping = false
+            fileLog.prune()
         }
     }
 
@@ -211,6 +253,11 @@ final class BenchmarkController: ObservableObject {
 
     func delete(_ result: BenchResult) {
         history.removeAll { $0.id == result.id }
+        save()
+    }
+
+    func clearHistory() {
+        history.removeAll()
         save()
     }
 

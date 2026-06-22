@@ -197,6 +197,15 @@ struct ServerSettings {
         return args
     }
 
+    /// Human-readable name of the GPU a run actually used, for the benchmark
+    /// record. Resolves the macOS-picked default to its real device name.
+    var gpuLabel: String {
+        let gpus = ServerController.availableGPUs()
+        if multiGPU { return "Split · \(max(2, gpus.count)) GPUs" }
+        if gpuIndex >= 0 { return gpus.first { $0.index == gpuIndex }?.name ?? "GPU \(gpuIndex)" }
+        return MTLCreateSystemDefaultDevice()?.name ?? "default"
+    }
+
     /// Web chat UI bundled with the app (served via llama-server --path).
     static var chatUIPath: String? {
         guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("test-ui").path,
@@ -606,6 +615,9 @@ final class ServerController: ObservableObject {
     static var externalSlotFile: URL { ServerSettings.slotCacheDir.appendingPathComponent("external.bin") }
 
     var logFileURL: URL { fileLog.fileURL }
+    /// The folder holding all per-session log files (kept ~3 days). Revealed in
+    /// Finder so the user can find — or share — past sessions, not just the live one.
+    var logsDirectory: URL { fileLog.directory }
 
     var serverURL: URL { URL(string: "http://127.0.0.1:\(currentPort)/")! }
 

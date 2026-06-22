@@ -81,12 +81,12 @@ struct LogsView: View {
                             "Copies what's shown (with filters applied)."))
 
                 Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([server.logFileURL])
+                    revealInFinder(file: server.logFileURL, folder: server.logsDirectory)
                 } label: {
-                    Label(loc.t("Archivo en Finder", "File in Finder"), systemImage: "doc.text.magnifyingglass")
+                    Label(loc.t("Logs en Finder", "Logs in Finder"), systemImage: "folder")
                 }
-                .help(loc.t("Cada sesión del servidor se guarda en su propio archivo con fecha y hora, así un cierre inesperado o un cuelgue de la Mac conserva el registro. Se borran solos a los 3 días.",
-                            "Each server session is saved to its own date-and-time file, so an unexpected quit or a Mac freeze keeps the log. They auto-delete after 3 days."))
+                .help(loc.t("Abre la carpeta con el registro de cada sesión (archivo con fecha y hora). Un cierre inesperado o un cuelgue conserva el registro; se borran solos a los 3 días.",
+                            "Opens the folder with each session's log (a date-and-time file). An unexpected quit or freeze keeps the log; they auto-delete after 3 days."))
 
                 Button { exportDiagnostics() } label: {
                     Label(loc.t("Exportar diagnóstico…", "Export diagnostics…"), systemImage: "square.and.arrow.up")

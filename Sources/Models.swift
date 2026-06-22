@@ -210,6 +210,10 @@ final class ModelStore: ObservableObject {
     @Published var models: [LocalModel] = []
     @Published var downloads: [DownloadItem] = []
 
+    /// Scan the folder up front so the list is populated as soon as the app
+    /// launches, independent of which window or tab appears first.
+    init() { refresh() }
+
     /// The fixed default location, used when the user hasn't picked a custom folder.
     static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("models")
 
