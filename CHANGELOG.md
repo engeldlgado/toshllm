@@ -3,6 +3,27 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.34] - 2026-06-22
+
+### Improved
+- **Reproducible benchmarks** — each run records the GPU it used and a full
+  configuration snapshot, and any run (not just the last) can be saved as a profile.
+- **Benchmark profile picker** — seed a benchmark from a saved profile, apply a result
+  to the global default, or save it as a new profile; the history highlights your best
+  run and lets you save, apply or delete any row.
+- **Profiles on the Dashboard** — the server card shows the active profile in a picker at
+  its top-right, with a "Default (no profile)" entry that restores the configuration you
+  had before applying any profile.
+- **Benchmark history on disk** — runs are written to a shared `benchmarks.txt` with a
+  full header (model, GPU, engine, args) for sharing or debugging, kept for 3 days.
+
+### Fixed
+- **"Logs in Finder" opens the logs folder** instead of a generic user folder.
+- **Crash-safe logs** — log and benchmark writes are flushed to disk immediately, so a
+  machine freeze no longer loses the recent history.
+- **Models list populates at launch** — no need to re-select the models folder to see them.
+- **"Reset to defaults" reverts the engine** from Turbo back to Bundled.
+
 ## [0.81.33] - 2026-06-21
 
 ### Improved
