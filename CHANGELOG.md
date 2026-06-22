@@ -3,6 +3,15 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.35] - 2026-06-22
+
+### Fixed
+- **Multi-GPU split activation hand-off** — the cross-device copy in a layer split used
+  an invalid Metal blit (a blit can't reach another device's buffer); it now stages
+  through host memory. This targets the corrupted generation reported on dual-GPU setups.
+  Applies to both engines. (Advanced: `GGML_METAL_CROSS_STAGING_DISABLE=1` uses the
+  generic fallback copy.)
+
 ## [0.81.34] - 2026-06-22
 
 ### Improved

@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5..26cc90d1 100644
+index 32d97cd5..411c778d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -349,14 +349,12 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
@@ -21,7 +21,7 @@ index 32d97cd5..26cc90d1 100644
  
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(tensor);
          if (bid_src.metal == nil) {
-@@ -365,30 +363,83 @@ void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * te
+@@ -365,34 +363,111 @@ void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * te
  
          bid_src.offs += offset;
  
@@ -123,6 +123,34 @@ index 32d97cd5..26cc90d1 100644
      }
  }
  
+ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst) {
++    // A Metal blit can't reach a buffer owned by another device, so a multi-GPU layer
++    // hand-off goes through host memory (GGML_METAL_CROSS_STAGING_DISABLE uses the generic copy).
++    if (ctx_src->dev != ctx_dst->dev) {
++        if (getenv("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
++            return false;
++        }
++        ggml_metal_synchronize(ctx_src); // finish the source GPU's work before reading it
++
++        ggml_backend_buffer_t bsrc = src->view_src ? src->view_src->buffer : src->buffer;
++        ggml_backend_buffer_t bdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
++        ggml_metal_buffer_t buf_src = (ggml_metal_buffer_t) bsrc->context;
++        ggml_metal_buffer_t buf_dst = (ggml_metal_buffer_t) bdst->context;
++
++        const size_t size = ggml_nbytes(src);
++        void * stage = malloc(size);
++        if (!stage) {
++            return false;
++        }
++        ggml_metal_buffer_get_tensor(buf_src, src, stage, 0, size);
++        ggml_metal_buffer_set_tensor(buf_dst, dst, stage, 0, size);
++        free(stage);
++        return true;
++    }
++
+     @autoreleasepool {
+         struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
 index 9f481caa..40a7458c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp

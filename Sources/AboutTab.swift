@@ -4,7 +4,7 @@ import Charts
 // MARK: - About
 
 enum AppInfo {
-    static let version = "0.81.34"
+    static let version = "0.81.35"
     static let developerName = "Engelbert Delgado"
     static let developerHandle = "engeldlgado"
     static let githubURL = "https://github.com/engeldlgado"
