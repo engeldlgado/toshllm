@@ -585,9 +585,30 @@ struct ServerSettings {
     }
 }
 
+/// Owns the running engine instance(s). For now there is exactly one, so behavior
+/// matches the previous singleton; the multi-server UI is built on top of this.
+@MainActor
+final class ServerManager: ObservableObject {
+    static let shared = ServerManager()
+
+    @Published var servers: [ServerController]
+    /// The instance the chat and benchmark act on.
+    @Published var activeID: UUID
+
+    private init() {
+        let first = ServerController()
+        servers = [first]
+        activeID = first.id
+    }
+
+    var active: ServerController { servers.first { $0.id == activeID } ?? servers[0] }
+
+    func stopAll() { servers.forEach { $0.stop() } }
+}
+
 @MainActor
 final class ServerController: ObservableObject {
-    static let shared = ServerController()
+    let id = UUID()
 
     enum State: Equatable { case stopped, starting, running, failed(String) }
 

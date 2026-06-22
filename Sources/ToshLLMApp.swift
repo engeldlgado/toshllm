@@ -13,7 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler {
-            ServerController.shared.stop()
+            ServerManager.shared.stopAll()
             NSApp.terminate(nil)
         }
         source.resume()
@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        ServerController.shared.stop()
+        ServerManager.shared.stopAll()
     }
 }
 
@@ -32,7 +32,10 @@ private func defaultsMigrationExtraArgs() -> String? {
 @main
 struct ToshLLMApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var server = ServerController.shared
+    @StateObject private var manager = ServerManager.shared
+    // The active instance, observed directly so state changes drive the UI. One
+    // server today; switching the active one is handled when the multi-server UI lands.
+    @StateObject private var server = ServerManager.shared.active
     @StateObject private var models = ModelStore()
     @StateObject private var vram = VRAMMonitor()
     @StateObject private var loc = Localizer()
@@ -71,6 +74,7 @@ struct ToshLLMApp: App {
         Window("ToshLLM", id: "chat") {
             ChatMainView()
                 .environmentObject(server)
+                .environmentObject(manager)
                 .environmentObject(models)
                 .environmentObject(vram)
                 .environmentObject(loc)
@@ -88,6 +92,7 @@ struct ToshLLMApp: App {
         Window(loc.t("Configuración", "Configuration"), id: "control") {
             ControlPanelView()
                 .environmentObject(server)
+                .environmentObject(manager)
                 .environmentObject(models)
                 .environmentObject(vram)
                 .environmentObject(loc)

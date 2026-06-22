@@ -705,7 +705,7 @@ final class ChatStore: ObservableObject {
         task?.cancel()
         task = nil
         watchdog = nil
-        ServerController.shared.stop()
+        ServerManager.shared.active.stop()
         lastError = Self.stallMessage
         generating = false
         generatingConvID = nil
