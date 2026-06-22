@@ -48,7 +48,7 @@ struct ToshLLMApp: App {
 
     init() {
         // Release VRAM held by an engine orphaned by a previous force-quit.
-        EngineLock.reapOrphan()
+        EngineLock.reapOrphans()
 
         // Migrate the legacy raw flag into the dedicated MTP toggle.
         if var extra = defaultsMigrationExtraArgs(), extra.contains("--spec-type draft-mtp") {

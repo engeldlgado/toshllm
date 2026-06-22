@@ -5,6 +5,7 @@ import Charts
 
 struct DashboardView: View {
     @EnvironmentObject var server: ServerController
+    @EnvironmentObject var manager: ServerManager
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var profileStore: ProfileStore
@@ -21,14 +22,22 @@ struct DashboardView: View {
         ScrollView {
             VStack(spacing: 16) {
                 updateBanner
-                HStack(alignment: .top, spacing: 16) {
+                // Cards flow into as many columns as the window fits, so extra servers
+                // fill the width instead of stacking in one tall column.
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
+                          spacing: 16) {
                     hardwareCard
                     serverCard
+                    ForEach(manager.servers.dropFirst(), id: \.id) { c in
+                        AddedServerCard(c: c).environmentObject(manager)
+                    }
                 }
-                .fixedSize(horizontal: false, vertical: true)
                 recommendationCard
             }
             .padding()
+        }
+        .overlay(alignment: .bottomTrailing) {
+            floatingAddButton.padding(20)
         }
     }
 
@@ -124,6 +133,23 @@ struct DashboardView: View {
                     "Loads a saved profile. If the server is running, it stops so the profile applies."))
     }
 
+    // Floating action button with the macOS 26 glass look (material fallback below).
+    private var floatingAddButton: some View {
+        Button {
+            let n = manager.servers.count + 1
+            manager.addServer(name: loc.t("Servidor \(n)", "Server \(n)"), from: nil)
+        } label: {
+            Label(loc.t("Agregar servidor", "Add server"), systemImage: "plus")
+                .font(.body.weight(.medium))
+                .padding(.horizontal, 18).padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+        .glassSurface(in: Capsule(), tint: .pink, interactive: true)
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+        .help(loc.t("Crea otro servidor independiente, con su propia GPU, modelo y puerto.",
+                    "Creates another independent server with its own GPU, model and port."))
+    }
+
     private var serverCard: some View {
         Card(title: loc.t("Servidor", "Server"), icon: "server.rack", fill: true,
              trailing: profileStore.profiles.isEmpty ? nil : AnyView(profileMenu)) {
@@ -191,28 +217,23 @@ struct DashboardView: View {
             }
 
             HStack {
-                switch server.state {
-                case .running, .starting:
-                    Button(role: .destructive) { server.stop() } label: {
-                        Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .controlSize(.large)
-                default:
-                    Button { server.start(.fromDefaults()) } label: {
-                        Label(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(modelPath.isEmpty)
-                }
+                ServerStateBadge(state: server.state)
+                Spacer()
                 if server.state == .running {
                     Button { NSWorkspace.shared.open(server.webChatURL) } label: {
                         Image(systemName: "safari")
                     }
-                    .controlSize(.large)
                     .help(loc.t("Abrir en el navegador", "Open in browser"))
+                }
+                if server.state == .running || server.state == .starting {
+                    Button(role: .destructive) { server.stop() } label: {
+                        Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
+                    }
+                } else {
+                    Button { server.start(.fromDefaults()) } label: {
+                        Label(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill")
+                    }
+                    .disabled(modelPath.isEmpty)
                 }
             }
             .padding(.top, 6)
@@ -281,6 +302,144 @@ struct DashboardView: View {
             Text(text).font(.callout).lineLimit(1)
             Spacer(minLength: 0)
         }
+    }
+}
+
+/// Compact server state indicator, shared by the main and the added server cards.
+struct ServerStateBadge: View {
+    let state: ServerController.State
+    @EnvironmentObject var loc: Localizer
+    var body: some View {
+        switch state {
+        case .running:
+            Label(loc.t("Activo", "Running"), systemImage: "circle.fill")
+                .foregroundStyle(.green).font(.caption)
+        case .starting:
+            Label(loc.t("Iniciando…", "Starting…"), systemImage: "circle.fill")
+                .foregroundStyle(.orange).font(.caption)
+        case .failed:
+            Label(loc.t("Error", "Error"), systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red).font(.caption)
+        case .stopped:
+            Label(loc.t("Detenido", "Stopped"), systemImage: "circle")
+                .foregroundStyle(.secondary).font(.caption)
+        }
+    }
+}
+
+/// One extra independent server: its own model, GPU, port, profile and toggles.
+/// Observes the controller directly so its state (running/stopped) drives the card.
+struct AddedServerCard: View {
+    @ObservedObject var c: ServerController
+    @EnvironmentObject var manager: ServerManager
+    @EnvironmentObject var models: ModelStore
+    @EnvironmentObject var loc: Localizer
+    @EnvironmentObject var profileStore: ProfileStore
+
+    var body: some View {
+        let busy = c.state == .running || c.state == .starting
+        let modelPath = c.profile?.modelPath ?? ""
+        Card(title: c.name, icon: "server.rack", fill: true, trailing: AnyView(accessory)) {
+            HStack(spacing: 8) {
+                Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
+                Picker("", selection: bind(\.modelPath, "")) {
+                    Text(loc.t("Sin modelo", "No model")).tag("")
+                    ForEach(models.models) { Text($0.name).tag($0.url.path) }
+                }
+                .labelsHidden().disabled(busy)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
+                Picker("", selection: bind(\.gpuIndex, -1)) {
+                    Text(loc.t("GPU por defecto", "Default GPU")).tag(-1)
+                    ForEach(hardware.gpus) { Text($0.name).tag($0.index) }
+                }
+                .labelsHidden().disabled(busy)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
+                Text(loc.t("Puerto", "Port")).font(.callout)
+                Spacer(minLength: 8)
+                TextField("", value: bind(\.port, 8080), format: .number.grouping(.never))
+                    .multilineTextAlignment(.trailing).frame(width: 72)
+                    .textFieldStyle(.roundedBorder).disabled(busy)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "wifi").frame(width: 18).foregroundStyle(.secondary)
+                Text(loc.t("Descubrible en red local", "Discoverable on local network")).font(.callout)
+                Spacer(minLength: 8)
+                Toggle("", isOn: boolBind(\.localNetworkDiscovery, false))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
+            }
+            if ServerSettings.mmprojPath(forModel: modelPath) != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "photo").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Visión", "Vision")).font(.callout)
+                    Spacer(minLength: 8)
+                    let on = c.profile?.loadVision ?? true
+                    Button { boolBind(\.loadVision, true).wrappedValue.toggle() } label: {
+                        Image(systemName: on ? "eye.fill" : "eye.slash")
+                            .imageScale(.large).foregroundStyle(on ? Color.accentColor : .secondary)
+                    }
+                    .buttonStyle(.plain).disabled(busy)
+                }
+            }
+            HStack {
+                ServerStateBadge(state: c.state)
+                Spacer()
+                if busy {
+                    Button(role: .destructive) { c.stop() } label: {
+                        Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
+                    }
+                } else {
+                    Button { c.start(c.effectiveSettings()) } label: {
+                        Label(loc.t("Iniciar", "Start"), systemImage: "play.fill")
+                    }
+                    .disabled(modelPath.isEmpty)
+                }
+            }
+        }
+    }
+
+    private var accessory: some View {
+        HStack(spacing: 10) {
+            if !profileStore.profiles.isEmpty {
+                Menu {
+                    ForEach(profileStore.profiles) { p in
+                        Button(p.name) { applyProfile(p) }
+                    }
+                } label: {
+                    Label(loc.t("Perfil", "Profile"), systemImage: "person.2.fill").font(.caption)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help(loc.t("Carga un perfil guardado en este servidor.",
+                            "Loads a saved profile into this server."))
+            }
+            Button { manager.removeServer(c.id) } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(loc.t("Eliminar este servidor.", "Remove this server."))
+        }
+    }
+
+    /// Loads a saved profile into this server, keeping its own name and port.
+    private func applyProfile(_ p: Profile) {
+        var np = p
+        np.name = c.name
+        np.port = c.profile?.port ?? p.port
+        c.profile = np
+        manager.persist()
+    }
+
+    private func bind<T>(_ kp: WritableKeyPath<Profile, T>, _ fallback: T) -> Binding<T> {
+        Binding(get: { c.profile?[keyPath: kp] ?? fallback },
+                set: { c.profile?[keyPath: kp] = $0; manager.persist() })
+    }
+
+    private func boolBind(_ kp: WritableKeyPath<Profile, Bool?>, _ fallback: Bool) -> Binding<Bool> {
+        Binding(get: { c.profile?[keyPath: kp] ?? fallback },
+                set: { c.profile?[keyPath: kp] = $0; manager.persist() })
     }
 }
 

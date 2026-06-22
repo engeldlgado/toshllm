@@ -32,6 +32,8 @@ struct Profile: Codable, Identifiable {
     var multiGPU: Bool? = nil
     var forcePrivateBuffers: Bool? = nil
     var cacheReuse: Bool? = nil
+    var loadVision: Bool? = nil
+    var localNetworkDiscovery: Bool? = nil
 }
 
 @MainActor
@@ -181,7 +183,8 @@ extension ServerSettings {
                 engine: engineTag, cacheRAM: cacheRAM, reasoningInline: reasoningInline,
                 parallelSlots: parallelSlots, faAmd: faAmd, persistCache: persistCache,
                 multiGPU: multiGPU, forcePrivateBuffers: forcePrivateBuffers,
-                cacheReuse: cacheReuse)
+                cacheReuse: cacheReuse, loadVision: loadVision,
+                localNetworkDiscovery: localNetworkDiscovery)
     }
 
     /// Load a profile's config into this struct without touching UserDefaults,
@@ -201,6 +204,8 @@ extension ServerSettings {
         if let v = p.multiGPU { multiGPU = v }
         if let v = p.forcePrivateBuffers { forcePrivateBuffers = v }
         if let v = p.cacheReuse { cacheReuse = v }
+        if let v = p.loadVision { loadVision = v }
+        if let v = p.localNetworkDiscovery { localNetworkDiscovery = v }
         switch p.engine {
         case "bundled": serverBinary = ServerSettings.defaultBinary
         case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary

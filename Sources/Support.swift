@@ -268,43 +268,61 @@ enum ShellWords {
 
 // MARK: - Engine PID lockfile
 
-/// Tracks the PID of the engine we spawned, so a later launch can reap an
-/// orphan precisely (verifying the PID still points at one of our binaries)
-/// instead of pattern-killing by path.
+/// Tracks the PIDs of the engines we spawned (one per running server), so a later
+/// launch can reap orphans precisely (verifying each PID still points at one of our
+/// binaries) instead of pattern-killing by path.
 enum EngineLock {
     private static var url: URL { AppSupport.directory.appendingPathComponent("engine.pid") }
 
-    static func write(pid: Int32) {
-        try? String(pid).write(to: url, atomically: true, encoding: .utf8)
+    private static func read() -> [Int32] {
+        (try? String(contentsOf: url, encoding: .utf8))?
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) } ?? []
     }
 
-    static func clear() {
-        try? FileManager.default.removeItem(at: url)
+    private static func save(_ pids: [Int32]) {
+        if pids.isEmpty {
+            try? FileManager.default.removeItem(at: url)
+        } else {
+            try? pids.map(String.init).joined(separator: "\n")
+                .write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 
-    /// Kills the recorded PID if it is still alive and its executable lives
-    /// inside one of our app bundles. Returns whether an orphan was reaped.
+    static func add(pid: Int32) {
+        var pids = read()
+        if !pids.contains(pid) { pids.append(pid) }
+        save(pids)
+    }
+
+    static func remove(pid: Int32) {
+        save(read().filter { $0 != pid })
+    }
+
+    /// Kills any recorded PID still alive whose executable lives inside one of our app
+    /// bundles, then clears the file. Returns whether at least one orphan was reaped.
     @discardableResult
-    static func reapOrphan() -> Bool {
-        guard let text = try? String(contentsOf: url, encoding: .utf8),
-              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
-        defer { clear() }
+    static func reapOrphans() -> Bool {
+        var reaped = false
+        for pid in read() {
+            guard kill(pid, 0) == 0 else { continue }   // not running
 
-        guard kill(pid, 0) == 0 else { return false }   // not running
+            var buffer = [CChar](repeating: 0, count: 4096)
+            let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+            guard length > 0 else { continue }
+            let path = String(cString: buffer)
 
-        var buffer = [CChar](repeating: 0, count: 4096)
-        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-        guard length > 0 else { return false }
-        let path = String(cString: buffer)
+            // Only processes from a ToshLLM bundle are ours to kill.
+            guard path.contains("ToshLLM.app/Contents/Resources/bin") else { continue }
 
-        // Only processes from a ToshLLM bundle are ours to kill.
-        guard path.contains("ToshLLM.app/Contents/Resources/bin") else { return false }
-
-        AppLog.app.warning("Reaping orphaned engine pid \(pid) at \(path)")
-        kill(pid, SIGTERM)
-        usleep(500_000)
-        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
-        return true
+            AppLog.app.warning("Reaping orphaned engine pid \(pid) at \(path)")
+            kill(pid, SIGTERM)
+            usleep(500_000)
+            if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            reaped = true
+        }
+        save([])
+        return reaped
     }
 }
 

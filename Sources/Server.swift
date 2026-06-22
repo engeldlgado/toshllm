@@ -595,20 +595,91 @@ final class ServerManager: ObservableObject {
     /// The instance the chat and benchmark act on.
     @Published var activeID: UUID
 
+    private static let storeKey = "multiServerProfiles"
+
     private init() {
+        // Server 1 is the default: nil profile → driven by the global settings.
         let first = ServerController()
-        servers = [first]
+        var list = [first]
+        // Recreate any extra servers the user added, each with its own config.
+        if let data = UserDefaults.standard.data(forKey: Self.storeKey),
+           let profiles = try? JSONDecoder().decode([Profile].self, from: data) {
+            for p in profiles {
+                let c = ServerController()
+                c.name = p.name
+                c.profile = p
+                list.append(c)
+            }
+        }
+        servers = list
         activeID = first.id
     }
 
     var active: ServerController { servers.first { $0.id == activeID } ?? servers[0] }
 
+    func setActive(_ id: UUID) {
+        if servers.contains(where: { $0.id == id }) { activeID = id }
+    }
+
+    /// Lowest port not already taken by a server, starting at the default.
+    func freePort() -> Int {
+        let used = Set(servers.map { $0.profile?.port ?? ServerSettings.fromDefaults().port })
+        var p = 8080
+        while used.contains(p) { p += 1 }
+        return p
+    }
+
+    /// Adds a server from a base profile (or the current config), on a free port.
+    @discardableResult
+    func addServer(name: String, from base: Profile?) -> ServerController {
+        var p = base ?? ServerSettings.fromDefaults().makeProfile(name: name)
+        p.name = name
+        p.port = freePort()
+        let c = ServerController()
+        c.name = name
+        c.profile = p
+        servers.append(c)
+        activeID = c.id
+        persist()
+        return c
+    }
+
+    /// Removes an added server (never the default). Stops it first.
+    func removeServer(_ id: UUID) {
+        guard let i = servers.firstIndex(where: { $0.id == id }), i != 0 else { return }
+        servers[i].stop()
+        let wasActive = servers[i].id == activeID
+        servers.remove(at: i)
+        if wasActive { activeID = servers[0].id }
+        persist()
+    }
+
     func stopAll() { servers.forEach { $0.stop() } }
+
+    /// Persists only the added servers (those with their own profile).
+    func persist() {
+        let profiles = servers.compactMap { $0.profile }
+        if let data = try? JSONEncoder().encode(profiles) {
+            UserDefaults.standard.set(data, forKey: Self.storeKey)
+        }
+    }
 }
 
 @MainActor
 final class ServerController: ObservableObject {
     let id = UUID()
+    @Published var name: String = "Servidor 1"
+    /// Per-server config. nil = the default server, which uses the global settings
+    /// (the Settings/Dashboard bindings), so today's single-server behavior is unchanged.
+    @Published var profile: Profile?
+
+    /// Config this server launches with: its own profile, or the global defaults.
+    func effectiveSettings() -> ServerSettings {
+        guard let profile else { return .fromDefaults() }
+        var s = ServerSettings.fromDefaults()
+        s.apply(profile)
+        return s
+    }
 
     enum State: Equatable { case stopped, starting, running, failed(String) }
 
@@ -797,7 +868,7 @@ final class ServerController: ObservableObject {
                 guard self.process === proc else { return }
                 self.healthTask?.cancel()
                 self.stopDiscovery()
-                EngineLock.clear()
+                EngineLock.remove(pid: proc.processIdentifier)
                 if case .failed = self.state { return }
                 if proc.terminationStatus == 0 || proc.terminationStatus == 15 {
                     self.state = .stopped
@@ -814,7 +885,7 @@ final class ServerController: ObservableObject {
                             ServerSettings.recordIncompatibleMmproj(model: settings.modelPath, projector: args[i + 1])
                         }
                         self.retryWithoutMmproj = true
-                        EngineLock.clear()
+                        EngineLock.remove(pid: proc.processIdentifier)
                         self.consume("\n[ToshLLM] el proyector (mmproj) no se pudo cargar — reintentando solo-texto (visión desactivada) / projector failed to load — retrying text-only (vision disabled)\n")
                         self.state = .starting
                         self.launch(settings)
@@ -831,7 +902,7 @@ final class ServerController: ObservableObject {
         do {
             try p.run()
             process = p
-            EngineLock.write(pid: p.processIdentifier)
+            EngineLock.add(pid: p.processIdentifier)
             // A fresh engine starts with empty KV slots; tell the chat so it
             // re-restores the active conversation's persisted cache on next turn.
             NotificationCenter.default.post(name: .engineDidStart, object: nil)
@@ -873,6 +944,9 @@ final class ServerController: ObservableObject {
         if let p = process {
             let pid = p.processIdentifier
             lastStoppedPID = pid
+            // Drop this engine's PID now: once process is niled below, the termination
+            // handler's guard skips its own removal.
+            EngineLock.remove(pid: pid)
             let prewarm = prewarmActive
             let port = currentPort
             // SIGKILL fallback fires regardless of pid in case the (deferred)
@@ -892,8 +966,8 @@ final class ServerController: ObservableObject {
             } else {
                 p.terminate()
             }
-        } else {
-            EngineLock.clear()
+        } else if let pid = lastStoppedPID {
+            EngineLock.remove(pid: pid)
         }
         process = nil
         state = .stopped
