@@ -2,11 +2,34 @@ import SwiftUI
 
 // MARK: - Logs
 
-/// Dedicated, full-height server-log viewer with search, severity filtering,
-/// toggleable auto-follow, copy and diagnostics export — replacing the cramped
-/// 200 px panel that used to live inside Settings.
+/// Picks which server's log to view (when more than one exists) and shows it.
 struct LogsView: View {
-    @EnvironmentObject var server: ServerController
+    @EnvironmentObject var manager: ServerManager
+    @State private var selectedID: UUID?
+
+    private var selected: ServerController {
+        manager.servers.first { $0.id == selectedID } ?? manager.servers[0]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if manager.servers.count > 1 {
+                Picker("", selection: Binding(get: { selected.id }, set: { selectedID = $0 })) {
+                    ForEach(manager.servers, id: \.id) { Text($0.name).tag($0.id) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 12).padding(.top, 10)
+            }
+            ServerLogView(server: selected)
+        }
+    }
+}
+
+/// Dedicated, full-height server-log viewer with search, severity filtering,
+/// toggleable auto-follow, copy and diagnostics export. The wrapper (`LogsView`)
+/// picks which server and passes it in as an observed object.
+struct ServerLogView: View {
+    @ObservedObject var server: ServerController
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
@@ -112,25 +135,32 @@ struct LogsView: View {
     /// session without leaving the log you're watching.
     private var serverControls: some View {
         HStack(spacing: 10) {
-            Menu {
-                if models.models.isEmpty {
-                    Text(loc.t("No hay modelos descargados", "No downloaded models"))
-                } else {
-                    ForEach(models.models) { m in
-                        Button {
-                            modelPath = m.url.path
-                            ncmoe = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: m), hw: hardware).suggestedNcmoe
-                        } label: {
-                            Label(m.name, systemImage: modelPath == m.url.path ? "checkmark" : "cpu")
+            // The model picker edits the global config, so only the primary server can
+            // change its model here; an added server shows its own model read-only.
+            if server.profile == nil {
+                Menu {
+                    if models.models.isEmpty {
+                        Text(loc.t("No hay modelos descargados", "No downloaded models"))
+                    } else {
+                        ForEach(models.models) { m in
+                            Button {
+                                modelPath = m.url.path
+                                ncmoe = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: m), hw: hardware).suggestedNcmoe
+                            } label: {
+                                Label(m.name, systemImage: modelPath == m.url.path ? "checkmark" : "cpu")
+                            }
                         }
                     }
+                } label: {
+                    Label(selectedModelName, systemImage: "cpu")
+                        .lineLimit(1).truncationMode(.middle)
                 }
-            } label: {
+                .menuStyle(.borderlessButton)
+                .help(loc.t("Selecciona el modelo a cargar.", "Pick the model to load."))
+            } else {
                 Label(selectedModelName, systemImage: "cpu")
                     .lineLimit(1).truncationMode(.middle)
             }
-            .menuStyle(.borderlessButton)
-            .help(loc.t("Selecciona el modelo a cargar.", "Pick the model to load."))
 
             Spacer()
 
@@ -141,11 +171,11 @@ struct LogsView: View {
                     Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
                 }
             default:
-                Button { server.start(.fromDefaults()) } label: {
+                Button { server.start(server.effectiveSettings()) } label: {
                     Label(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(modelPath.isEmpty)
+                .disabled(server.effectiveSettings().modelPath.isEmpty)
             }
         }
         .font(.callout)
@@ -153,8 +183,9 @@ struct LogsView: View {
     }
 
     private var selectedModelName: String {
-        guard !modelPath.isEmpty else { return loc.t("Seleccionar modelo…", "Select model…") }
-        return URL(fileURLWithPath: modelPath).lastPathComponent
+        let mp = server.effectiveSettings().modelPath
+        guard !mp.isEmpty else { return loc.t("Seleccionar modelo…", "Select model…") }
+        return URL(fileURLWithPath: mp).lastPathComponent
     }
 
     @ViewBuilder private var statusDot: some View {

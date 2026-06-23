@@ -28,7 +28,10 @@ struct DashboardView: View {
                           spacing: 16) {
                     hardwareCard
                     serverCard
-                    ForEach(manager.servers.dropFirst(), id: \.id) { c in
+                    // Array(...) not the ArraySlice from dropFirst(): a slice keeps its
+                    // parent's 1-based indices, which ForEach mishandles (the first added
+                    // server would never refresh its state).
+                    ForEach(Array(manager.servers.dropFirst()), id: \.id) { c in
                         AddedServerCard(c: c).environmentObject(manager)
                     }
                 }
@@ -153,8 +156,15 @@ struct DashboardView: View {
     private var serverCard: some View {
         Card(title: loc.t("Servidor", "Server"), icon: "server.rack", fill: true,
              trailing: profileStore.profiles.isEmpty ? nil : AnyView(profileMenu)) {
-            let active = models.models.first { $0.url.path == modelPath }
-            row("shippingbox", active?.name ?? loc.t("Sin modelo seleccionado", "No model selected"))
+            HStack(spacing: 8) {
+                Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
+                Picker("", selection: $modelPath) {
+                    Text(loc.t("Sin modelo", "No model")).tag("")
+                    ForEach(models.models) { Text($0.name).tag($0.url.path) }
+                }
+                .labelsHidden()
+                .disabled(server.state == .running || server.state == .starting)
+            }
             if ncmoe > 0 {
                 row("cpu", loc.t("Expertos MoE en CPU: \(ncmoe) capas",
                                  "MoE experts on CPU: \(ncmoe) layers"))

@@ -179,7 +179,6 @@
   "No direct .gguf files": "Nessun file .gguf diretto",
   "No downloaded models": "",
   "No model": "",
-  "No model selected": "Nessun modello selezionato",
   "No results": "Nessun risultato",
   "Not available with vision models: llama.cpp cannot save/restore slots when mmproj is loaded.": "",
   "Not compatible": "Non compatibile",
