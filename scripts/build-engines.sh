@@ -79,6 +79,16 @@ CMAKE_FLAGS=(
     -DLLAMA_OPENSSL=OFF
 )
 
+# Old GCN/Vega rigs often run pre-AVX2 CPUs (e.g. Xeon X5482, no AVX/SSE4.2), where
+# the default binary aborts with an illegal instruction at launch. TOSH_NO_AVX2=1 drops
+# the CPU baseline to SSSE3 so it runs there, at the cost of slower CPU-side ops elsewhere.
+if [ "${TOSH_NO_AVX2:-0}" = 1 ]; then
+    CMAKE_FLAGS+=(
+        -DGGML_AVX2=OFF -DGGML_AVX=OFF -DGGML_FMA=OFF
+        -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_SSE42=OFF
+    )
+fi
+
 build_engine() {
     local vendor="$1" ref="$2" fetch_ref="$3"
     shift 3
