@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.38] - 2026-06-23
+
+### Improved
+- **Disable thinking actually sticks**... turning reasoning off (or typing `/no_think`) now forces the model to stop thinking even on templates that ignore the flag, instead of spending the whole budget reasoning.
+- **Multi-GPU recommendations**... model suggestions count combined VRAM when the split is on, so large models show as full-GPU instead of suggesting CPU offload.
+
 ## [0.81.37] - 2026-06-23
 
 ### Added

@@ -13,7 +13,7 @@ struct GPUStat: Identifiable {
     var fraction: Double { totalMB > 0 ? min(usedMB / totalMB, 1) : 0 }
 }
 
-/// Polls per-GPU VRAM directly from the IOAccelerator registry — no process
+/// Polls per-GPU VRAM directly from the IOAccelerator registry... no process
 /// spawning, just an in-process IOKit query. Each Metal device is paired to its
 /// accelerator node by registry ID, so two identical GPUs stay distinct.
 @MainActor

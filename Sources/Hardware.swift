@@ -15,6 +15,8 @@ struct HardwareInfo {
 
     var bestGPU: GPUDevice? { gpus.max(by: { $0.vramMB < $1.vramMB }) }
     var vramGB: Double { Double(bestGPU?.vramMB ?? 0) / 1024 }
+    /// Total VRAM across all GPUs. Only meaningful for a multi-GPU layer split.
+    var combinedVramGB: Double { Double(gpus.reduce(0) { $0 + $1.vramMB }) / 1024 }
 
     static func detect() -> HardwareInfo {
         func sysctlString(_ name: String) -> String {
@@ -113,7 +115,8 @@ enum Estimator {
         let ctx = d.object(forKey: SettingsKeys.ctx) == nil ? 16384 : d.integer(forKey: SettingsKeys.ctx)
         let scale = (kvTypeScale(d.string(forKey: SettingsKeys.cacheTypeK) ?? "f16")
                    + kvTypeScale(d.string(forKey: SettingsKeys.cacheTypeV) ?? "f16")) / 2
-        return estimate(spec: spec, hw: hw, ctx: ctx, kvScale: scale)
+        return estimate(spec: spec, hw: hw, ctx: ctx, kvScale: scale,
+                        multiGPU: d.bool(forKey: SettingsKeys.multiGPU))
     }
 
     /// KV cache size of a quantization type relative to f16.
@@ -129,8 +132,13 @@ enum Estimator {
     }
 
     /// Estimates required VRAM/RAM and suggested configuration for a model on this machine.
-    static func estimate(spec: ModelSpec, hw: HardwareInfo, ctx: Int = 16384, kvScale: Double = 1.0) -> MemoryEstimate {
-        let vramBudget = hw.vramGB - 1.0          // driver reserve
+    static func estimate(spec: ModelSpec, hw: HardwareInfo, ctx: Int = 16384, kvScale: Double = 1.0,
+                         multiGPU: Bool = false) -> MemoryEstimate {
+        // A layer split is sequential (pipeline): combined VRAM raises capacity,
+        // not per-token speed. Use summed VRAM (driver reserve per device) when
+        // the user enabled the split and there are 2+ GPUs; otherwise one card.
+        let splitting = multiGPU && hw.gpus.count >= 2
+        let vramBudget = (splitting ? hw.combinedVramGB : hw.vramGB) - Double(splitting ? hw.gpus.count : 1)
         let kvGB = kvCache(spec: spec, ctx: ctx) * kvScale
         let computeGB = 0.9 + spec.paramsB * 0.012
 

@@ -45,6 +45,21 @@ final class EstimatorTests: XCTestCase {
         XCTAssertEqual(Estimator.estimate(spec: spec, hw: smallRAM).level, .no)
     }
 
+    func testMoEFitsFullyAcrossMultiGPU() {
+        // Two 16 GB cards (Lance's rig): the 35B MoE needs expert offload on one
+        // card, but fits entirely in combined VRAM with the split enabled.
+        let dualGPU = HardwareInfo(
+            cpuBrand: "Test", physicalCores: 16, logicalCores: 32,
+            ramGB: 96, arch: "x86_64", model: "", osVersion: "",
+            gpus: [GPUDevice(index: 0, name: "GPU0", vramMB: 16368),
+                   GPUDevice(index: 1, name: "GPU1", vramMB: 16368)])
+        let spec = ModelSpec(fileGB: 19.5, paramsB: 35.4, layers: 40, isMoE: true)
+        XCTAssertNotEqual(Estimator.estimate(spec: spec, hw: dualGPU).level, .ideal)
+        let split = Estimator.estimate(spec: spec, hw: dualGPU, multiGPU: true)
+        XCTAssertEqual(split.level, .ideal)
+        XCTAssertEqual(split.suggestedNcmoe, 0)
+    }
+
     func testEstimatedSpecFromFileSize() {
         let spec = ModelSpec.estimated(fileBytes: 5_000_000_000, isMoE: false)
         XCTAssertEqual(spec.fileGB, 4.66, accuracy: 0.05)

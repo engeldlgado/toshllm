@@ -334,22 +334,25 @@ final class ChatStore: ObservableObject {
                                           messages: conversations[i].messages,
                                           from: conversations[i].summarizedCount ?? 0)
 
-        // Disabling reasoning: `enable_thinking:false` (below) is a Qwen chat-
-        // template kwarg that some reasoning models ignore, so they keep
-        // thinking. The Qwen-family soft switch `/no_think`, appended to the
-        // last user turn, disables it even when the template doesn't; other
-        // models simply ignore the trailing token. Belt-and-braces — only sent
-        // for this request, never persisted to the visible conversation.
-        if !thinking, let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
-            if let s = history[last]["content"] as? String {
-                history[last]["content"] = s + "\n/no_think"
-            } else if var parts = history[last]["content"] as? [[String: Any]] {
-                if let ti = parts.firstIndex(where: { ($0["type"] as? String) == "text" }) {
-                    parts[ti]["text"] = ((parts[ti]["text"] as? String) ?? "") + "\n/no_think"
-                } else {
-                    parts.insert(["type": "text", "text": "/no_think"], at: 0)
+        // Reasoning off can come from the toggle or a typed /no_think; a typed
+        // switch overrides the toggle for this turn. Not persisted to history.
+        var reasoningOff = !thinking
+        if let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
+            let typed = Self.messageText(history[last]["content"])
+            if typed.contains("/no_think") { reasoningOff = true }
+            else if typed.contains("/think") { reasoningOff = false }
+
+            if reasoningOff, !typed.contains("/no_think") {
+                if let s = history[last]["content"] as? String {
+                    history[last]["content"] = s + "\n/no_think"
+                } else if var parts = history[last]["content"] as? [[String: Any]] {
+                    if let ti = parts.firstIndex(where: { ($0["type"] as? String) == "text" }) {
+                        parts[ti]["text"] = ((parts[ti]["text"] as? String) ?? "") + "\n/no_think"
+                    } else {
+                        parts.insert(["type": "text", "text": "/no_think"], at: 0)
+                    }
+                    history[last]["content"] = parts
                 }
-                history[last]["content"] = parts
             }
         }
 
@@ -457,8 +460,11 @@ final class ChatStore: ObservableObject {
                     // Stream prompt-processing progress (in `prompt_progress`).
                     "return_progress": true,
                 ]
-                if !thinking {
+                if reasoningOff {
                     body["chat_template_kwargs"] = ["enable_thinking": false]
+                    // For templates that ignore enable_thinking (Qwen3.6 still
+                    // prefills <think>): 0 forces the reasoning block to close now.
+                    body["thinking_budget_tokens"] = 0
                 }
                 // Pin to slot 0 so the saved/restored KV always matches the chat.
                 if self?.slotPersistEnabled == true { body["id_slot"] = 0 }
@@ -747,6 +753,16 @@ final class ChatStore: ObservableObject {
             return ["role": m.role, "content": text]
         }
         return history
+    }
+
+    /// Plain text of a message's content, whether it's a string or the
+    /// multimodal parts array. Used to detect a typed /no_think | /think switch.
+    private static func messageText(_ content: Any?) -> String {
+        if let s = content as? String { return s }
+        if let parts = content as? [[String: Any]] {
+            return parts.compactMap { $0["text"] as? String }.joined(separator: " ")
+        }
+        return ""
     }
 
     /// Index up to which messages can be folded into the summary: keeps the
