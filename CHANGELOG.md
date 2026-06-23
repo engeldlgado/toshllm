@@ -3,6 +3,21 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.36] - 2026-06-22
+
+### Added
+- **Multiple servers at once**... run several independent engine instances from the
+  Dashboard, each with its own model, GPU, port, profile and vision/network toggles. Add
+  one with the floating button, remove it with the x. Handy for serving different models
+  side by side or pinning one model per GPU. The chat keeps using the main server.
+- **Per-server logs**... the Logs tab gets a picker to switch between each running server's
+  live log.
+- **Model picker on the main server card**, alongside the one the added servers already had.
+
+### Fixed
+- **Cleaner shutdown of multiple engines**... the engine tracker now records every running
+  instance, so each one is reaped on quit instead of only the last.
+
 ## [0.81.35] - 2026-06-22
 
 ### Added

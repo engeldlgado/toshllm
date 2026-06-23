@@ -46,6 +46,7 @@ It opens, detects your hardware, and recommends models that will actually run we
 - **Dual engines** — official llama.cpp + experimental **TurboQuant** engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), with an optional **AMD Flash Attention kernel** that keeps decode attention on the GPU for quantized/turbo KV (see the [research note](#research-amd-gpus-on-metal))
 - **Benchmarks** — measure prompt/generation speed per configuration, with history and side-by-side comparison charts
 - **OpenAI-compatible API** — use it at `http://127.0.0.1:8080`, with optional local-network access and Bonjour discovery
+- **Multiple servers** — run several independent engine instances at once from the Dashboard, each with its own model, GPU, port and profile; serve different models side by side or pin one model per GPU
 - **Every parameter explained** — bilingual tooltips and built-in docs (English/Spanish)
 - **Profiles, menu bar mode, auto-start** — save full configurations and switch with one click
 
