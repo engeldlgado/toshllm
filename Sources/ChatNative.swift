@@ -276,7 +276,7 @@ final class ChatStore: ObservableObject {
         if conversations.isEmpty { newConversation() }
         // Drop its persisted KV slot file too, and forget it if it was loaded.
         try? FileManager.default.removeItem(
-            at: ServerSettings.slotCacheDir.appendingPathComponent(Self.slotFile(c.id)))
+            at: ServerSettings.primarySlotCacheDir.appendingPathComponent(Self.slotFile(c.id)))
         if slotConvID == c.id { slotConvID = nil }
         save()
     }
@@ -656,7 +656,7 @@ final class ChatStore: ObservableObject {
     /// Drop slot files with no matching conversation (deleted while disabled, or
     /// left over). Bounds disk use to the conversations that still exist.
     private func pruneOrphanSlots() {
-        let dir = ServerSettings.slotCacheDir
+        let dir = ServerSettings.primarySlotCacheDir
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         let ids = Set(conversations.map { $0.id.uuidString })
         for f in files where f.pathExtension == "bin" {

@@ -40,6 +40,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.modelsDir) private var modelsDir = ""
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
+    @AppStorage(SettingsKeys.menuBarGPU) private var menuBarGPU = "panel"
     @AppStorage(SettingsKeys.autoStart) private var autoStart = false
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
     @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
@@ -62,6 +63,11 @@ struct SettingsView: View {
         if case .stopped = server.state { return true }
         if case .failed = server.state { return true }
         return false
+    }
+    // Networking is a launch flag, so restart the running server to apply it now.
+    private func setDiscoverable(_ on: Bool) {
+        localNetworkDiscovery = on
+        if !serverIsStopped { server.restart(.fromDefaults()) }
     }
     private var currentModelIsVision: Bool {
         ServerSettings.mmprojPath(forModel: modelPath) != nil
@@ -144,16 +150,24 @@ struct SettingsView: View {
                 Toggle(loc.t("Icono en la barra de menús", "Menu bar icon"), isOn: $menuBarIcon)
                     .infoTip(loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
                                 "Shows a menu bar icon with server status and quick controls, even with the window closed."))
+                Picker(loc.t("VRAM de la GPU en la barra", "GPU VRAM in the menu bar"), selection: $menuBarGPU) {
+                    Text(loc.t("Oculta", "Hidden")).tag("off")
+                    Text(loc.t("En el icono", "In the icon")).tag("icon")
+                    Text(loc.t("En el panel", "In the panel")).tag("panel")
+                }
+                .disabled(!menuBarIcon)
+                .infoTip(loc.t("Dónde mostrar el uso de VRAM: junto al icono (porcentaje agregado) o como barras por GPU al abrir el panel.",
+                            "Where to show VRAM usage: next to the icon (aggregate percentage) or as per-GPU bars when the panel opens."))
                 Toggle(loc.t("Iniciar servidor al abrir la app", "Start server on app launch"), isOn: $autoStart)
                     .infoTip(loc.t("Arranca automáticamente el último modelo configurado al abrir ToshLLM.",
                                 "Automatically starts the last configured model when ToshLLM opens."))
                 Toggle(loc.t("Proteger la API con clave", "Protect the API with a key"), isOn: $apiKeyEnabled)
                     .infoTip(loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
                                 "Generates a key (stored in the Keychain) required on every request. The in-app chat uses it automatically; useful on shared Macs."))
-                Toggle(loc.t("Descubrible en red local", "Discoverable on local network"), isOn: $localNetworkDiscovery)
-                    .disabled(!serverIsStopped)
-                    .infoTip(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour como 'ToshLLM API'. Actívalo solo en redes confiables; se aplica al reiniciar el servidor.",
-                                "Makes the server listen on the local network and advertises it with Bonjour as 'ToshLLM API'. Enable only on trusted networks; takes effect when the server restarts."))
+                Toggle(loc.t("Descubrible en red local", "Discoverable on local network"),
+                       isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
+                    .infoTip(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour como 'ToshLLM API'. Actívalo solo en redes confiables; reinicia el servidor si está activo.",
+                                "Makes the server listen on the local network and advertises it with Bonjour as 'ToshLLM API'. Enable only on trusted networks; restarts the server if it's running."))
                 if localNetworkDiscovery && !apiKeyEnabled {
                     Label(loc.t("Recomendado: activa 'Proteger la API con clave' antes de exponer el servidor en la red local.",
                                 "Recommended: enable 'Protect the API with a key' before exposing the server on the local network."),
@@ -161,13 +175,6 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-                if !serverIsStopped {
-                    Label(loc.t("Los cambios de red se aplican al reiniciar el servidor.",
-                                "Network changes take effect after restarting the server."),
-                          systemImage: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 if apiKeyEnabled {
                     HStack {

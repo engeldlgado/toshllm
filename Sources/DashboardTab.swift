@@ -9,6 +9,7 @@ struct DashboardView: View {
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var profileStore: ProfileStore
+    @EnvironmentObject var vram: VRAMMonitor
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
     @AppStorage(SettingsKeys.port) private var port = 8080
@@ -19,28 +20,31 @@ struct DashboardView: View {
     @EnvironmentObject var updates: UpdateChecker
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                updateBanner
-                // Cards flow into as many columns as the window fits, so extra servers
-                // fill the width instead of stacking in one tall column.
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
-                          spacing: 16) {
-                    hardwareCard
-                    serverCard
-                    // Array(...) not the ArraySlice from dropFirst(): a slice keeps its
-                    // parent's 1-based indices, which ForEach mishandles (the first added
-                    // server would never refresh its state).
-                    ForEach(Array(manager.servers.dropFirst()), id: \.id) { c in
-                        AddedServerCard(c: c).environmentObject(manager)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 16) {
+                    updateBanner
+                    // Cards flow into as many columns as the window fits, so extra servers
+                    // fill the width instead of stacking in one tall column.
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
+                              spacing: 16) {
+                        hardwareCard
+                        gpuCard
+                        serverCard
+                        // Array(...) not the ArraySlice from dropFirst(): a slice keeps its
+                        // parent's 1-based indices, which ForEach mishandles (the first added
+                        // server would never refresh its state).
+                        ForEach(Array(manager.servers.dropFirst()), id: \.id) { c in
+                            AddedServerCard(c: c).environmentObject(manager).id(c.id)
+                        }
                     }
+                    recommendationCard
                 }
-                recommendationCard
+                .padding()
             }
-            .padding()
-        }
-        .overlay(alignment: .bottomTrailing) {
-            floatingAddButton.padding(20)
+            .overlay(alignment: .bottomTrailing) {
+                floatingAddButton(proxy).padding(20)
+            }
         }
     }
 
@@ -97,6 +101,39 @@ struct DashboardView: View {
         }
     }
 
+    // Networking is a launch flag, so restart the running primary to apply it now.
+    private func setDiscoverable(_ on: Bool) {
+        localNetworkDiscovery = on
+        if server.state == .running || server.state == .starting {
+            server.restart(.fromDefaults())
+        }
+    }
+
+    private var gpuCard: some View {
+        Card(title: loc.t("GPUs", "GPUs"), icon: "rectangle.on.rectangle", fill: true) {
+            if vram.gpus.isEmpty {
+                row("rectangle.on.rectangle", loc.t("Sin datos de uso de GPU", "No GPU usage data"))
+            } else {
+                ForEach(vram.gpus) { gpuRow($0) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func gpuRow(_ g: GPUStat) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(g.name).font(.callout).lineLimit(1)
+                Spacer(minLength: 8)
+                Text(String(format: "%.1f / %.0f GB", g.usedMB / 1024, g.totalMB / 1024))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            ProgressView(value: g.fraction)
+                .tint(g.fraction > 0.9 ? .red : g.fraction > 0.75 ? .orange : .accentColor)
+        }
+        .help(loc.t("VRAM en uso de \(g.name).", "VRAM in use on \(g.name)."))
+    }
+
     private var profileMenu: some View {
         Menu {
             if profileStore.activeProfileName != nil {
@@ -137,18 +174,27 @@ struct DashboardView: View {
     }
 
     // Floating action button with the macOS 26 glass look (material fallback below).
-    private var floatingAddButton: some View {
+    private func floatingAddButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
             let n = manager.servers.count + 1
-            manager.addServer(name: loc.t("Servidor \(n)", "Server \(n)"), from: nil)
+            let new = withAnimation(.snappy) {
+                manager.addServer(name: loc.t("Servidor \(n)", "Server \(n)"), from: nil)
+            }
+            // The card is appended at the end of the grid, often below the fold;
+            // scroll to it so the click visibly produces something.
+            withAnimation(.snappy) { proxy.scrollTo(new.id, anchor: .center) }
         } label: {
             Label(loc.t("Agregar servidor", "Add server"), systemImage: "plus")
                 .font(.body.weight(.medium))
                 .padding(.horizontal, 18).padding(.vertical, 12)
+                // Interactive glass installs its own press gesture that competes
+                // with the Button and sometimes eats the click; feedback comes from
+                // PressableButtonStyle instead.
+                .glassSurface(in: Capsule(), tint: .pink)
+                .contentShape(Capsule())
+                .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
         }
-        .buttonStyle(.plain)
-        .glassSurface(in: Capsule(), tint: .pink, interactive: true)
-        .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+        .buttonStyle(PressableButtonStyle())
         .help(loc.t("Crea otro servidor independiente, con su propia GPU, modelo y puerto.",
                     "Creates another independent server with its own GPU, model and port."))
     }
@@ -201,12 +247,11 @@ struct DashboardView: View {
                                         "Recommended: protect the API with a key before exposing it on the local network."))
                 }
                 Spacer(minLength: 8)
-                Toggle("", isOn: $localNetworkDiscovery)
+                Toggle("", isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small)
-                    .disabled(serverBusy)
             }
-            .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour.",
-                        "Makes the server listen on the local network and advertises it via Bonjour.") + restartNote)
+            .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour. Reinicia el servidor si está activo.",
+                        "Makes the server listen on the local network and advertises it via Bonjour. Restarts the server if it's running."))
             // Only for vision-capable models: let the user run text-only to save VRAM.
             // The eye is colored when vision loads, dimmed when the model runs text-only.
             if ServerSettings.mmprojPath(forModel: modelPath) != nil {
@@ -480,5 +525,15 @@ struct Card<Content: View>: View {
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: fill ? .infinity : nil, alignment: .topLeading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// Tactile press feedback for plain/glass buttons that otherwise show none.
+struct PressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
     }
 }

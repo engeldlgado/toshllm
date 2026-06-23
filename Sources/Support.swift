@@ -43,6 +43,8 @@ enum SettingsKeys {
     static let apiKeyEnabled = "apiKeyEnabled"
     static let localNetworkDiscovery = "localNetworkDiscovery"
     static let menuBarIcon = "menuBarIcon"
+    /// Where to surface per-GPU VRAM in the menu bar: "off" | "icon" | "panel".
+    static let menuBarGPU = "menuBarGPU"
     static let autoStart = "autoStart"
     static let chatTemp = "chatTemp"
     static let chatMaxTokens = "chatMaxTokens"
@@ -62,7 +64,7 @@ enum SettingsKeys {
         vramReserve, gpuIndex, extraArgs, cacheTypeK, cacheTypeV, mlock, cacheRAM,
         parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
-        menuBarIcon, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
+        menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
         chatAutoCompact, smoothTyping,
     ]
 

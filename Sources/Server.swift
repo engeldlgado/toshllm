@@ -92,13 +92,18 @@ struct ServerSettings {
     var isTurboEngine: Bool { Self.isTurbo(serverBinary) }
     var isMultimodal: Bool { Self.mmprojPath(forModel: modelPath) != nil }
 
-    /// Directory where per-conversation KV slot files live.
-    static var slotCacheDir: URL {
+    /// Directory where one server's per-conversation KV slot files live. Namespaced
+    /// by port so independent servers don't overwrite each other's slot 0 / prefix
+    /// files in a shared folder.
+    static func slotCacheDir(port: Int) -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ToshLLM/slots")
+            .appendingPathComponent("ToshLLM/slots/\(port)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
+
+    /// Slot directory of the primary server (the one the native chat talks to).
+    static var primarySlotCacheDir: URL { slotCacheDir(port: fromDefaults().port) }
 
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
 
@@ -151,7 +156,7 @@ struct ServerSettings {
         // the turbo engine, where the AMD FA kernel keeps the V cache contiguous
         // (the official engine's transposed-V save/restore is unusably slow on AMD).
         if persistCache && isTurboEngine {
-            args += ["--slot-save-path", Self.slotCacheDir.path]
+            args += ["--slot-save-path", Self.slotCacheDir(port: port).path]
         }
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
@@ -709,7 +714,9 @@ final class ServerController: ObservableObject {
     private var prewarmActive = false
     /// Single fixed file for the external-client prefix (not a conversation UUID,
     /// so the chat's orphan-prune leaves it alone).
-    static var externalSlotFile: URL { ServerSettings.slotCacheDir.appendingPathComponent("external.bin") }
+    static func externalSlotFile(port: Int) -> URL {
+        ServerSettings.slotCacheDir(port: port).appendingPathComponent("external.bin")
+    }
 
     var logFileURL: URL { fileLog.fileURL }
     /// The folder holding all per-session log files (kept ~3 days). Revealed in
@@ -960,7 +967,7 @@ final class ServerController: ObservableObject {
                 // bounded; terminate runs even if the save fails or times out.
                 Task.detached {
                     await ServerController.slotAction("save", port: port,
-                                                      file: ServerController.externalSlotFile.lastPathComponent)
+                                                      file: ServerController.externalSlotFile(port: port).lastPathComponent)
                     p.terminate()
                 }
             } else {
@@ -971,6 +978,20 @@ final class ServerController: ObservableObject {
         }
         process = nil
         state = .stopped
+    }
+
+    /// Restart with new settings, if currently up. Waits (bounded) for the old
+    /// engine to exit so the relaunch doesn't race it for the port.
+    func restart(_ settings: ServerSettings) {
+        guard state == .running || state == .starting else { return }
+        stop()
+        Task { @MainActor in
+            for _ in 0..<40 {
+                guard let pid = lastStoppedPID, kill(pid, 0) == 0 else { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            start(settings)
+        }
     }
 
     /// POST /slots/0?action=save|restore (best-effort, short timeout). Used to
@@ -990,8 +1011,8 @@ final class ServerController: ObservableObject {
     /// Restore the saved external-client prefix into slot 0 (only if a file exists).
     private func restoreExternalSlot(port: Int) async {
         guard prewarmActive,
-              FileManager.default.fileExists(atPath: Self.externalSlotFile.path) else { return }
-        await Self.slotAction("restore", port: port, file: Self.externalSlotFile.lastPathComponent)
+              FileManager.default.fileExists(atPath: Self.externalSlotFile(port: port).path) else { return }
+        await Self.slotAction("restore", port: port, file: Self.externalSlotFile(port: port).lastPathComponent)
     }
 
     private var isFailed: Bool { if case .failed = state { return true }; return false }

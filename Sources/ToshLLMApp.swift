@@ -45,6 +45,7 @@ struct ToshLLMApp: App {
     @StateObject private var updates = UpdateChecker()
     @StateObject private var control = ControlPanelState()
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
+    @AppStorage(SettingsKeys.menuBarGPU) private var menuBarGPU = "panel"
 
     init() {
         // Release VRAM held by an engine orphaned by a previous force-quit.
@@ -108,62 +109,153 @@ struct ToshLLMApp: App {
         MenuBarExtra(isInserted: $menuBarIcon) {
             MenuBarView()
                 .environmentObject(server)
+                .environmentObject(manager)
                 .environmentObject(loc)
+                .environmentObject(vram)
         } label: {
-            Image(systemName: server.state == .running ? "cpu.fill" : "cpu")
+            let icon = server.state == .running ? "cpu.fill" : "cpu"
+            // "icon" mode shows aggregate VRAM next to the glyph; per-GPU bars
+            // live in the panel.
+            if menuBarGPU == "icon", vram.totalMB > 0 {
+                Label("\(Int(vram.fraction * 100))%", systemImage: icon)
+            } else {
+                Image(systemName: icon)
+            }
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+/// Window-style menu bar panel: a real SwiftUI surface so it can draw per-GPU
+/// VRAM bars and per-server controls (a native menu only renders text/buttons).
+struct MenuBarView: View {
+    @EnvironmentObject var manager: ServerManager
+    @EnvironmentObject var loc: Localizer
+    @EnvironmentObject var vram: VRAMMonitor
+    @AppStorage(SettingsKeys.menuBarGPU) private var menuBarGPU = "panel"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Every server, primary first, each with its own start/stop + networking.
+            ForEach(Array(manager.servers.enumerated()), id: \.element.id) { i, c in
+                if i > 0 { Divider() }
+                MenuServerRow(c: c, isPrimary: i == 0).environmentObject(manager).environmentObject(loc)
+            }
+
+            if menuBarGPU == "panel" && !vram.gpus.isEmpty {
+                Divider()
+                gpuSection
+            }
+
+            Divider()
+
+            HStack {
+                Button(loc.t("Abrir ToshLLM", "Open ToshLLM")) {
+                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+                }
+                Spacer()
+                Button(loc.t("Salir", "Quit")) { NSApp.terminate(nil) }
+            }
+        }
+        .padding(14)
+        .frame(width: 280)
+    }
+
+    private var gpuSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(loc.t("GPUs", "GPUs")).font(.caption).foregroundStyle(.secondary)
+            ForEach(vram.gpus) { g in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(g.name).font(.caption).lineLimit(1)
+                        Spacer(minLength: 6)
+                        Text("\(Int(g.fraction * 100))%")
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: g.fraction)
+                        .tint(g.fraction > 0.9 ? .red : g.fraction > 0.75 ? .orange : .accentColor)
+                }
+            }
         }
     }
 }
 
-struct MenuBarView: View {
-    @EnvironmentObject var server: ServerController
+/// One server in the menu bar panel (primary or added): live status, start/stop,
+/// chat link and a per-server networking toggle. Observes the controller so it
+/// refreshes while the panel is open.
+struct MenuServerRow: View {
+    @ObservedObject var c: ServerController
+    let isPrimary: Bool
+    @EnvironmentObject var manager: ServerManager
     @EnvironmentObject var loc: Localizer
-    @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
+    @AppStorage(SettingsKeys.localNetworkDiscovery) private var globalDiscover = false
 
-    private var serverIsStopped: Bool {
-        if case .stopped = server.state { return true }
-        if case .failed = server.state { return true }
-        return false
+    private var running: Bool { c.state == .running || c.state == .starting }
+    private var hasModel: Bool {
+        isPrimary ? !((UserDefaults.standard.string(forKey: SettingsKeys.modelPath) ?? "").isEmpty)
+                  : !((c.profile?.modelPath ?? "").isEmpty)
+    }
+    private var dotColor: Color {
+        switch c.state {
+        case .running: return .green
+        case .starting: return .orange
+        case .failed: return .red
+        case .stopped: return .secondary
+        }
     }
 
     var body: some View {
-        Group {
-            switch server.state {
-            case .running:
-                Text(loc.t("Servidor activo", "Server running") +
-                     (server.genSpeed.map { String(format: " · %.1f t/s", $0) } ?? ""))
-                Button(loc.t("Abrir chat en el navegador", "Open chat in browser")) {
-                    NSWorkspace.shared.open(server.webChatURL)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle().fill(dotColor).frame(width: 7, height: 7)
+                // The primary's stored name isn't localized; show the same label the
+                // dashboard uses for it. Added servers keep their user-facing name.
+                Text(isPrimary ? loc.t("Servidor", "Server") : c.name)
+                    .font(.subheadline.weight(.medium)).lineLimit(1)
+                if c.state == .running, let tg = c.genSpeed {
+                    Text(String(format: "%.1f t/s", tg))
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                 }
-                Button(loc.t("Detener servidor", "Stop server")) { server.stop() }
-            case .starting:
-                Text(loc.t("Cargando modelo…", "Loading model…"))
-                Button(loc.t("Cancelar", "Cancel")) { server.stop() }
-            default:
-                Text(loc.t("Servidor detenido", "Server stopped"))
-                Button(loc.t("Iniciar servidor", "Start server")) {
-                    server.start(.fromDefaults())
-                }
-                .disabled((UserDefaults.standard.string(forKey: "modelPath") ?? "").isEmpty)
+                Spacer(minLength: 6)
+                actions
             }
-
-            Divider()
-
-            Toggle(loc.t("Descubrible en red local", "Discoverable on local network"),
-                   isOn: $localNetworkDiscovery)
-                .disabled(!serverIsStopped)
-            if !serverIsStopped {
-                Text(loc.t("Reinicia para cambiar la red", "Restart to change networking"))
-                    .font(.caption)
+            HStack(spacing: 6) {
+                Image(systemName: "wifi").font(.caption2).foregroundStyle(.secondary)
+                Text(loc.t("Descubrible en red", "Discoverable")).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Toggle("", isOn: discoverBinding)
+                    .labelsHidden().toggleStyle(.switch).controlSize(.mini)
             }
-
-            Divider()
-
-            Button(loc.t("Abrir ToshLLM", "Open ToshLLM")) {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
-            }
-            Button(loc.t("Salir", "Quit")) { NSApp.terminate(nil) }
         }
+    }
+
+    @ViewBuilder private var actions: some View {
+        if running {
+            if c.state == .running {
+                Button(loc.t("Chat", "Chat")) { NSWorkspace.shared.open(c.webChatURL) }.controlSize(.small)
+            }
+            Button(loc.t("Detener", "Stop")) { c.stop() }.controlSize(.small)
+        } else {
+            Button(loc.t("Iniciar", "Start")) {
+                c.start(isPrimary ? .fromDefaults() : c.effectiveSettings())
+            }
+            .controlSize(.small).disabled(!hasModel)
+        }
+    }
+
+    // Networking is a launch flag, so restart the server if it's up to apply it now.
+    private var discoverBinding: Binding<Bool> {
+        if isPrimary {
+            return Binding(get: { globalDiscover }, set: { v in
+                globalDiscover = v
+                if running { c.restart(.fromDefaults()) }
+            })
+        }
+        return Binding(get: { c.profile?.localNetworkDiscovery ?? false }, set: { v in
+            c.profile?.localNetworkDiscovery = v
+            manager.persist()
+            if running { c.restart(c.effectiveSettings()) }
+        })
     }
 }

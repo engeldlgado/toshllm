@@ -3,6 +3,29 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.37] - 2026-06-23
+
+### Added
+- **Per-GPU VRAM on the Dashboard**... a new GPUs card shows a usage bar for each detected
+  GPU, so multi-GPU machines see what each card is holding instead of a single guessed total.
+- **VRAM in the menu bar**... a new setting shows VRAM usage next to the menu bar icon
+  (aggregate percentage) or as per-GPU bars inside the panel.
+- **Consolidated menu bar panel**... it now lists every server, the main one first, each with
+  its own start/stop, a chat link while running, and its own "discoverable on network" toggle.
+
+### Changed
+- **Networking toggle applies live**... turning "discoverable on local network" on or off now
+  restarts the running server automatically to apply it, instead of staying disabled until you
+  restart by hand.
+- **Add-server button**... it now gives press feedback and scrolls to the new card, so a click
+  always produces something visible.
+
+### Fixed
+- **Per-GPU VRAM reading**... the monitor read only the first accelerator, so a second GPU's
+  usage was missing; each GPU is now paired to its accelerator by registry ID.
+- **Independent KV slot caches**... each server's on-disk KV slots now live in a per-port
+  folder, so servers with cache persistence no longer overwrite each other's slot files.
+
 ## [0.81.36] - 2026-06-22
 
 ### Added
