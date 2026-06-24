@@ -82,7 +82,9 @@ struct SettingsView: View {
             },
             set: { kind in
                 switch kind {
-                case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary
+                // Default the AMD Flash-Attention kernel on with turbo: without it
+                // attention falls back and vision / large K-quant models emit garbage.
+                case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary; faAmd = true
                 case "bundled": serverBinary = ServerSettings.defaultBinary; faAmd = false
                 default: serverBinary = ""; faAmd = false
                 }

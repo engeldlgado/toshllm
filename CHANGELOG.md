@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.39] - 2026-06-24
+
+### Fixed
+- **Image input on the experimental engine**... picking the experimental engine now turns on the AMD Flash Attention kernel by default, which fixes garbage output (`0000…`) on large MoE / K-quant vision models. Gemma 4 vision still needs the bundled engine.
+
 ## [0.81.38] - 2026-06-23
 
 ### Improved
