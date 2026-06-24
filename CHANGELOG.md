@@ -8,6 +8,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 - **Image input on the experimental engine**... picking the experimental engine now turns on the AMD Flash Attention kernel by default, which fixes garbage output (`0000…`) on large MoE / K-quant vision models. Gemma 4 vision still needs the bundled engine.
 - **Update cleanup**... the downloaded `.dmg` is removed after a successful install instead of piling up in Downloads; it's kept if the update fails.
+- **Recommended models**... replaced the Moondream2 vision pick (its chat template can't carry an image through llama-server, so every image returned HTTP 400) with Qwen3-VL-2B, a tiny vision model that works on both engines.
 
 ## [0.81.38] - 2026-06-23
 
