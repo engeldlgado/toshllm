@@ -154,6 +154,20 @@ The same kernel handles **prompt processing** too: although it is the "vec" deco
 
 It remains experimental and off by default. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
 
+### Quantized KV cache: memory vs speed
+
+With the AMD attention kernel running on the GPU, quantizing the KV cache stops being a trap on these cards (it no longer forces attention to the CPU), so it becomes a real lever for fitting long context into limited VRAM. The experimental engine adds `q8_0` plus three `turbo2/3/4` types on top of `f16`. Measured on an RX 6700 XT with **Qwen3-8B (Q4_K_M)**, the hard case — prompt processing *and* generation on top of a 2048-token context (`pp2048 @ d2048`, `tg128 @ d2048`, llama-bench, cooled runs):
+
+| KV type | pp @ depth (t/s) | tg @ depth (t/s) | KV at 32k ctx |
+|---|---:|---:|---:|
+| f16    | 120 | **54** | ~4.6 GiB |
+| q8_0   | **195** | 53 | ~2.4 GiB |
+| turbo4 | 184 | 38 | ~1.3 GiB |
+| turbo3 | 166 | 36 | ~1.0 GiB |
+| turbo2 | 188 | 41 | ~0.7 GiB |
+
+Two things stand out. Prompt processing at depth is *faster* with a quantized cache than with `f16`, because attention reads a smaller KV (less bandwidth). And `q8_0` matches `f16` generation speed while halving the KV footprint — a free win for long context, and you can now quantize both keys and values, not just keys. The `turbo2/3/4` types trade ~25–30% generation speed for a far smaller cache (down to ~⅙ of `f16`); they earn their keep only when you are VRAM-bound and need a context that would not otherwise fit. *Quality at the lowest bit widths is not characterized yet.*
+
 ### ToshGEMM: tiled prefill matmul on AMD
 
 Prompt processing on AMD was stuck on the slow matrix-vector path, because Metal's matrix-unit `mul_mm` kernel uses `simdgroup_matrix`, which AMD GPUs can't run (it crashes). **ToshGEMM** is a from-scratch tiled matrix-matrix kernel that restores the fast prefill without those cooperative ops. It is auto-selected on AMD RDNA (wave32); Apple Silicon and AMD GCN are unaffected, and it reverts with `GGML_METAL_MM_MANUAL_DISABLE=1`. Output is byte-identical and generation speed is unchanged.
