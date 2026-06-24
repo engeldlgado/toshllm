@@ -86,6 +86,9 @@ final class UpdateChecker: ObservableObject {
             }
 
             let installed = try await Task.detached { try Self.install(dmgAt: dest) }.value
+            // Installed OK: drop the downloaded DMG so it doesn't pile up in Downloads.
+            // Any failure above leaves it in place (the catch keeps it for retry/inspection).
+            try? FileManager.default.removeItem(at: dest)
             relaunch(installed)
         } catch {
             installError = error.localizedDescription
