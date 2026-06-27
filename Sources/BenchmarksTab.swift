@@ -189,6 +189,9 @@ struct BenchmarksView: View {
                     chip("K:\(cfg.cacheTypeK)", active: cfg.cacheTypeK != "f16")
                     chip("V:\(cfg.cacheTypeV)", active: cfg.cacheTypeV != "f16")
                     chip(engineName, active: cfg.serverBinary != ServerSettings.defaultBinary)
+                    chip(faChipText(cfg.benchmarkFlashAttentionRoute),
+                         active: cfg.benchmarkFlashAttentionRoute != "off",
+                         icon: cfg.benchmarkFlashAttentionRoute == "amd-gpu" ? "bolt.fill" : "cpu")
                     chip(cfg.gpuLabel, active: cfg.gpuIndex >= 0 || cfg.multiGPU, icon: "cpu")
                     Spacer()
                 }
@@ -259,6 +262,15 @@ struct BenchmarksView: View {
         .background(active ? AnyShapeStyle(.pink.opacity(0.18)) : AnyShapeStyle(.quaternary.opacity(0.5)),
                     in: Capsule())
         .foregroundStyle(active ? .pink : .secondary)
+    }
+
+    private func faChipText(_ route: String) -> String {
+        switch route {
+        case "amd-gpu": return loc.t("FA AMD GPU", "FA AMD GPU")
+        case "standard-cpu": return loc.t("FA CPU", "FA CPU")
+        case "standard-auto": return loc.t("FA auto", "FA auto")
+        default: return loc.t("FA off", "FA off")
+        }
     }
 
     private var outputCard: some View {

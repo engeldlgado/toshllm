@@ -3,6 +3,16 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.42] - 2026-06-27
+
+### Changed
+- **AMD Flash Attention defaults to GPU**... the AMD kernel is now on by default for bundled engines and is restored when switching back to bundled or TurboQuant, so supported AMD runs prefer the custom GPU path instead of the standard CPU Flash Attention path.
+- **Clear Flash Attention labels**... settings and benchmarks now distinguish the standard `Flash Attention (CPU)` path from the `AMD Flash Attention (GPU)` kernel without burying the distinction in tooltips.
+
+### Fixed
+- **Quantized KV benchmarks**... any quantized KV cache now forces `-fa 1` for server and benchmark runs, as llama.cpp requires, while leaving `TOSH_FA_AMD` under the AMD kernel toggle. Turning the AMD kernel off still allows the standard CPU Flash Attention fallback for compatibility and comparison.
+- **Benchmark history**... each benchmark now records and displays whether it used `FA CPU`, `FA AMD GPU`, `FA auto` or no Flash Attention, and the full text log includes the effective FA route for shareable results.
+
 ## [0.81.41] - 2026-06-27
 
 ### Fixed

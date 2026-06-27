@@ -56,7 +56,7 @@ struct ServerSettings {
     /// Experimental: route attention through the dedicated AMD Metal
     /// Flash-Attention kernel (gated by the TOSH_FA_AMD env var in the engine).
     /// Forces `-fa 1`, but the patched engine routes supported AMD cases to TOSH_FA_AMD.
-    var faAmd: Bool = false
+    var faAmd: Bool = true
     /// Persist each conversation's KV cache to disk (`--slot-save-path`) so
     /// reopening a chat — or restarting the app/engine — skips re-processing the
     /// prompt. Only effective on the turbo engine with the AMD FA kernel: without
@@ -105,15 +105,17 @@ struct ServerSettings {
     /// Slot directory of the primary server (the one the native chat talks to).
     static var primarySlotCacheDir: URL { slotCacheDir(port: fromDefaults().port) }
 
+    static let defaultFaAmd = true
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
 
     var arguments: [String] {
+        let faValue = effectiveFaAmd || kvNeedsFlashAttention ? "1" : flashAttn
         var args = [
             "-m", modelPath,
             "-ngl", String(ngl),
             "-c", String(ctx),
             "-t", String(threads),
-            "-fa", effectiveFaAmd ? "1" : flashAttn,
+            "-fa", faValue,
             "--host", localNetworkDiscovery ? "0.0.0.0" : "127.0.0.1",
             "--port", String(port),
         ]
@@ -201,7 +203,7 @@ struct ServerSettings {
         if ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
-        if effectiveFaAmd || flashAttn == "on" { args += ["-fa", "1"] }
+        if effectiveFaAmd || flashAttn == "on" || kvNeedsFlashAttention { args += ["-fa", "1"] }
         if multiGPU { args += ["--split-mode", "layer"] }
         return args
     }
@@ -314,7 +316,7 @@ struct ServerSettings {
             apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),
             localNetworkDiscovery: bool(SettingsKeys.localNetworkDiscovery, false),
             specMTP: bool(SettingsKeys.specMTP, false),
-            faAmd: bool(SettingsKeys.faAmd, false),
+            faAmd: bool(SettingsKeys.faAmd, defaultFaAmd),
             persistCache: bool(SettingsKeys.persistCache, false),
             multiGPU: bool(SettingsKeys.multiGPU, false),
             forcePrivateBuffers: bool(SettingsKeys.forcePrivateBuffers, false),
@@ -361,10 +363,30 @@ struct ServerSettings {
         return big
     }
 
-    /// Exactly the user's AMD Flash-Attention toggle. Do not auto-enable this from
-    /// model metadata; normal Flash Attention remains a separate user setting.
+    var kvNeedsFlashAttention: Bool {
+        cacheTypeK != "f16" || cacheTypeV != "f16"
+    }
+
+    /// The user's AMD Flash-Attention choice. Quantized KV may still force
+    /// normal Flash Attention when this is off.
     var effectiveFaAmd: Bool {
         faAmd
+    }
+
+    var benchmarkFlashAttentionRoute: String {
+        if effectiveFaAmd { return "amd-gpu" }
+        if flashAttn == "on" || kvNeedsFlashAttention { return "standard-cpu" }
+        if flashAttn == "auto" { return "standard-auto" }
+        return "off"
+    }
+
+    var benchmarkFlashAttentionLabel: String {
+        switch benchmarkFlashAttentionRoute {
+        case "amd-gpu": return "AMD Flash Attention (GPU)"
+        case "standard-cpu": return "standard Flash Attention (CPU)"
+        case "standard-auto": return "standard Flash Attention (auto)"
+        default: return "off"
+        }
     }
 
     nonisolated static func modelHasMTP(at path: String) -> Bool {
@@ -923,7 +945,7 @@ final class ServerController: ObservableObject {
             return "Memoria insuficiente: sube 'Expertos MoE en CPU' o reduce el contexto / out of memory: raise 'MoE experts on CPU' or reduce context"
         }
         if tail.contains("quantized v cache") {
-            return "Valores KV cuantizados requieren Flash Attention 'on' / quantized V cache requires Flash Attention 'on'"
+            return "El KV cuantizado requiere Flash Attention: activa el kernel AMD o usa FA estándar / quantized KV requires Flash Attention: enable the AMD kernel or use standard FA"
         }
         if tail.contains("nextn") || tail.contains("draft-mtp") || tail.contains("mtp") {
             return "Este modelo no trae cabezal MTP: desactiva 'Aceleración MTP' o descarga la variante -MTP- / model has no MTP head: disable 'MTP acceleration' or download the -MTP- variant"

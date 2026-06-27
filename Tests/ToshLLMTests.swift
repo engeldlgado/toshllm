@@ -262,13 +262,30 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "-fa")! + 1], "1")
     }
 
-    func testQuantizedValuesDoNotForceNormalFlashAttention() {
+    func testAmdFlashAttentionDefaultsOnWhenUnset() {
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: SettingsKeys.faAmd)
+        defaults.removeObject(forKey: SettingsKeys.faAmd)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: SettingsKeys.faAmd)
+            } else {
+                defaults.removeObject(forKey: SettingsKeys.faAmd)
+            }
+        }
+
+        XCTAssertTrue(ServerSettings.fromDefaults().faAmd)
+    }
+
+    func testQuantizedKVForcesFlashAttentionButNotAmdKernel() {
         var s = makeSettings()
+        s.faAmd = false
         s.flashAttn = "off"
+        s.cacheTypeK = "q8_0"
         s.cacheTypeV = "q8_0"
 
-        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "off")
-        XCTAssertFalse(s.benchmarkArguments.contains("-fa"))
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "1")
+        XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "-fa")! + 1], "1")
         XCTAssertNil(s.environment["TOSH_FA_AMD"])
     }
 
@@ -276,8 +293,11 @@ final class ServerSettingsTests: XCTestCase {
         var s = makeSettings()
         s.serverBinary = "/tmp/bin-turbo/llama-server"
         s.faAmd = false
+        s.cacheTypeK = "q8_0"
 
         XCTAssertFalse(s.effectiveFaAmd)
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "1")
+        XCTAssertNil(s.environment["TOSH_FA_AMD"])
 
         s.faAmd = true
         XCTAssertTrue(s.effectiveFaAmd)
@@ -467,9 +487,26 @@ final class BenchAndProfileTests: XCTestCase {
     func testBenchConfigLabel() {
         let r = BenchResult(date: .now, model: "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf",
                             ncmoe: 24, pp: 68.3, tg: 15.7,
-                            ctk: "turbo4", ctv: "turbo3", engine: "turbo")
-        XCTAssertEqual(r.configLabel, "ncmoe 24 · K:turbo4 · V:turbo3 · turbo")
+                            ctk: "turbo4", ctv: "turbo3", engine: "turbo",
+                            fa: "amd-gpu")
+        XCTAssertEqual(r.configLabel, "ncmoe 24 · K:turbo4 · V:turbo3 · FA AMD GPU · turbo")
         XCTAssertFalse(r.shortModel.contains(".gguf"))
+    }
+
+    func testBenchmarkFlashAttentionRouteLabelsCPUAndGPU() {
+        var s = ServerSettings(serverBinary: "/usr/bin/true", modelPath: "/tmp/m.gguf", port: 8080,
+                               ngl: 99, ncmoe: 0, ctx: 16384, threads: 6, flashAttn: "off",
+                               noMmap: true, jinja: true, concurrencyDisable: true,
+                               vramReserveMB: 1024, gpuIndex: -1, extraArgs: "",
+                               cacheTypeK: "q8_0", cacheTypeV: "q8_0", mlock: false)
+        s.faAmd = false
+
+        XCTAssertEqual(s.benchmarkFlashAttentionRoute, "standard-cpu")
+        XCTAssertEqual(s.benchmarkFlashAttentionLabel, "standard Flash Attention (CPU)")
+
+        s.faAmd = true
+        XCTAssertEqual(s.benchmarkFlashAttentionRoute, "amd-gpu")
+        XCTAssertEqual(s.benchmarkFlashAttentionLabel, "AMD Flash Attention (GPU)")
     }
 
     func testLegacyBenchResultsDecode() throws {
@@ -477,6 +514,7 @@ final class BenchAndProfileTests: XCTestCase {
         let legacy = #"[{"id":"00000000-0000-0000-0000-000000000000","date":700000000,"model":"m.gguf","ncmoe":0,"pp":100,"tg":50}]"#
         let decoded = try JSONDecoder().decode([BenchResult].self, from: Data(legacy.utf8))
         XCTAssertEqual(decoded.first?.configLabel, "base")
+        XCTAssertNil(decoded.first?.fa)
     }
 
     func testProfileRoundTrip() throws {

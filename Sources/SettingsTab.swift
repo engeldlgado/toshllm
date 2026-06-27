@@ -11,7 +11,7 @@ struct SettingsView: View {
     @EnvironmentObject var models: ModelStore
 
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
-    @AppStorage(SettingsKeys.faAmd) private var faAmd = false
+    @AppStorage(SettingsKeys.faAmd) private var faAmd = ServerSettings.defaultFaAmd
     @AppStorage(SettingsKeys.persistCache) private var persistCache = false
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
@@ -72,6 +72,8 @@ struct SettingsView: View {
     private var currentModelIsVision: Bool {
         ServerSettings.mmprojPath(forModel: modelPath) != nil
     }
+    private var kvNeedsFlashAttention: Bool { cacheTypeK != "f16" || cacheTypeV != "f16" }
+    private var amdFlashActive: Bool { faAmd }
 
     private var engineSelection: Binding<String> {
         Binding(
@@ -82,8 +84,12 @@ struct SettingsView: View {
             },
             set: { kind in
                 switch kind {
-                case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary
-                case "bundled": serverBinary = ServerSettings.defaultBinary
+                case "turbo":
+                    serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary
+                    faAmd = ServerSettings.defaultFaAmd
+                case "bundled":
+                    serverBinary = ServerSettings.defaultBinary
+                    faAmd = ServerSettings.defaultFaAmd
                 default: serverBinary = ""; faAmd = false
                 }
             })
@@ -335,7 +341,7 @@ struct SettingsView: View {
                 Picker(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)"), selection: $cacheTypeK) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }
-                .infoTip(faAmd
+                .infoTip(amdFlashActive
                     ? loc.t("Cuantización de las claves del KV cache. Con el kernel Flash Attention AMD, cualquier combinación estándar (f16/q8_0/q4_0 en claves y valores) corre en GPU a velocidad plena. Para máximo ahorro de memoria: q8_0/q8_0 (mitad, recomendado) o q4_0/q4_0 (un cuarto); para comprimir solo las claves manteniendo los valores en precisión completa: q8_0/f16 o q4_0/f16.",
                             "Quantization for KV cache keys. With the AMD Flash Attention kernel, any standard combination (f16/q8_0/q4_0 for keys and values) runs on the GPU at full speed. For maximum memory savings: q8_0/q8_0 (half, recommended) or q4_0/q4_0 (a quarter); to compress only the keys while keeping values at full precision: q8_0/f16 or q4_0/f16.")
                     : loc.t("Cuantización de las claves del KV cache. En GPU AMD (sin el kernel Flash Attention AMD): q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado), dejando los valores en f16; q4_0 a un cuarto. Los tipos turbo* (TurboQuant) requieren el motor experimental.",
@@ -343,7 +349,7 @@ struct SettingsView: View {
                 Picker(loc.t("KV cache: valores (-ctv)", "KV cache: values (-ctv)"), selection: $cacheTypeV) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }
-                .infoTip(faAmd
+                .infoTip(amdFlashActive
                     ? loc.t("Cuantización de los valores del KV cache. Con el kernel Flash Attention AMD cualquier valor estándar (f16/q8_0/q4_0) corre en GPU a velocidad plena, en cualquier combinación con las claves. Cuantizar los valores ahorra más memoria; dejarlos en f16 (con claves cuantizadas) conserva más calidad — ambos van igual de rápidos.",
                             "Quantization for KV cache values. With the AMD Flash Attention kernel any standard value type (f16/q8_0/q4_0) runs on the GPU at full speed, in any combination with the keys. Quantizing values saves more memory; keeping them at f16 (with quantized keys) preserves more quality — both run equally fast.")
                     : loc.t("Cuantización de los valores del KV cache. ⚠️ En GPU AMD (sin el kernel Flash Attention AMD) esto fuerza Flash Attention en CPU: la generación baja ~3× (de ~50 a ~15-19 t/s en un 8B). Úsalo solo cuando necesites contexto enorme; si no, déjalo en f16 y cuantiza solo las claves.",
@@ -371,23 +377,26 @@ struct SettingsView: View {
                     .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Tu equipo tiene \(hardware.logicalCores) hilos; los núcleos físicos (\(hardware.physicalCores)) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
                                 "Threads for the CPU side (MoE experts, tokenization). Your machine has \(hardware.logicalCores) threads; physical cores (\(hardware.physicalCores)) are usually optimal; more threads won't help if RAM bandwidth is the limit."))
                     .onAppear { if threads > hardware.logicalCores { threads = max(1, hardware.logicalCores) } }
-                Picker("Flash Attention", selection: $flashAttn) {
+                Picker(loc.t("Flash Attention estándar (CPU)", "Standard Flash Attention (CPU)"), selection: $flashAttn) {
                     Text("auto").tag("auto"); Text("on").tag("on"); Text("off").tag("off")
                 }
-                .disabled(faAmd)
-                .infoTip(loc.t("Atención optimizada en memoria (Metal estándar). En GPU AMD el backend la ejecuta en la CPU; usa el kernel AMD de abajo para mantenerla en la GPU. 'auto' la activa solo donde el backend la soporta.",
-                            "Memory-efficient attention (standard Metal). On AMD GPUs the backend runs it on the CPU; use the AMD kernel below to keep it on the GPU. 'auto' enables it only where the backend supports it."))
+                .disabled(amdFlashActive || kvNeedsFlashAttention)
+                .infoTip(loc.t("Ruta Flash Attention estándar de llama.cpp. En GPU AMD cae en CPU; se fuerza a 'on' cuando el KV está cuantizado. Para atención en GPU usa el kernel AMD de abajo.",
+                            "Standard llama.cpp Flash Attention path. On AMD GPUs it falls back to CPU; it is forced to 'on' when KV is quantized. For GPU attention use the AMD kernel below."))
                 if engineSelection.wrappedValue != "custom" {
                     Toggle(loc.t("Kernel Flash Attention AMD (GPU)", "AMD Flash Attention kernel (GPU)"), isOn: $faAmd)
-                        .infoTip(loc.t("Kernel Metal propio que ejecuta la atención (prompt y generación) en la GPU AMD: cabezas 128/256/512 (cubre Gemma 4) y cualquier KV estándar f16/q8_0/q4_0. Sin él, cuantizar el KV obliga a Flash Attention y la atención cae a la CPU.",
-                                    "Custom Metal kernel that runs attention (prompt and generation) on the AMD GPU: head dim 128/256/512 (covers Gemma 4) and any standard KV f16/q8_0/q4_0. Without it, quantizing the KV forces Flash Attention onto the CPU."))
-                    Label(faAmd
-                          ? loc.t("Atención en la GPU AMD (Flash Attention forzado a 'on').",
-                                  "Attention on the AMD GPU (Flash Attention forced to 'on').")
-                          : loc.t("Flash Attention estándar corre en la CPU en GPU AMD; actívalo para usar la GPU.",
-                                  "Standard Flash Attention runs on the CPU on AMD GPUs; enable it to use the GPU."),
-                          systemImage: faAmd ? "bolt.fill" : "cpu")
-                        .font(.caption).foregroundStyle(faAmd ? .green : .secondary)
+                        .infoTip(loc.t("Kernel Metal propio, activo por defecto, que ejecuta la atención (prompt y generación) en la GPU AMD: cabezas 128/256/512 y KV estándar f16/q8_0/q4_0. Si lo apagas, el KV cuantizado sigue requiriendo Flash Attention pero usa la ruta estándar en CPU.",
+                                    "Custom Metal kernel, on by default, that runs attention (prompt and generation) on the AMD GPU: head dims 128/256/512 and standard KV f16/q8_0/q4_0. If you turn it off, quantized KV still requires Flash Attention but uses the standard CPU path."))
+                    Label(amdFlashActive
+                            ? loc.t("Usando kernel AMD en GPU; Flash Attention queda forzado a 'on'.",
+                                    "Using the AMD GPU kernel; Flash Attention is forced to 'on'.")
+                            : kvNeedsFlashAttention
+                              ? loc.t("El KV cuantizado requiere Flash Attention: con el kernel AMD apagado usa el FA estándar en CPU.",
+                                      "Quantized KV requires Flash Attention: with the AMD kernel off, it uses standard FA on CPU.")
+                              : loc.t("Flash Attention estándar corre en la CPU en GPU AMD; activa el kernel AMD para usar la GPU.",
+                                      "Standard Flash Attention runs on CPU on AMD GPUs; enable the AMD kernel to use the GPU."),
+                          systemImage: amdFlashActive ? "bolt.fill" : "cpu")
+                        .font(.caption).foregroundStyle(amdFlashActive ? .green : .secondary)
                 }
                 Toggle(loc.t("Aceleración MTP (especulativa)", "MTP acceleration (speculative)"), isOn: $specMTP)
                     .infoTip(loc.t("Multi-token prediction: ~+30% de generación sin pérdida de calidad. Requiere un GGUF con cabezal MTP (variantes '-MTP-'); con otros modelos se ignora automáticamente.",
@@ -434,7 +443,7 @@ struct SettingsView: View {
                             "Bundled: official llama.cpp, recommended. Experimental (TurboQuant): experimental engine with turbo2/3/4 KV cache (~6× more context, but generation drops ~3× on AMD GPUs); also bundles the AMD Flash Attention kernel you can enable below. External: any llama-server of yours."))
                 if engineSelection.wrappedValue == "turbo" {
                     Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
-                        .disabled(!faAmd || currentModelIsVision)
+                        .disabled(!amdFlashActive || currentModelIsVision)
                         .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
                                     "Saves each conversation's KV cache to disk, so reopening a chat or restarting the app skips re-processing the prompt (saves several seconds per turn on long prompts). Requires the AMD Flash Attention kernel; with quantized KV (q8_0/q4_0) the file is smaller and restore is faster. Files live in Application Support and are removed when you delete the conversation."))
                     if currentModelIsVision {
@@ -442,7 +451,7 @@ struct SettingsView: View {
                                     "Not available with vision models: llama.cpp cannot save/restore slots when mmproj is loaded."),
                               systemImage: "info.circle")
                             .font(.caption).foregroundStyle(.secondary)
-                    } else if !faAmd {
+                    } else if !amdFlashActive {
                         Label(loc.t("Requiere activar el kernel Flash Attention AMD (arriba).",
                                     "Requires enabling the AMD Flash Attention kernel (above)."),
                               systemImage: "info.circle")

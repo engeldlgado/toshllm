@@ -11,6 +11,9 @@ struct BenchResult: Codable, Identifiable {
     var ctk: String?
     var ctv: String?
     var engine: String?
+    /// Effective Flash Attention route for this run:
+    /// "amd-gpu", "standard-cpu", "standard-auto" or "off".
+    var fa: String?
     /// GPU that ran this benchmark, and the full config snapshot — the snapshot
     /// lets any past run be saved as a profile, not just the most recent.
     var gpu: String?
@@ -28,8 +31,19 @@ struct BenchResult: Codable, Identifiable {
         if ncmoe > 0 { parts.append("ncmoe \(ncmoe)") }
         if let ctk, ctk != "f16" { parts.append("K:\(ctk)") }
         if let ctv, ctv != "f16" { parts.append("V:\(ctv)") }
+        if let faLabel { parts.append(faLabel) }
         if let engine, engine != "bundled" { parts.append(engine) }
         return parts.isEmpty ? "base" : parts.joined(separator: " · ")
+    }
+
+    var faLabel: String? {
+        switch fa {
+        case "amd-gpu": return "FA AMD GPU"
+        case "standard-cpu": return "FA CPU"
+        case "standard-auto": return "FA auto"
+        case "off": return nil
+        default: return nil
+        }
     }
 }
 
@@ -63,6 +77,7 @@ final class BenchmarkController: ObservableObject {
         model:  \(model)
         GPU:    \(settings.gpuLabel)
         engine: \(settings.engineTag)\(settings.ncmoe > 0 ? " · ncmoe \(settings.ncmoe)" : "") · K:\(settings.cacheTypeK) V:\(settings.cacheTypeV)
+        FA:     \(settings.benchmarkFlashAttentionLabel)
         args:   \(settings.benchmarkArguments.joined(separator: " "))
         =========================
 
@@ -148,6 +163,7 @@ final class BenchmarkController: ObservableObject {
             }
             history.insert(BenchResult(date: .now, model: name, ncmoe: settings.ncmoe, pp: pp, tg: tg,
                                        ctk: settings.cacheTypeK, ctv: settings.cacheTypeV, engine: engine,
+                                       fa: settings.benchmarkFlashAttentionRoute,
                                        gpu: settings.gpuLabel, profile: settings.makeProfile(name: name)),
                            at: 0)
             save()
@@ -220,7 +236,8 @@ final class BenchmarkController: ObservableObject {
                 history.insert(BenchResult(date: .now, model: name, ncmoe: candidate,
                                            pp: result.pp, tg: result.tg,
                                            ctk: settings.cacheTypeK, ctv: settings.cacheTypeV,
-                                           engine: engine, gpu: settings.gpuLabel,
+                                           engine: engine, fa: settings.benchmarkFlashAttentionRoute,
+                                           gpu: settings.gpuLabel,
                                            profile: settings.makeProfile(name: "\(name) ncmoe \(candidate)")),
                                at: 0)
                 save()
