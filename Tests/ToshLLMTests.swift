@@ -261,6 +261,29 @@ final class ServerSettingsTests: XCTestCase {
 
         XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "-fa")! + 1], "1")
     }
+
+    func testQuantizedValuesDoNotForceNormalFlashAttention() {
+        var s = makeSettings()
+        s.flashAttn = "off"
+        s.cacheTypeV = "q8_0"
+
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "off")
+        XCTAssertFalse(s.benchmarkArguments.contains("-fa"))
+        XCTAssertNil(s.environment["TOSH_FA_AMD"])
+    }
+
+    func testAmdFlashAttentionIsOnlyUserToggle() {
+        var s = makeSettings()
+        s.serverBinary = "/tmp/bin-turbo/llama-server"
+        s.faAmd = false
+
+        XCTAssertFalse(s.effectiveFaAmd)
+
+        s.faAmd = true
+        XCTAssertTrue(s.effectiveFaAmd)
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "1")
+        XCTAssertEqual(s.environment["TOSH_FA_AMD"], "1")
+    }
 }
 
 // MARK: - Chat

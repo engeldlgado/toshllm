@@ -361,25 +361,33 @@ index 05d7f430..7707bdde 100644
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
              dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
-@@ -1233,6 +1340,28 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1233,6 +1340,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
 +            // AMD dGPUs report no simdgroup_mm, so the templated vec kernel would be
-+            // rejected (and it miscompiles anyway). We ship a dedicated decode kernel
-+            // for the common case; allow FA for exactly that case via simdgroup
-+            // reduction. Everything else still requires simdgroup matrix multiply.
++            // rejected (and it miscompiles anyway). We ship a dedicated vec kernel
++            // for the standard KV pairs it instantiates; allow FA for exactly those
++            // cases via simdgroup reduction. Everything else still requires simdgroup
++            // matrix multiply and will stay off Metal instead of taking the broken
++            // upstream vec path.
 +            if (getenv("TOSH_FA_AMD") != NULL &&
 +                !has_simdgroup_mm && has_simdgroup_reduction &&
-+                op->src[0]->ne[1] < 20 && op->src[0]->ne[0] % 32 == 0) {
++                dev->props.simd_width == 32 &&
++                op->src[0]->ne[0] % 32 == 0) {
 +                float max_bias = 0.0f;
 +                float softcap  = 0.0f;
 +                memcpy(&max_bias, ((const int32_t *) op->op_params) + 1, sizeof(float));
 +                memcpy(&softcap,  ((const int32_t *) op->op_params) + 2, sizeof(float));
++                const enum ggml_type kt = op->src[1]->type;
++                const enum ggml_type vt = op->src[2]->type;
++                const bool k_std = (kt == GGML_TYPE_F16 || kt == GGML_TYPE_Q8_0 || kt == GGML_TYPE_Q4_0);
++                const bool v_std = (vt == GGML_TYPE_F16 || vt == GGML_TYPE_Q8_0 || vt == GGML_TYPE_Q4_0);
++                const int64_t dk = op->src[0]->ne[0];
 +                const bool simple =
-+                    op->src[0]->ne[0] == 128 &&
-+                    op->src[2]->ne[0] == 128 &&
-+                    op->src[1]->type == GGML_TYPE_F16 &&
++                    (dk == 128 || dk == 256 || dk == 512) &&
++                    op->src[2]->ne[0] == dk &&
++                    k_std && v_std &&
 +                    op->src[3] != NULL &&   // additive mask present
 +                    op->src[4] == NULL &&   // no attention sinks
 +                    max_bias == 0.0f && softcap == 0.0f;
@@ -594,7 +602,7 @@ index e2ce56e9..f763d222 100644
  bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
      assert(op->op == GGML_OP_FLASH_ATTN_EXT);
  
-@@ -2711,6 +2726,79 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2711,6 +2726,80 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      ggml_metal_buffer_id bid_tmp = bid_blk;
      bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
  
@@ -611,6 +619,7 @@ index e2ce56e9..f763d222 100644
 +    }
 +    if (getenv("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
 +        !props_dev->has_simdgroup_mm && props_dev->has_simdgroup_reduction &&
++        props_dev->simd_width == 32 &&   // wave32 only: the kernel assumes 32-lane simdgroups
 +        has_mask && !has_sinks && !has_bias && !has_scap) {
 +
 +        ggml_metal_kargs_flash_attn_ext_vec args = {

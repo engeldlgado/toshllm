@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.41] - 2026-06-27
+
+### Fixed
+- **AMD Flash Attention toggle**... the app no longer turns on Flash Attention implicitly when switching engines or using quantized KV values. Standard Flash Attention and the AMD GPU kernel now follow their own controls: `-fa` stays off when Flash Attention is off, and `TOSH_FA_AMD` is only set when the AMD kernel toggle is enabled.
+
 ## [0.81.40] - 2026-06-27
 
 ### Added

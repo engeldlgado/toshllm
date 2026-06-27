@@ -53,9 +53,9 @@ struct ServerSettings {
     /// MTP self-speculative decoding (+30% generation). Only applied when the
     /// selected GGUF actually ships the MTP head; silently skipped otherwise.
     var specMTP: Bool = false
-    /// Experimental: route decode attention through the dedicated AMD Metal
+    /// Experimental: route attention through the dedicated AMD Metal
     /// Flash-Attention kernel (gated by the TOSH_FA_AMD env var in the engine).
-    /// Forces `-fa 1`; prefill falls back to CPU, so prompt processing is slower.
+    /// Forces `-fa 1`, but the patched engine routes supported AMD cases to TOSH_FA_AMD.
     var faAmd: Bool = false
     /// Persist each conversation's KV cache to disk (`--slot-save-path`) so
     /// reopening a chat — or restarting the app/engine — skips re-processing the
@@ -201,7 +201,7 @@ struct ServerSettings {
         if ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
-        if effectiveFaAmd || flashAttn == "on" || cacheTypeV != "f16" { args += ["-fa", "1"] }
+        if effectiveFaAmd || flashAttn == "on" { args += ["-fa", "1"] }
         if multiGPU { args += ["--split-mode", "layer"] }
         return args
     }
@@ -331,10 +331,7 @@ struct ServerSettings {
     /// named "…-MTP-GGUF"), which would make every model a false positive.
     /// Cached per path+size so repeated calls are free.
     /// True when the model's attention head dim exceeds 256 (Gemma 4's global
-    /// layers use key_length 512). The AMD Flash-Attention kernel only covers
-    /// head dims 128/256/512, and on the bundled official engine only 128/256 —
-    /// so this drives auto-enabling the kernel on the turbo engine, where
-    /// otherwise those layers fall back to CPU. Reads the real uint32 value from
+    /// layers use key_length 512). Reads the real uint32 value from
     /// the GGUF header (`<arch>.attention.key_length`), skipping the `_swa`
     /// sibling. Cached per path+size.
     nonisolated static func modelHasBigHeadDim(at path: String) -> Bool {
@@ -364,14 +361,10 @@ struct ServerSettings {
         return big
     }
 
-    /// faAmd as the user set it, OR auto-enabled for big-head-dim models (Gemma
-    /// 4) when running the turbo engine — without the AMD kernel their global
-    /// layers (head_dim 512) fall back to CPU during prompt processing. Gated to
-    /// `bin-turbo` because only that engine ships the dk512 kernel; forcing it on
-    /// the official engine (which lacks it) would push those layers to CPU under
-    /// `-fa 1`, worse than its `-fa 0` GPU path.
+    /// Exactly the user's AMD Flash-Attention toggle. Do not auto-enable this from
+    /// model metadata; normal Flash Attention remains a separate user setting.
     var effectiveFaAmd: Bool {
-        faAmd || (serverBinary.contains("bin-turbo") && Self.modelHasBigHeadDim(at: modelPath))
+        faAmd
     }
 
     nonisolated static func modelHasMTP(at path: String) -> Bool {
