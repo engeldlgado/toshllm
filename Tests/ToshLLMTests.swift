@@ -133,6 +133,24 @@ final class ServerSettingsTests: XCTestCase {
                        "llama.cpp does not support cache-reuse with multimodal prompts")
     }
 
+    func testProjectorNotMispairedAcrossModels() throws {
+        // A text model must not borrow another model's projector sitting in the same
+        // folder, even when names share a family prefix (and would share a KV dim).
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("toshllm-vision-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let model = dir.appendingPathComponent("Qwen3-8B-Q4_K_M.gguf")
+        let mmproj = dir.appendingPathComponent("Qwen3.5-9B-Q4_K_M.mmproj.gguf")
+        FileManager.default.createFile(atPath: model.path, contents: Data())
+        FileManager.default.createFile(atPath: mmproj.path, contents: Data())
+
+        var s = makeSettings()
+        s.modelPath = model.path
+        XCTAssertFalse(s.isMultimodal, "Qwen3-8B must not pair with Qwen3.5-9B's projector")
+        XCTAssertNil(ServerSettings.mmprojPath(forModel: model.path))
+    }
+
     func testRenamedProjectorsPairUnambiguouslyInSharedFolder() throws {
         // Repos ship projectors under generic, identical names (mmproj-F16.gguf),
         // so the downloader saves them as <model>.mmproj.gguf. Two vision models

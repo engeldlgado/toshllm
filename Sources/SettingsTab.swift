@@ -377,13 +377,19 @@ struct SettingsView: View {
                     Text("auto").tag("auto"); Text("on").tag("on"); Text("off").tag("off")
                 }
                 .disabled(faAmd)
-                .infoTip(loc.t("Atención optimizada en memoria. 'auto' la activa solo donde el backend la soporta bien (recomendado en GPU AMD). Necesaria para cuantizar los valores del KV cache.",
-                            "Memory-efficient attention. 'auto' enables it only where the backend supports it well (recommended on AMD GPUs). Required for quantized KV cache values."))
-                if faAmd {
-                    Label(loc.t("El kernel Flash Attention AMD lo fuerza a 'on'.",
-                                "The AMD Flash Attention kernel forces this to 'on'."),
-                          systemImage: "info.circle")
-                        .font(.caption).foregroundStyle(.secondary)
+                .infoTip(loc.t("Atención optimizada en memoria (Metal estándar). En GPU AMD el backend la ejecuta en la CPU; usa el kernel AMD de abajo para mantenerla en la GPU. 'auto' la activa solo donde el backend la soporta.",
+                            "Memory-efficient attention (standard Metal). On AMD GPUs the backend runs it on the CPU; use the AMD kernel below to keep it on the GPU. 'auto' enables it only where the backend supports it."))
+                if engineSelection.wrappedValue != "custom" {
+                    Toggle(loc.t("Kernel Flash Attention AMD (GPU)", "AMD Flash Attention kernel (GPU)"), isOn: $faAmd)
+                        .infoTip(loc.t("Kernel Metal propio que ejecuta la atención (prompt y generación) en la GPU AMD: cabezas 128/256/512 (cubre Gemma 4) y cualquier KV estándar f16/q8_0/q4_0. Sin él, cuantizar el KV obliga a Flash Attention y la atención cae a la CPU.",
+                                    "Custom Metal kernel that runs attention (prompt and generation) on the AMD GPU: head dim 128/256/512 (covers Gemma 4) and any standard KV f16/q8_0/q4_0. Without it, quantizing the KV forces Flash Attention onto the CPU."))
+                    Label(faAmd
+                          ? loc.t("Atención en la GPU AMD (Flash Attention forzado a 'on').",
+                                  "Attention on the AMD GPU (Flash Attention forced to 'on').")
+                          : loc.t("Flash Attention estándar corre en la CPU en GPU AMD; actívalo para usar la GPU.",
+                                  "Standard Flash Attention runs on the CPU on AMD GPUs; enable it to use the GPU."),
+                          systemImage: faAmd ? "bolt.fill" : "cpu")
+                        .font(.caption).foregroundStyle(faAmd ? .green : .secondary)
                 }
                 Toggle(loc.t("Aceleración MTP (especulativa)", "MTP acceleration (speculative)"), isOn: $specMTP)
                     .infoTip(loc.t("Multi-token prediction: ~+30% de generación sin pérdida de calidad. Requiere un GGUF con cabezal MTP (variantes '-MTP-'); con otros modelos se ignora automáticamente.",
@@ -429,9 +435,6 @@ struct SettingsView: View {
                 .infoTip(loc.t("Integrado: llama.cpp oficial, recomendado. Experimental (TurboQuant): motor experimental con KV cache turbo2/3/4 (~6× más contexto, pero la generación baja ~3× en GPU AMD) e incluye el kernel Flash Attention AMD activable abajo. Externo: cualquier llama-server tuyo.",
                             "Bundled: official llama.cpp, recommended. Experimental (TurboQuant): experimental engine with turbo2/3/4 KV cache (~6× more context, but generation drops ~3× on AMD GPUs); also bundles the AMD Flash Attention kernel you can enable below. External: any llama-server of yours."))
                 if engineSelection.wrappedValue == "turbo" {
-                    Toggle(loc.t("Kernel Flash Attention AMD", "AMD Flash Attention kernel"), isOn: $faAmd)
-                        .infoTip(loc.t("Activa un kernel Metal propio que ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD (define TOSH_FA_AMD y fuerza -fa activado), para cabezas de 128, 256 y 512 (cubre Gemma 4). Imprescindible con KV cuantizado/turbo: como ese KV obliga a -fa, sin este kernel la atención cae a CPU y se desploma (p. ej. prefill turbo ~6 → ~100 t/s; generación ~4 → ~30 t/s). Cubre cualquier KV estándar (f16/q8_0/q4_0) en cualquier combinación claves/valores.",
-                                    "Enables a custom Metal kernel that runs attention — both prompt processing and generation — on the AMD GPU (sets TOSH_FA_AMD and forces -fa on), for head dim 128, 256 and 512 (covers Gemma 4). Essential with quantized/turbo KV: since that KV requires -fa, without this kernel attention falls back to CPU and collapses (e.g. turbo prefill ~6 → ~100 t/s; generation ~4 → ~30 t/s). Covers any standard KV (f16/q8_0/q4_0) in any keys/values combination."))
                     Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
                         .disabled(!faAmd || currentModelIsVision)
                         .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",

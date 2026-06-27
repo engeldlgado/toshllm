@@ -15,6 +15,31 @@ struct DonateView: View {
                 .font(.callout).multilineTextAlignment(.center)
                 .frame(width: 300)
 
+            // Card-based sponsorship (Getly) is the easiest path, so it leads.
+            Button {
+                NSWorkspace.shared.open(URL(string: AppInfo.sponsorURL)!)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "gift.fill").font(.title3)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(loc.t("Conviértete en patrocinador", "Become a sponsor"))
+                            .fontWeight(.semibold)
+                        Text(loc.t("Apoya el desarrollo con tarjeta en Getly",
+                                   "Support development by card on Getly"))
+                            .font(.caption2).opacity(0.85)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "arrow.up.forward").font(.caption)
+                }
+                .padding(.vertical, 5).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent).tint(.pink).controlSize(.large)
+            .frame(width: 300)
+
+            Text(loc.t("o con cripto", "or with crypto"))
+                .font(.caption2).foregroundStyle(.secondary)
+                .padding(.top, 2)
+
             Picker("", selection: $method) {
                 Text("Binance Pay").tag(0)
                 Text("USDT (TRC-20)").tag(1)

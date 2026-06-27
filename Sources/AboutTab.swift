@@ -4,10 +4,11 @@ import Charts
 // MARK: - About
 
 enum AppInfo {
-    static let version = "0.81.39"
+    static let version = "0.81.40"
     static let developerName = "Engelbert Delgado"
     static let developerHandle = "engeldlgado"
     static let githubURL = "https://github.com/engeldlgado"
+    static let sponsorURL = "https://www.getly.store/product/toshllm-for-intel-macs-open-source-development-sponsor"
     static let binancePayID = "engeldlgado"
     static let usdtTRC20 = "TFUG271bbbQEmFu4wkFHyvNNkYRZC5JDUf"
     static let donateNoteES = "Si ToshLLM te resulta útil, puedes apoyar el desarrollo con una donación."

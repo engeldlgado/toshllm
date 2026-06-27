@@ -33,8 +33,8 @@ enum Catalog {
             isVision: true),
         CatalogModel(
             name: "Qwen3-VL-2B Vision",
-            detailES: "Visión diminuta y veloz (ggml-org): describe y lee texto en imágenes",
-            detailEN: "Tiny, fast vision model (ggml-org): captions and reads text in images",
+            detailES: "Visión diminuta y veloz (ggml-org): describe y lee texto en imágenes. Puede ser impredecible en respuestas largas",
+            detailEN: "Tiny, fast vision model (ggml-org): captions and reads text in images. Can be unpredictable on long replies",
             urlString: "https://huggingface.co/ggml-org/Qwen3-VL-2B-Instruct-GGUF/resolve/main/Qwen3-VL-2B-Instruct-Q8_0.gguf",
             spec: ModelSpec(fileGB: 1.83, paramsB: 2.0, layers: 28, isMoE: false),
             isVision: true),

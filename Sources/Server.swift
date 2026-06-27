@@ -516,13 +516,10 @@ struct ServerSettings {
         (ggufUInt32("expert_count", at: path) ?? 0) > 0
     }
 
-    /// Finds the multimodal projector (mmproj) paired with a model, if any. A
-    /// projector only fits if its output dim (`clip.vision.projection_dim`) equals
-    /// the text model's `embedding_length` — that's what the runtime requires, and
-    /// it stops a same-family-but-different-size projector (e.g. Qwen3.6-35B's
-    /// mmproj) from being paired with another model (Qwen3-8B) just because the
-    /// names share a prefix. Among compatible projectors the best name match wins.
-    /// Enables vision (image input) automatically — no manual setting needed.
+    /// Finds the multimodal projector (mmproj) paired with a model, if any. The
+    /// projector must belong to this model — its name starts with the model's stem
+    /// (`<model>.mmproj.gguf`) — so a same-family model's projector isn't mispaired on
+    /// dimension or a shared prefix alone. Enables vision automatically.
     private static func mmprojPairKey(_ model: String, _ projector: String) -> String {
         model + "\u{1}" + projector
     }
@@ -573,15 +570,15 @@ struct ServerSettings {
         projectors = projectors.filter { !isIncompatibleMmproj(model: modelPath, projector: $0.path) }
         guard !projectors.isEmpty else { return nil }
 
-        func norm(_ s: String) -> String { String(s.lowercased().filter { $0.isLetter || $0.isNumber }) }
-        let mn = norm(name)
-        func lcp(_ a: String, _ b: String) -> Int { zip(a, b).prefix { $0 == $1 }.count }
-        let scored = projectors.map { p -> (URL, Int) in
-            let stem = p.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "mmproj", with: "")
-            return (p, lcp(mn, norm(stem)))
+        // Strip the "mmproj" token; what remains must equal the model stem exactly, so a
+        // same-dim projector from another model can't be mispaired (no false positives).
+        // Covers both "<model>.mmproj.gguf" and "mmproj-<model>.gguf".
+        func core(_ s: String) -> String {
+            String(s.lowercased().replacingOccurrences(of: "mmproj", with: "").filter { $0.isLetter || $0.isNumber })
         }
-        if let best = scored.max(by: { $0.1 < $1.1 }), best.1 >= 4 { return best.0.path }
-        return projectors.count == 1 ? projectors[0].path : nil
+        let mn = core(name)
+        guard !mn.isEmpty else { return nil }
+        return projectors.first { core($0.deletingPathExtension().lastPathComponent) == mn }?.path
     }
 
     /// The API key the chat must send, when protection is enabled in Settings.

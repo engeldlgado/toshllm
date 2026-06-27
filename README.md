@@ -21,6 +21,10 @@ Native macOS app · Metal acceleration · No cloud, no accounts, no per-token co
 
 ---
 
+> **🟠 Project notice:** Due to recent events in my city following the earthquake on June 24, 2026, project development will be delayed. I hope to return to my normal pace soon once the local situation stabilizes. Thank you for your understanding.
+
+---
+
 ## What is ToshLLM?
 
 ToshLLM lets you run modern open LLMs **entirely on your own Mac** — your chats never leave the machine, there are no accounts, and there's nothing to pay per token.
@@ -110,7 +114,7 @@ ToshLLM is **beta** and under active development. It's solid for daily use, but 
 - **External clients (VS Code Copilot, Cline, Continue…):** these send a fixed 15–19k-token prompt (system instructions + tool definitions) with *every* request. On GPUs without Metal Flash Attention that means minutes of prompt processing per cold request, which saturates the GPU and can thermally throttle it. Recent versions mitigate this (single slot with resumable prefill, prompt-cache reuse, inline reasoning) and more is on the way. The built-in chat isn't affected — it only sends your conversation.
 - **Vision cache:** `llama.cpp` does not support saving/restoring slots or cache-reuse while an `mmproj` is loaded. ToshLLM disables those features automatically for vision models; normal in-memory prompt caching still works.
 - **Large MoE models on AMD GPUs:** Mixture-of-Experts models that don't fully fit in VRAM (e.g. 26B/35B with `--n-cpu-moe` offload) shuttle data between GPU and CPU on every token. On discrete AMD GPUs under Metal this can eventually deadlock the driver mid-generation. ToshLLM ships a **watchdog** that detects the stall, frees memory, and suggests switching to a dense model. **Dense models (e.g. 8B, fully in VRAM) are stable and recommended**; large MoE-with-offload is best avoided. *(Characterized on an RX 6700 XT with the [NootRX](https://github.com/ChefKissInc/NootRX) kext; behavior may differ on other AMD setups.)*
-- **Vision (image input):** on large MoE / K-quant models (e.g. Qwen 3.6 35B) the **bundled engine** can emit garbage (`0000…`) because attention falls back off the GPU. The **experimental engine** fixes this — selecting it turns on the **AMD Flash Attention kernel** by default, which keeps attention on the GPU and produces correct descriptions. The exception is **Gemma 4 (MoE)**, whose image encoder still crashes under forced Flash Attention on AMD: use the bundled engine for Gemma 4 vision.
+- **Vision (image input):** the **experimental engine** turns on the **AMD Flash Attention kernel** by default, which keeps attention on the GPU and produces correct image descriptions across the Qwen3-VL family (Qwen3-VL-2B, Qwen3.5-9B, Qwen3.6-14B/35B) and Gemma 3. Without it the bundled engine can emit garbage (`0000…`) on large MoE / K-quant vision models, because attention falls back to the CPU. **Gemma 4** is the exception: its image projector loads only on the **bundled engine**, so use that for Gemma 4 vision. Note that reasoning models (Qwen 3.5/3.6) place the image description in their thinking output, which the in-app chat shows but some external clients may not.
 
 ## Build from source
 
@@ -133,7 +137,7 @@ The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for 
 
 A recurring limitation on discrete AMD GPUs under Metal is that **Flash Attention** is gated on hardware features these GPUs report as unavailable (`simdgroup matrix multiply`), and the upstream "vec" decode kernel miscompiles on RDNA 2 (it produces garbage even though each SIMD primitive is correct in isolation). The practical consequence: any quantized or `turbo*` KV cache **requires** Flash Attention, so on AMD that attention silently falls back to the CPU and generation collapses at longer contexts.
 
-ToshLLM ships a from-scratch **AMD decode attention kernel** (Metal) as an opt-in toggle on the experimental engine. It keeps a deliberately simple structure (one `float4` slice of the head per SIMD lane, simdgroups splitting the KV stream, online-softmax merge) that was validated bit-for-bit against a CPU reference. It supports head dims **128, 256 and 512**, KV types **f16, q8_0, q4_0 and turbo2/3/4** in **any keys/values combination** of the standard types (so you can compress keys while keeping values at full precision, all on the GPU), and is gated behind an environment flag so the default engine is unchanged.
+ToshLLM ships a from-scratch **AMD decode attention kernel** (Metal) as a toggle on **both engines**, sitting right next to the standard Flash Attention setting. It keeps a deliberately simple structure (one `float4` slice of the head per SIMD lane, simdgroups splitting the KV stream, online-softmax merge) that was validated bit-for-bit against a CPU reference. It supports head dims **128, 256 and 512** and KV types **f16, q8_0, q4_0** in **any keys/values combination** (so you can compress keys while keeping values at full precision, all on the GPU); the experimental engine adds the **turbo2/3/4** KV types on top. The distinction the toggle makes explicit: standard Flash Attention runs on the CPU on AMD GPUs, this kernel runs on the GPU.
 
 The kernel splits the KV stream across as many simdgroups as the threadgroup-memory budget allows (32 for head dim 128, 16 for 256, 8 for 512 — the head dim Gemma 4's global layers use), turning the long serial decode loop into short parallel ones — a win that grows with context depth. On an RX 6700 XT with a turbo KV cache, generation at 4096 tokens of context improves from 19 → 33 t/s on an 8B (+75%) and 26 → 31 t/s on the 9B coder (+17%); at 2048 tokens, +42% and +11%. Prompt processing stays within ~3% and output is bit-for-bit unchanged.
 
@@ -152,7 +156,7 @@ The same kernel handles **prompt processing** too: although it is the "vec" deco
 | q8_0 | 40 t/s | **100 t/s** |
 | turbo3 | 6 t/s | **97 t/s** |
 
-It remains experimental and off by default. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
+It is on by default on the experimental engine and an opt-in toggle on the bundled engine. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
 
 ### Quantized KV cache: memory vs speed
 
@@ -237,7 +241,13 @@ Free to use, study, modify and redistribute. Any distributed derivative must rem
 
 ## Support the project
 
-If ToshLLM is useful to you:
+ToshLLM is free and open source, built in the open for the Mac AMD community. If it's useful to you, sponsoring keeps it independent and moving forward.
+
+### 💜 [Become a sponsor on Getly](https://www.getly.store/product/toshllm-for-intel-macs-open-source-development-sponsor)
+
+Pay by card, quick and friendly. Every contribution funds continued development. Thank you for being part of this.
+
+Prefer crypto?
 
 - **Binance Pay**: alias `engeldlgado`
 - **USDT (TRC-20)**: `TFUG271bbbQEmFu4wkFHyvNNkYRZC5JDUf`
@@ -249,6 +259,8 @@ If ToshLLM is useful to you:
 **Ejecuta modelos de lenguaje grandes localmente en Macs Intel con GPU AMD.** Aceleración Metal. Sin nube, sin cuentas, sin costos por token.
 
 ### [⬇️ Descarga la última versión](https://github.com/engeldlgado/toshllm/releases/latest) · [📝 Cambios](CHANGELOG.md)
+
+> **🟠 Aviso del proyecto:** Debido a los sucesos recientes en mi ciudad tras el sismo del 24 de junio de 2026, el desarrollo del proyecto se retrasará. Espero retomar mi ritmo normal pronto, una vez que la situación local se estabilice. Gracias por su comprensión.
 
 ### ¿Qué es ToshLLM?
 
@@ -290,6 +302,16 @@ Descarga el `.dmg` desde [Releases](https://github.com/engeldlgado/toshllm/relea
 - **Beta:** funciona para uso diario pero pueden aparecer detalles por pulir; reporta lo que encuentres en [Issues](https://github.com/engeldlgado/toshllm/issues) (exporta diagnósticos desde Ajustes → Registro del servidor).
 - **Limitaciones conocidas:** los clientes externos (VS Code, Cline…) envían un prompt fijo de 15-19k tokens en cada petición, lo que en frío satura la GPU varios minutos (el chat integrado no se ve afectado); y los modelos MoE grandes con offload pueden bloquear el driver AMD a mitad de generación — un watchdog lo detecta y recomienda cambiar a un modelo denso, que es lo más estable en este hardware.
 - **Caché con visión:** `llama.cpp` no permite guardar/restaurar slots ni usar cache-reuse mientras hay un `mmproj` cargado. ToshLLM desactiva esas funciones automáticamente para modelos de visión; la caché normal en memoria sigue funcionando.
+
+### Apoya el proyecto
+
+ToshLLM es libre y de código abierto, hecho para la comunidad Mac AMD. Si te resulta útil, patrocinarlo lo mantiene independiente y avanzando.
+
+#### 💜 [Conviértete en patrocinador en Getly](https://www.getly.store/product/toshllm-for-intel-macs-open-source-development-sponsor)
+
+Pago con tarjeta, rápido y sencillo. Cada aporte financia el desarrollo. Gracias por ser parte de esto.
+
+¿Prefieres cripto? **Binance Pay**: alias `engeldlgado` · **USDT (TRC-20)**: `TFUG271bbbQEmFu4wkFHyvNNkYRZC5JDUf`
 
 ### Licencia
 

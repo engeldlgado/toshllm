@@ -3,6 +3,17 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.40] - 2026-06-27
+
+### Added
+- **AMD Flash Attention on the bundled engine**... the custom AMD attention kernel, until now only on the experimental engine, runs on the default bundled engine too, keeping attention on the AMD GPU instead of the CPU. A toggle sits right next to the standard Flash Attention setting, with a clear distinction: standard Flash Attention runs on the CPU on AMD GPUs, the AMD kernel runs on the GPU. On an 8B this lifts generation from ~12 to ~58 t/s. Covers standard KV (f16/q8_0/q4_0) and head dims 128/256/512.
+
+### Fixed
+- **Vision detection**... a text model no longer shows as vision-capable just because an unrelated projector with a matching size happens to sit in the same models folder. A projector is paired only when its name matches the model (the `<model>.mmproj.gguf` or `mmproj-<model>.gguf` convention), so models like Qwen3-8B stop borrowing another model's `mmproj`.
+
+### Changed
+- **Vision-capable models**... confirmed image input working with the AMD Flash Attention kernel across the Qwen3-VL family (Qwen3-VL-2B, Qwen3.5-9B, Qwen3.6-14B/35B) and Gemma 3, with Gemma 4 on the bundled engine. The Qwen3-VL-2B recommendation now notes it can be unpredictable on long replies.
+
 ## [0.81.39] - 2026-06-24
 
 ### Fixed
