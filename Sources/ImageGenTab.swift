@@ -22,8 +22,14 @@ struct ImageControls: View {
     @AppStorage(SettingsKeys.imagenFormat) private var format = ImageFormat.png.rawValue
     @AppStorage(SettingsKeys.imagenOffloadCPU) private var offloadCPU = false
     @AppStorage(SettingsKeys.imagenGPU) private var gpuIndex = 0
+    @AppStorage(SettingsKeys.imagenModel) private var modelID = ""
 
-    private var model: ImageGenModel { ImageGenCatalog.zImageTurbo }
+    /// The selected model, falling back to the best pick for this GPU.
+    private var model: ImageGenModel {
+        ImageGenCatalog.model(id: modelID)
+            ?? ImageGenCatalog.recommended(for: hardware)
+            ?? ImageGenCatalog.zImageTurbo
+    }
     private var ready: Bool { ImageGenerator.engineInstalled && ImageGenerator.installed(model, in: models) }
     private var aspectValue: ImageAspect { ImageAspect(rawValue: aspect) ?? .square }
     private var formatValue: ImageFormat { ImageFormat(rawValue: format) ?? .png }
@@ -33,25 +39,40 @@ struct ImageControls: View {
         if gpuIndex < hardware.gpus.count { return Double(hardware.gpus[gpuIndex].vramMB) / 1024 }
         return hardware.vramGB
     }
+    /// The GPU has enough VRAM to load this model at all.
+    private var modelFitsGPU: Bool { targetVRAM >= model.minVRAMGB }
     private var baseSizes: [Int] {
-        let sizes = ImageGenLimits.baseSizes(vramGB: targetVRAM)
+        let sizes = ImageGenLimits.baseSizes(vramGB: targetVRAM, residentGB: model.residentGB)
         return sizes.isEmpty ? [512] : sizes
     }
     private var currentDimensions: (Int, Int) { aspectValue.dimensions(base: baseSize) }
     private var fitsVRAM: Bool {
-        ImageGenLimits.fits(width: currentDimensions.0, height: currentDimensions.1, vramGB: targetVRAM)
+        ImageGenLimits.fits(width: currentDimensions.0, height: currentDimensions.1,
+                            vramGB: targetVRAM, residentGB: model.residentGB)
+    }
+    /// Fits, but close enough to the VRAM ceiling that a freeze or crash is possible.
+    private var nearVRAMLimit: Bool {
+        let px = currentDimensions.0 * currentDimensions.1
+        return fitsVRAM && Double(px) >= 0.8 *
+            Double(ImageGenLimits.maxPixels(vramGB: targetVRAM, residentGB: model.residentGB))
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 experimentalBadge
-                if ready {
+                modelPicker
+                if !modelFitsGPU {
+                    // The picker already shows why; no run controls for a model
+                    // this GPU can't load.
+                    EmptyView()
+                } else if ready {
                     if server.state == .running { serverBusyWarning }
                     Text(loc.t("Descripción", "Prompt")).font(.headline)
                     promptEditor
                     settingsGrid
                     if !fitsVRAM { vramWarning }
+                    else if nearVRAMLimit { nearLimitNote }
                     generateButton
                     dimensionsFootnote
                 } else {
@@ -63,8 +84,37 @@ struct ImageControls: View {
         .frame(minWidth: 260)
         // Keep the base size within what the target GPU can hold (a smaller card,
         // or a GPU switch, can drop the previously chosen size).
-        .onAppear { clampBaseSize() }
+        .onAppear {
+            if ImageGenCatalog.model(id: modelID) == nil { modelID = model.id }
+            clampBaseSize()
+        }
         .onChange(of: gpuIndex) { clampBaseSize() }
+    }
+
+    /// Model chooser: every catalog model, with a note on ones too big for this GPU.
+    /// Switching resets the step count to the new model's tuned default.
+    private var modelPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(loc.t("Modelo", "Model")).font(.caption).foregroundStyle(.secondary)
+            Picker("", selection: $modelID) {
+                ForEach(ImageGenCatalog.models) { m in
+                    let fits = targetVRAM >= m.minVRAMGB
+                    Text(fits ? m.name : "\(m.name) · \(Int(m.minVRAMGB)) GB+").tag(m.id)
+                }
+            }
+            .labelsHidden()
+            .onChange(of: modelID) {
+                steps = model.defaultSteps
+                clampBaseSize()
+            }
+            Text(model.detail(loc.isSpanish)).font(.caption2).foregroundStyle(.secondary)
+            if !modelFitsGPU {
+                Label(loc.t("Necesita \(Int(model.minVRAMGB)) GB de VRAM; no corre en esta GPU.",
+                            "Needs \(Int(model.minVRAMGB)) GB of VRAM; it won't run on this GPU."),
+                      systemImage: "xmark.octagon.fill")
+                    .font(.caption2).foregroundStyle(.red)
+            }
+        }
     }
 
     private func clampBaseSize() {
@@ -77,6 +127,17 @@ struct ImageControls: View {
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(.orange.opacity(0.18), in: Capsule())
             .foregroundStyle(.orange)
+    }
+
+    /// The frame fits but sits near the VRAM ceiling; nudge the user to step down
+    /// if the GPU freezes or the run crashes.
+    private var nearLimitNote: some View {
+        Label(loc.t("Cerca del límite de VRAM. Si hay tirones o un crash, baja el tamaño.",
+                    "Near the VRAM limit. If it freezes or crashes, lower the size."),
+              systemImage: "gauge.with.dots.needle.67percent")
+            .font(.caption).foregroundStyle(.yellow)
+            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.yellow.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
     }
 
     /// A square at a large base can exceed VRAM even when the engine is ready.
@@ -243,7 +304,11 @@ struct ImageCanvas: View {
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var models: ModelStore
 
-    private var model: ImageGenModel { ImageGenCatalog.zImageTurbo }
+    private var model: ImageGenModel {
+        ImageGenCatalog.model(id: UserDefaults.standard.string(forKey: SettingsKeys.imagenModel) ?? "")
+            ?? ImageGenCatalog.recommended(for: hardware)
+            ?? ImageGenCatalog.zImageTurbo
+    }
     private var recommended: Bool { ImageGenCatalog.recommended(for: hardware)?.id == model.id }
     private var formatValue: ImageFormat {
         ImageFormat(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.imagenFormat) ?? "png") ?? .png
@@ -374,6 +439,12 @@ struct ImageCanvas: View {
             Text(model.detail(loc.isSpanish)).font(.callout).foregroundStyle(.secondary)
             Divider()
             ForEach(model.components) { componentRow($0) }
+            if !modelFitsGPU {
+                Label(loc.t("Necesita \(Int(model.minVRAMGB)) GB de VRAM; no corre en esta GPU.",
+                            "Needs \(Int(model.minVRAMGB)) GB of VRAM; it won't run on this GPU."),
+                      systemImage: "xmark.octagon.fill")
+                    .font(.caption).foregroundStyle(.red)
+            }
             Button {
                 for comp in model.components {
                     models.downloadImageComponent(urlString: comp.urlString, fileName: comp.fileName)
@@ -383,10 +454,14 @@ struct ImageCanvas: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent).controlSize(.large)
-            .help(loc.t("Descarga los tres componentes del modelo.", "Download all three model components."))
+            .disabled(!modelFitsGPU)   // don't let the user fetch GBs for a model that can't run
+            .help(loc.t("Descarga los componentes del modelo.", "Download the model's components."))
         }
         .frame(maxWidth: 460)
     }
+
+    /// The detected GPU can load this model.
+    private var modelFitsGPU: Bool { hardware.vramGB >= model.minVRAMGB }
 
     private func componentRow(_ comp: ImageGenComponent) -> some View {
         let present = FileManager.default.fileExists(
@@ -395,7 +470,7 @@ struct ImageCanvas: View {
             Image(systemName: present ? "checkmark.circle.fill" : "circle.dashed")
                 .foregroundStyle(present ? .green : .secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(loc.isSpanish ? comp.labelES() : comp.labelEN()).font(.callout)
+                Text(comp.label(loc.isSpanish)).font(.callout)
                 Text(comp.fileName).font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }

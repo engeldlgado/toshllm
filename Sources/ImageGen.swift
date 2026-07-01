@@ -1,30 +1,38 @@
 import SwiftUI
 
-// Local text-to-image via a bundled stable-diffusion.cpp engine. A model is three
-// files (diffusion transformer, VAE, text encoder), kept in an `imagen/` subfolder
-// so they stay out of the LLM model list.
+// Local text-to-image via a bundled stable-diffusion.cpp engine. A model is one
+// or more files (a full checkpoint, or a diffusion transformer plus its VAE and
+// text encoders), kept in an `imagen/` subfolder so they stay out of the LLM
+// model list. The catalog spans GPU sizes: tiny models for small cards, heavier
+// ones for large VRAM.
 
-/// One downloadable piece of an image model.
+/// One downloadable piece of an image model, tagged with the sd-cli flag it maps to.
 struct ImageGenComponent: Identifiable {
-    enum Kind { case diffusion, vae, textEncoder }
+    enum Kind { case checkpoint, diffusion, vae, textEncoder, t5, clipL }
     let kind: Kind
     let urlString: String
     let fileName: String
     let sizeGB: Double
     var id: String { fileName }
 
-    func labelES() -> String {
+    /// The sd-cli argument this file is passed as.
+    var flag: String {
         switch kind {
-        case .diffusion: return "Modelo de difusión"
-        case .vae: return "VAE"
-        case .textEncoder: return "Codificador de texto"
+        case .checkpoint:  return "--model"
+        case .diffusion:   return "--diffusion-model"
+        case .vae:         return "--vae"
+        case .textEncoder: return "--llm"
+        case .t5:          return "--t5xxl"
+        case .clipL:       return "--clip_l"
         }
     }
-    func labelEN() -> String {
+
+    func label(_ spanish: Bool) -> String {
         switch kind {
-        case .diffusion: return "Diffusion model"
-        case .vae: return "VAE"
-        case .textEncoder: return "Text encoder"
+        case .checkpoint:  return spanish ? "Modelo" : "Model"
+        case .diffusion:   return spanish ? "Modelo de difusión" : "Diffusion model"
+        case .vae:         return "VAE"
+        case .textEncoder, .t5, .clipL: return spanish ? "Codificador de texto" : "Text encoder"
         }
     }
 }
@@ -34,9 +42,7 @@ struct ImageGenModel: Identifiable {
     let name: String
     let detailES: String
     let detailEN: String
-    let diffusion: ImageGenComponent
-    let vae: ImageGenComponent
-    let textEncoder: ImageGenComponent
+    let components: [ImageGenComponent]
     /// Steps the model is tuned for (Turbo/distilled models need very few).
     let defaultSteps: Int
     /// Guidance scale the model expects (Turbo models run at 1.0).
@@ -45,41 +51,114 @@ struct ImageGenModel: Identifiable {
     let minVRAMGB: Double
 
     var id: String { name }
-    var components: [ImageGenComponent] { [diffusion, vae, textEncoder] }
     var totalGB: Double { components.reduce(0) { $0 + $1.sizeGB } }
+
+    /// The model that stays resident in VRAM during sampling (checkpoint or
+    /// diffusion transformer); VAE and text encoders are transient. Drives the
+    /// per-model VRAM budget, so a heavier model correctly allows smaller images.
+    var residentGB: Double {
+        components.filter { $0.kind == .checkpoint || $0.kind == .diffusion }
+            .map(\.sizeGB).max() ?? totalGB
+    }
 
     func detail(_ spanish: Bool) -> String { spanish ? detailES : detailEN }
 }
 
 enum ImageGenCatalog {
-    /// Z-Image Turbo (6B DiT, 8 steps, Apache). The VAE comes from a non-gated
-    /// mirror because the official FLUX autoencoder repo is gated.
+    /// Non-gated FLUX autoencoder mirror, shared by Z-Image and Flux.
+    private static func fluxVAE(_ name: String) -> ImageGenComponent {
+        ImageGenComponent(kind: .vae,
+            urlString: "https://huggingface.co/wbruna/Z-Image-Turbo-sdcpp-GGUF/resolve/main/ae_bf16.safetensors",
+            fileName: name, sizeGB: 0.16)
+    }
+
+    /// Stable Diffusion 1.5 (0.9B, single checkpoint). Tiny and fast for small GPUs.
+    static let sd15 = ImageGenModel(
+        name: "SD 1.5",
+        detailES: "Diminuto y veloz. Para GPUs pequeñas; enorme ecosistema de estilos.",
+        detailEN: "Tiny and fast. For small GPUs; huge ecosystem of styles.",
+        components: [ImageGenComponent(kind: .checkpoint,
+            urlString: "https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/main/stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
+            fileName: "sd-v1-5-Q8_0.gguf", sizeGB: 1.68)],
+        defaultSteps: 20, cfgScale: 7.0, minVRAMGB: 3)
+
+    /// SDXL Turbo (3.5B, single checkpoint). Few steps, opens the LoRA/style world.
+    static let sdxlTurbo = ImageGenModel(
+        name: "SDXL Turbo",
+        detailES: "3.5B, pocos pasos. Buena calidad y compatible con LoRAs/estilos SDXL.",
+        detailEN: "3.5B, few steps. Strong quality and compatible with SDXL LoRAs/styles.",
+        components: [ImageGenComponent(kind: .checkpoint,
+            urlString: "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors",
+            fileName: "sd_xl_turbo_1.0_fp16.safetensors", sizeGB: 6.6)],
+        defaultSteps: 6, cfgScale: 1.0, minVRAMGB: 8)
+
+    /// Z-Image Turbo (6B DiT, 8 steps, Apache). Diffusion + VAE + Qwen3-4B encoder.
     static let zImageTurbo = ImageGenModel(
         name: "Z-Image Turbo",
-        detailES: "6B, 8 pasos, Apache. Rápido y fotorrealista; el mejor equilibrio para GPUs AMD de 12 GB.",
-        detailEN: "6B, 8 steps, Apache. Fast and photorealistic; the best fit for 12 GB AMD GPUs.",
-        diffusion: ImageGenComponent(
-            kind: .diffusion,
-            urlString: "https://huggingface.co/leejet/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q4_0.gguf",
-            fileName: "z_image_turbo-Q4_0.gguf", sizeGB: 3.5),
-        vae: ImageGenComponent(
-            kind: .vae,
-            urlString: "https://huggingface.co/wbruna/Z-Image-Turbo-sdcpp-GGUF/resolve/main/ae_bf16.safetensors",
-            fileName: "z_image_ae.safetensors", sizeGB: 0.16),
-        textEncoder: ImageGenComponent(
-            kind: .textEncoder,
-            urlString: "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-            fileName: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", sizeGB: 2.4),
+        detailES: "6B, 8 pasos, Apache. Rápido y fotorrealista; el mejor equilibrio para 8-12 GB.",
+        detailEN: "6B, 8 steps, Apache. Fast and photorealistic; the best fit for 8-12 GB.",
+        components: [
+            ImageGenComponent(kind: .diffusion,
+                urlString: "https://huggingface.co/leejet/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q4_0.gguf",
+                fileName: "z_image_turbo-Q4_0.gguf", sizeGB: 3.5),
+            fluxVAE("z_image_ae.safetensors"),
+            ImageGenComponent(kind: .textEncoder,
+                urlString: "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+                fileName: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", sizeGB: 2.4),
+        ],
         defaultSteps: 8, cfgScale: 1.0, minVRAMGB: 8)
 
-    static let models: [ImageGenModel] = [zImageTurbo]
+    /// Flux.1 schnell (12B, 4 steps, Apache). Top prompt adherence for large GPUs.
+    static let fluxSchnell = ImageGenModel(
+        name: "Flux.1 schnell",
+        detailES: "12B, 4 pasos, Apache. Máxima adherencia al prompt; para GPUs de 16 GB+.",
+        detailEN: "12B, 4 steps, Apache. Top prompt adherence; for 16 GB+ GPUs.",
+        components: [
+            ImageGenComponent(kind: .diffusion,
+                urlString: "https://huggingface.co/city96/FLUX.1-schnell-gguf/resolve/main/flux1-schnell-Q4_0.gguf",
+                fileName: "flux1-schnell-Q4_0.gguf", sizeGB: 6.4),
+            fluxVAE("flux_ae.safetensors"),
+            ImageGenComponent(kind: .t5,
+                urlString: "https://huggingface.co/city96/t5-v1_1-xxl-encoder-gguf/resolve/main/t5-v1_1-xxl-encoder-Q4_K_M.gguf",
+                fileName: "t5-v1_1-xxl-encoder-Q4_K_M.gguf", sizeGB: 2.76),
+            ImageGenComponent(kind: .clipL,
+                urlString: "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
+                fileName: "clip_l.safetensors", sizeGB: 0.23),
+        ],
+        defaultSteps: 4, cfgScale: 1.0, minVRAMGB: 16)
 
-    /// The model to suggest for this machine, or nil when no GPU can hold one.
-    /// A single model today, gated on usable VRAM so we don't recommend it on
-    /// cards that would swap.
+    /// Qwen-Image (20B MMDiT). The one that renders legible text inside images.
+    /// Heavy: for 24 GB+ GPUs. Text encoder is Qwen2.5-VL.
+    static let qwenImage = ImageGenModel(
+        name: "Qwen-Image",
+        detailES: "20B. Escribe texto legible dentro de la imagen. Muy pesado; para GPUs de 24 GB+.",
+        detailEN: "20B. Renders legible text inside images. Heavy; for 24 GB+ GPUs.",
+        components: [
+            ImageGenComponent(kind: .diffusion,
+                urlString: "https://huggingface.co/city96/Qwen-Image-gguf/resolve/main/qwen-image-Q4_0.gguf",
+                fileName: "qwen-image-Q4_0.gguf", sizeGB: 11.3),
+            ImageGenComponent(kind: .vae,
+                urlString: "https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors",
+                fileName: "qwen_image_vae.safetensors", sizeGB: 0.24),
+            ImageGenComponent(kind: .textEncoder,
+                urlString: "https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+                fileName: "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", sizeGB: 4.5),
+        ],
+        defaultSteps: 20, cfgScale: 2.5, minVRAMGB: 24)
+
+    /// Curated order (small to large). Z-Image sits before SDXL so it wins the
+    /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD).
+    static let models: [ImageGenModel] = [sd15, zImageTurbo, sdxlTurbo, fluxSchnell, qwenImage]
+
+    /// The best model this GPU can run: the highest min-VRAM tier that fits, and
+    /// within a tie the earliest listed (curated preference).
     static func recommended(for hw: HardwareInfo) -> ImageGenModel? {
-        models.first { hw.vramGB >= $0.minVRAMGB }
+        let fitting = models.filter { hw.vramGB >= $0.minVRAMGB }
+        guard let top = fitting.map(\.minVRAMGB).max() else { return nil }
+        return fitting.first { $0.minVRAMGB == top }
     }
+
+    static func model(id: String) -> ImageGenModel? { models.first { $0.id == id } }
 }
 
 /// Resolution and command-buffer limits derived from the detected GPU. Large
@@ -87,27 +166,30 @@ enum ImageGenCatalog {
 /// pixels) and the macOS GPU watchdog (a single command buffer that runs too long
 /// is killed). These pick sizes that clear both.
 enum ImageGenLimits {
-    /// Largest width*height that fits VRAM. Empirical on a 12 GB RX 6700 XT:
-    /// 1600x900 (1.44M px) fits, 1600x1600 (2.56M, ~11.5 GB buffer) OOMs. Roughly
-    /// 4.5e-6 GB per output pixel on top of the resident model, with headroom.
-    static func maxPixels(vramGB: Double) -> Int {
-        let budget = max(0.4, vramGB - 3.7 - 1.0)
+    /// Largest width*height that fits VRAM. ~4.5e-6 GB per output pixel on top of
+    /// the resident model, with headroom (empirical: Z-Image on 12 GB fits
+    /// 1600x900, OOMs at 1600x1600). `residentGB` makes it model-aware, so a
+    /// heavier model correctly allows smaller images.
+    static func maxPixels(vramGB: Double, residentGB: Double) -> Int {
+        let budget = max(0.4, vramGB - residentGB - 1.0)
         return Int(budget / 4.5e-6)
     }
 
-    /// Base (long-edge) sizes to offer: a 16:9 frame at that base must fit VRAM.
-    /// Capped at 1440, the safe ceiling measured for a 12 GB card.
-    static func baseSizes(vramGB: Double) -> [Int] {
-        let maxPx = maxPixels(vramGB: vramGB)
-        return [512, 640, 768, 896, 1024, 1152, 1280, 1440].filter { base in
+    /// Base (long-edge) sizes to offer: a 16:9 frame at that base must fit VRAM,
+    /// so the list scales with the card and the model.
+    static func baseSizes(vramGB: Double, residentGB: Double) -> [Int] {
+        let maxPx = maxPixels(vramGB: vramGB, residentGB: residentGB)
+        let candidates = [512, 640, 768, 896, 1024, 1152, 1280, 1440,
+                          1600, 1792, 2048, 2304, 2560, 3072]
+        return candidates.filter { base in
             let short = max(256, Int((Double(base) * 9 / 16 / 64).rounded()) * 64)
             return base * short <= maxPx
         }
     }
 
     /// True when a specific frame fits VRAM (a square at a large base may not).
-    static func fits(width: Int, height: Int, vramGB: Double) -> Bool {
-        width * height <= maxPixels(vramGB: vramGB)
+    static func fits(width: Int, height: Int, vramGB: Double, residentGB: Double) -> Bool {
+        width * height <= maxPixels(vramGB: vramGB, residentGB: residentGB)
     }
 
     /// Command buffers to split each diffusion step into so none exceeds the
@@ -227,15 +309,15 @@ final class ImageGenerator: ObservableObject {
                   format: ImageFormat, offloadToCPU: Bool, gpuIndex: Int) {
         guard !isBusy else { return }
         let dir = models.imagenDirectory
-        let diffusion = dir.appendingPathComponent(model.diffusion.fileName)
-        let vae = dir.appendingPathComponent(model.vae.fileName)
-        let llm = dir.appendingPathComponent(model.textEncoder.fileName)
         let out = dir.appendingPathComponent("toshllm_out.\(format.ext)")
 
-        var args: [String] = [
-            "--diffusion-model", diffusion.path,
-            "--vae", vae.path,
-            "--llm", llm.path,
+        // Each component maps to its own sd-cli flag (a full checkpoint via --model,
+        // or a diffusion model plus its VAE and text encoders).
+        var args: [String] = []
+        for comp in model.components {
+            args += [comp.flag, dir.appendingPathComponent(comp.fileName).path]
+        }
+        args += [
             "-p", prompt,
             "--cfg-scale", String(format: "%.1f", model.cfgScale),
             "--steps", String(steps),
