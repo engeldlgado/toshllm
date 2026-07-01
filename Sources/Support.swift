@@ -54,6 +54,16 @@ enum SettingsKeys {
     static let smoothTyping = "smoothTyping"
     static let onboardingDone = "onboardingDone"
 
+    // Image generation (text-to-image)
+    static let imagenPrompt = "imagenPrompt"
+    static let imagenAspect = "imagenAspect"
+    static let imagenBaseSize = "imagenBaseSize"
+    static let imagenSteps = "imagenSteps"
+    static let imagenSeed = "imagenSeed"
+    static let imagenFormat = "imagenFormat"
+    static let imagenOffloadCPU = "imagenOffloadCPU"
+    static let imagenGPU = "imagenGPU"
+
     /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
     /// so `@AppStorage` falls back to its declared defaults. The models folder, the
     /// selected model and onboarding state are deliberately NOT included, so a reset
@@ -66,6 +76,7 @@ enum SettingsKeys {
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
         chatAutoCompact, smoothTyping,
+        imagenAspect, imagenBaseSize, imagenSteps, imagenFormat, imagenOffloadCPU, imagenGPU,
     ]
 
     /// Clears every tunable option so they revert to defaults, keeping models intact.

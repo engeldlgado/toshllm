@@ -1,0 +1,25 @@
+Image engine: let GGML_METAL_NCB override the command-buffer split count.
+
+On AMD the graph must run one command buffer at a time (n_cb=1) to dodge the
+concurrency corruption, but a single large diffusion step then lands in one
+multi-second buffer that the macOS GPU watchdog kills. Splitting the step across
+a few command buffers (serial on the queue) keeps each short enough to clear the
+watchdog, so larger images render. The app sizes n_cb to the resolution and sets
+this env var; the LLM engines never set it, so their n_cb=1 default is untouched.
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 32d97cd5..73906d0f 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -661,6 +736,11 @@ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx) {
+ }
+ 
+ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
++    const char * ncb_env = getenv("GGML_METAL_NCB");
++    if (ncb_env) {
++        const int v = atoi(ncb_env);
++        if (v > 0) { n_cb = v; }
++    }
+     if (ctx->n_cb != n_cb) {
+         ctx->n_cb = MIN(n_cb, GGML_METAL_MAX_COMMAND_BUFFERS);
+ 

@@ -84,6 +84,15 @@ if [ -x "$TURBO_STATIC/llama-server" ]; then
     echo "bundled TurboQuant engine (experimental)"
 fi
 
+# Image generation engine (stable-diffusion.cpp; optional)
+IMAGE_STATIC="vendor/stable-diffusion.cpp/build-static/bin"
+if [ -x "$IMAGE_STATIC/sd-cli" ]; then
+    mkdir -p "$APP/Contents/Resources/bin-image"
+    cp "$IMAGE_STATIC/sd-cli" "$APP/Contents/Resources/bin-image/"
+    [ -f "$IMAGE_STATIC/default.metallib" ] && cp "$IMAGE_STATIC/default.metallib" "$APP/Contents/Resources/bin-image/"
+    echo "bundled image generation engine"
+fi
+
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -115,5 +124,6 @@ EOF
 
 [ -x "$APP/Contents/Resources/bin/llama-server" ] && codesign --force -s - "$APP/Contents/Resources/bin/"*
 [ -x "$APP/Contents/Resources/bin-turbo/llama-server" ] && codesign --force -s - "$APP/Contents/Resources/bin-turbo/"*
+[ -x "$APP/Contents/Resources/bin-image/sd-cli" ] && codesign --force -s - "$APP/Contents/Resources/bin-image/"*
 codesign --force -s - "$APP"
 echo "Done: $APP"

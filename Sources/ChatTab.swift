@@ -10,6 +10,9 @@ final class ControlPanelState: ObservableObject {
     @Published var section: Section_ = .dashboard
 }
 
+/// Top-level mode of the main window: the chat, or the image studio.
+enum MainMode: String { case chat, images }
+
 struct ChatMainView: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var models: ModelStore
@@ -21,55 +24,47 @@ struct ChatMainView: View {
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.onboardingDone) private var onboardingDone = false
     @State private var showOnboarding = false
+    @State private var mode: MainMode = .chat
+    // One generator shared across the studio's sidebar (controls) and detail
+    // (canvas), so both halves of the split view drive the same run.
+    @StateObject private var imageGen = ImageGenerator()
 
     var body: some View {
+        // A single NavigationSplitView for both modes: only the sidebar and detail
+        // content swap, so the window chrome stays put and Chat/Images doesn't jump.
         NavigationSplitView {
-            ConversationListView()
+            Group {
+                if mode == .images {
+                    ImageControls(gen: imageGen).transition(.opacity)
+                } else {
+                    ConversationListView().transition(.opacity)
+                }
+            }
         } detail: {
             Group {
-                switch server.state {
-                case .running:
-                    NativeChatView()
-                case .starting:
-                    loadingView
-                default:
-                    setupHero
+                if mode == .images {
+                    ImageCanvas(gen: imageGen).transition(.opacity)
+                } else {
+                    chatDetail.transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .animation(.easeInOut(duration: 0.2), value: mode)
         .environmentObject(chat)
         .navigationTitle("ToshLLM")
-        .navigationSubtitle(stateSubtitle)
+        .navigationSubtitle(mode == .images
+                            ? loc.t("Imágenes · Experimental", "Images · Experimental")
+                            : stateSubtitle)
         .toolbar {
-            if let version = updates.latestVersion {
-                Button {
-                    openControl(.dashboard)
-                } label: {
-                    Label(loc.t("Actualización", "Update"), systemImage: "arrow.down.app.fill")
-                        .foregroundStyle(.pink)
-                }
-                .help(loc.t("ToshLLM \(version) disponible — instálala desde Configuración → Inicio.",
-                            "ToshLLM \(version) available — install it from Configuration → Home."))
-            }
-            Button {
-                NSWorkspace.shared.open(server.webChatURL)
-            } label: { Image(systemName: "safari") }
-                .disabled(server.state != .running)
-                .help(loc.t("Abrir el chat web en el navegador", "Open the web chat in the browser"))
-            Button {
-                openControl()
-            } label: { Image(systemName: "gearshape") }
-                .keyboardShortcut(",", modifiers: .command)
-                .help(loc.t("Configuración: modelos, motor, benchmarks y ajustes (⌘,)",
-                            "Configuration: models, engine, benchmarks and settings (⌘,)"))
+            ToolbarItem(placement: .principal) { modePicker }
+            toolbarActions
         }
         .onAppear {
             models.refresh()
             if !onboardingDone && models.models.isEmpty {
                 showOnboarding = true
             }
-            // Auto-start the server when enabled
             if UserDefaults.standard.bool(forKey: SettingsKeys.autoStart),
                server.state == .stopped,
                !(UserDefaults.standard.string(forKey: SettingsKeys.modelPath) ?? "").isEmpty {
@@ -85,6 +80,53 @@ struct ChatMainView: View {
                 onboardingDone = true
                 showOnboarding = false
             }
+        }
+    }
+
+    @ViewBuilder private var chatDetail: some View {
+        switch server.state {
+        case .running:  NativeChatView()
+        case .starting: loadingView
+        default:        setupHero
+        }
+    }
+
+    /// Chat / Images switch, front and center in the title bar.
+    private var modePicker: some View {
+        Picker("", selection: $mode) {
+            Label(loc.t("Chat", "Chat"), systemImage: "bubble.left.and.bubble.right").tag(MainMode.chat)
+            Label(loc.t("Imágenes", "Images"), systemImage: "photo.on.rectangle.angled").tag(MainMode.images)
+        }
+        .pickerStyle(.segmented).labelStyle(.titleAndIcon).fixedSize()
+        .help(loc.t("Cambia entre el chat y la generación de imágenes.",
+                    "Switch between chat and image generation."))
+    }
+
+    /// Web chat, config and the optional update badge. The web link only applies
+    /// to the chat, so it's disabled outside chat mode.
+    @ToolbarContentBuilder private var toolbarActions: some ToolbarContent {
+        ToolbarItemGroup(placement: .automatic) {
+            if let version = updates.latestVersion {
+                Button {
+                    openControl(.dashboard)
+                } label: {
+                    Label(loc.t("Actualización", "Update"), systemImage: "arrow.down.app.fill")
+                        .foregroundStyle(.pink)
+                }
+                .help(loc.t("ToshLLM \(version) disponible... instálala desde Configuración → Inicio.",
+                            "ToshLLM \(version) available... install it from Configuration → Home."))
+            }
+            Button {
+                NSWorkspace.shared.open(server.webChatURL)
+            } label: { Image(systemName: "safari") }
+                .disabled(server.state != .running || mode == .images)
+                .help(loc.t("Abrir el chat web en el navegador", "Open the web chat in the browser"))
+            Button {
+                openControl()
+            } label: { Image(systemName: "gearshape") }
+                .keyboardShortcut(",", modifiers: .command)
+                .help(loc.t("Configuración: modelos, motor, benchmarks y ajustes (⌘,)",
+                            "Configuration: models, engine, benchmarks and settings (⌘,)"))
         }
     }
 

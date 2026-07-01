@@ -224,6 +224,37 @@ final class ModelStore: ObservableObject {
         return custom.isEmpty ? Self.defaultDirectory : URL(fileURLWithPath: custom, isDirectory: true)
     }
 
+    /// Where image-generation components (diffusion model, VAE, text encoder) live.
+    /// A subfolder so they never appear in the LLM model list, which scans only the
+    /// top level.
+    var imagenDirectory: URL { directory.appendingPathComponent("imagen", isDirectory: true) }
+
+    /// Download an image-gen component into the `imagen/` subfolder under its fixed
+    /// name. Reuses the resumable transfer used for models; skips the projector
+    /// auto-fetch (components aren't vision models).
+    func downloadImageComponent(urlString: String, fileName: String) {
+        guard let remote = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
+              remote.scheme?.hasPrefix("http") == true else { return }
+        let dir = imagenDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent(fileName)
+        guard !FileManager.default.fileExists(atPath: dest.path),
+              !downloads.contains(where: { $0.destination == dest && $0.error == nil }) else { return }
+        let item = DownloadItem(remote: remote, destination: dest)
+        item.onFinish = { [weak self] in self?.objectWillChange.send() }
+        downloads.append(item)
+    }
+
+    /// The in-progress (or failed) download for an image component, matched inside
+    /// the `imagen/` subfolder so it can show live progress on its card.
+    func imageDownload(fileName: String) -> DownloadItem? {
+        downloads.last {
+            $0.destination.lastPathComponent == fileName
+                && $0.destination.deletingLastPathComponent().lastPathComponent == "imagen"
+                && !$0.finished
+        }
+    }
+
     func refresh() {
         let fm = FileManager.default
         try? fm.createDirectory(at: directory, withIntermediateDirectories: true)

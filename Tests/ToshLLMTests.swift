@@ -77,6 +77,60 @@ final class EstimatorTests: XCTestCase {
     }
 }
 
+// MARK: - Image generation
+
+final class ImageGenTests: XCTestCase {
+    private func hw(vramMB: Int) -> HardwareInfo {
+        HardwareInfo(cpuBrand: "CPU", physicalCores: 6, logicalCores: 12,
+                     ramGB: 32, arch: "x86_64", model: "", osVersion: "",
+                     gpus: [GPUDevice(index: 0, name: "GPU", vramMB: vramMB)])
+    }
+
+    func testAspectDimensionsSnapToLatentGrid() {
+        // Every edge is a multiple of 64 (the latent grid), and the base is the
+        // long edge, so no preset exceeds base x base (keeps a step under the
+        // GPU watchdog).
+        for aspect in ImageAspect.allCases {
+            let (w, h) = aspect.dimensions(base: 1024)
+            XCTAssertEqual(w % 64, 0, "\(aspect.rawValue) width")
+            XCTAssertEqual(h % 64, 0, "\(aspect.rawValue) height")
+            XCTAssertLessThanOrEqual(max(w, h), 1024, "\(aspect.rawValue) exceeds base")
+            XCTAssertEqual(max(w, h), 1024, "\(aspect.rawValue) long edge should equal base")
+        }
+        XCTAssertEqual(ImageAspect.square.dimensions(base: 1024).0, 1024)
+        // Landscape is wider than tall; portrait is taller than wide.
+        let land = ImageAspect.landscape.dimensions(base: 1024)
+        XCTAssertGreaterThan(land.0, land.1)
+        let port = ImageAspect.portrait.dimensions(base: 1024)
+        XCTAssertGreaterThan(port.1, port.0)
+    }
+
+    func testRecommendationGatedByVRAM() {
+        XCTAssertNotNil(ImageGenCatalog.recommended(for: hw(vramMB: 12868)))
+        XCTAssertNil(ImageGenCatalog.recommended(for: hw(vramMB: 4096)))
+    }
+
+    func testResolutionLimitsScaleWithVRAM() {
+        // Bigger cards allow more pixels and larger base sizes.
+        let px12 = ImageGenLimits.maxPixels(vramGB: 12)
+        let px8 = ImageGenLimits.maxPixels(vramGB: 8)
+        XCTAssertGreaterThan(px12, px8)
+        // 12 GB fits a 1600x900 frame but not a 1600x1600 square (measured).
+        XCTAssertTrue(ImageGenLimits.fits(width: 1600, height: 900, vramGB: 12))
+        XCTAssertFalse(ImageGenLimits.fits(width: 1600, height: 1600, vramGB: 12))
+        // 12 GB tops out at 1440 base; an 8 GB card offers less.
+        XCTAssertEqual(ImageGenLimits.baseSizes(vramGB: 12).max(), 1440)
+        XCTAssertLessThan(ImageGenLimits.baseSizes(vramGB: 8).max() ?? 0, 1440)
+    }
+
+    func testCommandBufferSplitClearsWatchdog() {
+        // 1024x1024 runs as one buffer; larger frames split, capped at 4.
+        XCTAssertEqual(ImageGenLimits.nCB(width: 1024, height: 1024), 1)
+        XCTAssertGreaterThan(ImageGenLimits.nCB(width: 1600, height: 900), 1)
+        XCTAssertLessThanOrEqual(ImageGenLimits.nCB(width: 1600, height: 1600), 4)
+    }
+}
+
 // MARK: - Server configuration
 
 final class ServerSettingsTests: XCTestCase {
