@@ -23,10 +23,19 @@ struct ImageControls: View {
     @AppStorage(SettingsKeys.imagenOffloadCPU) private var offloadCPU = false
     @AppStorage(SettingsKeys.imagenGPU) private var gpuIndex = 0
     @AppStorage(SettingsKeys.imagenModel) private var modelID = ""
+    @AppStorage(SettingsKeys.imagenCustomModel) private var customModelPath = ""
+    @AppStorage(SettingsKeys.imagenCustomVAE) private var customVAEPath = ""
+    @AppStorage(SettingsKeys.imagenCustomCfg) private var customCfg = 7.0
 
-    /// The selected model, falling back to the best pick for this GPU.
+    private var isCustom: Bool { modelID == ImageGenCatalog.customID }
+
+    /// The selected model: a catalog entry, the user's own files, or the best pick.
     private var model: ImageGenModel {
-        ImageGenCatalog.model(id: modelID)
+        if isCustom {
+            return ImageGenCatalog.custom(modelPath: customModelPath, vaePath: customVAEPath,
+                                          steps: steps, cfg: customCfg)
+        }
+        return ImageGenCatalog.model(id: modelID)
             ?? ImageGenCatalog.recommended(for: hardware)
             ?? ImageGenCatalog.zImageTurbo
     }
@@ -62,7 +71,7 @@ struct ImageControls: View {
             VStack(alignment: .leading, spacing: 16) {
                 experimentalBadge
                 modelPicker
-                if !modelFitsGPU {
+                if !isCustom && !modelFitsGPU {
                     // The picker already shows why; no run controls for a model
                     // this GPU can't load.
                     EmptyView()
@@ -75,7 +84,7 @@ struct ImageControls: View {
                     else if nearVRAMLimit { nearLimitNote }
                     generateButton
                     dimensionsFootnote
-                } else {
+                } else if !isCustom {
                     notReadyHint
                 }
             }
@@ -101,20 +110,70 @@ struct ImageControls: View {
                     let fits = targetVRAM >= m.minVRAMGB
                     Text(fits ? m.name : "\(m.name) · \(Int(m.minVRAMGB)) GB+").tag(m.id)
                 }
+                Divider()
+                Text(loc.t("Personalizado…", "Custom…")).tag(ImageGenCatalog.customID)
             }
             .labelsHidden()
             .onChange(of: modelID) {
-                steps = model.defaultSteps
+                if !isCustom { steps = model.defaultSteps }
                 clampBaseSize()
             }
             Text(model.detail(loc.isSpanish)).font(.caption2).foregroundStyle(.secondary)
-            if !modelFitsGPU {
+            if isCustom { customSetup }
+            if !isCustom && !modelFitsGPU {
                 Label(loc.t("Necesita \(Int(model.minVRAMGB)) GB de VRAM; no corre en esta GPU.",
                             "Needs \(Int(model.minVRAMGB)) GB of VRAM; it won't run on this GPU."),
                       systemImage: "xmark.octagon.fill")
                     .font(.caption2).foregroundStyle(.red)
             }
         }
+    }
+
+    /// Custom model setup: point the app at a checkpoint (and optional VAE) the
+    /// user downloaded themselves, plus the CFG their model expects.
+    private var customSetup: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            filePickRow(loc.t("Archivo del modelo", "Model file"), path: $customModelPath,
+                        types: ["safetensors", "gguf", "ckpt"])
+            filePickRow(loc.t("VAE (opcional)", "VAE (optional)"), path: $customVAEPath,
+                        types: ["safetensors", "gguf"])
+            HStack(spacing: 6) {
+                Text("CFG").font(.callout)
+                Spacer(minLength: 8)
+                TextField("", value: $customCfg, format: .number).textFieldStyle(.roundedBorder).frame(width: 70)
+                    .help(loc.t("Guía. Modelos turbo ~1, normales ~7. Según la ficha del modelo.",
+                                "Guidance. Turbo models ~1, normal ~7. Per the model's card."))
+            }
+            Text(loc.t("Formatos: .safetensors / .gguf. Ajusta pasos y CFG según tu modelo.",
+                       "Formats: .safetensors / .gguf. Set steps and CFG to match your model."))
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func filePickRow(_ title: String, path: Binding<String>, types: [String]) -> some View {
+        HStack(spacing: 6) {
+            Text(title).font(.caption)
+            Spacer(minLength: 6)
+            Button(path.wrappedValue.isEmpty
+                   ? loc.t("Elegir…", "Choose…")
+                   : (path.wrappedValue as NSString).lastPathComponent) {
+                pickFile(types: types) { path.wrappedValue = $0 }
+            }
+            .font(.caption).lineLimit(1).truncationMode(.middle).frame(maxWidth: 150, alignment: .trailing)
+            if !path.wrappedValue.isEmpty {
+                Button { path.wrappedValue = "" } label: { Image(systemName: "xmark.circle") }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func pickFile(types: [String], onPick: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = types.compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { onPick(url.path) }
     }
 
     private func clampBaseSize() {
@@ -304,6 +363,9 @@ struct ImageCanvas: View {
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var models: ModelStore
 
+    private var isCustom: Bool {
+        UserDefaults.standard.string(forKey: SettingsKeys.imagenModel) == ImageGenCatalog.customID
+    }
     private var model: ImageGenModel {
         ImageGenCatalog.model(id: UserDefaults.standard.string(forKey: SettingsKeys.imagenModel) ?? "")
             ?? ImageGenCatalog.recommended(for: hardware)
@@ -318,7 +380,8 @@ struct ImageCanvas: View {
         Group {
             if !ImageGenerator.engineInstalled {
                 centered { engineMissingCard }
-            } else if !ImageGenerator.installed(model, in: models) {
+            } else if !isCustom && !ImageGenerator.installed(model, in: models) {
+                // Custom models are set up with file pickers in the sidebar, not downloaded.
                 centered { modelInstallCard }
             } else if let img = gen.resultImage, !gen.isBusy {
                 resultCanvas(img)
@@ -465,7 +528,7 @@ struct ImageCanvas: View {
 
     private func componentRow(_ comp: ImageGenComponent) -> some View {
         let present = FileManager.default.fileExists(
-            atPath: models.imagenDirectory.appendingPathComponent(comp.fileName).path)
+            atPath: comp.path(in: models.imagenDirectory).path)
         return HStack(spacing: 10) {
             Image(systemName: present ? "checkmark.circle.fill" : "circle.dashed")
                 .foregroundStyle(present ? .green : .secondary)

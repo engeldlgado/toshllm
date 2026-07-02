@@ -35,6 +35,12 @@ struct ImageGenComponent: Identifiable {
         case .textEncoder, .t5, .clipL: return spanish ? "Codificador de texto" : "Text encoder"
         }
     }
+
+    /// Absolute path: a catalog file lives under `dir`; a custom file carries its
+    /// own absolute path in `fileName`.
+    func path(in dir: URL) -> URL {
+        fileName.hasPrefix("/") ? URL(fileURLWithPath: fileName) : dir.appendingPathComponent(fileName)
+    }
 }
 
 /// An image-generation model the app can install and run.
@@ -159,6 +165,28 @@ enum ImageGenCatalog {
     }
 
     static func model(id: String) -> ImageGenModel? { models.first { $0.id == id } }
+
+    /// Sentinel id for the user's own model (files picked from disk).
+    static let customID = "__custom__"
+
+    /// Build a model from user-picked files: a checkpoint (or diffusion model) and
+    /// an optional VAE. Passed as a full checkpoint via --model, which covers most
+    /// community SD/SDXL finetunes; minVRAMGB 0 so it's never blocked.
+    static func custom(modelPath: String, vaePath: String, steps: Int, cfg: Double) -> ImageGenModel {
+        func gb(_ p: String) -> Double {
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: p))?[.size] as? Int ?? 0
+            return Double(bytes) / 1_073_741_824
+        }
+        var comps = [ImageGenComponent(kind: .checkpoint, urlString: "",
+                                       fileName: modelPath, sizeGB: gb(modelPath))]
+        if !vaePath.isEmpty {
+            comps.append(ImageGenComponent(kind: .vae, urlString: "", fileName: vaePath, sizeGB: gb(vaePath)))
+        }
+        return ImageGenModel(name: "Custom",
+            detailES: "Tu propio modelo. Ajusta pasos y CFG según su ficha.",
+            detailEN: "Your own model. Set steps and CFG to match its card.",
+            components: comps, defaultSteps: steps, cfgScale: cfg, minVRAMGB: 0)
+    }
 }
 
 /// Resolution and command-buffer limits derived from the detected GPU. Large
@@ -289,10 +317,11 @@ final class ImageGenerator: ObservableObject {
 
     static var engineInstalled: Bool { FileManager.default.fileExists(atPath: binary) }
 
-    /// True when all three component files for `model` are present.
+    /// True when every component file for `model` is present (and named).
     static func installed(_ model: ImageGenModel, in models: ModelStore) -> Bool {
-        model.components.allSatisfy {
-            FileManager.default.fileExists(atPath: models.imagenDirectory.appendingPathComponent($0.fileName).path)
+        !model.components.isEmpty && model.components.allSatisfy {
+            !$0.fileName.isEmpty
+                && FileManager.default.fileExists(atPath: $0.path(in: models.imagenDirectory).path)
         }
     }
 
@@ -315,7 +344,7 @@ final class ImageGenerator: ObservableObject {
         // or a diffusion model plus its VAE and text encoders).
         var args: [String] = []
         for comp in model.components {
-            args += [comp.flag, dir.appendingPathComponent(comp.fileName).path]
+            args += [comp.flag, comp.path(in: dir).path]
         }
         args += [
             "-p", prompt,
