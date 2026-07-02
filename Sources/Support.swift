@@ -68,6 +68,8 @@ enum SettingsKeys {
     static let imagenCustomModel = "imagenCustomModel"
     static let imagenCustomVAE = "imagenCustomVAE"
     static let imagenCustomCfg = "imagenCustomCfg"
+    static let imagenInitImage = "imagenInitImage"
+    static let imagenStrength = "imagenStrength"
 
     /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
     /// so `@AppStorage` falls back to its declared defaults. The models folder, the

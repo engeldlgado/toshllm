@@ -335,7 +335,8 @@ final class ImageGenerator: ObservableObject {
     /// unless the caller overrides them.
     func generate(model: ImageGenModel, models: ModelStore, prompt: String,
                   width: Int, height: Int, steps: Int, seed: Int,
-                  format: ImageFormat, offloadToCPU: Bool, gpuIndex: Int) {
+                  format: ImageFormat, offloadToCPU: Bool, gpuIndex: Int,
+                  initImagePath: String = "", strength: Double = 0.75) {
         guard !isBusy else { return }
         let dir = models.imagenDirectory
         let out = dir.appendingPathComponent("toshllm_out.\(format.ext)")
@@ -358,6 +359,11 @@ final class ImageGenerator: ObservableObject {
             // The output format follows the file extension (PNG lossless, JPG lighter).
             "-o", out.path,
         ]
+        // img2img: seed the run with an existing image. Strength is how much to
+        // change it (0 keeps it, 1 regenerates from scratch).
+        if !initImagePath.isEmpty {
+            args += ["-i", initImagePath, "--strength", String(format: "%.2f", strength)]
+        }
         // Offloading the diffusion model to CPU trades speed for VRAM; measured to
         // make no difference here, so it's off by default and only a fallback.
         if offloadToCPU { args.append("--offload-to-cpu") }

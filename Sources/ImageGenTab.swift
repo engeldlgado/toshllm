@@ -26,6 +26,8 @@ struct ImageControls: View {
     @AppStorage(SettingsKeys.imagenCustomModel) private var customModelPath = ""
     @AppStorage(SettingsKeys.imagenCustomVAE) private var customVAEPath = ""
     @AppStorage(SettingsKeys.imagenCustomCfg) private var customCfg = 7.0
+    @AppStorage(SettingsKeys.imagenInitImage) private var initImagePath = ""
+    @AppStorage(SettingsKeys.imagenStrength) private var strength = 0.6
 
     private var isCustom: Bool { modelID == ImageGenCatalog.customID }
 
@@ -79,6 +81,7 @@ struct ImageControls: View {
                     if server.state == .running { serverBusyWarning }
                     Text(loc.t("Descripción", "Prompt")).font(.headline)
                     promptEditor
+                    img2imgSection
                     settingsGrid
                     if !fitsVRAM { vramWarning }
                     else if nearVRAMLimit { nearLimitNote }
@@ -242,6 +245,25 @@ struct ImageControls: View {
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 
+    /// img2img: optionally seed generation from an existing image. Strength shows
+    /// only once an image is chosen (how much to transform it).
+    private var img2imgSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            filePickRow(loc.t("Imagen inicial (img2img)", "Init image (img2img)"),
+                        path: $initImagePath, types: ["png", "jpg", "jpeg", "webp"])
+            if !initImagePath.isEmpty {
+                HStack(spacing: 6) {
+                    Text(loc.t("Intensidad", "Strength")).font(.caption)
+                    Slider(value: $strength, in: 0.1...1.0)
+                    Text(String(format: "%.2f", strength))
+                        .font(.system(size: 11, design: .monospaced)).frame(width: 34)
+                }
+                .help(loc.t("Cuánto cambia la imagen inicial. Bajo = se parece más; alto = la reinventa.",
+                            "How much the init image changes. Low = closer to it; high = reinvents it."))
+            }
+        }
+    }
+
     private var promptEditor: some View {
         TextEditor(text: $prompt)
             .font(.body).frame(minHeight: 110)
@@ -329,7 +351,7 @@ struct ImageControls: View {
                 gen.generate(model: model, models: models, prompt: prompt,
                              width: w, height: h, steps: steps,
                              seed: seed, format: formatValue, offloadToCPU: offloadCPU,
-                             gpuIndex: gpuIndex)
+                             gpuIndex: gpuIndex, initImagePath: initImagePath, strength: strength)
             } label: {
                 Label(loc.t("Generar", "Generate"), systemImage: "sparkles").frame(maxWidth: .infinity)
             }
