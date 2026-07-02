@@ -13,7 +13,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-LLAMA_COMMIT="${LLAMA_COMMIT:-1593d56}"   # llama.cpp commit validated against the patches
+LLAMA_COMMIT="${LLAMA_COMMIT:-4fc4ec5}"   # llama.cpp commit validated against the patches
 TURBO_COMMIT="${TURBO_COMMIT:-a3e3638}"   # head of llama.cpp PR 23962 (TurboQuant KV cache)
 SD_COMMIT="${SD_COMMIT:-3590aa8}"         # stable-diffusion.cpp commit validated for image gen
 ARCH="${ARCH:-$(uname -m)}"
