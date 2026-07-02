@@ -80,6 +80,15 @@ CMAKE_FLAGS=(
     -DLLAMA_OPENSSL=OFF
 )
 
+# GGML_NATIVE=OFF emits an SSE2 baseline on a native x86 host build (no AVX2/FMA),
+# which halves CPU-side MoE-offload throughput; a cross-build on an arm64 CI runner
+# happens to enable AVX2, so local builds regressed silently vs the released binary.
+# Every Metal-capable Intel Mac is Haswell+ (AVX2/FMA), so force the ISA explicitly.
+# TOSH_NO_AVX2=1 builds the legacy variant for the rare no-AVX2 Xeon Hackintosh.
+if [ "$ARCH" = "x86_64" ] && [ -z "${TOSH_NO_AVX2:-}" ]; then
+    CMAKE_FLAGS+=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
+fi
+
 build_engine() {
     local vendor="$1" ref="$2" fetch_ref="$3"
     shift 3
@@ -152,11 +161,16 @@ build_image_engine() {
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/0003-image-metal-ncb.patch"
     echo "applied ggml-metal hunks of 0001 + 0003 to stable-diffusion.cpp"
 
+    local isa=()
+    if [ "$ARCH" = "x86_64" ] && [ -z "${TOSH_NO_AVX2:-}" ]; then
+        isa=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
+    fi
     cmake -B build-static \
         -DCMAKE_BUILD_TYPE=Release \
         -DSD_METAL=ON \
         -DGGML_METAL_EMBED_LIBRARY=ON \
         -DGGML_NATIVE=OFF \
+        "${isa[@]}" \
         -DCMAKE_OSX_ARCHITECTURES="$ARCH"
     cmake --build build-static --config Release -j "$(sysctl -n hw.ncpu)" -t sd-cli
 
