@@ -37,6 +37,7 @@ enum SettingsKeys {
     static let faAmd = "faAmd"
     static let persistCache = "persistCache"
     static let multiGPU = "multiGPU"
+    static let multiGPUCount = "multiGPUCount"
     static let forcePrivateBuffers = "forcePrivateBuffers"
     static let cacheReuse = "cacheReuse"
     static let loadVision = "loadVision"
@@ -76,7 +77,7 @@ enum SettingsKeys {
     static let resettableOptionKeys = [
         serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
         vramReserve, gpuIndex, extraArgs, cacheTypeK, cacheTypeV, mlock, cacheRAM,
-        parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU,
+        parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU, multiGPUCount,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
         chatAutoCompact, smoothTyping,

@@ -27,6 +27,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.vramReserve) private var vramReserve = 1024
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
+    @AppStorage(SettingsKeys.multiGPUCount) private var multiGPUCount = 0
     @AppStorage(SettingsKeys.forcePrivateBuffers) private var forcePrivateBuffers = false
     @AppStorage(SettingsKeys.cacheReuse) private var cacheReuse = true
     @AppStorage(SettingsKeys.extraArgs) private var extraArgs = ""
@@ -265,6 +266,14 @@ struct SettingsView: View {
                                  "Split model across all GPUs (experimental)"), isOn: $multiGPU)
                         .infoTip(loc.t("Divide las capas del modelo entre todas las GPUs detectadas (--split-mode layer) en vez de usar una sola, p. ej. para cargar un modelo que no cabe en una. Anula el selector de arriba.",
                                     "Splits the model's layers across all detected GPUs (--split-mode layer) instead of using one, e.g. to load a model that doesn't fit on a single card. Overrides the picker above."))
+                    if multiGPU && hardware.gpus.count > 2 {
+                        Picker(loc.t("GPUs a usar", "GPUs to use"), selection: $multiGPUCount) {
+                            Text(loc.t("Todas (\(hardware.gpus.count))", "All (\(hardware.gpus.count))")).tag(0)
+                            ForEach(2...hardware.gpus.count, id: \.self) { Text("\($0)").tag($0) }
+                        }
+                        .infoTip(loc.t("Cuántas GPUs repartir. Más GPUs = prompt más rápido; menos GPUs = generación más rápida (menos sincronización entre tarjetas).",
+                                    "How many GPUs to split across. More GPUs = faster prompt; fewer GPUs = faster generation (less cross-card sync)."))
+                    }
                     if multiGPU {
                         Label(loc.t("⚠️ Experimental y sin validar en GPU AMD/Metal: el reparto entre GPUs es una ruta distinta que podría dar salida incorrecta o colgar el motor. Verifica que la generación sea coherente y vigila la estabilidad. Necesita más pruebas.",
                                     "⚠️ Experimental and unvalidated on AMD/Metal: cross-GPU splitting is a different path that could produce wrong output or hang the engine. Check that generation is coherent and watch stability. Needs more testing."),

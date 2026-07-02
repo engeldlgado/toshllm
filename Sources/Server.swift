@@ -71,6 +71,10 @@ struct ServerSettings {
     /// copies are a different path than the host↔device staging the patch covers and
     /// could corrupt or deadlock. Works the same on both engines. Off by default.
     var multiGPU: Bool = false
+    /// How many GPUs to split across when `multiGPU` is on. 0 = all detected.
+    /// Fewer GPUs can generate faster (less cross-card sync) at the cost of prompt
+    /// speed, which the #16 tester asked to control per workload.
+    var multiGPUCount: Int = 0
     /// Force VRAM-resident (private) Metal buffers. The backend forces shared
     /// (system-memory) buffers for external GPUs, which streams weights over
     /// Thunderbolt every op (~0.8 t/s); this overrides that for the default-GPU
@@ -212,7 +216,10 @@ struct ServerSettings {
     /// record. Resolves the macOS-picked default to its real device name.
     var gpuLabel: String {
         let gpus = ServerController.availableGPUs()
-        if multiGPU { return "Split · \(max(2, gpus.count)) GPUs" }
+        if multiGPU {
+            let n = multiGPUCount > 0 ? min(multiGPUCount, gpus.count) : gpus.count
+            return "Split · \(max(2, n)) GPUs"
+        }
         if gpuIndex >= 0 { return gpus.first { $0.index == gpuIndex }?.name ?? "GPU \(gpuIndex)" }
         return MTLCreateSystemDefaultDevice()?.name ?? "default"
     }
@@ -232,8 +239,10 @@ struct ServerSettings {
         // these to MTLCopyAllDevices() — the same order as the app's GPU picker).
         let gpus = ServerController.availableGPUs()
         if multiGPU {
-            // Register every physical GPU so --split-mode layer spans separate cards.
-            env["GGML_METAL_DEVICES"] = String(max(2, gpus.count))
+            // Split across N GPUs. Fewer than all lets the user trade prompt speed
+            // (more GPUs) for generation speed (fewer, less cross-card sync). 0 = all.
+            let n = multiGPUCount > 0 ? min(multiGPUCount, gpus.count) : gpus.count
+            env["GGML_METAL_DEVICES"] = String(max(2, n))
         } else if gpuIndex >= 0 {
             // Pin the engine to one physical GPU by index.
             env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex)
@@ -319,6 +328,7 @@ struct ServerSettings {
             faAmd: bool(SettingsKeys.faAmd, defaultFaAmd),
             persistCache: bool(SettingsKeys.persistCache, false),
             multiGPU: bool(SettingsKeys.multiGPU, false),
+            multiGPUCount: int(SettingsKeys.multiGPUCount, 0),
             forcePrivateBuffers: bool(SettingsKeys.forcePrivateBuffers, false),
             cacheReuse: bool(SettingsKeys.cacheReuse, true),
             loadVision: bool(SettingsKeys.loadVision, true))
