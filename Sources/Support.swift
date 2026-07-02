@@ -37,6 +37,7 @@ enum SettingsKeys {
     static let faAmd = "faAmd"
     static let persistCache = "persistCache"
     static let multiGPU = "multiGPU"
+    static let multiGPUCount = "multiGPUCount"
     static let forcePrivateBuffers = "forcePrivateBuffers"
     static let cacheReuse = "cacheReuse"
     static let loadVision = "loadVision"
@@ -54,6 +55,22 @@ enum SettingsKeys {
     static let smoothTyping = "smoothTyping"
     static let onboardingDone = "onboardingDone"
 
+    // Image generation (text-to-image)
+    static let imagenPrompt = "imagenPrompt"
+    static let imagenAspect = "imagenAspect"
+    static let imagenBaseSize = "imagenBaseSize"
+    static let imagenSteps = "imagenSteps"
+    static let imagenSeed = "imagenSeed"
+    static let imagenFormat = "imagenFormat"
+    static let imagenOffloadCPU = "imagenOffloadCPU"
+    static let imagenGPU = "imagenGPU"
+    static let imagenModel = "imagenModel"
+    static let imagenCustomModel = "imagenCustomModel"
+    static let imagenCustomVAE = "imagenCustomVAE"
+    static let imagenCustomCfg = "imagenCustomCfg"
+    static let imagenInitImage = "imagenInitImage"
+    static let imagenStrength = "imagenStrength"
+
     /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
     /// so `@AppStorage` falls back to its declared defaults. The models folder, the
     /// selected model and onboarding state are deliberately NOT included, so a reset
@@ -62,10 +79,11 @@ enum SettingsKeys {
     static let resettableOptionKeys = [
         serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
         vramReserve, gpuIndex, extraArgs, cacheTypeK, cacheTypeV, mlock, cacheRAM,
-        parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU,
+        parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU, multiGPUCount,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
         chatAutoCompact, smoothTyping,
+        imagenAspect, imagenBaseSize, imagenSteps, imagenFormat, imagenOffloadCPU, imagenGPU,
     ]
 
     /// Clears every tunable option so they revert to defaults, keeping models intact.

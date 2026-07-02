@@ -3,6 +3,18 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.43] - 2026-07-02
+
+### Added
+- **Image generation studio**... a new experimental Images tab in the main window generates images locally on the GPU with stable-diffusion.cpp, which shares the same Metal stack as the language engines. Supports text-to-image and image-to-image (pick a starting image and set how strongly it steers the result), and runs on the AMD GPU with the same tiled matmul the language engines use.
+- **Image model catalog**... a set of models spanning GPU sizes, each with its own VRAM budget so the app only offers the ones that fit, from small models on 4 GB cards up to larger ones on 24 GB+ cards. Resolution options scale to the selected model and the detected VRAM.
+- **Custom image models**... point the studio at your own checkpoint, VAE and text-encoder files to run models beyond the built-in catalog.
+- **Pick how many GPUs to use**... on a multi-GPU machine a setting chooses how many GPUs to split a model across instead of always using every detected GPU.
+- **Image engine logs**... the Logs tab now switches between the server log and the image generation log.
+
+### Changed
+- **Newer bundled engine**... updated the bundled llama.cpp to a recent master build.
+
 ## [0.81.42] - 2026-06-27
 
 ### Changed

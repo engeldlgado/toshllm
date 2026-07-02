@@ -77,6 +77,75 @@ final class EstimatorTests: XCTestCase {
     }
 }
 
+// MARK: - Image generation
+
+final class ImageGenTests: XCTestCase {
+    private func hw(vramMB: Int) -> HardwareInfo {
+        HardwareInfo(cpuBrand: "CPU", physicalCores: 6, logicalCores: 12,
+                     ramGB: 32, arch: "x86_64", model: "", osVersion: "",
+                     gpus: [GPUDevice(index: 0, name: "GPU", vramMB: vramMB)])
+    }
+
+    func testAspectDimensionsSnapToLatentGrid() {
+        // Every edge is a multiple of 64 (the latent grid), and the base is the
+        // long edge, so no preset exceeds base x base (keeps a step under the
+        // GPU watchdog).
+        for aspect in ImageAspect.allCases {
+            let (w, h) = aspect.dimensions(base: 1024)
+            XCTAssertEqual(w % 64, 0, "\(aspect.rawValue) width")
+            XCTAssertEqual(h % 64, 0, "\(aspect.rawValue) height")
+            XCTAssertLessThanOrEqual(max(w, h), 1024, "\(aspect.rawValue) exceeds base")
+            XCTAssertEqual(max(w, h), 1024, "\(aspect.rawValue) long edge should equal base")
+        }
+        XCTAssertEqual(ImageAspect.square.dimensions(base: 1024).0, 1024)
+        // Landscape is wider than tall; portrait is taller than wide.
+        let land = ImageAspect.landscape.dimensions(base: 1024)
+        XCTAssertGreaterThan(land.0, land.1)
+        let port = ImageAspect.portrait.dimensions(base: 1024)
+        XCTAssertGreaterThan(port.1, port.0)
+    }
+
+    func testRecommendationScalesWithVRAM() {
+        // A tiny 2 GB card gets nothing; bigger cards get progressively larger models.
+        XCTAssertNil(ImageGenCatalog.recommended(for: hw(vramMB: 2048)))
+        let rec4 = ImageGenCatalog.recommended(for: hw(vramMB: 4096))
+        let rec12 = ImageGenCatalog.recommended(for: hw(vramMB: 12868))
+        let rec24 = ImageGenCatalog.recommended(for: hw(vramMB: 24576))
+        XCTAssertNotNil(rec4)
+        XCTAssertLessThanOrEqual(rec4!.minVRAMGB, rec12!.minVRAMGB)
+        XCTAssertLessThanOrEqual(rec12!.minVRAMGB, rec24!.minVRAMGB)
+        // 12 GB prefers Z-Image (curated tie-break); the largest card gets the heaviest.
+        XCTAssertEqual(rec12?.id, ImageGenCatalog.zImageTurbo.id)
+        XCTAssertEqual(rec24?.id, ImageGenCatalog.qwenImage.id)
+    }
+
+    func testResolutionLimitsScaleWithVRAM() {
+        let r = ImageGenCatalog.zImageTurbo.residentGB
+        // Bigger cards allow more pixels and larger base sizes.
+        let px12 = ImageGenLimits.maxPixels(vramGB: 12, residentGB: r)
+        let px8 = ImageGenLimits.maxPixels(vramGB: 8, residentGB: r)
+        XCTAssertGreaterThan(px12, px8)
+        // 12 GB fits a 1600x900 frame but not a 1600x1600 square (measured, Z-Image).
+        XCTAssertTrue(ImageGenLimits.fits(width: 1600, height: 900, vramGB: 12, residentGB: r))
+        XCTAssertFalse(ImageGenLimits.fits(width: 1600, height: 1600, vramGB: 12, residentGB: r))
+        // A heavier model (larger resident) allows fewer pixels on the same card.
+        XCTAssertLessThan(ImageGenLimits.maxPixels(vramGB: 12, residentGB: ImageGenCatalog.fluxSchnell.residentGB), px12)
+        // The offered base sizes scale with the card: more VRAM unlocks larger.
+        let max8 = ImageGenLimits.baseSizes(vramGB: 8, residentGB: r).max() ?? 0
+        let max12 = ImageGenLimits.baseSizes(vramGB: 12, residentGB: r).max() ?? 0
+        let max32 = ImageGenLimits.baseSizes(vramGB: 32, residentGB: r).max() ?? 0
+        XCTAssertLessThan(max8, max12)
+        XCTAssertLessThan(max12, max32)
+    }
+
+    func testCommandBufferSplitClearsWatchdog() {
+        // 1024x1024 runs as one buffer; larger frames split, capped at 4.
+        XCTAssertEqual(ImageGenLimits.nCB(width: 1024, height: 1024), 1)
+        XCTAssertGreaterThan(ImageGenLimits.nCB(width: 1600, height: 900), 1)
+        XCTAssertLessThanOrEqual(ImageGenLimits.nCB(width: 1600, height: 1600), 4)
+    }
+}
+
 // MARK: - Server configuration
 
 final class ServerSettingsTests: XCTestCase {

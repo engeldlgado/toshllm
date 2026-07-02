@@ -40,6 +40,16 @@ struct ServerLogView: View {
     @State private var minLevel = 0
     @State private var autoFollow = true
     @State private var copied = false
+    /// Which engine's log to show: the chat server, or the image studio.
+    @State private var logSource = "server"
+    @State private var imageLog = ""
+
+    /// The raw log for the selected source. The image log is read from disk (the
+    /// image studio runs in another window).
+    private var rawLog: String { logSource == "images" ? imageLog : server.log }
+    private func reloadImageLog() {
+        imageLog = ImageGenerator.latestLogURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,12 +57,24 @@ struct ServerLogView: View {
             Divider()
             logBody
         }
+        // The image log lives in a file written by the other window; poll it while shown.
+        .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in
+            if logSource == "images" { reloadImageLog() }
+        }
     }
 
     // MARK: controls
 
     private var controls: some View {
         VStack(spacing: 8) {
+            Picker("", selection: $logSource) {
+                Text(loc.t("Servidor", "Server")).tag("server")
+                Text(loc.t("Imágenes", "Images")).tag("images")
+            }
+            .pickerStyle(.segmented).fixedSize()
+            .help(loc.t("Registro del servidor de chat o del motor de imágenes.",
+                        "Chat server log or the image engine log."))
+            .onChange(of: logSource) { if logSource == "images" { reloadImageLog() } }
             serverControls
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
@@ -104,7 +126,8 @@ struct ServerLogView: View {
                             "Copies what's shown (with filters applied)."))
 
                 Button {
-                    revealInFinder(file: server.logFileURL, folder: server.logsDirectory)
+                    let file = logSource == "images" ? (ImageGenerator.latestLogURL ?? server.logsDirectory) : server.logFileURL
+                    revealInFinder(file: file, folder: server.logsDirectory)
                 } label: {
                     Label(loc.t("Logs en Finder", "Logs in Finder"), systemImage: "folder")
                 }
@@ -117,7 +140,9 @@ struct ServerLogView: View {
                 .help(loc.t("Genera un archivo con tu hardware, configuración y el registro reciente, listo para adjuntar a un reporte.",
                             "Creates a file with your hardware, settings and recent log, ready to attach to a report."))
 
-                Button(role: .destructive) { server.log = "" } label: {
+                Button(role: .destructive) {
+                    if logSource == "images" { imageLog = "" } else { server.log = "" }
+                } label: {
                     Label(loc.t("Limpiar", "Clear"), systemImage: "trash")
                 }
                 .help(loc.t("Vacía el registro en pantalla (el archivo en disco se conserva).",
@@ -239,8 +264,8 @@ struct ServerLogView: View {
 
     private var filteredLog: String {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard minLevel > 0 || !q.isEmpty else { return server.log }
-        let lines = server.log.split(separator: "\n", omittingEmptySubsequences: false)
+        guard minLevel > 0 || !q.isEmpty else { return rawLog }
+        let lines = rawLog.split(separator: "\n", omittingEmptySubsequences: false)
         let out = lines.filter { line in
             if minLevel > 0, rank(line) < minLevel { return false }
             if !q.isEmpty, !line.lowercased().contains(q) { return false }
