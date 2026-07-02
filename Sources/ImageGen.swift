@@ -290,6 +290,20 @@ final class ImageGenerator: ObservableObject {
     /// Tail of the engine output, kept so a failure can be diagnosed (e.g. a GPU
     /// watchdog timeout) into a helpful message.
     private var logTail = ""
+    /// Persist the engine output so the Logs tab can show image runs too.
+    private let fileLog = RotatingFileLog(name: "imagegen")
+
+    /// Newest image-gen log file, for the Logs tab to read (this generator lives in
+    /// another window, so the file is the shared handoff).
+    static var latestLogURL: URL? {
+        let dir = AppSupport.directory.appendingPathComponent("logs", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter { $0.lastPathComponent.hasPrefix("imagegen") }
+            .max { a, b in (mtime(a) ?? .distantPast) < (mtime(b) ?? .distantPast) }
+    }
+    private static func mtime(_ u: URL) -> Date? {
+        try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
 
     var isBusy: Bool { if case .generating = state { return true }; return false }
 
@@ -393,6 +407,9 @@ final class ImageGenerator: ObservableObject {
             Task { @MainActor in self?.finish(status: proc.terminationStatus, output: out) }
         }
 
+        fileLog.startSession()
+        fileLog.append("$ sd-cli " + args.joined(separator: " ") + "\n\n")
+
         resultImage = nil
         resultURL = nil
         progress = 0
@@ -414,6 +431,7 @@ final class ImageGenerator: ObservableObject {
     /// the bar. Also note the decode stage so the UI can name the wait.
     private func consume(_ text: String, steps: Int) {
         logTail = String((logTail + text).suffix(4000))
+        fileLog.append(text)
         for raw in text.split(whereSeparator: \.isNewline) {
             let line = String(raw)
             if line.lowercased().contains("decod") { stage = .decoding }

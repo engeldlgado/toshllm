@@ -252,14 +252,14 @@ struct ImageControls: View {
             filePickRow(loc.t("Imagen inicial (img2img)", "Init image (img2img)"),
                         path: $initImagePath, types: ["png", "jpg", "jpeg", "webp"])
             if !initImagePath.isEmpty {
+                let strengthTip = loc.t("Cuánto cambia la imagen inicial. Bajo (~0.3) conserva la composición; alto (~0.8) la reinventa.",
+                                        "How much the init image changes. Low (~0.3) keeps the composition; high (~0.8) reinvents it.")
                 HStack(spacing: 6) {
-                    Text(loc.t("Intensidad", "Strength")).font(.caption)
-                    Slider(value: $strength, in: 0.1...1.0)
+                    Text(loc.t("Intensidad", "Strength")).font(.caption).help(strengthTip)
+                    Slider(value: $strength, in: 0.1...1.0).help(strengthTip)
                     Text(String(format: "%.2f", strength))
-                        .font(.system(size: 11, design: .monospaced)).frame(width: 34)
+                        .font(.system(size: 11, design: .monospaced)).frame(width: 34).help(strengthTip)
                 }
-                .help(loc.t("Cuánto cambia la imagen inicial. Bajo = se parece más; alto = la reinventa.",
-                            "How much the init image changes. Low = closer to it; high = reinvents it."))
             }
         }
     }
