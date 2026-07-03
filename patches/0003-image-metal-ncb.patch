@@ -7,6 +7,10 @@ a few command buffers (serial on the queue) keeps each short enough to clear the
 watchdog, so larger images render. The app sizes n_cb to the resolution and sets
 this env var; the LLM engines never set it, so their n_cb=1 default is untouched.
 
+Also keep the manual matmul's packed partial sums in float for the image
+engine: diffusion activations overflow half partials (white images), while
+the LLM engines keep the faster half accumulation. Applies on top of 0001.
+
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
 index 32d97cd5..73906d0f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
@@ -23,3 +27,43 @@ index 32d97cd5..73906d0f 100644
      if (ctx->n_cb != n_cb) {
          ctx->n_cb = MIN(n_cb, GGML_METAL_MAX_COMMAND_BUFFERS);
  
+
+diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
+--- a/ggml/src/ggml-metal/ggml-metal.metal
++++ b/ggml/src/ggml-metal/ggml-metal.metal
+@@ -10038,7 +10038,7 @@ kernel void kernel_mul_mm(
+             for (short ik = 0; ik < NK/8; ik++) {
+                 // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
+                 // scalar loop; partials flush to float every 8-deep slice for precision
+-                vec<S0,2> pacc[4][4];
++                float2 pacc[4][4]; // diffusion activations overflow half partials
+                 for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
+ 
+                 FOR_UNROLL (short k = 0; k < 8; k += 2) {
+@@ -10054,7 +10054,7 @@ kernel void kernel_mul_mm(
+                     for (short rr = 0; rr < 4; rr++) {
+                         for (short cc = 0; cc < 4; cc++) {
+                             // mul+add: no bfloat2 fma() overload; fast math contracts it anyway
+-                            pacc[rr][cc] = av[rr]*vec<S0,2>(bv[cc]) + pacc[rr][cc];
++                            pacc[rr][cc] = float2(av[rr])*float2(bv[cc]) + pacc[rr][cc];
+                         }
+                     }
+                 }
+@@ -10468,7 +10468,7 @@ kernel void kernel_mul_mm_id(
+             for (short ik = 0; ik < NK/8; ik++) {
+                 // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
+                 // scalar loop; partials flush to float every 8-deep slice for precision
+-                vec<S0,2> pacc[4][4];
++                float2 pacc[4][4]; // diffusion activations overflow half partials
+                 for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
+ 
+                 FOR_UNROLL (short k = 0; k < 8; k += 2) {
+@@ -10484,7 +10484,7 @@ kernel void kernel_mul_mm_id(
+                     for (short rr = 0; rr < 4; rr++) {
+                         for (short cc = 0; cc < 4; cc++) {
+                             // mul+add: no bfloat2 fma() overload; fast math contracts it anyway
+-                            pacc[rr][cc] = av[rr]*vec<S0,2>(bv[cc]) + pacc[rr][cc];
++                            pacc[rr][cc] = float2(av[rr])*float2(bv[cc]) + pacc[rr][cc];
+                         }
+                     }
+                 }
