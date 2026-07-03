@@ -152,10 +152,10 @@ index 32d97cd5..411c778d 100644
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 4f4f073c..47932388 100644
+index 0e1f1de4..c0ff5849 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -695,7 +695,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+@@ -709,7 +709,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
      constexpr int NRA = SZ_SIMDGROUP * N_MM_BLOCK_Y * N_MM_SIMD_GROUP_Y;
      constexpr int NRB = SZ_SIMDGROUP * N_MM_BLOCK_X * N_MM_SIMD_GROUP_X;
  
@@ -165,7 +165,7 @@ index 4f4f073c..47932388 100644
  
      const bool bc_out = has_tensor
          ? (op->ne[0] % NRA != 0 || op->ne[1] % NRB != 0)
-@@ -708,8 +709,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+@@ -722,8 +723,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
      const int16_t r3   = (int16_t) (ne13 / op->src[0]->ne[3]);
  
      snprintf(base, 256, "kernel_mul_mm_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
@@ -176,7 +176,7 @@ index 4f4f073c..47932388 100644
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
-@@ -721,6 +722,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+@@ -735,6 +736,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
          ggml_metal_cv_set_int16(cv, ne13,  FC_MUL_MM + 3);
          ggml_metal_cv_set_int16(cv, r2,    FC_MUL_MM + 4);
          ggml_metal_cv_set_int16(cv, r3,    FC_MUL_MM + 5);
@@ -184,7 +184,7 @@ index 4f4f073c..47932388 100644
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
-@@ -957,14 +959,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+@@ -971,14 +973,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
  
      const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
  
@@ -205,10 +205,10 @@ index 4f4f073c..47932388 100644
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index 4a3ebb55..1017d8ad 100644
+index d465f31c..d37ddd12 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
-@@ -250,7 +250,14 @@ struct ggml_metal_device_props {
+@@ -251,7 +251,14 @@ struct ggml_metal_device_props {
  
      bool has_simdgroup_reduction;
      bool has_simdgroup_mm;
@@ -224,7 +224,7 @@ index 4a3ebb55..1017d8ad 100644
      bool has_tensor;
      bool use_residency_sets;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 05d7f430..7707bdde 100644
+index a7cbc60e..13369472 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -128,6 +128,28 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
@@ -361,7 +361,7 @@ index 05d7f430..7707bdde 100644
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
              dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
-@@ -1233,6 +1340,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1254,6 +1361,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
@@ -398,7 +398,7 @@ index 05d7f430..7707bdde 100644
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
          case GGML_OP_SSM_SCAN:
-@@ -1697,6 +1826,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1718,6 +1855,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
  }
  
  void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -409,7 +409,7 @@ index 05d7f430..7707bdde 100644
      if (buf->is_shared) {
          memcpy((char *) tensor->data + offset, data, size);
          return;
-@@ -1710,12 +1843,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +1872,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -467,7 +467,7 @@ index 05d7f430..7707bdde 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1751,6 +1927,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1772,6 +1956,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -478,7 +478,7 @@ index 05d7f430..7707bdde 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1767,24 +1947,67 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1788,24 +1976,67 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -559,10 +559,10 @@ index 05d7f430..7707bdde 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index e2ce56e9..f763d222 100644
+index 18656b34..6d03089f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2164,7 +2164,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+@@ -2165,7 +2165,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
          !ggml_is_transposed(op->src[1]) &&
          // for now the matrix-matrix multiplication kernel only works on A14+/M1+ SoCs
          // AMD GPU and older A-chips will reuse matrix-vector multiplication kernel
@@ -571,7 +571,7 @@ index e2ce56e9..f763d222 100644
          //GGML_LOG_INFO("matrix: ne00 = %6d, ne01 = %6d, ne02 = %6d, ne11 = %6d, ne12 = %6d\n", ne00, ne01, ne02, ne11, ne12);
  
          // some Metal matrix data types require aligned pointers
-@@ -2319,7 +2319,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+@@ -2320,7 +2320,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
      // ne21 = n_rows (batch size)
      const int ne21_mm_id_min = 32;
  
@@ -580,7 +580,7 @@ index e2ce56e9..f763d222 100644
          // some Metal matrix data types require aligned pointers
          // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
          //switch (op->src[0]->type) {
-@@ -2513,6 +2513,21 @@ int ggml_metal_op_add_id(ggml_metal_op_t ctx, int idx) {
+@@ -2514,6 +2514,21 @@ int ggml_metal_op_add_id(ggml_metal_op_t ctx, int idx) {
      return 1;
  }
  
@@ -602,7 +602,7 @@ index e2ce56e9..f763d222 100644
  bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
      assert(op->op == GGML_OP_FLASH_ATTN_EXT);
  
-@@ -2711,6 +2726,80 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2712,6 +2727,80 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      ggml_metal_buffer_id bid_tmp = bid_blk;
      bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
  
@@ -699,10 +699,10 @@ index a1003b3a..53748453 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 0aea6845..6fb19d43 100644
+index 25e78e10..e5ccd027 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
-@@ -7182,6 +7182,164 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -7189,6 +7189,164 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NS20
  }
  
@@ -867,7 +867,7 @@ index 0aea6845..6fb19d43 100644
  // note: I think the s_t can be half instead of float, because the Q*K scaling is done before storing to shared mem
  //       in the other (non-vec) kernel, we need s_t to also be float because we scale during the soft_max
  //
-@@ -9411,6 +9569,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
+@@ -9431,6 +9589,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
  constant short FC_mul_mm_ne13  [[function_constant(FC_MUL_MM + 3)]];
  constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
  constant short FC_mul_mm_r3    [[function_constant(FC_MUL_MM + 5)]];
@@ -875,13 +875,18 @@ index 0aea6845..6fb19d43 100644
  
  // each block_q contains 16*nl weights
  #ifdef GGML_METAL_HAS_TENSOR
-@@ -9596,13 +9755,19 @@ kernel void kernel_mul_mm(
+@@ -9616,13 +9775,24 @@ kernel void kernel_mul_mm(
          + args.nb11*(r1 + lr1)
          + args.nb10*iy);
  
 +    // Manual tiled path for GPUs without simdgroup matrix; simdgroup path otherwise.
 +    const short lane = tiitg % 32;
-+    float acc[8][2];
++    const short lr = lane % 8; // row within an 8-row block of sa
++    const short lc = lane / 8; // low 2 bits of the output column
++
++    // manual path: 4x4 register tile per lane, rows 8*rr + lr, cols lc + 4*cc
++    // of the simdgroup's 32x16 output subtile
++    float acc[4][4];
      S0_8x8 ma[4];
      S1_8x8 mb[2];
 -
@@ -890,7 +895,7 @@ index 0aea6845..6fb19d43 100644
 -    for (short i = 0; i < 8; i++){
 -        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
 +    if (FC_mul_mm_manual) {
-+        for (short i = 0; i < 8; i++) { acc[i][0] = 0.f; acc[i][1] = 0.f; }
++        for (short i = 0; i < 4; i++) { for (short j = 0; j < 4; j++) { acc[i][j] = 0.f; } }
 +    } else {
 +        for (short i = 0; i < 8; i++) {
 +            mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
@@ -898,7 +903,48 @@ index 0aea6845..6fb19d43 100644
      }
  
      for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
-@@ -9683,45 +9848,80 @@ kernel void kernel_mul_mm(
+@@ -9635,14 +9805,17 @@ kernel void kernel_mul_mm(
+                 const short sx = 2*il0 + i/8;
+                 const short sy = (tiitg/NL0)/8;
+ 
+-              //const short lx = i%8;
+-              //const short ly = (tiitg/NL0)%8;
+                 const short lx = (tiitg/NL0)%8;
+                 const short ly = i%8;
+ 
+                 const short ib = 8*sx + sy;
+ 
+-                *(sa + 64*ib + 8*ly + lx) = loop_k + 16*il + i < args.ne00 ? *((device T0 *) x + i) : 0;
++                // manual path stores row-major within the 8x8 block so (k, k+1)
++                // pairs sit contiguous for its packed-half2 compute loop; the
++                // simdgroup path keeps the layout simdgroup_load expects
++                const short el = FC_mul_mm_manual ? (8*lx + ly) : (8*ly + lx);
++
++                *(sa + 64*ib + el) = loop_k + 16*il + i < args.ne00 ? *((device T0 *) x + i) : 0;
+             }
+         } else {
+             S0_4x4 temp_a;
+@@ -9654,17 +9827,14 @@ kernel void kernel_mul_mm(
+                 const short sx = 2*il0 + i/8;
+                 const short sy = (tiitg/NL0)/8;
+ 
+-              //const short lx = i%8;
+-              //const short ly = (tiitg/NL0)%8;
+                 const short lx = (tiitg/NL0)%8;
+                 const short ly = i%8;
+ 
+                 const short ib = 8*sx + sy;
+ 
+-                // NOTE: this is massively slower.. WTF?
+-                //sa[64*ib + 8*ly + lx] = temp_a[i/4][i%4];
++                const short el = FC_mul_mm_manual ? (8*lx + ly) : (8*ly + lx);
+ 
+-                *(sa + 64*ib + 8*ly + lx) = temp_a[i/4][i%4];
++                *(sa + 64*ib + el) = temp_a[i/4][i%4];
+             }
+         }
+ 
+@@ -9703,45 +9873,95 @@ kernel void kernel_mul_mm(
  
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
@@ -910,18 +956,36 @@ index 0aea6845..6fb19d43 100644
 -            simdgroup_barrier(mem_flags::mem_none);
 +        if (FC_mul_mm_manual) {
 +            for (short ik = 0; ik < NK/8; ik++) {
-+                for (short i = 0; i < 8; i++) {
-+                    threadgroup const S1 * pb = lsmb + 64*(i/4);
-+                    threadgroup const S0 * pa = lsma + 64*(i%4);
-+                    for (short e = 0; e < 2; e++) {
-+                        const short fe = lane + 32*e;
-+                        const short r  = fe / 8;
-+                        const short c  = fe % 8;
-+                        float s = 0.f;
-+                        for (short k = 0; k < 8; k++) {
-+                            s += (float) pb[8*r + k] * (float) pa[8*k + c];
++                // rank-1 update of the 4x4 register tile on (k, k+1) pairs: packed
++                // half2 FMAs halve the instruction count vs scalar f32 (RDNA runs
++                // v_pk_fma_f16 at 2x the f32 rate). Partial sums stay in half only
++                // across the 4 pairs of one 8-deep slice, then flush to the float
++                // accumulator to keep precision/overflow bounded.
++                vec<S0,2> pacc[4][4];
++                for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
++
++                FOR_UNROLL (short k = 0; k < 8; k += 2) {
++                    vec<S0,2> av[4];
++                    vec<S1,2> bv[4];
++                    for (short rr = 0; rr < 4; rr++) {
++                        av[rr] = *(threadgroup const vec<S0,2> *)(lsma + 64*rr + 8*lr + k);
++                    }
++                    for (short cc = 0; cc < 4; cc++) {
++                        const short col = lc + 4*cc;
++                        bv[cc] = *(threadgroup const vec<S1,2> *)(lsmb + 64*(col/8) + 8*(col%8) + k);
++                    }
++                    for (short rr = 0; rr < 4; rr++) {
++                        for (short cc = 0; cc < 4; cc++) {
++                            // mul+add instead of fma(): no bfloat2 fma overload, and
++                            // fast math contracts this to the packed fma anyway
++                            pacc[rr][cc] = av[rr]*vec<S0,2>(bv[cc]) + pacc[rr][cc];
 +                        }
-+                        acc[i][e] += s;
++                    }
++                }
++
++                for (short rr = 0; rr < 4; rr++) {
++                    for (short cc = 0; cc < 4; cc++) {
++                        acc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
 +                    }
 +                }
  
@@ -972,15 +1036,12 @@ index 0aea6845..6fb19d43 100644
 +        const int base_row = r0 + 32*(sgitg & 1);
 +        const int base_col = r1 + 16*(sgitg >> 1);
 +        device float * Dbase = (device float *) dst + im*(int64_t)args.ne1*args.ne0;
-+        for (short i = 0; i < 8; i++) {
-+            for (short e = 0; e < 2; e++) {
-+                const short fe = lane + 32*e;
-+                const short r  = fe / 8;
-+                const short c  = fe % 8;
-+                const int row = base_row + 8*(i%4) + c;
-+                const int col = base_col + 8*(i/4) + r;
++        for (short rr = 0; rr < 4; rr++) {
++            for (short cc = 0; cc < 4; cc++) {
++                const int row = base_row + 8*rr + lr;
++                const int col = base_col + lc + 4*cc;
 +                if (row < args.ne0 && col < args.ne1) {
-+                    Dbase[row + (int64_t)col*args.ne0] = acc[i][e];
++                    Dbase[row + (int64_t)col*args.ne0] = acc[rr][cc];
 +                }
 +            }
 +        }
@@ -998,13 +1059,18 @@ index 0aea6845..6fb19d43 100644
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
-@@ -9894,13 +10094,20 @@ kernel void kernel_mul_mm_id(
+@@ -9914,13 +10134,25 @@ kernel void kernel_mul_mm_id(
          + args.nb10*iy);
  
  #ifndef GGML_METAL_HAS_TENSOR
 +    // Manual tiled path for GPUs without simdgroup matrix; simdgroup path otherwise.
 +    const short lane = tiitg % 32;
-+    float acc[8][2];
++    const short lr = lane % 8; // row within an 8-row block of sa
++    const short lc = lane / 8; // low 2 bits of the output column
++
++    // manual path: 4x4 register tile per lane, rows 8*rr + lr, cols lc + 4*cc
++    // of the simdgroup's 32x16 output subtile
++    float acc[4][4];
      S0_8x8 ma[4];
      S1_8x8 mb[2];
  
@@ -1013,7 +1079,7 @@ index 0aea6845..6fb19d43 100644
 -    for (short i = 0; i < 8; i++){
 -        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
 +    if (FC_mul_mm_manual) {
-+        for (short i = 0; i < 8; i++) { acc[i][0] = 0.f; acc[i][1] = 0.f; }
++        for (short i = 0; i < 4; i++) { for (short j = 0; j < 4; j++) { acc[i][j] = 0.f; } }
 +    } else {
 +        for (short i = 0; i < 8; i++){
 +            mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
@@ -1021,7 +1087,40 @@ index 0aea6845..6fb19d43 100644
      }
  #else
      auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
-@@ -10057,27 +10264,49 @@ kernel void kernel_mul_mm_id(
+@@ -9951,7 +10183,11 @@ kernel void kernel_mul_mm_id(
+ 
+                 const short ib = 8*sx + sy;
+ 
+-                *(sa + 64*ib + 8*ly + lx) = loop_k + 16*il + i < args.ne00 ? (S0) *((device T0 *) x + i) : (S0) 0;
++                // manual path stores row-major within the 8x8 block so (k, k+1)
++                // pairs sit contiguous for its packed-half2 compute loop
++                const short el = FC_mul_mm_manual ? (8*lx + ly) : (8*ly + lx);
++
++                *(sa + 64*ib + el) = loop_k + 16*il + i < args.ne00 ? (S0) *((device T0 *) x + i) : (S0) 0;
+             }
+         } else {
+             S0_4x4 temp_a;
+@@ -9963,17 +10199,14 @@ kernel void kernel_mul_mm_id(
+                 const short sx = 2*il0 + i/8;
+                 const short sy = (tiitg/NL0)/8;
+ 
+-              //const short lx = i%8;
+-              //const short ly = (tiitg/NL0)%8;
+                 const short lx = (tiitg/NL0)%8;
+                 const short ly = i%8;
+ 
+                 const short ib = 8*sx + sy;
+ 
+-                // NOTE: this is massively slower.. WTF?
+-                //sa[64*ib + 8*ly + lx] = temp_a[i/4][i%4];
++                const short el = FC_mul_mm_manual ? (8*lx + ly) : (8*ly + lx);
+ 
+-                *(sa + 64*ib + 8*ly + lx) = temp_a[i/4][i%4];
++                *(sa + 64*ib + el) = temp_a[i/4][i%4];
+             }
+         }
+ 
+@@ -10077,27 +10310,67 @@ kernel void kernel_mul_mm_id(
          threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
          threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
  
@@ -1029,23 +1128,41 @@ index 0aea6845..6fb19d43 100644
 -            simdgroup_barrier(mem_flags::mem_none);
 +        if (FC_mul_mm_manual) {
 +            for (short ik = 0; ik < NK/8; ik++) {
-+                for (short i = 0; i < 8; i++) {
-+                    threadgroup const S1 * pb = lsmb + 64*(i/4);
-+                    threadgroup const S0 * pa = lsma + 64*(i%4);
-+                    for (short e = 0; e < 2; e++) {
-+                        const short fe = lane + 32*e;
-+                        const short r  = fe / 8;
-+                        const short c  = fe % 8;
-+                        float s = 0.f;
-+                        for (short k = 0; k < 8; k++) {
-+                            s += (float) pb[8*r + k] * (float) pa[8*k + c];
++                // rank-1 update of the 4x4 register tile on (k, k+1) pairs: packed
++                // half2 FMAs halve the instruction count vs scalar f32 (RDNA runs
++                // v_pk_fma_f16 at 2x the f32 rate). Partial sums stay in half only
++                // across the 4 pairs of one 8-deep slice, then flush to the float
++                // accumulator to keep precision/overflow bounded.
++                vec<S0,2> pacc[4][4];
++                for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
++
++                FOR_UNROLL (short k = 0; k < 8; k += 2) {
++                    vec<S0,2> av[4];
++                    vec<S1,2> bv[4];
++                    for (short rr = 0; rr < 4; rr++) {
++                        av[rr] = *(threadgroup const vec<S0,2> *)(lsma + 64*rr + 8*lr + k);
++                    }
++                    for (short cc = 0; cc < 4; cc++) {
++                        const short col = lc + 4*cc;
++                        bv[cc] = *(threadgroup const vec<S1,2> *)(lsmb + 64*(col/8) + 8*(col%8) + k);
++                    }
++                    for (short rr = 0; rr < 4; rr++) {
++                        for (short cc = 0; cc < 4; cc++) {
++                            // mul+add instead of fma(): no bfloat2 fma overload, and
++                            // fast math contracts this to the packed fma anyway
++                            pacc[rr][cc] = av[rr]*vec<S0,2>(bv[cc]) + pacc[rr][cc];
 +                        }
-+                        acc[i][e] += s;
 +                    }
 +                }
  
 -            FOR_UNROLL (short i = 0; i < 4; i++) {
 -                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
++                for (short rr = 0; rr < 4; rr++) {
++                    for (short cc = 0; cc < 4; cc++) {
++                        acc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
++                    }
++                }
++
 +                lsma += 8*64;
 +                lsmb += 4*64;
              }
@@ -1062,17 +1179,17 @@ index 0aea6845..6fb19d43 100644
 -                simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
 -            }
 +                simdgroup_barrier(mem_flags::mem_none);
-+
+ 
+-            simdgroup_barrier(mem_flags::mem_none);
 +                FOR_UNROLL (short i = 0; i < 2; i++) {
 +                    simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
 +                }
  
--            simdgroup_barrier(mem_flags::mem_none);
-+                simdgroup_barrier(mem_flags::mem_none);
- 
 -            FOR_UNROLL (short i = 0; i < 8; i++){
 -                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
 -            }
++                simdgroup_barrier(mem_flags::mem_none);
++
 +                FOR_UNROLL (short i = 0; i < 8; i++){
 +                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
 +                }
@@ -1085,7 +1202,7 @@ index 0aea6845..6fb19d43 100644
          }
  #else
          auto sA = tA.slice(0, 0);
-@@ -10096,8 +10325,20 @@ kernel void kernel_mul_mm_id(
+@@ -10116,8 +10389,17 @@ kernel void kernel_mul_mm_id(
  #else
      threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
  
@@ -1093,12 +1210,9 @@ index 0aea6845..6fb19d43 100644
 -        simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
 +    if (FC_mul_mm_manual) {
 +        // mirror the simdgroup_store layout so the scatter loop below is unchanged
-+        for (short i = 0; i < 8; i++) {
-+            for (short e = 0; e < 2; e++) {
-+                const short fe = lane + 32*e;
-+                const short r  = fe / 8;
-+                const short c  = fe % 8;
-+                temp_str[(8*(i%4) + c) + (8*(i/4) + r)*NR0] = acc[i][e];
++        for (short rr = 0; rr < 4; rr++) {
++            for (short cc = 0; cc < 4; cc++) {
++                temp_str[(8*rr + lr) + (lc + 4*cc)*NR0] = acc[rr][cc];
 +            }
 +        }
 +    } else {
@@ -1109,10 +1223,10 @@ index 0aea6845..6fb19d43 100644
  #endif
  
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 2802103b..c921d1a3 100644
+index 12bf5c37..bc6ce32d 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1854,15 +1854,19 @@ ggml_tensor * llama_kv_cache::build_rope_shift(
+@@ -1874,15 +1874,19 @@ ggml_tensor * llama_kv_cache::build_rope_shift(
          // dequantize to f32 -> RoPE -> quantize back
          tmp = ggml_cast(ctx, cur, GGML_TYPE_F32);
  
