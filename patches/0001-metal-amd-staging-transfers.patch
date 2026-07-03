@@ -559,7 +559,7 @@ index a7cbc60e..13369472 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 18656b34..6d03089f 100644
+index 18656b34..1682e749 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -2165,7 +2165,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
@@ -602,7 +602,7 @@ index 18656b34..6d03089f 100644
  bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
      assert(op->op == GGML_OP_FLASH_ATTN_EXT);
  
-@@ -2712,6 +2727,80 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2712,6 +2727,107 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      ggml_metal_buffer_id bid_tmp = bid_blk;
      bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
  
@@ -657,6 +657,33 @@ index 18656b34..6d03089f 100644
 +            /*.logit_softcap =*/ logit_softcap,
 +        };
 +
++        // prefill goes to the tile kernel (K/V shared across 16 queries);
++        // decode keeps the per-query vec kernel
++        if (ne01 >= 16 && getenv("TOSH_FA_TILE_DISABLE") == NULL) {
++            char fa_tile_pipeline[80];
++            snprintf(fa_tile_pipeline, sizeof(fa_tile_pipeline), "kernel_flash_attn_ext_tile_amd_dk%d_k%s_v%s", (int) ne00,
++                     ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type));
++
++            auto pipeline = ggml_metal_library_get_pipeline(lib, fa_tile_pipeline);
++            if (!pipeline.pipeline) {
++                pipeline = ggml_metal_library_compile_pipeline(lib, fa_tile_pipeline, fa_tile_pipeline, nullptr);
++            }
++
++            ggml_metal_encoder_set_pipeline(enc, pipeline);
++            ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++            ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
++            ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
++            ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);
++            ggml_metal_encoder_set_buffer  (enc, bid_src3, 4);
++            ggml_metal_encoder_set_buffer  (enc, bid_src4, 5);
++            ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
++            ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
++
++            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + 15)/16, ne02, ne03, 32, 16, 1);
++
++            return 1;
++        }
++
 +        auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_pipeline);
 +        if (!pipeline.pipeline) {
 +            pipeline = ggml_metal_library_compile_pipeline(lib, fa_amd_pipeline, fa_amd_pipeline, nullptr);
@@ -699,10 +726,10 @@ index a1003b3a..53748453 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 25e78e10..e5ccd027 100644
+index 25e78e10..47529e1b 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
-@@ -7189,6 +7189,164 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -7189,6 +7189,322 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NS20
  }
  
@@ -864,10 +891,168 @@ index 25e78e10..e5ccd027 100644
 +#undef FA_AMD_PAIR
 +#undef FA_AMD_INST
 +
++// Prefill companion of the AMD vec kernel above: NQ simdgroups (one query each)
++// share K/V tiles staged in threadgroup memory, so the cache is streamed from
++// device memory once per NQ queries instead of once per query.
++template<
++    short DK, short NQ,
++    typename k_t, short NKK, void (*deq_k)(device const k_t *, short, thread float4 &),
++    typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &)>
++kernel void kernel_flash_attn_ext_tile_amd(
++        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
++        device const char * q     [[buffer(1)]],
++        device const char * k     [[buffer(2)]],
++        device const char * v     [[buffer(3)]],
++        device const char * mask  [[buffer(4)]],
++        device const char * sinks [[buffer(5)]],
++        device const char * pad   [[buffer(6)]],
++        device       char * dst   [[buffer(7)]],
++        uint3  tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]],
++        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
++    constexpr short DK4 = DK/4;    // float4 per head row
++    constexpr short NC  = DK4/32;  // float4 chunks each lane owns
++    constexpr short TK  = 4096/DK; // KV rows per tile (sk + sv = 16 KiB)
++
++    threadgroup half4 sk[TK*DK4];
++    threadgroup half4 sv[TK*DK4];
++    threadgroup short sh_any;
++
++    const int iq1 = tgpig.x*NQ + sgitg; // this simdgroup's query token
++    const int iq2 = tgpig.y;            // query head
++    const int iq3 = tgpig.z;            // batch
++
++    // tail simdgroups past ne01 recompute the last query and skip the store;
++    // they must stay for the cooperative loads and barriers
++    const int iq1c = iq1 < args.ne01 ? iq1 : args.ne01 - 1;
++
++    device const float4 * q4 = (device const float4 *) (q + iq1c*args.nb01 + iq2*args.nb02 + iq3*args.nb03);
++
++    // grouped-query attention: map query head -> kv head
++    const int ikv2 = iq2 / (args.ne02 / args.ne_12_2);
++    const int ikv3 = iq3 / (args.ne03 / args.ne_12_3);
++
++    device const char * kp = k + ikv2*args.nb12 + ikv3*args.nb13;
++    device const char * vp = v + ikv2*args.nb22 + ikv3*args.nb23;
++
++    device const half * pm = (device const half *) (mask + iq1c*args.nb31 + (iq2%args.ne32)*args.nb32 + (iq3%args.ne33)*args.nb33);
++
++    float4 myq[NC];
++    for (short c = 0; c < NC; ++c) {
++        myq[c] = q4[tiisg + c*32];
++    }
++
++    float4 acc[NC];
++    for (short c = 0; c < NC; ++c) {
++        acc[c] = float4(0.0f);
++    }
++    float m = -FLT_MAX/2;
++    float s = 0.0f;
++
++    const short tl = 32*sgitg + tiisg; // linear thread id for cooperative loads
++
++    for (int j0 = 0; j0 < args.ne11; j0 += TK) {
++        const short tn = (args.ne11 - j0 < TK) ? (short)(args.ne11 - j0) : TK;
++
++        // skip tiles no query of this group attends to (causal top-right triangle)
++        if (tl == 0) {
++            sh_any = 0;
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        {
++            float mx = -FLT_MAX;
++            for (short jj = tiisg; jj < tn; jj += 32) {
++                mx = max(mx, (float) pm[j0 + jj]);
++            }
++            mx = simd_max(mx);
++            if (tiisg == 0 && mx > -1e30f) {
++                sh_any = 1;
++            }
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        if (sh_any == 0) {
++            continue;
++        }
++
++        // cooperative dequant of the K/V tile rows into threadgroup memory
++        for (short c = tl; c < tn*DK4; c += 32*NQ) {
++            const short jj = c / DK4;
++            const short ch = c % DK4;
++            float4 t;
++            device const k_t * kb = (device const k_t *) (kp + (uint64_t)(j0 + jj)*args.nb11);
++            deq_k(kb + ch/NKK, ch%NKK, t);
++            sk[c] = (half4) t;
++            device const v_t * vb = (device const v_t *) (vp + (uint64_t)(j0 + jj)*args.nb21);
++            deq_v(vb + ch/NKV, ch%NKV, t);
++            sv[c] = (half4) t;
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        for (short jj = 0; jj < tn; ++jj) {
++            const float mv = (float) pm[j0 + jj];
++            if (mv <= -1e30f) {
++                continue;
++            }
++
++            float pl = 0.0f;
++            for (short c = 0; c < NC; ++c) {
++                pl += dot(myq[c], (float4) sk[jj*DK4 + tiisg + c*32]);
++            }
++            const float p = simd_sum(pl); // full DK-dim Q.K
++
++            const float pp   = p*args.scale + mv;
++            const float nm   = max(m, pp);
++            const float corr = exp(m  - nm);
++            const float w    = exp(pp - nm);
++
++            for (short c = 0; c < NC; ++c) {
++                acc[c] = acc[c]*corr + w*(float4) sv[jj*DK4 + tiisg + c*32];
++            }
++            s = s*corr + w;
++            m = nm;
++        }
++        // the two barriers at the top of the next tile fence sk/sv reuse
++    }
++
++    if (iq1 >= args.ne01) {
++        return;
++    }
++
++    const float inv = s > 0.0f ? 1.0f/s : 0.0f;
++    const int64_t rid = (int64_t) iq3*args.ne2*args.ne1 + iq2 + (int64_t) iq1*args.ne1;
++    device float4 * dst4 = (device float4 *) dst;
++    for (short c = 0; c < NC; ++c) {
++        dst4[rid*DK4 + tiisg + c*32] = acc[c]*inv;
++    }
++}
++
++typedef decltype(kernel_flash_attn_ext_tile_amd<128, 16, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4>) flash_attn_ext_tile_amd_t;
++
++// standard K/V pairs only; turbo caches keep using the vec kernel for prefill
++#define FA_AMD_TILE_INST(dk, nm, kt, nkk, dkf, vt, nkv, dvf) \
++template [[host_name("kernel_flash_attn_ext_tile_amd_dk" #dk "_" nm)]] kernel flash_attn_ext_tile_amd_t \
++    kernel_flash_attn_ext_tile_amd<dk, 16, kt, nkk, dkf, vt, nkv, dvf>;
++#define FA_AMD_TILE_PAIR(nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_TILE_INST(128, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_TILE_INST(256, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_TILE_INST(512, nm, kt, nkk, dkf, vt, nkv, dvf)
++
++FA_AMD_TILE_PAIR("kf16_vf16",   half4,      1, dequantize_f16_t4,  half4,      1, dequantize_f16_t4)
++FA_AMD_TILE_PAIR("kq8_0_vq8_0", block_q8_0, 8, dequantize_q8_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
++FA_AMD_TILE_PAIR("kq4_0_vq4_0", block_q4_0, 8, dequantize_q4_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_TILE_PAIR("kq8_0_vf16",  block_q8_0, 8, dequantize_q8_0_t4, half4,      1, dequantize_f16_t4)
++FA_AMD_TILE_PAIR("kq4_0_vf16",  block_q4_0, 8, dequantize_q4_0_t4, half4,      1, dequantize_f16_t4)
++FA_AMD_TILE_PAIR("kf16_vq8_0",  half4,      1, dequantize_f16_t4,  block_q8_0, 8, dequantize_q8_0_t4)
++FA_AMD_TILE_PAIR("kf16_vq4_0",  half4,      1, dequantize_f16_t4,  block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_TILE_PAIR("kq8_0_vq4_0", block_q8_0, 8, dequantize_q8_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_TILE_PAIR("kq4_0_vq8_0", block_q4_0, 8, dequantize_q4_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
++#undef FA_AMD_TILE_PAIR
++#undef FA_AMD_TILE_INST
++
  // note: I think the s_t can be half instead of float, because the Q*K scaling is done before storing to shared mem
  //       in the other (non-vec) kernel, we need s_t to also be float because we scale during the soft_max
  //
-@@ -9431,6 +9589,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
+@@ -9431,6 +9747,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
  constant short FC_mul_mm_ne13  [[function_constant(FC_MUL_MM + 3)]];
  constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
  constant short FC_mul_mm_r3    [[function_constant(FC_MUL_MM + 5)]];
@@ -875,7 +1060,7 @@ index 25e78e10..e5ccd027 100644
  
  // each block_q contains 16*nl weights
  #ifdef GGML_METAL_HAS_TENSOR
-@@ -9616,13 +9775,24 @@ kernel void kernel_mul_mm(
+@@ -9616,13 +9933,24 @@ kernel void kernel_mul_mm(
          + args.nb11*(r1 + lr1)
          + args.nb10*iy);
  
@@ -903,7 +1088,7 @@ index 25e78e10..e5ccd027 100644
      }
  
      for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
-@@ -9635,14 +9805,17 @@ kernel void kernel_mul_mm(
+@@ -9635,14 +9963,17 @@ kernel void kernel_mul_mm(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -924,7 +1109,7 @@ index 25e78e10..e5ccd027 100644
              }
          } else {
              S0_4x4 temp_a;
-@@ -9654,17 +9827,14 @@ kernel void kernel_mul_mm(
+@@ -9654,17 +9985,14 @@ kernel void kernel_mul_mm(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -944,7 +1129,7 @@ index 25e78e10..e5ccd027 100644
              }
          }
  
-@@ -9703,45 +9873,95 @@ kernel void kernel_mul_mm(
+@@ -9703,45 +10031,91 @@ kernel void kernel_mul_mm(
  
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
@@ -956,11 +1141,8 @@ index 25e78e10..e5ccd027 100644
 -            simdgroup_barrier(mem_flags::mem_none);
 +        if (FC_mul_mm_manual) {
 +            for (short ik = 0; ik < NK/8; ik++) {
-+                // rank-1 update of the 4x4 register tile on (k, k+1) pairs: packed
-+                // half2 FMAs halve the instruction count vs scalar f32 (RDNA runs
-+                // v_pk_fma_f16 at 2x the f32 rate). Partial sums stay in half only
-+                // across the 4 pairs of one 8-deep slice, then flush to the float
-+                // accumulator to keep precision/overflow bounded.
++                // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
++                // scalar loop; partials flush to float every 8-deep slice for precision
 +                vec<S0,2> pacc[4][4];
 +                for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
 +
@@ -976,8 +1158,7 @@ index 25e78e10..e5ccd027 100644
 +                    }
 +                    for (short rr = 0; rr < 4; rr++) {
 +                        for (short cc = 0; cc < 4; cc++) {
-+                            // mul+add instead of fma(): no bfloat2 fma overload, and
-+                            // fast math contracts this to the packed fma anyway
++                            // mul+add: no bfloat2 fma() overload; fast math contracts it anyway
 +                            pacc[rr][cc] = av[rr]*vec<S0,2>(bv[cc]) + pacc[rr][cc];
 +                        }
 +                    }
@@ -1017,13 +1198,13 @@ index 25e78e10..e5ccd027 100644
 -                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
 -            }
 +                simdgroup_barrier(mem_flags::mem_none);
- 
--            lsma += 8*64;
--            lsmb += 4*64;
++
 +                FOR_UNROLL (short i = 0; i < 8; i++){
 +                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
 +                }
-+
+ 
+-            lsma += 8*64;
+-            lsmb += 4*64;
 +                lsma += 8*64;
 +                lsmb += 4*64;
 +            }
@@ -1059,7 +1240,7 @@ index 25e78e10..e5ccd027 100644
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
-@@ -9914,13 +10134,25 @@ kernel void kernel_mul_mm_id(
+@@ -9914,13 +10288,25 @@ kernel void kernel_mul_mm_id(
          + args.nb10*iy);
  
  #ifndef GGML_METAL_HAS_TENSOR
@@ -1087,7 +1268,7 @@ index 25e78e10..e5ccd027 100644
      }
  #else
      auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
-@@ -9951,7 +10183,11 @@ kernel void kernel_mul_mm_id(
+@@ -9951,7 +10337,11 @@ kernel void kernel_mul_mm_id(
  
                  const short ib = 8*sx + sy;
  
@@ -1100,7 +1281,7 @@ index 25e78e10..e5ccd027 100644
              }
          } else {
              S0_4x4 temp_a;
-@@ -9963,17 +10199,14 @@ kernel void kernel_mul_mm_id(
+@@ -9963,17 +10353,14 @@ kernel void kernel_mul_mm_id(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -1120,7 +1301,7 @@ index 25e78e10..e5ccd027 100644
              }
          }
  
-@@ -10077,27 +10310,67 @@ kernel void kernel_mul_mm_id(
+@@ -10077,27 +10464,63 @@ kernel void kernel_mul_mm_id(
          threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
          threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
  
@@ -1128,11 +1309,8 @@ index 25e78e10..e5ccd027 100644
 -            simdgroup_barrier(mem_flags::mem_none);
 +        if (FC_mul_mm_manual) {
 +            for (short ik = 0; ik < NK/8; ik++) {
-+                // rank-1 update of the 4x4 register tile on (k, k+1) pairs: packed
-+                // half2 FMAs halve the instruction count vs scalar f32 (RDNA runs
-+                // v_pk_fma_f16 at 2x the f32 rate). Partial sums stay in half only
-+                // across the 4 pairs of one 8-deep slice, then flush to the float
-+                // accumulator to keep precision/overflow bounded.
++                // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
++                // scalar loop; partials flush to float every 8-deep slice for precision
 +                vec<S0,2> pacc[4][4];
 +                for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
 +
@@ -1148,21 +1326,20 @@ index 25e78e10..e5ccd027 100644
 +                    }
 +                    for (short rr = 0; rr < 4; rr++) {
 +                        for (short cc = 0; cc < 4; cc++) {
-+                            // mul+add instead of fma(): no bfloat2 fma overload, and
-+                            // fast math contracts this to the packed fma anyway
++                            // mul+add: no bfloat2 fma() overload; fast math contracts it anyway
 +                            pacc[rr][cc] = av[rr]*vec<S0,2>(bv[cc]) + pacc[rr][cc];
 +                        }
 +                    }
 +                }
- 
--            FOR_UNROLL (short i = 0; i < 4; i++) {
--                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
++
 +                for (short rr = 0; rr < 4; rr++) {
 +                    for (short cc = 0; cc < 4; cc++) {
 +                        acc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
 +                    }
 +                }
-+
+ 
+-            FOR_UNROLL (short i = 0; i < 4; i++) {
+-                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
 +                lsma += 8*64;
 +                lsmb += 4*64;
              }
@@ -1189,20 +1366,20 @@ index 25e78e10..e5ccd027 100644
 -                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
 -            }
 +                simdgroup_barrier(mem_flags::mem_none);
-+
-+                FOR_UNROLL (short i = 0; i < 8; i++){
-+                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
-+                }
  
 -            lsma += 8*64;
 -            lsmb += 4*64;
++                FOR_UNROLL (short i = 0; i < 8; i++){
++                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
++                }
++
 +                lsma += 8*64;
 +                lsmb += 4*64;
 +            }
          }
  #else
          auto sA = tA.slice(0, 0);
-@@ -10116,8 +10389,17 @@ kernel void kernel_mul_mm_id(
+@@ -10116,8 +10539,17 @@ kernel void kernel_mul_mm_id(
  #else
      threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
  
