@@ -9,6 +9,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Faster prompt processing**... the AMD tiled matmul now does its math in packed half precision, which AMD cards run at twice the speed. Prompt processing jumps about 50% on both engines (Qwen3-8B: ~310 to ~470 t/s) with output quality verified identical. Generation speed is unaffected (that one is memory-bound).
 - **Much faster prompts in long conversations**... a new attention kernel processes prompt tokens in groups of 16 that share the stored conversation instead of each token re-reading all of it. Prompt processing at 4K of context goes about 3x faster (103 to 289 t/s on an 8B), and the deeper the chat, the bigger the win... long conversations stop feeling slower to respond over time.
 
+## [0.81.43] - 2026-07-02
+
 ### Added
 - **Image generation studio**... a new experimental Images tab in the main window generates images locally on the GPU with stable-diffusion.cpp, which shares the same Metal stack as the language engines. Supports text-to-image and image-to-image (pick a starting image and set how strongly it steers the result), and runs on the AMD GPU with the same tiled matmul the language engines use.
 - **Image model catalog**... a set of models spanning GPU sizes, each with its own VRAM budget so the app only offers the ones that fit, from small models on 4 GB cards up to larger ones on 24 GB+ cards. Resolution options scale to the selected model and the detected VRAM.
