@@ -3,6 +3,15 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.46] - 2026-07-04
+
+### Added
+- **Restart from Use**... pressing Use on a model while the main server is running now offers to restart it right away with the new model, after a confirmation popup. With the server stopped, Use keeps selecting the model without starting anything.
+
+### Fixed
+- **MoE offload follows the selected model**... picking a model from the server card or the benchmark now sets 'MoE experts on CPU' automatically: the value you last used for that model, or the hardware recommendation, and 0 for dense models. Before, the value from a previous MoE model stuck around (dense models kept showing MoE info) and selecting a MoE model didn't recover the value you had set.
+- **Per-model MoE memory**... the app remembers the 'experts on CPU' you settle on for each model (adjusted in Settings, used in a benchmark run, or applied from the optimizer sweep) and restores it whenever that model is selected again, anywhere.
+
 ## [0.81.45] - 2026-07-04
 
 ### Fixed
