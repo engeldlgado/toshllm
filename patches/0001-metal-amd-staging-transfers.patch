@@ -726,7 +726,7 @@ index a1003b3a..53748453 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 25e78e10..47529e1b 100644
+index 25e78e10..60d04105 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -7189,6 +7189,322 @@ kernel void kernel_flash_attn_ext_vec(
@@ -1240,7 +1240,23 @@ index 25e78e10..47529e1b 100644
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
-@@ -9914,13 +10288,25 @@ kernel void kernel_mul_mm_id(
+@@ -9896,9 +10270,12 @@ kernel void kernel_mul_mm_id(
+ 
+     const int id = ids_i32[im*args.ne21 + r1 + lr1];
+ 
+-    const short i11 = (id % args.ne20) % args.ne11;
+-    const short i12 = (id / args.ne20);
+-    const short i13 = 0;
++    // int, not short: the AMD Metal compiler miscompiles device address math
++    // built from short indices with ids-derived dynamic bases (reads zeros/junk
++    // for every token with id >= 256, i.e. token index >= 128)
++    const int i11 = (id % args.ne20) % args.ne11;
++    const int i12 = (id / args.ne20);
++    const int i13 = 0;
+ 
+     const uint64_t offset0 = im*args.nb02 + i13*args.nb03;
+     const short    offset1 = il0/nl;
+@@ -9914,13 +10291,25 @@ kernel void kernel_mul_mm_id(
          + args.nb10*iy);
  
  #ifndef GGML_METAL_HAS_TENSOR
@@ -1268,7 +1284,7 @@ index 25e78e10..47529e1b 100644
      }
  #else
      auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
-@@ -9951,7 +10337,11 @@ kernel void kernel_mul_mm_id(
+@@ -9951,7 +10340,11 @@ kernel void kernel_mul_mm_id(
  
                  const short ib = 8*sx + sy;
  
@@ -1281,7 +1297,7 @@ index 25e78e10..47529e1b 100644
              }
          } else {
              S0_4x4 temp_a;
-@@ -9963,17 +10353,14 @@ kernel void kernel_mul_mm_id(
+@@ -9963,17 +10356,14 @@ kernel void kernel_mul_mm_id(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -1301,7 +1317,7 @@ index 25e78e10..47529e1b 100644
              }
          }
  
-@@ -10077,27 +10464,63 @@ kernel void kernel_mul_mm_id(
+@@ -10077,27 +10467,63 @@ kernel void kernel_mul_mm_id(
          threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
          threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
  
@@ -1379,7 +1395,7 @@ index 25e78e10..47529e1b 100644
          }
  #else
          auto sA = tA.slice(0, 0);
-@@ -10116,8 +10539,17 @@ kernel void kernel_mul_mm_id(
+@@ -10116,8 +10542,17 @@ kernel void kernel_mul_mm_id(
  #else
      threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
  
@@ -1399,6 +1415,19 @@ index 25e78e10..47529e1b 100644
      }
  #endif
  
+@@ -10126,8 +10561,10 @@ kernel void kernel_mul_mm_id(
+     for (short j = sgitg; j < nr1; j += 4) {
+         const int id = ids_i32[im*args.ne21 + r1 + j];
+ 
+-        const short ide = id % args.ne20;
+-        const short idt = id / args.ne20;
++        // int, not short: the AMD Metal compiler miscompiles device address math
++        // built from short indices with ids-derived dynamic bases
++        const int ide = id % args.ne20;
++        const int idt = id / args.ne20;
+ 
+         device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
+         device float4 * D4 = (device float4 *) D;
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 index 12bf5c37..bc6ce32d 100644
 --- a/src/llama-kv-cache.cpp

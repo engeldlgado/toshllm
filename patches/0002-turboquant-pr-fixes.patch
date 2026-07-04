@@ -711,7 +711,7 @@ index a1003b3a..53748453 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 344657df..1128a080 100644
+index 344657df..1357fb9f 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -8500,6 +8500,356 @@ kernel void kernel_flash_attn_ext_vec(
@@ -1271,10 +1271,50 @@ index 344657df..1128a080 100644
  #endif // GGML_METAL_HAS_TENSOR
  
  template<short ne20> // n_expert_used
-@@ -12249,6 +12792,231 @@ kernel void kernel_mul_mm_id(
-     }
- }
+@@ -11998,9 +12541,12 @@ kernel void kernel_mul_mm_id(
  
+     const int id = ids_i32[im*args.ne21 + r1 + lr1];
+ 
+-    const short i11 = (id % args.ne20) % args.ne11;
+-    const short i12 = (id / args.ne20);
+-    const short i13 = 0;
++    // int, not short: the AMD Metal compiler miscompiles device address math
++    // built from short indices with ids-derived dynamic bases (reads zeros/junk
++    // for every token with id >= 256, i.e. token index >= 128)
++    const int i11 = (id % args.ne20) % args.ne11;
++    const int i12 = (id / args.ne20);
++    const int i13 = 0;
+ 
+     const uint64_t offset0 = im*args.nb02 + i13*args.nb03;
+     const short    offset1 = il0/nl;
+@@ -12228,8 +12774,237 @@ kernel void kernel_mul_mm_id(
+     for (short j = sgitg; j < nr1; j += 4) {
+         const int id = ids_i32[im*args.ne21 + r1 + j];
+ 
+-        const short ide = id % args.ne20;
+-        const short idt = id / args.ne20;
++        // int, not short: same AMD address-math miscompile as the loads above
++        const int ide = id % args.ne20;
++        const int idt = id / args.ne20;
++
++        device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
++        device float4 * D4 = (device float4 *) D;
++
++        threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
++        threadgroup float4 * C4 = (threadgroup float4 *) C;
++
++        int i = tiisg;
++        for (; i < nr0/4; i += 32) {
++            *(D4 + i) = *(C4 + i);
++        }
++
++        i = (4*(nr0/4)) + tiisg;
++        for (; i < nr0; i += 32) {
++            *(D + i) = *(C + i);
++        }
++    }
++}
++
 +#ifndef GGML_METAL_HAS_TENSOR
 +// Manual tiled mul_mm_id for GPUs without simdgroup matrix (wave32 AMD/RDNA).
 +// Same load + scatter as kernel_mul_mm_id; only the outer product and the
@@ -1329,9 +1369,12 @@ index 344657df..1128a080 100644
 +
 +    const int id = ids_i32[im*args.ne21 + r1 + lr1];
 +
-+    const short i11 = (id % args.ne20) % args.ne11;
-+    const short i12 = (id / args.ne20);
-+    const short i13 = 0;
++    // int, not short: the AMD Metal compiler miscompiles device address math
++    // built from short indices with ids-derived dynamic bases (reads zeros/junk
++    // for every token with id >= 256, i.e. token index >= 128)
++    const int i11 = (id % args.ne20) % args.ne11;
++    const int i12 = (id / args.ne20);
++    const int i13 = 0;
 +
 +    const uint64_t offset0 = im*args.nb02 + i13*args.nb03;
 +    const short    offset1 = il0/nl;
@@ -1478,32 +1521,21 @@ index 344657df..1128a080 100644
 +    for (short j = sgitg; j < nr1; j += 4) {
 +        const int id = ids_i32[im*args.ne21 + r1 + j];
 +
-+        const short ide = id % args.ne20;
-+        const short idt = id / args.ne20;
-+
-+        device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
-+        device float4 * D4 = (device float4 *) D;
-+
-+        threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
-+        threadgroup float4 * C4 = (threadgroup float4 *) C;
-+
-+        int i = tiisg;
-+        for (; i < nr0/4; i += 32) {
-+            *(D4 + i) = *(C4 + i);
-+        }
-+
-+        i = (4*(nr0/4)) + tiisg;
-+        for (; i < nr0; i += 32) {
-+            *(D + i) = *(C + i);
-+        }
-+    }
-+}
++        // int, not short: same AMD address-math miscompile as the loads above
++        const int ide = id % args.ne20;
++        const int idt = id / args.ne20;
+ 
+         device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
+         device float4 * D4 = (device float4 *) D;
+@@ -12248,6 +13023,7 @@ kernel void kernel_mul_mm_id(
+         }
+     }
+ }
 +#endif // GGML_METAL_HAS_TENSOR
-+
+ 
  #define QK_NL 16
  
- //
-@@ -12403,6 +13171,62 @@ template [[host_name("kernel_mul_mm_iq1_m_f16")]]   kernel mul_mm_t kernel_mul_m
+@@ -12403,6 +13179,62 @@ template [[host_name("kernel_mul_mm_iq1_m_f16")]]   kernel mul_mm_t kernel_mul_m
  template [[host_name("kernel_mul_mm_iq4_nl_f16")]]  kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
  template [[host_name("kernel_mul_mm_iq4_xs_f16")]]  kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
  
@@ -1566,7 +1598,7 @@ index 344657df..1128a080 100644
  //
  // indirect matrix-matrix multiplication
  //
-@@ -12468,6 +13292,67 @@ template [[host_name("kernel_mul_mm_id_iq1_m_f16")]]   kernel mul_mm_id kernel_m
+@@ -12468,6 +13300,67 @@ template [[host_name("kernel_mul_mm_id_iq1_m_f16")]]   kernel mul_mm_id kernel_m
  template [[host_name("kernel_mul_mm_id_iq4_nl_f16")]]  kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
  template [[host_name("kernel_mul_mm_id_iq4_xs_f16")]]  kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
  
