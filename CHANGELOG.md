@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.45] - 2026-07-04
+
+### Fixed
+- **MoE models no longer break on long prompts**... on AMD GPUs, mixture-of-experts models (Qwen3.6 35B/14B and family) could return garbage like `000000...` on a long prompt or from the second message on, and were silently losing prompt quality even when the output looked fine. The expert-routing matrix kernel read the wrong memory for every token past the first 128 of a batch (a Metal compiler quirk with 16-bit index math on AMD). Prompts now read correctly at any length, with a measured quality jump on long MoE prompts on top of the crash fix.
+
 ## [0.81.44] - 2026-07-03
 
 ### Improved
