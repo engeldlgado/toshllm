@@ -300,7 +300,10 @@ struct SettingsView: View {
                 Stepper(modelIsMoE
                             ? loc.t("Expertos MoE en CPU: \(ncmoe)", "MoE experts on CPU: \(ncmoe)")
                             : loc.t("Expertos MoE en CPU: no aplica (modelo denso)", "MoE experts on CPU: N/A (dense model)"),
-                        value: $ncmoe, in: 0...99)
+                        value: Binding(get: { ncmoe }, set: { v in
+                            ncmoe = v
+                            ServerSettings.rememberNcmoe(v, forModel: modelPath)
+                        }), in: 0...99)
                     .disabled(!modelIsMoE)
                     .infoTip(loc.t("Solo modelos MoE: capas cuyos 'expertos' viven en RAM y los procesa el CPU. Se ajusta solo al elegir modelo; súbelo si la VRAM se satura, bájalo si te sobra. (Deshabilitado en modelos densos, donde el motor lo ignora.)",
                                 "MoE models only: layers whose 'experts' live in RAM and run on the CPU. Auto-set when picking a model; raise if VRAM saturates, lower if you have headroom. (Disabled on dense models, where the engine ignores it.)"))

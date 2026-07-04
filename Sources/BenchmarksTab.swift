@@ -39,8 +39,10 @@ struct BenchmarksView: View {
             if !busy {
                 cfg = .fromDefaults()
                 // A MoE model left at ncmoe 0 puts every expert on the GPU and can
-                // saturate VRAM; seed the hardware-recommended value instead.
-                if isMoEModel && cfg.ncmoe == 0 { applySuggestedNcmoe(for: cfg.modelPath) }
+                // saturate VRAM; a dense model must not inherit a stale MoE value.
+                if !isMoEModel || cfg.ncmoe == 0 {
+                    cfg.ncmoe = Estimator.ncmoeForSelection(path: cfg.modelPath, models: models.models)
+                }
             }
         }
         .alert(loc.t("Guardar como perfil", "Save as profile"),
@@ -86,21 +88,13 @@ struct BenchmarksView: View {
         !cfg.modelPath.isEmpty && ServerSettings.modelIsMoE(at: cfg.modelPath)
     }
 
-    /// Model picker binding that seeds the recommended ncmoe on selection.
+    /// Model picker binding that seeds ncmoe on selection: the remembered or
+    /// recommended value for MoE models, 0 for dense (never carries over stale).
     private var modelBinding: Binding<String> {
         Binding(get: { cfg.modelPath }, set: { newPath in
             cfg.modelPath = newPath
-            applySuggestedNcmoe(for: newPath)
+            cfg.ncmoe = Estimator.ncmoeForSelection(path: newPath, models: models.models)
         })
-    }
-
-    /// Seed 'experts on CPU' with the hardware-recommended value for a MoE model,
-    /// matching what the Models tab applies, so the benchmark never runs at the
-    /// unsafe ncmoe 0 that can saturate VRAM.
-    private func applySuggestedNcmoe(for path: String) {
-        guard ServerSettings.modelIsMoE(at: path),
-              let lm = models.models.first(where: { $0.url.path == path }) else { return }
-        cfg.ncmoe = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: lm), hw: hardware).suggestedNcmoe
     }
 
     private var benchLogButton: some View {
@@ -175,6 +169,7 @@ struct BenchmarksView: View {
                             .font(.callout).foregroundStyle(.pink)
                         Button(loc.t("Aplicar ncmoe \(best)", "Apply ncmoe \(best)")) {
                             cfg.ncmoe = best
+                            ServerSettings.rememberNcmoe(best, forModel: cfg.modelPath)
                             bench.sweepBest = nil
                         }
                         .controlSize(.small)
@@ -230,7 +225,10 @@ struct BenchmarksView: View {
                 .disabled(cfg.modelPath.isEmpty || cfg.ncmoe == 0 || server.state == .running || server.state == .starting)
                 .help(loc.t("Solo modelos MoE: prueba varios valores de 'Expertos en CPU' bajando hasta detectar la saturación de VRAM, y reporta el mejor. Tarda varios minutos.",
                             "MoE models only: tries several 'experts on CPU' values going down until VRAM saturates, then reports the best. Takes several minutes."))
-                Button { bench.run(settings: cfg) } label: {
+                Button {
+                    ServerSettings.rememberNcmoe(cfg.ncmoe, forModel: cfg.modelPath)
+                    bench.run(settings: cfg)
+                } label: {
                     Label(loc.t("Ejecutar", "Run"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent).controlSize(.large)

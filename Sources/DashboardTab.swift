@@ -204,14 +204,19 @@ struct DashboardView: View {
              trailing: profileStore.profiles.isEmpty ? nil : AnyView(profileMenu)) {
             HStack(spacing: 8) {
                 Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
-                Picker("", selection: $modelPath) {
+                // Selecting a model also seeds ncmoe (remembered value, or the
+                // recommendation; 0 for dense) so it never carries over stale.
+                Picker("", selection: Binding(get: { modelPath }, set: { p in
+                    modelPath = p
+                    ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
+                })) {
                     Text(loc.t("Sin modelo", "No model")).tag("")
                     ForEach(models.models) { Text($0.name).tag($0.url.path) }
                 }
                 .labelsHidden()
                 .disabled(server.state == .running || server.state == .starting)
             }
-            if ncmoe > 0 {
+            if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
                 row("cpu", loc.t("Expertos MoE en CPU: \(ncmoe) capas",
                                  "MoE experts on CPU: \(ncmoe) layers"))
             }
@@ -397,7 +402,12 @@ struct AddedServerCard: View {
         Card(title: c.name, icon: "server.rack", fill: true, trailing: AnyView(accessory)) {
             HStack(spacing: 8) {
                 Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
-                Picker("", selection: bind(\.modelPath, "")) {
+                // Same ncmoe seeding as the primary server's picker.
+                Picker("", selection: Binding(get: { c.profile?.modelPath ?? "" }, set: { p in
+                    c.profile?.modelPath = p
+                    c.profile?.ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
+                    manager.persist()
+                })) {
                     Text(loc.t("Sin modelo", "No model")).tag("")
                     ForEach(models.models) { Text($0.name).tag($0.url.path) }
                 }

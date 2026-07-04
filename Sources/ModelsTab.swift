@@ -449,7 +449,6 @@ private struct LocalModelCard: View {
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var models: ModelStore
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
-    @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
 
     var body: some View {
         let est = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: model), hw: hardware)
@@ -485,10 +484,8 @@ private struct LocalModelCard: View {
                     Label(loc.t("Activo", "Active"), systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green).font(.callout)
                 } else {
-                    Button(loc.t("Usar", "Use")) {
-                        modelPath = model.url.path
-                        ncmoe = est.suggestedNcmoe
-                    }.buttonStyle(.borderedProminent).controlSize(.small)
+                    UseModelButton(path: model.url.path, modelName: model.name)
+                        .controlSize(.small)
                 }
                 Spacer()
                 Button { NSWorkspace.shared.activateFileViewerSelecting([model.url]) } label: {

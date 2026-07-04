@@ -541,6 +541,19 @@ struct ServerSettings {
         (ggufUInt32("expert_count", at: path) ?? 0) > 0
     }
 
+    /// Remembers the ncmoe the user settled on for a MoE model, so selecting
+    /// that model again restores it instead of re-deriving the recommendation.
+    nonisolated static func rememberNcmoe(_ value: Int, forModel path: String) {
+        guard !path.isEmpty, modelIsMoE(at: path) else { return }
+        var map = UserDefaults.standard.dictionary(forKey: SettingsKeys.ncmoeByModel) as? [String: Int] ?? [:]
+        map[path] = value
+        UserDefaults.standard.set(map, forKey: SettingsKeys.ncmoeByModel)
+    }
+
+    nonisolated static func recalledNcmoe(forModel path: String) -> Int? {
+        (UserDefaults.standard.dictionary(forKey: SettingsKeys.ncmoeByModel) as? [String: Int])?[path]
+    }
+
     /// Finds the multimodal projector (mmproj) paired with a model, if any. The
     /// projector must belong to this model — its name starts with the model's stem
     /// (`<model>.mmproj.gguf`) — so a same-family model's projector isn't mispaired on

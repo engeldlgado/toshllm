@@ -18,6 +18,8 @@ enum SettingsKeys {
     static let port = "port"
     static let ngl = "ngl"
     static let ncmoe = "ncmoe"
+    /// Last user-set ncmoe per model file, restored when that model is re-selected.
+    static let ncmoeByModel = "ncmoeByModel"
     static let ctx = "ctx"
     static let threads = "threads"
     static let flashAttn = "flashAttn"

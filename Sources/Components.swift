@@ -41,13 +41,54 @@ struct EstimateLine: View {
     }
 }
 
+/// "Use" action for a model: marks it as the primary server's model and, when
+/// that server is up, asks to restart it so the change applies right away.
+struct UseModelButton: View {
+    let path: String
+    let modelName: String
+    @EnvironmentObject var loc: Localizer
+    @EnvironmentObject var models: ModelStore
+    @EnvironmentObject var server: ServerController
+    @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
+    @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
+    @State private var confirmRestart = false
+
+    var body: some View {
+        Button(loc.t("Usar", "Use")) {
+            if server.state == .running || server.state == .starting {
+                confirmRestart = true
+            } else {
+                apply()
+            }
+        }
+        .buttonStyle(.borderedProminent)
+        .help(loc.t("Usa este modelo en el servidor principal; si está corriendo, pedirá confirmación para reiniciarlo.",
+                    "Use this model on the main server; if it's running, you'll be asked to confirm a restart."))
+        .alert(loc.t("¿Reiniciar el servidor principal?", "Restart the main server?"),
+               isPresented: $confirmRestart) {
+            Button(loc.t("Reiniciar", "Restart")) {
+                apply()
+                server.restart(.fromDefaults())
+            }
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(loc.t("El servidor principal se reiniciará para usar «\(modelName)».",
+                       "The main server will restart to use “\(modelName)”."))
+        }
+    }
+
+    private func apply() {
+        modelPath = path
+        ncmoe = Estimator.ncmoeForSelection(path: path, models: models.models)
+    }
+}
+
 struct CatalogActionButton: View {
     let model: CatalogModel
     let est: MemoryEstimate
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
-    @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
 
     var body: some View {
         if let local = models.localModel(fileName: model.fileName) {
@@ -55,11 +96,7 @@ struct CatalogActionButton: View {
                 Label(loc.t("Activo", "Active"), systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green).font(.callout)
             } else {
-                Button(loc.t("Usar", "Use")) {
-                    modelPath = local.url.path
-                    ncmoe = est.suggestedNcmoe
-                }
-                .buttonStyle(.borderedProminent)
+                UseModelButton(path: local.url.path, modelName: model.name)
             }
         } else if let item = models.downloadItem(fileName: model.fileName) {
             InlineDownloadProgress(item: item)

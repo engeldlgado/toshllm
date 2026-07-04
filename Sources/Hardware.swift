@@ -109,6 +109,15 @@ struct MemoryEstimate {
 }
 
 enum Estimator {
+    /// ncmoe to apply when a model is picked: dense → 0; MoE → the value the
+    /// user last set for that file, or the hardware recommendation.
+    static func ncmoeForSelection(path: String, models: [LocalModel]) -> Int {
+        guard !path.isEmpty, ServerSettings.modelIsMoE(at: path) else { return 0 }
+        if let saved = ServerSettings.recalledNcmoe(forModel: path) { return saved }
+        guard let lm = models.first(where: { $0.url.path == path }) else { return 0 }
+        return estimateCurrent(spec: Catalog.spec(forLocal: lm), hw: hardware).suggestedNcmoe
+    }
+
     /// Estimate using the user's current context size and KV quantization.
     static func estimateCurrent(spec: ModelSpec, hw: HardwareInfo) -> MemoryEstimate {
         let d = UserDefaults.standard
