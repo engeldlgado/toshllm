@@ -28,7 +28,13 @@ struct ServerSettings {
     var concurrencyDisable: Bool
     var vramReserveMB: Int
     var gpuIndex: Int          // -1 = system default
+    /// Explicit set of physical GPUs to split across (2+ entries). Overrides
+    /// `gpuIndex` and the all/N `multiGPU` split.
+    var gpuList: [Int] = []
     var extraArgs: String
+    /// Serve /v1/embeddings (--embeddings). llama-server restricts the process
+    /// to embedding use, so it's meant for a dedicated embedding-model server.
+    var embeddings: Bool = false
     var cacheTypeK: String     // f16 | q8_0 | q5_x | q4_x | iq4_nl
     var cacheTypeV: String
     var mlock: Bool
@@ -154,10 +160,11 @@ struct ServerSettings {
         // the N slots share one pool: the main chat keeps the full context window
         // and concurrent API requests don't multiply KV memory.
         if parallelSlots > 1 { args.append("--kv-unified") }
-        // EXPERIMENTAL multi-GPU: split layers across all detected Metal devices.
-        // Leaves device selection to llama.cpp (we also skip the single-device env
-        // below). Unvalidated on AMD — see the multiGPU doc comment.
-        if multiGPU { args += ["--split-mode", "layer"] }
+        // EXPERIMENTAL multi-GPU: split layers across the detected Metal devices
+        // (all/N via multiGPU, or the explicit gpuList set). Device selection is
+        // done through the env vars below.
+        if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
+        if embeddings { args.append("--embeddings") }
         // Persist KV slots to disk so reopening a chat skips re-prefill. Only on
         // the turbo engine, where the AMD FA kernel keeps the V cache contiguous
         // (the official engine's transposed-V save/restore is unusably slow on AMD).
@@ -208,7 +215,7 @@ struct ServerSettings {
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if effectiveFaAmd || flashAttn == "on" || kvNeedsFlashAttention { args += ["-fa", "1"] }
-        if multiGPU { args += ["--split-mode", "layer"] }
+        if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
         return args
     }
 
@@ -216,6 +223,7 @@ struct ServerSettings {
     /// record. Resolves the macOS-picked default to its real device name.
     var gpuLabel: String {
         let gpus = ServerController.availableGPUs()
+        if gpuList.count >= 2 { return "Split · \(gpuList.count) GPUs" }
         if multiGPU {
             let n = multiGPUCount > 0 ? min(multiGPUCount, gpus.count) : gpus.count
             return "Split · \(max(2, n)) GPUs"
@@ -238,7 +246,10 @@ struct ServerSettings {
         // Physical GPU selection (consumed by the patched Metal backend, which maps
         // these to MTLCopyAllDevices() — the same order as the app's GPU picker).
         let gpus = ServerController.availableGPUs()
-        if multiGPU {
+        if gpuList.count >= 2 {
+            // Split across exactly these GPUs; slot i maps to the i-th listed index.
+            env["GGML_METAL_DEVICE_LIST"] = gpuList.map(String.init).joined(separator: ",")
+        } else if multiGPU {
             // Split across N GPUs. Fewer than all lets the user trade prompt speed
             // (more GPUs) for generation speed (fewer, less cross-card sync). 0 = all.
             let n = multiGPUCount > 0 ? min(multiGPUCount, gpus.count) : gpus.count
@@ -251,8 +262,11 @@ struct ServerSettings {
         // GPUs, so weights stream over Thunderbolt every op (~0.8 t/s). Forcing private
         // VRAM-resident buffers restores normal speed. Auto-enable it when the selected
         // card is external; the manual override covers the default case (macOS picks).
-        let selectedExternal = !multiGPU && gpuIndex >= 0 && gpus.first { $0.index == gpuIndex }?.isExternal == true
-        let anyExternalInSplit = multiGPU && gpus.contains { $0.isExternal }
+        let splittingList = gpuList.count >= 2
+        let selectedExternal = !multiGPU && !splittingList && gpuIndex >= 0
+            && gpus.first { $0.index == gpuIndex }?.isExternal == true
+        let anyExternalInSplit = (multiGPU && !splittingList && gpus.contains { $0.isExternal })
+            || (splittingList && gpus.contains { gpuList.contains($0.index) && $0.isExternal })
         if forcePrivateBuffers || selectedExternal || anyExternalInSplit {
             env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
@@ -296,6 +310,11 @@ struct ServerSettings {
         return FileManager.default.fileExists(atPath: dev) ? dev : nil
     }
 
+    /// gpuList is persisted as a comma-separated string so @AppStorage can bind it.
+    static func gpuList(fromCSV csv: String?) -> [Int] {
+        (csv ?? "").split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
     /// Reads persisted settings (same keys as the views' @AppStorage).
     static func fromDefaults() -> ServerSettings {
         let d = UserDefaults.standard
@@ -315,7 +334,9 @@ struct ServerSettings {
             concurrencyDisable: bool(SettingsKeys.concurrencyDisable, defaultConcurrencyDisable),
             vramReserveMB: int(SettingsKeys.vramReserve, 1024),
             gpuIndex: int(SettingsKeys.gpuIndex, -1),
+            gpuList: gpuList(fromCSV: d.string(forKey: SettingsKeys.gpuList)),
             extraArgs: d.string(forKey: SettingsKeys.extraArgs) ?? "",
+            embeddings: bool(SettingsKeys.embeddings, false),
             cacheTypeK: d.string(forKey: SettingsKeys.cacheTypeK) ?? "f16",
             cacheTypeV: d.string(forKey: SettingsKeys.cacheTypeV) ?? "f16",
             mlock: bool(SettingsKeys.mlock, false),

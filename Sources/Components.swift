@@ -83,6 +83,49 @@ struct UseModelButton: View {
     }
 }
 
+/// GPU picker that also supports sets: none selected = system default, one =
+/// pin that GPU, two or more = split the layers across exactly those GPUs.
+struct GPUSelectionMenu: View {
+    @Binding var gpuIndex: Int
+    @Binding var gpuList: [Int]
+    @EnvironmentObject var loc: Localizer
+
+    private var selection: Set<Int> {
+        gpuList.count >= 2 ? Set(gpuList) : (gpuIndex >= 0 ? [gpuIndex] : [])
+    }
+
+    var body: some View {
+        Menu {
+            Button(loc.t("Predeterminada", "Default")) { gpuIndex = -1; gpuList = [] }
+            Divider()
+            ForEach(hardware.gpus) { g in
+                Toggle("\(g.name) · \(g.vramMB / 1024) GB", isOn: Binding(
+                    get: { selection.contains(g.index) },
+                    set: { _ in toggle(g.index) }))
+            }
+        } label: {
+            Text(label).lineLimit(1)
+        }
+        .help(loc.t("GPU(s) que usa este servidor: una fija esa GPU; varias reparten las capas del modelo entre ellas (experimental); ninguna deja elegir a macOS.",
+                    "GPU(s) this server uses: one pins that GPU; several split the model's layers across them (experimental); none lets macOS choose."))
+    }
+
+    private var label: String {
+        let sel = selection
+        if sel.count >= 2 { return loc.t("Reparto · \(sel.count) GPUs", "Split · \(sel.count) GPUs") }
+        if let i = sel.first, let g = hardware.gpus.first(where: { $0.index == i }) { return g.name }
+        return loc.t("GPU predeterminada", "Default GPU")
+    }
+
+    private func toggle(_ i: Int) {
+        var sel = selection
+        if sel.contains(i) { sel.remove(i) } else { sel.insert(i) }
+        let sorted = sel.sorted()
+        if sorted.count >= 2 { gpuIndex = -1; gpuList = sorted }
+        else { gpuIndex = sorted.first ?? -1; gpuList = [] }
+    }
+}
+
 struct CatalogActionButton: View {
     let model: CatalogModel
     let est: MemoryEstimate

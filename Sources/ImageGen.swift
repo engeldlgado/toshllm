@@ -1,4 +1,5 @@
 import SwiftUI
+import Metal
 
 // Local text-to-image via a bundled stable-diffusion.cpp engine. A model is one
 // or more files (a full checkpoint, or a diffusion transformer plus its VAE and
@@ -353,7 +354,10 @@ final class ImageGenerator: ObservableObject {
                   initImagePath: String = "", strength: Double = 0.75) {
         guard !isBusy else { return }
         let dir = models.imagenDirectory
-        let out = dir.appendingPathComponent("toshllm_out.\(format.ext)")
+        // Timestamped name so each generation keeps its own file.
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd_HH.mm.ss"
+        let out = dir.appendingPathComponent("toshllm_\(fmt.string(from: Date())).\(format.ext)")
 
         // Each component maps to its own sd-cli flag (a full checkpoint via --model,
         // or a diffusion model plus its VAE and text encoders).
@@ -389,7 +393,11 @@ final class ImageGenerator: ObservableObject {
         // Split each step into enough command buffers to clear the GPU watchdog.
         env["GGML_METAL_NCB"] = String(ImageGenLimits.nCB(width: width, height: height))
         // Pin the chosen GPU (slot maps to MTLCopyAllDevices order, as in the picker).
-        if gpuIndex > 0 { env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex) }
+        // Index 0 must also be exported: without it Metal falls back to the system
+        // default, which on multi-GPU Macs may be a different card than picked.
+        if gpuIndex >= 0 && MTLCopyAllDevices().count > 1 {
+            env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex)
+        }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Self.binary)

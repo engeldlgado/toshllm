@@ -224,7 +224,7 @@ index d465f31c..d37ddd12 100644
      bool has_tensor;
      bool use_residency_sets;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60e..13369472 100644
+index a7cbc60e..aafd4088 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -128,6 +128,28 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
@@ -256,7 +256,7 @@ index a7cbc60e..13369472 100644
  #else
  
  #ifdef SWIFT_PACKAGE
-@@ -682,7 +704,29 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -682,7 +704,41 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
      assert(dev != NULL);
  
      if (dev->mtl_device == nil) {
@@ -266,14 +266,26 @@ index a7cbc60e..13369472 100644
 +        // default GPU (preserving original behavior, incl. its removable/eGPU policy).
 +        // Physical GPU selection is opt-in via env, mapping the slot to a real
 +        // MTLCopyAllDevices() device (same order as the app's GPU picker):
-+        //   GGML_METAL_DEVICE_INDEX=N  -> pin the single device to physical GPU N
-+        //   GGML_METAL_DEVICES=K (K>1) -> register K devices, slot i -> physical i
-+        const char * env_idx = getenv("GGML_METAL_DEVICE_INDEX");
-+        const char * env_num = getenv("GGML_METAL_DEVICES");
++        //   GGML_METAL_DEVICE_INDEX=N    -> pin the single device to physical GPU N
++        //   GGML_METAL_DEVICES=K (K>1)   -> register K devices, slot i -> physical i
++        //   GGML_METAL_DEVICE_LIST=a,b   -> register the listed GPUs, slot i -> physical list[i]
++        const char * env_idx  = getenv("GGML_METAL_DEVICE_INDEX");
++        const char * env_num  = getenv("GGML_METAL_DEVICES");
++        const char * env_list = getenv("GGML_METAL_DEVICE_LIST");
 +        const int    num_dev = env_num ? atoi(env_num) : 1;
-+        if (env_idx != NULL || num_dev > 1) {
++        if (env_idx != NULL || num_dev > 1 || env_list != NULL) {
 +            const int base = env_idx ? atoi(env_idx) : 0;
-+            const int phys = base + device;
++            int phys = base + device;
++            if (env_list != NULL) {
++                phys = -1;
++                const char * p = env_list;
++                for (int i = 0; ; ++i) {
++                    if (i == device) { phys = atoi(p); break; }
++                    while (*p != '\0' && *p != ',') ++p;
++                    if (*p == '\0') break;
++                    ++p;
++                }
++            }
 +            NSArray<id<MTLDevice>> * all = MTLCopyAllDevices();
 +            if (phys >= 0 && phys < (int) all.count) {
 +                dev->mtl_device = [all[phys] retain];
@@ -287,7 +299,7 @@ index a7cbc60e..13369472 100644
  
          if (dev->mtl_device) {
              dev->mtl_queue = [dev->mtl_device newCommandQueue];
-@@ -693,10 +737,73 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -693,10 +749,73 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
              dev->addr_virt = 0x000000400ULL;
  
              dev->props.device = device;
@@ -361,7 +373,7 @@ index a7cbc60e..13369472 100644
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
              dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
-@@ -1254,6 +1361,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1254,6 +1373,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
@@ -398,7 +410,7 @@ index a7cbc60e..13369472 100644
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
          case GGML_OP_SSM_SCAN:
-@@ -1718,6 +1855,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1718,6 +1867,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
  }
  
  void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -409,7 +421,7 @@ index a7cbc60e..13369472 100644
      if (buf->is_shared) {
          memcpy((char *) tensor->data + offset, data, size);
          return;
-@@ -1731,12 +1872,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +1884,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -467,7 +479,7 @@ index a7cbc60e..13369472 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1772,6 +1956,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1772,6 +1968,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -478,7 +490,7 @@ index a7cbc60e..13369472 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1788,24 +1976,67 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1788,24 +1988,67 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -711,10 +723,28 @@ index 18656b34..1682e749 100644
          // half8x8 kernel
          const int nqptg = OP_FLASH_ATTN_EXT_NQPSG; // queries per threadgroup
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index a1003b3a..53748453 100644
+index a1003b3a..b2842a5a 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -928,6 +928,10 @@ ggml_backend_reg_t ggml_backend_metal_reg(void) {
+@@ -918,6 +918,17 @@ ggml_backend_reg_t ggml_backend_metal_reg(void) {
+             g_devices = atoi(env);
+         }
+ 
++        // an explicit device list registers one slot per listed physical GPU
++        const char * env_list = getenv("GGML_METAL_DEVICE_LIST");
++        if (env_list && *env_list) {
++            g_devices = 1;
++            for (const char * p = env_list; *p; ++p) {
++                if (*p == ',') {
++                    ++g_devices;
++                }
++            }
++        }
++
+         static std::vector<ggml_backend_device_ptr> devs;
+ 
+         if (!initialized) {
+@@ -928,6 +939,10 @@ ggml_backend_reg_t ggml_backend_metal_reg(void) {
              static ggml_backend_metal_reg_ptr reg_ctx(ggml_backend_metal_reg_init());
  
              for (int i = 0; i < g_devices; ++i) {

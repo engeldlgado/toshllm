@@ -28,7 +28,10 @@ enum SettingsKeys {
     static let concurrencyDisable = "concurrencyDisable"
     static let vramReserve = "vramReserve"
     static let gpuIndex = "gpuIndex"
+    /// Comma-separated physical GPU indices to split across (2+ entries).
+    static let gpuList = "gpuList"
     static let extraArgs = "extraArgs"
+    static let embeddings = "embeddings"
     static let cacheTypeK = "cacheTypeK"
     static let cacheTypeV = "cacheTypeV"
     static let mlock = "mlock"
@@ -80,7 +83,7 @@ enum SettingsKeys {
     /// live outside UserDefaults and are untouched.
     static let resettableOptionKeys = [
         serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
-        vramReserve, gpuIndex, extraArgs, cacheTypeK, cacheTypeV, mlock, cacheRAM,
+        vramReserve, gpuIndex, gpuList, extraArgs, embeddings, cacheTypeK, cacheTypeV, mlock, cacheRAM,
         parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU, multiGPUCount,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,

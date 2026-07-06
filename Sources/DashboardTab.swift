@@ -16,6 +16,9 @@ struct DashboardView: View {
     @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
     @AppStorage(SettingsKeys.loadVision) private var loadVision = true
+    @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
+    @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
+    @AppStorage(SettingsKeys.embeddings) private var embeddings = false
 
     @EnvironmentObject var updates: UpdateChecker
 
@@ -216,6 +219,15 @@ struct DashboardView: View {
                 .labelsHidden()
                 .disabled(server.state == .running || server.state == .starting)
             }
+            if hardware.gpus.count > 1 {
+                HStack(spacing: 8) {
+                    Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
+                    GPUSelectionMenu(gpuIndex: $gpuIndex, gpuList: Binding(
+                        get: { ServerSettings.gpuList(fromCSV: gpuListCSV) },
+                        set: { gpuListCSV = $0.map(String.init).joined(separator: ",") }))
+                        .disabled(server.state == .running || server.state == .starting)
+                }
+            }
             if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
                 row("cpu", loc.t("Expertos MoE en CPU: \(ncmoe) capas",
                                  "MoE experts on CPU: \(ncmoe) layers"))
@@ -274,6 +286,23 @@ struct DashboardView: View {
                 }
                 .help(loc.t("Ojo encendido: carga el proyector para leer imágenes. Apagado: solo texto, libera la VRAM del codificador de imágenes.",
                             "Eye on: loads the projector so the model can read images. Off: text-only, frees the image encoder's VRAM.") + restartNote)
+            }
+            DisclosureGroup {
+                HStack(spacing: 8) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Servidor de embeddings", "Embeddings server")).font(.callout)
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: $embeddings)
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                        .disabled(serverBusy)
+                }
+                .help(loc.t("Sirve /v1/embeddings con --embeddings para clientes RAG (p. ej. Obsidian Copilot). El servidor queda dedicado a embeddings: úsalo con un modelo de embeddings, no para chatear.",
+                            "Serves /v1/embeddings via --embeddings for RAG clients (e.g. Obsidian Copilot). The server becomes embeddings-only: use it with an embedding model, not for chat."))
+                .padding(.top, 4)
+            } label: {
+                Text(loc.t("Opciones avanzadas", "Advanced options"))
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             HStack {
@@ -415,11 +444,10 @@ struct AddedServerCard: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
-                Picker("", selection: bind(\.gpuIndex, -1)) {
-                    Text(loc.t("GPU por defecto", "Default GPU")).tag(-1)
-                    ForEach(hardware.gpus) { Text($0.name).tag($0.index) }
-                }
-                .labelsHidden().disabled(busy)
+                GPUSelectionMenu(gpuIndex: bind(\.gpuIndex, -1), gpuList: Binding(
+                    get: { c.profile?.gpuList ?? [] },
+                    set: { c.profile?.gpuList = $0; manager.persist() }))
+                    .disabled(busy)
             }
             HStack(spacing: 8) {
                 Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
@@ -448,6 +476,22 @@ struct AddedServerCard: View {
                     }
                     .buttonStyle(.plain).disabled(busy)
                 }
+            }
+            DisclosureGroup {
+                HStack(spacing: 8) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Servidor de embeddings", "Embeddings server")).font(.callout)
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: boolBind(\.embeddings, false))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
+                }
+                .help(loc.t("Sirve /v1/embeddings con --embeddings para clientes RAG (p. ej. Obsidian Copilot). El servidor queda dedicado a embeddings: úsalo con un modelo de embeddings, no para chatear.",
+                            "Serves /v1/embeddings via --embeddings for RAG clients (e.g. Obsidian Copilot). The server becomes embeddings-only: use it with an embedding model, not for chat."))
+                .padding(.top, 4)
+            } label: {
+                Text(loc.t("Opciones avanzadas", "Advanced options"))
+                    .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 ServerStateBadge(state: c.state)

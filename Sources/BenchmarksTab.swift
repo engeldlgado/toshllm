@@ -137,14 +137,11 @@ struct BenchmarksView: View {
                         }
                         if !gpus.isEmpty {
                             field("GPU") {
-                                Picker("", selection: $cfg.gpuIndex) {
-                                    Text(loc.t("Predeterminada", "Default")).tag(-1)
-                                    ForEach(gpus) { g in Text(g.name).tag(g.index) }
-                                }
-                                .labelsHidden().fixedSize()
+                                GPUSelectionMenu(gpuIndex: $cfg.gpuIndex, gpuList: $cfg.gpuList)
+                                    .fixedSize()
                             }
-                            .help(loc.t("GPU que ejecuta el benchmark. 'Predeterminada' deja que macOS elija; se registra en el resultado.",
-                                        "GPU that runs the benchmark. 'Default' lets macOS pick; it's recorded in the result."))
+                            .help(loc.t("GPU(s) del benchmark: una fija esa GPU, varias reparten el modelo entre ellas; 'Predeterminada' deja que macOS elija. Se registra en el resultado.",
+                                        "Benchmark GPU(s): one pins that GPU, several split the model across them; 'Default' lets macOS pick. It's recorded in the result."))
                         }
                         if isMoEModel {
                             field(loc.t("MoE en CPU", "MoE on CPU")) {
@@ -187,7 +184,7 @@ struct BenchmarksView: View {
                     chip(faChipText(cfg.benchmarkFlashAttentionRoute),
                          active: cfg.benchmarkFlashAttentionRoute != "off",
                          icon: cfg.benchmarkFlashAttentionRoute == "amd-gpu" ? "bolt.fill" : "cpu")
-                    chip(cfg.gpuLabel, active: cfg.gpuIndex >= 0 || cfg.multiGPU, icon: "cpu")
+                    chip(cfg.gpuLabel, active: cfg.gpuIndex >= 0 || cfg.multiGPU || cfg.gpuList.count >= 2, icon: "cpu")
                     Spacer()
                 }
 

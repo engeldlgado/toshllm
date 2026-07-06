@@ -3,6 +3,17 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.47] - 2026-07-06
+
+### Added
+- **Embeddings server**... a new option starts the server with `--embeddings`, so local RAG clients (e.g. Obsidian Copilot) get /v1/embeddings instead of a 501 error. Available in Settings and on each server card under the new Advanced options disclosure; pair it with a dedicated embedding model on a second server to keep chatting on the main one. Verified on AMD: GPU embeddings match the CPU reference exactly, including with the AMD Flash Attention kernel.
+- **Pick exactly which GPUs share a model**... the GPU pickers on the server cards and in Benchmarks are now multi-select: check one GPU to pin it, check several to split the model's layers across exactly those cards, even non-adjacent ones (say, 0 and 6). Settings gains a 'Split GPUs' row when the multi-GPU split is on, and the main server card now shows the GPU selector on multi-GPU machines.
+- **Paste images in the chat**... Cmd+V with a screenshot or a copied image attaches it to the message when the model has vision (all common formats); copied files attach like a drag-and-drop. Plain text pasting is unchanged.
+
+### Fixed
+- **Image generation GPU choice**... picking the first GPU in the list was silently ignored and generation ran on the system-default card instead. The selection now always pins the chosen GPU on multi-GPU machines.
+- **Generated images keep their history**... each image now saves under a date-and-time name instead of overwriting the previous output file.
+
 ## [0.81.46] - 2026-07-04
 
 ### Added

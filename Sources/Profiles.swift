@@ -34,6 +34,8 @@ struct Profile: Codable, Identifiable {
     var cacheReuse: Bool? = nil
     var loadVision: Bool? = nil
     var localNetworkDiscovery: Bool? = nil
+    var gpuList: [Int]? = nil
+    var embeddings: Bool? = nil
 }
 
 @MainActor
@@ -131,6 +133,8 @@ final class ProfileStore: ObservableObject {
         if let v = p.multiGPU { d.set(v, forKey: SettingsKeys.multiGPU) }
         if let v = p.forcePrivateBuffers { d.set(v, forKey: SettingsKeys.forcePrivateBuffers) }
         if let v = p.cacheReuse { d.set(v, forKey: SettingsKeys.cacheReuse) }
+        if let v = p.gpuList { d.set(v.map(String.init).joined(separator: ","), forKey: SettingsKeys.gpuList) }
+        if let v = p.embeddings { d.set(v, forKey: SettingsKeys.embeddings) }
         switch p.engine {
         case "bundled": d.set(ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
         case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
@@ -184,7 +188,8 @@ extension ServerSettings {
                 parallelSlots: parallelSlots, faAmd: faAmd, persistCache: persistCache,
                 multiGPU: multiGPU, forcePrivateBuffers: forcePrivateBuffers,
                 cacheReuse: cacheReuse, loadVision: loadVision,
-                localNetworkDiscovery: localNetworkDiscovery)
+                localNetworkDiscovery: localNetworkDiscovery,
+                gpuList: gpuList, embeddings: embeddings)
     }
 
     /// Load a profile's config into this struct without touching UserDefaults,
@@ -206,6 +211,8 @@ extension ServerSettings {
         if let v = p.cacheReuse { cacheReuse = v }
         if let v = p.loadVision { loadVision = v }
         if let v = p.localNetworkDiscovery { localNetworkDiscovery = v }
+        gpuList = p.gpuList ?? []
+        if let v = p.embeddings { embeddings = v }
         switch p.engine {
         case "bundled": serverBinary = ServerSettings.defaultBinary
         case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary

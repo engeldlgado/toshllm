@@ -28,6 +28,8 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
     @AppStorage(SettingsKeys.multiGPUCount) private var multiGPUCount = 0
+    @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
+    @AppStorage(SettingsKeys.embeddings) private var embeddings = false
     @AppStorage(SettingsKeys.forcePrivateBuffers) private var forcePrivateBuffers = false
     @AppStorage(SettingsKeys.cacheReuse) private var cacheReuse = true
     @AppStorage(SettingsKeys.extraArgs) private var extraArgs = ""
@@ -72,6 +74,12 @@ struct SettingsView: View {
     }
     private var currentModelIsVision: Bool {
         ServerSettings.mmprojPath(forModel: modelPath) != nil
+    }
+    private var splitSelection: [Int] { ServerSettings.gpuList(fromCSV: gpuListCSV) }
+    private func toggleSplitGPU(_ i: Int) {
+        var sel = Set(splitSelection)
+        if sel.contains(i) { sel.remove(i) } else { sel.insert(i) }
+        gpuListCSV = sel.sorted().map(String.init).joined(separator: ",")
     }
     private var kvNeedsFlashAttention: Bool { cacheTypeK != "f16" || cacheTypeV != "f16" }
     private var amdFlashActive: Bool { faAmd }
@@ -264,9 +272,12 @@ struct SettingsView: View {
                 if hardware.gpus.count > 1 {
                     Toggle(loc.t("Repartir el modelo entre todas las GPUs (experimental)",
                                  "Split model across all GPUs (experimental)"), isOn: $multiGPU)
+                        .onChange(of: multiGPU) { _, on in
+                            if !on { gpuListCSV = "" }
+                        }
                         .infoTip(loc.t("Divide las capas del modelo entre todas las GPUs detectadas (--split-mode layer) en vez de usar una sola, p. ej. para cargar un modelo que no cabe en una. Anula el selector de arriba.",
                                     "Splits the model's layers across all detected GPUs (--split-mode layer) instead of using one, e.g. to load a model that doesn't fit on a single card. Overrides the picker above."))
-                    if multiGPU && hardware.gpus.count > 2 {
+                    if multiGPU && hardware.gpus.count > 2 && splitSelection.count < 2 {
                         Picker(loc.t("GPUs a usar", "GPUs to use"), selection: $multiGPUCount) {
                             Text(loc.t("Todas (\(hardware.gpus.count))", "All (\(hardware.gpus.count))")).tag(0)
                             ForEach(2...hardware.gpus.count, id: \.self) { Text("\($0)").tag($0) }
@@ -275,6 +286,30 @@ struct SettingsView: View {
                                     "How many GPUs to split across. More GPUs = faster prompt; fewer GPUs = faster generation (less cross-card sync)."))
                     }
                     if multiGPU {
+                        LabeledContent(loc.t("GPUs del reparto", "Split GPUs")) {
+                            Menu {
+                                Button(loc.t("Todas", "All")) { gpuListCSV = "" }
+                                Divider()
+                                ForEach(hardware.gpus) { g in
+                                    Toggle("\(g.name) · \(g.vramMB / 1024) GB", isOn: Binding(
+                                        get: { splitSelection.contains(g.index) },
+                                        set: { _ in toggleSplitGPU(g.index) }))
+                                }
+                            } label: {
+                                Text(splitSelection.count >= 2
+                                        ? loc.t("\(splitSelection.count) elegidas", "\(splitSelection.count) selected")
+                                        : loc.t("Todas", "All"))
+                            }
+                            .fixedSize()
+                        }
+                        .infoTip(loc.t("Qué GPUs concretas participan en el reparto (p. ej. la 0 y la 6, saltándose las demás). Con 'Todas' se usan las primeras N del selector de arriba.",
+                                    "Which specific GPUs take part in the split (e.g. 0 and 6, skipping the rest). With 'All', the first N from the picker above are used."))
+                        if splitSelection.count == 1 {
+                            Label(loc.t("Elige al menos 2 GPUs para el reparto; con una sola se usan todas.",
+                                        "Pick at least 2 GPUs for the split; with only one, all are used."),
+                                  systemImage: "info.circle")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         Label(loc.t("⚠️ Experimental y sin validar en GPU AMD/Metal: el reparto entre GPUs es una ruta distinta que podría dar salida incorrecta o colgar el motor. Verifica que la generación sea coherente y vigila la estabilidad. Necesita más pruebas.",
                                     "⚠️ Experimental and unvalidated on AMD/Metal: cross-GPU splitting is a different path that could produce wrong output or hang the engine. Check that generation is coherent and watch stability. Needs more testing."),
                               systemImage: "exclamationmark.triangle.fill")
@@ -476,6 +511,10 @@ struct SettingsView: View {
                         .infoTip(loc.t("Ruta a un llama-server alternativo para probar otras builds.",
                                     "Path to an alternative llama-server to test other builds."))
                 }
+                Toggle(loc.t("Servidor de embeddings (--embeddings)",
+                             "Embeddings server (--embeddings)"), isOn: $embeddings)
+                    .infoTip(loc.t("Sirve /v1/embeddings para clientes RAG (p. ej. Obsidian Copilot), que sin esto reciben un error 501. Ojo: llama-server dedica el proceso a embeddings, así que actívalo con un modelo de embeddings; para chatear a la vez, añade un segundo servidor en Inicio con esta opción.",
+                                "Serves /v1/embeddings for RAG clients (e.g. Obsidian Copilot), which otherwise get a 501 error. Note: llama-server dedicates the process to embeddings, so enable it with an embedding model; to keep chatting, add a second server on Home with this option."))
                 TextField(loc.t("Argumentos extra", "Extra arguments"), text: $extraArgs)
                     .font(.system(.caption, design: .monospaced))
                     .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios (para opciones que la app no expone). Un token con forma CLAVE=VALOR se aplica como variable de entorno del motor, no como argumento. Ej.: en tarjetas AMD GCN/Vega (Vega 56/64, RX 580, Radeon VII) que dan texto corrupto, escribe GGML_METAL_WAVE64_SAFEMODE=1 para forzar salida coherente (más lento).",

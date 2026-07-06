@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import Vision
+import UniformTypeIdentifiers
 
 // MARK: - Model
 
@@ -989,6 +990,7 @@ struct NativeChatView: View {
     // True while the newest message is on screen (inverted scroll rests here).
     @State private var atBottom = true
     @FocusState private var inputFocused: Bool
+    @State private var pasteMonitor: Any?
 
     private var maxTokenOptions: [Int] {
         [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072].filter { $0 <= contextLimit }
@@ -1010,7 +1012,24 @@ struct NativeChatView: View {
 
     var body: some View {
         chatColumn
-            .onAppear { inputFocused = true }
+            .onAppear {
+                inputFocused = true
+                // The field editor swallows Cmd+V before SwiftUI's paste command
+                // sees it, so intercept the key itself when the clipboard carries
+                // an image or files; plain text falls through to the normal paste.
+                pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    guard inputFocused, !chat.generating,
+                          event.modifierFlags.contains(.command),
+                          event.charactersIgnoringModifiers?.lowercased() == "v",
+                          clipboardHasAttachables else { return event }
+                    pasteFromClipboard()
+                    return nil
+                }
+            }
+            .onDisappear {
+                if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+                pasteMonitor = nil
+            }
             // Markdown links: open valid web/mail URLs in the default browser
             // and silently drop malformed ones (e.g. placeholder "#" links),
             // instead of the system's "can't open the application (-50)" dialog.
@@ -1200,8 +1219,11 @@ struct NativeChatView: View {
                     .onChange(of: draft) { _, value in
                         absorbLargeDraft(value)
                     }
-                    .help(loc.t("Intro envía; Opción+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto.",
-                                "Return sends; Option+Return inserts a line break. Large pasted text becomes an attachment."))
+                    .onPasteCommand(of: [.image, .png, .tiff, .fileURL]) { _ in
+                        pasteFromClipboard()
+                    }
+                    .help(loc.t("Intro envía; Opción+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto; pegar una imagen (captura) la adjunta si el modelo tiene visión.",
+                                "Return sends; Option+Return inserts a line break. Large pasted text becomes an attachment; pasting an image (screenshot) attaches it if the model has vision."))
                 if chat.generating {
                     Button { chat.stop() } label: {
                         Image(systemName: "stop.circle.fill")
@@ -1419,6 +1441,37 @@ struct NativeChatView: View {
         let name = existing == 0 ? base + ".txt" : "\(base) \(existing + 1).txt"
         attachments.append(ChatAttachment(name: name, content: value))
         draft = ""
+    }
+
+    /// Whether the clipboard holds something we attach instead of pasting as text.
+    /// NSImage covers every readable image type (PNG, JPEG, TIFF, HEIC…).
+    private var clipboardHasAttachables: Bool {
+        let pb = NSPasteboard.general
+        return (pb.types ?? []).contains(.fileURL) || NSImage.canInit(with: pb)
+    }
+
+    /// Cmd+V with an image (screenshot) or copied files on the clipboard attaches
+    /// them like a drop; plain text keeps the field's normal paste.
+    private func pasteFromClipboard() {
+        let pb = NSPasteboard.general
+        if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                     options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !urls.isEmpty {
+            addAttachments(urls: urls)
+            return
+        }
+        guard let img = NSImage(pasteboard: pb), let data = img.tiffRepresentation else { return }
+        guard visionAvailable else {
+            attachError = loc.t("Imagen pegada: el modelo actual no admite imágenes (carga un modelo con visión y su mmproj)",
+                                "Pasted image: the current model can't read images (load a vision model with its mmproj)")
+            return
+        }
+        guard let uri = Self.imageDataURI(from: data) else {
+            attachError = loc.t("No se pudo procesar la imagen pegada", "Couldn't process the pasted image")
+            return
+        }
+        attachError = nil
+        images.append(uri)
     }
 
     private func pickAttachments() {
