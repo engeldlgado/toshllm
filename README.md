@@ -44,13 +44,16 @@ It opens, detects your hardware, and recommends models that will actually run we
 ## Features
 
 - **Native chat** — multiple persistent conversations, full Markdown with code-copy, regenerate, system prompt, live tokens/sec, file attachments
+- **Vision** — attach images (or paste a screenshot with Cmd+V) and vision-capable models describe them; the matching projector (`mmproj`) is paired automatically
+- **Image generation (beta)** — a local text-to-image studio (stable-diffusion.cpp on the same AMD Metal stack): text-to-image and image-to-image, with a model catalog sized to your VRAM
 - **Model manager** — a curated catalog with **per-model VRAM/RAM estimates for *your* hardware**, plus Hugging Face search, downloads with live progress, and one-click delete
 - **MoE-aware** — automatic `--n-cpu-moe` calculation so 35B-class Mixture-of-Experts models run well on 12 GB GPUs
 - **MTP speculative decoding** — +34% generation speed with compatible models, zero quality loss
-- **Dual engines** — official llama.cpp + experimental **TurboQuant** engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), with an optional **AMD Flash Attention kernel** that keeps decode attention on the GPU for quantized/turbo KV (see the [research note](#research-amd-gpus-on-metal))
+- **Dual engines** — official llama.cpp + experimental **TurboQuant** engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), both with the **AMD Flash Attention kernel** on by default so attention runs on the GPU (see the [research note](#research-amd-gpus-on-metal))
 - **Benchmarks** — measure prompt/generation speed per configuration, with history and side-by-side comparison charts
-- **OpenAI-compatible API** — use it at `http://127.0.0.1:8080`, with optional local-network access and Bonjour discovery
+- **OpenAI-compatible API** — use it at `http://127.0.0.1:8080`, with optional local-network access and Bonjour discovery; can also serve embeddings for local RAG clients
 - **Multiple servers** — run several independent engine instances at once from the Dashboard, each with its own model, GPU, port and profile; serve different models side by side or pin one model per GPU
+- **Multi-GPU and eGPU** — split a model across all your GPUs or an exact set of cards (validated on dual-GPU setups); external GPUs run at full speed with VRAM-resident weights
 - **Every parameter explained** — bilingual tooltips and built-in docs (English/Spanish)
 - **Profiles, menu bar mode, auto-start** — save full configurations and switch with one click
 
@@ -60,7 +63,7 @@ These are new and still being validated — enable them in Settings, but expect 
 
 - **Remember conversations (disk cache)** *(experimental engine)* — persists each chat's KV cache so reopening it, or restarting the app, skips re-processing the prompt; the reload is byte-exact, and a long chat comes back in under a second instead of re-prefilling. Also pre-warms the cache for external clients (VS Code/Cline), so their first request skips the multi-minute cold prefill.
 - **Prompt cache reuse** *(experimental engine)* — reuses the cache across mid-prompt edits (coding assistants) and trimmed reasoning instead of reprocessing. Fast but approximate; toggle it off in Settings for exact, reproducible output.
-- **Split model across all GPUs** *(experimental, both engines)* — splits the model's layers over every detected GPU, for machines with multiple cards. Unvalidated on AMD/Metal so far; the UI flags it and it needs real multi-GPU testing.
+- **Split model across GPUs** *(both engines)* — validated on a dual-GPU setup (RX 6900 XT + RX 6800 XT eGPU): a 35B MoE with all experts in VRAM generated at ~3× the single-GPU-offload speed. You can pick the exact set of cards per server; it stays flagged experimental in the UI while more configurations report back.
 
 ### A native chat that stays out of your way
 
@@ -156,7 +159,7 @@ The same kernel handles **prompt processing** too: although it is the "vec" deco
 | q8_0 | 40 t/s | **100 t/s** |
 | turbo3 | 6 t/s | **97 t/s** |
 
-It is on by default on the experimental engine and an opt-in toggle on the bundled engine. Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
+It is on by default on both engines (a toggle in Settings turns it off). Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
 
 ### Quantized KV cache: memory vs speed
 
@@ -184,6 +187,8 @@ Prompt processing on an RX 6700 XT (Qwen3-8B Q4, pp512, t/s, before → ToshGEMM
 | Turbo    | 105 → **309** (2.9×) | 99 → **322** (3.2×) |
 
 For a 1000-token prompt that cuts time-to-first-token from ~10 s to ~4 s (official) and ~9 s to ~3 s (turbo).
+
+Two later upgrades pushed it further. The kernel now does its math in **packed half precision**, which AMD cards execute at twice the rate, and the AMD attention kernel prefills in blocks of 16 tokens that share the stored context instead of each token re-reading all of it. Measured today on the same card, **pp512 on the 8B reaches ~470 t/s on both engines** (from the ~310 above — 5× the pre-ToshGEMM baseline), and prompt processing deep into a conversation (4k of context) goes from 103 to ~290 t/s, so long chats stop feeling slower to respond over time. That 1000-token prompt now takes ~2 s to first token.
 
 ToshGEMM now also covers **Mixture-of-Experts** prefill: the per-expert matmul (`mul_mm_id`) uses the same tiled kernel, so MoE models get the speedup on whatever experts are GPU-resident, not just their dense/attention layers. On a Qwen3-Coder-30B-A3B (Q4_K_M, pp512, RX 6700 XT, `--n-cpu-moe 20`):
 
@@ -273,12 +278,15 @@ Casi todas las herramientas de LLM locales en macOS apuntan a Apple Silicon; los
 ### Funciones
 
 - **Chat nativo** — conversaciones persistentes, Markdown completo con copiar código, regenerar, prompt de sistema, tokens/seg en vivo y adjuntar archivos
+- **Visión** — adjunta imágenes (o pega una captura con Cmd+V) y los modelos con visión las describen; el proyector (`mmproj`) se empareja solo
+- **Generación de imágenes (beta)** — estudio local de texto-a-imagen (stable-diffusion.cpp sobre el mismo stack Metal AMD): texto-a-imagen e imagen-a-imagen, con catálogo ajustado a tu VRAM
 - **Gestor de modelos** — catálogo curado con **estimaciones de VRAM/RAM para *tu* equipo**, búsqueda en Hugging Face, descargas con progreso y borrado en un clic
 - **Soporte MoE** — cálculo automático de `--n-cpu-moe` para que modelos de 35B corran bien en GPUs de 12 GB
 - **Decodificación especulativa MTP** — +34% de velocidad de generación sin pérdida de calidad
-- **Motores duales** — llama.cpp oficial + motor experimental **TurboQuant** (caché KV hasta ~16%, contextos de 100k+ tokens), con kernel opcional de **Flash Attention para AMD**
+- **Motores duales** — llama.cpp oficial + motor experimental **TurboQuant** (caché KV hasta ~16%, contextos de 100k+ tokens), ambos con el kernel de **Flash Attention para AMD** activo por defecto
 - **Benchmarks** — mide velocidad de prompt y generación por configuración, con historial y gráficas comparativas
-- **API compatible con OpenAI** en `http://127.0.0.1:8080`, con acceso opcional por red local y descubrimiento Bonjour
+- **API compatible con OpenAI** en `http://127.0.0.1:8080`, con acceso opcional por red local y descubrimiento Bonjour; también puede servir embeddings para clientes RAG locales
+- **Varios servidores y multi-GPU** — varios motores independientes a la vez, cada uno con su modelo, GPU (o conjunto exacto de GPUs), puerto y perfil; las eGPU corren a velocidad completa con pesos residentes en VRAM
 - **Cada parámetro explicado** — tooltips bilingües y documentación integrada
 - **Perfiles, modo barra de menú y auto-inicio**
 
@@ -287,7 +295,7 @@ Casi todas las herramientas de LLM locales en macOS apuntan a Apple Silicon; los
 Funciones nuevas, aún en validación — actívalas en Ajustes, pero pueden tener detalles por pulir:
 
 - **Recordar conversaciones (caché en disco)** *(motor experimental)* — guarda la caché KV de cada chat, así al reabrirlo o reiniciar la app no se reprocesa el prompt; la restauración es byte-exacta y un chat largo vuelve en menos de un segundo. También pre-calienta la caché para clientes externos (VS Code/Cline), evitando el prefill frío de varios minutos en la primera petición.
-- **Repartir el modelo entre varias GPUs** *(experimental, ambos motores)* — divide las capas del modelo entre todas las GPUs detectadas, para equipos con varias tarjetas. Sin validar aún en AMD/Metal; la UI lo advierte y necesita pruebas reales con multi-GPU.
+- **Repartir el modelo entre varias GPUs** *(ambos motores)* — validado en un equipo con dos GPUs (RX 6900 XT + RX 6800 XT por eGPU): un MoE de 35B con todos los expertos en VRAM generó a ~3× la velocidad de una sola GPU con offload. Puedes elegir el conjunto exacto de tarjetas por servidor; sigue marcado experimental mientras llegan más configuraciones.
 
 ### Instalación
 
