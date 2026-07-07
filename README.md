@@ -37,7 +37,7 @@ Most local-LLM tools on macOS only target Apple Silicon. Intel Macs with discret
 |---|---|---|
 | Output | corrupted | correct |
 | Qwen3-8B generation | 0.6–2.6 t/s | **~57 t/s** |
-| Qwen3.6-35B (MoE) generation | unusable | **~26 t/s** (with MTP) |
+| Qwen3.6-35B (MoE) generation | unusable | **~24 t/s**, flat on long runs |
 
 It opens, detects your hardware, and recommends models that will actually run well — no guesswork.
 
@@ -132,7 +132,7 @@ cd toshllm
 ./scripts/test.sh               # optional: run the unit tests (needs Xcode for XCTest)
 ```
 
-The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for Metal drivers that cap host-visible allocations (now also covering the asynchronous tensor read path that MTP exercises, which previously aborted mid-generation). The other key stability setting (`GGML_METAL_CONCURRENCY_DISABLE`) is already supported upstream and the app sets it automatically.
+The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for Metal drivers that cap host-visible allocations (also covering the asynchronous tensor read path that MTP exercises, which previously aborted mid-generation), plus a persistent staging buffer that keeps long generations from slowly drowning the AMD driver (see the [research note](#persistent-staging-flat-sustained-generation)). The other key stability setting (`GGML_METAL_CONCURRENCY_DISABLE`) is already supported upstream and the app sets it automatically.
 
 ## Research: AMD GPUs on Metal
 
@@ -199,6 +199,20 @@ ToshGEMM now also covers **Mixture-of-Experts** prefill: the per-expert matmul (
 | dense **+ MoE experts** | **124 (+37%)** |
 
 So the expert matmul adds the larger share (+22% on top of dense) once experts sit on the GPU. That share scales with how many experts fit in VRAM — small when most are offloaded to CPU (the usual case on 12 GB cards), larger on higher-VRAM GPUs. Output stays coherent. *Measured on a single RX 6700 XT; still needs more everyday-use testing across models and VRAM sizes.*
+
+### Persistent staging: flat sustained generation
+
+On discrete GPUs the weights live in private VRAM buffers, so every CPU↔GPU tensor copy used to wrap the caller's host pointer in a fresh `MTLBuffer` — one new kernel graphics resource per copy. Dense models barely notice (one logits read per token), but MoE models with experts on the CPU cross that boundary dozens of times per token, and multi-GPU splits cross it on every layer hand-off. The AMD driver accumulates those resources faster than it retires them, so a long reasoning or vision answer slowly loses speed and can end with the driver wedged — the engine stalls, and on setups where the same GPU drives the display the whole machine appears frozen. Captured live on a stalled process: 11,000+ IOAccelerator regions, stuck inside `IOAccelResourceCreate`.
+
+Since 0.81.49 both engines route small transfers through one persistent staging buffer per device (blit + memcpy, zero new resources per copy); large one-shot transfers (model load, KV persistence) keep the direct path. Measured on an RX 6700 XT with Qwen3.6-35B-A3B (Q4_K_S, experts on CPU):
+
+| | before | after |
+|---|---:|---:|
+| pp512 | 155.3 ± 7.7 t/s | **179.9 ± 0.2 t/s** |
+| tg128 | 18.2 ± 1.4 t/s | **23.3 ± 0.4 t/s** |
+| sustained reasoning (2200 tokens) | 14 → 5.7 t/s, then a full stall | **~21–22 t/s, flat** |
+
+Dense models gain ~4% and were never at risk (too few copies per token). The prompt-processing gain has the same source: each large batched copy used to pin megabytes of host memory per call. The variance collapse (±7.7 → ±0.2) shows the churn was also where the run-to-run noise came from.
 
 ### Vega / GCN cards (in progress)
 
