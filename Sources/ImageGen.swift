@@ -196,7 +196,10 @@ enum ImageGenCatalog {
                 urlString: "https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
                 fileName: "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", sizeGB: 4.5),
         ],
-        defaultSteps: 20, cfgScale: 2.5, minVRAMGB: 24)
+        // Its 3D VAE needs IM2COL_3D, which Metal doesn't implement (issue #19):
+        // run the VAE on CPU until we ship a kernel.
+        defaultSteps: 20, cfgScale: 2.5, minVRAMGB: 24,
+        extraArgs: ["--backend", "vae=cpu"])
 
     /// Curated order (small to large). Z-Image sits before SDXL so it wins the
     /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD);

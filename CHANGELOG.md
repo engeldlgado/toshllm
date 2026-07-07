@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.50] - 2026-07-07
+
+### Fixed
+- **Qwen-Image no longer crashes at the end of generation**... its 3D VAE uses an operation (`IM2COL_3D`) that Metal doesn't implement, so the run aborted right at the decode step after minutes of sampling (#19). The VAE now runs on the CPU for this model automatically: decoding takes a few extra seconds and the image comes out. A Metal kernel to put it back on the GPU is planned.
+
+### Changed
+- **Clearer offload label**... the image studio's "VAE on CPU" toggle is now "Offload to CPU", which is what it always did (keep weights in RAM and stream them to VRAM per stage, to save VRAM). The Qwen-Image VAE fix above is independent and automatic.
+
 ## [0.81.49] - 2026-07-06
 
 ### Fixed

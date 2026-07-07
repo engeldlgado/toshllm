@@ -418,9 +418,9 @@ struct ImageInstanceForm: View {
                     ForEach(ImageFormat.allCases) { Text($0.rawValue.uppercased()).tag($0.rawValue) }
                 }.labelsHidden().frame(width: 96)
             }
-            row(loc.t("VAE en CPU", "VAE on CPU"),
-                loc.t("Descarga a CPU para ahorrar VRAM. Más lento; solo si falta memoria.",
-                      "Offload to CPU to save VRAM. Slower; only if memory is tight.")) {
+            row(loc.t("Descargar a CPU", "Offload to CPU"),
+                loc.t("Mantiene los pesos en RAM y los sube a VRAM por etapas. Más lento; solo si falta VRAM.",
+                      "Keeps weights in RAM and streams them to VRAM per stage. Slower; only if VRAM is tight.")) {
                 Toggle("", isOn: $cfg.offloadCPU).labelsHidden().toggleStyle(.switch)
             }
         }
