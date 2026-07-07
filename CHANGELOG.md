@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.49] - 2026-07-06
+
+### Fixed
+- **MoE models no longer slow down and freeze on long generations**... on AMD GPUs, MoE models with experts on the CPU (and multi-GPU splits) gradually lost speed during a long reasoning or vision answer and could end up freezing the engine, or the whole machine on some setups. Every per-token CPU↔GPU copy was creating a fresh kernel graphics resource and the AMD driver drowned in them. Those copies now reuse one persistent staging buffer, so sustained generations hold a flat speed indefinitely.
+
+### Improved
+- **MoE generation is much faster**... removing that per-copy overhead also raises steady-state MoE-offload speed: measured on the RX 6700 XT, Qwen3.6-35B goes from ~14 to ~21 t/s and the 14B from ~18 to ~22 t/s, with identical output. Multi-GPU splits use the same path and should see a similar gain.
+
 ## [0.81.48] - 2026-07-06
 
 ### Added

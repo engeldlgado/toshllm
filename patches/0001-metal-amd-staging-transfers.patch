@@ -1,8 +1,44 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5..411c778d 100644
+index 32d97cd5..3f0d2198 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -349,14 +349,12 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -306,13 +306,7 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
+ 
+ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+     @autoreleasepool {
+-        // wrap the source data into a Metal buffer
+         id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
+-        id<MTLBuffer> buf_src = [device newBufferWithBytes:data
+-                                                    length:size
+-                                                   options:MTLResourceStorageModeShared];
+-
+-        GGML_ASSERT(buf_src);
+ 
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(tensor);
+         if (bid_dst.metal == nil) {
+@@ -321,6 +315,21 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+ 
+         bid_dst.offs += offset;
+ 
++        // private buffers route small transfers through the device staging
++        // buffer (synchronous) instead of allocating a Metal buffer per call
++        ggml_backend_buffer_t buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
++        if (!ggml_metal_buffer_is_shared(buffer->context)
++            && ggml_metal_device_stage_set(ctx->dev, bid_dst, data, size)) {
++            return;
++        }
++
++        // wrap the source data into a Metal buffer
++        id<MTLBuffer> buf_src = [device newBufferWithBytes:data
++                                                    length:size
++                                                   options:MTLResourceStorageModeShared];
++
++        GGML_ASSERT(buf_src);
++
+         // queue the copy operation into the queue of the Metal context
+         // this will be queued at the end, after any currently ongoing GPU operations
+         id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
+@@ -349,14 +358,12 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  }
  
  void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -21,12 +57,20 @@ index 32d97cd5..411c778d 100644
  
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(tensor);
          if (bid_src.metal == nil) {
-@@ -365,34 +363,111 @@ void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * te
+@@ -365,34 +372,119 @@ void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * te
  
          bid_src.offs += offset;
  
 -        // queue the copy operation into the queue of the Metal context
 -        // this will be queued at the end, after any currently ongoing GPU operations
++        // private buffers route small transfers through the device staging
++        // buffer (synchronous) instead of allocating a Metal buffer per call
++        ggml_backend_buffer_t buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
++        if (!ggml_metal_buffer_is_shared(buffer->context)
++            && ggml_metal_device_stage_get(ctx->dev, bid_src, data, size)) {
++            return;
++        }
++
          id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
 -        id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
 -        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
@@ -205,7 +249,7 @@ index 0e1f1de4..c0ff5849 100644
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index d465f31c..d37ddd12 100644
+index d465f31c..d8944eb4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -251,7 +251,14 @@ struct ggml_metal_device_props {
@@ -223,8 +267,20 @@ index d465f31c..d37ddd12 100644
      bool has_bfloat;
      bool has_tensor;
      bool use_residency_sets;
+@@ -309,6 +316,11 @@ bool   ggml_metal_buffer_is_shared(ggml_metal_buffer_t buf);
+ void   ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size);
+ void   ggml_metal_buffer_set_tensor   (ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
+ void   ggml_metal_buffer_get_tensor   (ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size);
++
++// small host<->device transfers through the device's persistent staging buffer
++// (synchronous); false when the size exceeds the stage, so callers fall back
++bool   ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_dst, const void * data, size_t size);
++bool   ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_src, void * data, size_t size);
+ bool   ggml_metal_buffer_cpy_tensor   (ggml_metal_buffer_t buf, const struct ggml_tensor * src, struct ggml_tensor * dst);
+ void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60e..aafd4088 100644
+index a7cbc60e..6b13c4e1 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -128,6 +128,28 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
@@ -256,7 +312,20 @@ index a7cbc60e..aafd4088 100644
  #else
  
  #ifdef SWIFT_PACKAGE
-@@ -682,7 +704,41 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -533,6 +555,12 @@ struct ggml_metal_device {
+ 
+     // virtual address for GPU memory allocations
+     atomic_uintptr_t addr_virt;
++
++    // reused host-visible staging buffer for small private-buffer transfers;
++    // wrapping the caller's pointer allocates a fresh kernel resource per call,
++    // which on AMD accumulates across long runs until transfers crawl
++    id<MTLBuffer> stage_buf;
++    NSLock * stage_lock;
+ };
+ 
+ //
+@@ -682,7 +710,41 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
      assert(dev != NULL);
  
      if (dev->mtl_device == nil) {
@@ -299,7 +368,12 @@ index a7cbc60e..aafd4088 100644
  
          if (dev->mtl_device) {
              dev->mtl_queue = [dev->mtl_device newCommandQueue];
-@@ -693,10 +749,73 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -690,13 +752,78 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+                 GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
+             }
+ 
++            dev->stage_lock = [[NSLock alloc] init];
++
              dev->addr_virt = 0x000000400ULL;
  
              dev->props.device = device;
@@ -373,7 +447,24 @@ index a7cbc60e..aafd4088 100644
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
              dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
-@@ -1254,6 +1373,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -925,6 +1052,16 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
+     ggml_metal_library_free(dev->library);
+     dev->library = NULL;
+ 
++    if (dev->stage_buf) {
++        [dev->stage_buf release];
++        dev->stage_buf = nil;
++    }
++
++    if (dev->stage_lock) {
++        [dev->stage_lock release];
++        dev->stage_lock = nil;
++    }
++
+     if (dev->mtl_queue) {
+         [dev->mtl_queue release];
+         dev->mtl_queue = nil;
+@@ -1254,6 +1391,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
@@ -410,9 +501,103 @@ index a7cbc60e..aafd4088 100644
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
          case GGML_OP_SSM_SCAN:
-@@ -1718,6 +1867,10 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +1884,123 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+     }
  }
  
++// transfers up to this size reuse one persistent staging buffer; larger one-shot
++// transfers (model load, KV persistence) keep the direct no-copy wrap
++#define GGML_METAL_STAGE_BUF_MAX ((size_t) 16*1024*1024)
++
++// caller must hold dev->stage_lock; nil on allocation failure
++static id<MTLBuffer> ggml_metal_device_stage_buf(ggml_metal_device_t dev) {
++    if (dev->stage_buf == nil) {
++        dev->stage_buf = [dev->mtl_device newBufferWithLength:GGML_METAL_STAGE_BUF_MAX
++                                                      options:MTLResourceStorageModeShared];
++    }
++    return dev->stage_buf;
++}
++
++bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_dst, const void * data, size_t size) {
++    if (size == 0) {
++        return true;
++    }
++    if (size > GGML_METAL_STAGE_BUF_MAX || bid_dst.metal == nil) {
++        return false;
++    }
++
++    [dev->stage_lock lock];
++
++    id<MTLBuffer> stage = ggml_metal_device_stage_buf(dev);
++    if (stage == nil) {
++        [dev->stage_lock unlock];
++        return false;
++    }
++
++    memcpy(stage.contents, data, size);
++
++    id<MTLCommandBuffer> cmd_buf = [dev->mtl_queue commandBufferWithUnretainedReferences];
++
++    {
++        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
++
++        [encoder copyFromBuffer:stage
++                   sourceOffset:0
++                       toBuffer:bid_dst.metal
++              destinationOffset:bid_dst.offs
++                           size:size];
++
++        [encoder endEncoding];
++    }
++
++    [cmd_buf commit];
++    [cmd_buf waitUntilCompleted];
++
++    [dev->stage_lock unlock];
++
++    return true;
++}
++
++bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_src, void * data, size_t size) {
++    if (size == 0) {
++        return true;
++    }
++    if (size > GGML_METAL_STAGE_BUF_MAX || bid_src.metal == nil) {
++        return false;
++    }
++
++    [dev->stage_lock lock];
++
++    id<MTLBuffer> stage = ggml_metal_device_stage_buf(dev);
++    if (stage == nil) {
++        [dev->stage_lock unlock];
++        return false;
++    }
++
++    id<MTLCommandBuffer> cmd_buf = [dev->mtl_queue commandBufferWithUnretainedReferences];
++
++    {
++        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
++
++        [encoder copyFromBuffer:bid_src.metal
++                   sourceOffset:bid_src.offs
++                       toBuffer:stage
++              destinationOffset:0
++                           size:size];
++
++        [encoder endEncoding];
++    }
++
++    [cmd_buf commit];
++    [cmd_buf waitUntilCompleted];
++
++    memcpy(data, stage.contents, size);
++
++    [dev->stage_lock unlock];
++
++    return true;
++}
++
  void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
 +    if (size == 0) {
 +        return;
@@ -421,7 +606,26 @@ index a7cbc60e..aafd4088 100644
      if (buf->is_shared) {
          memcpy((char *) tensor->data + offset, data, size);
          return;
-@@ -1731,12 +1884,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+     }
+ 
+     @autoreleasepool {
++        // Small transfers (the per-token copies of MoE-offload and multi-GPU
++        // runs) go through the reused staging buffer: wrapping the caller's
++        // pointer below allocates a kernel resource per call, and on AMD those
++        // accumulate across a long generation until transfers crawl.
++        {
++            struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
++            bid_dst.offs += offset;
++
++            if (ggml_metal_device_stage_set(buf->dev, bid_dst, data, size)) {
++                return;
++            }
++        }
++
+         // src
+         void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
+         id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
+@@ -1731,12 +2008,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -479,7 +683,7 @@ index a7cbc60e..aafd4088 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1772,6 +1968,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1772,6 +2092,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -490,7 +694,18 @@ index a7cbc60e..aafd4088 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1788,24 +1988,67 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1782,30 +2106,78 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+         struct ggml_metal_buffer_id bid_src = ggml_metal_buffer_get_id(buf, tensor);
+         bid_src.offs += offset;
+ 
++        // small transfers reuse the persistent staging buffer (see set_tensor)
++        if (ggml_metal_device_stage_get(buf->dev, bid_src, data, size)) {
++            return;
++        }
++
+         // dst
+         id<MTLBuffer> buf_dst = [buf->dev->mtl_device newBufferWithBytesNoCopy:data
+                                                                length:size
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
