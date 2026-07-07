@@ -173,6 +173,24 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(args[args.firstIndex(of: "--cache-reuse")! + 1], "256")
     }
 
+    func testBenchmarkWorkloadArguments() {
+        var s = makeSettings()
+        // Defaults reproduce the classic pp512/tg128 run.
+        var args = s.benchmarkArguments
+        XCTAssertEqual(args[args.firstIndex(of: "-p")! + 1], "512")
+        XCTAssertEqual(args[args.firstIndex(of: "-n")! + 1], "128")
+        // Custom sizes pass through; out-of-range values are clamped.
+        s.benchPP = 4096
+        s.benchTG = 512
+        args = s.benchmarkArguments
+        XCTAssertEqual(args[args.firstIndex(of: "-p")! + 1], "4096")
+        XCTAssertEqual(args[args.firstIndex(of: "-n")! + 1], "512")
+        s.benchPP = 0
+        s.benchTG = 1_000_000
+        XCTAssertEqual(s.benchPPClamped, 16)
+        XCTAssertEqual(s.benchTGClamped, 8192)
+    }
+
     func testPromptCacheAndReasoningArguments() {
         var s = makeSettings()
         s.cacheRAM = 0

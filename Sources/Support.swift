@@ -60,6 +60,10 @@ enum SettingsKeys {
     static let smoothTyping = "smoothTyping"
     static let onboardingDone = "onboardingDone"
 
+    // Benchmark workload sizes (llama-bench -p / -n)
+    static let benchPP = "benchPP"
+    static let benchTG = "benchTG"
+
     // Image generation (text-to-image)
     static let imagenPrompt = "imagenPrompt"
     static let imagenAspect = "imagenAspect"
@@ -75,6 +79,8 @@ enum SettingsKeys {
     static let imagenCustomCfg = "imagenCustomCfg"
     static let imagenInitImage = "imagenInitImage"
     static let imagenStrength = "imagenStrength"
+    /// Extra parallel generation instances (JSON: [ImageInstanceConfig]).
+    static let imagenInstances = "imagenInstances"
 
     /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
     /// so `@AppStorage` falls back to its declared defaults. The models folder, the

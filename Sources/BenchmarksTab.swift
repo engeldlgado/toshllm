@@ -154,6 +154,20 @@ struct BenchmarksView: View {
                             .help(loc.t("Solo modelos MoE: capas cuyos expertos corren en CPU. Se siembra con el valor recomendado para tu hardware; subirlo descarga más a CPU, bajarlo arriesga saturar la VRAM.",
                                         "MoE models only: layers whose experts run on the CPU. Seeded with the value recommended for your hardware; raising offloads more to CPU, lowering risks saturating VRAM."))
                         }
+                        field("Prompt · -p") {
+                            TextField("", value: $cfg.benchPP, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder).frame(width: 64)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        .help(loc.t("Tokens de prompt a medir (test ppN). 512 es el estándar comparable; 2048-4096 mide el prefill profundo. Más tokens = corrida más larga.",
+                                    "Prompt tokens to measure (ppN test). 512 is the comparable standard; 2048-4096 measures deep prefill. More tokens = longer run."))
+                        field("Gen · -n") {
+                            TextField("", value: $cfg.benchTG, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder).frame(width: 64)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        .help(loc.t("Tokens a generar (test tgN). 128 es el estándar comparable; 512+ mide la generación sostenida. Más tokens = corrida más larga.",
+                                    "Tokens to generate (tgN test). 128 is the comparable standard; 512+ measures sustained generation. More tokens = longer run."))
                     }
                     .disabled(busy)
                     Spacer()
@@ -177,6 +191,8 @@ struct BenchmarksView: View {
 
                 // Effective configuration — the exact run that produces the result.
                 HStack(spacing: 6) {
+                    chip("pp\(cfg.benchPPClamped)/tg\(cfg.benchTGClamped)",
+                         active: cfg.benchPPClamped != 512 || cfg.benchTGClamped != 128)
                     chip("ncmoe \(cfg.ncmoe)", active: cfg.ncmoe > 0)
                     chip("K:\(cfg.cacheTypeK)", active: cfg.cacheTypeK != "f16")
                     chip("V:\(cfg.cacheTypeV)", active: cfg.cacheTypeV != "f16")
@@ -216,7 +232,7 @@ struct BenchmarksView: View {
                     Button(loc.t("Cancelar", "Cancel"), role: .destructive) { bench.cancel() }
                 }
             } else {
-                Button { bench.sweep(settings: cfg) } label: {
+                Button { rememberWorkload(); bench.sweep(settings: cfg) } label: {
                     Label(loc.t("Buscar óptimo", "Find optimum"), systemImage: "scope")
                 }
                 .disabled(cfg.modelPath.isEmpty || cfg.ncmoe == 0 || server.state == .running || server.state == .starting)
@@ -224,6 +240,7 @@ struct BenchmarksView: View {
                             "MoE models only: tries several 'experts on CPU' values going down until VRAM saturates, then reports the best. Takes several minutes."))
                 Button {
                     ServerSettings.rememberNcmoe(cfg.ncmoe, forModel: cfg.modelPath)
+                    rememberWorkload()
                     bench.run(settings: cfg)
                 } label: {
                     Label(loc.t("Ejecutar", "Run"), systemImage: "play.fill")
@@ -241,10 +258,18 @@ struct BenchmarksView: View {
                   systemImage: "exclamationmark.triangle")
                 .font(.caption).foregroundStyle(.orange)
         } else {
-            Text(loc.t("Mide pp512 (prompt) y tg128 (generación), 2 repeticiones. Tarda varios minutos en modelos grandes.",
-                       "Measures pp512 (prompt) and tg128 (generation), 2 repetitions. Takes minutes on large models."))
+            Text(loc.t("Mide pp\(cfg.benchPPClamped) (prompt) y tg\(cfg.benchTGClamped) (generación), 2 repeticiones. Tarda varios minutos en modelos grandes.",
+                       "Measures pp\(cfg.benchPPClamped) (prompt) and tg\(cfg.benchTGClamped) (generation), 2 repetitions. Takes minutes on large models."))
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    /// Clamp and persist the workload sizes so the next session seeds them.
+    private func rememberWorkload() {
+        cfg.benchPP = cfg.benchPPClamped
+        cfg.benchTG = cfg.benchTGClamped
+        UserDefaults.standard.set(cfg.benchPP, forKey: SettingsKeys.benchPP)
+        UserDefaults.standard.set(cfg.benchTG, forKey: SettingsKeys.benchTG)
     }
 
     private func chip(_ text: String, active: Bool, icon: String? = nil) -> some View {

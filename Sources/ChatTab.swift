@@ -25,9 +25,10 @@ struct ChatMainView: View {
     @AppStorage(SettingsKeys.onboardingDone) private var onboardingDone = false
     @State private var showOnboarding = false
     @State private var mode: MainMode = .chat
-    // One generator shared across the studio's sidebar (controls) and detail
-    // (canvas), so both halves of the split view drive the same run.
-    @StateObject private var imageGen = ImageGenerator()
+    // One pool shared across the studio's sidebar (controls) and detail
+    // (canvas): it owns every generation instance and its generator, so both
+    // halves of the split view drive the same runs.
+    @StateObject private var imageGenPool = ImageGenPool()
 
     var body: some View {
         // A single NavigationSplitView for both modes: only the sidebar and detail
@@ -35,7 +36,7 @@ struct ChatMainView: View {
         NavigationSplitView {
             Group {
                 if mode == .images {
-                    ImageControls(gen: imageGen).transition(.opacity)
+                    ImageControls(pool: imageGenPool).transition(.opacity)
                 } else {
                     ConversationListView().transition(.opacity)
                 }
@@ -43,7 +44,7 @@ struct ChatMainView: View {
         } detail: {
             Group {
                 if mode == .images {
-                    ImageCanvas(gen: imageGen).transition(.opacity)
+                    ImageCanvas(pool: imageGenPool).transition(.opacity)
                 } else {
                     chatDetail.transition(.opacity)
                 }

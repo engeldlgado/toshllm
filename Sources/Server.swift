@@ -94,6 +94,10 @@ struct ServerSettings {
     /// Load the multimodal projector (mmproj) for vision-capable models. Off skips it
     /// so a vision model runs text-only and frees the VRAM the image encoder would use.
     var loadVision: Bool = true
+    /// llama-bench workload sizes: prompt tokens (-p → ppN) and generated tokens
+    /// (-n → tgN). Benchmark-only; llama-server ignores them.
+    var benchPP: Int = 512
+    var benchTG: Int = 128
 
     /// True when the selected binary is the bundled or dev turbo engine.
     static func isTurbo(_ binary: String) -> Bool {
@@ -210,7 +214,8 @@ struct ServerSettings {
     /// are not valid for the benchmark tool, but benchmark must still honor the
     /// GPU/memory options that affect performance.
     var benchmarkArguments: [String] {
-        var args = ["-m", modelPath, "-ngl", String(ngl), "--mmap", "0", "-r", "2"]
+        var args = ["-m", modelPath, "-ngl", String(ngl), "--mmap", "0", "-r", "2",
+                    "-p", String(benchPPClamped), "-n", String(benchTGClamped)]
         if ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
@@ -218,6 +223,10 @@ struct ServerSettings {
         if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
         return args
     }
+
+    /// Workload sizes kept within what llama-bench accepts and a Mac can finish.
+    var benchPPClamped: Int { min(max(benchPP, 16), 32768) }
+    var benchTGClamped: Int { min(max(benchTG, 16), 8192) }
 
     /// Human-readable name of the GPU a run actually used, for the benchmark
     /// record. Resolves the macOS-picked default to its real device name.
@@ -352,7 +361,9 @@ struct ServerSettings {
             multiGPUCount: int(SettingsKeys.multiGPUCount, 0),
             forcePrivateBuffers: bool(SettingsKeys.forcePrivateBuffers, false),
             cacheReuse: bool(SettingsKeys.cacheReuse, true),
-            loadVision: bool(SettingsKeys.loadVision, true))
+            loadVision: bool(SettingsKeys.loadVision, true),
+            benchPP: int(SettingsKeys.benchPP, 512),
+            benchTG: int(SettingsKeys.benchTG, 128))
     }
 
     /// Whether a GGUF ships the MTP (multi-token prediction) head. Detected by

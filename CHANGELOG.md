@@ -3,6 +3,16 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.48] - 2026-07-06
+
+### Added
+- **Parallel image instances**... the image studio can now run several generations at once. Each instance is a collapsible accordion with its own full configuration (model, prompt, size, GPU, steps, seed, format, img2img), so a multi-GPU Mac renders up to one variation per card from a single Generate. New instances inherit instance 1's prompt until you type their own, and the canvas becomes a grid with per-instance progress and results. Two instances on the same GPU show a warning (that can hang the card on AMD Macs).
+- **Benchmark workload sizes**... two new fields choose how many prompt tokens (-p) and generated tokens (-n) the benchmark measures, while keeping every ToshLLM optimization active (#22). Defaults stay at the comparable pp512/tg128; each result records its sizes and the history labels non-standard runs.
+- **Flux 2 image models**... the catalog adds Flux.2 klein 9B (Apache license, 4 steps, for 16 GB GPUs) and Flux.2 dev (the 32B quality reference, for 24 GB+ GPUs, non-commercial license). Both download from non-gated mirrors and sample with euler as upstream recommends; dev offloads idle models to CPU to fit. Fresh additions, feedback welcome.
+
+### Fixed
+- **Model switch updates the install panel**... picking a not-yet-downloaded image model now immediately shows its components and the download action, inline in the instance's form. Before, the panel could keep showing the previous model's state.
+
 ## [0.81.47] - 2026-07-06
 
 ### Added

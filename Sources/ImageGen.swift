@@ -1,5 +1,6 @@
 import SwiftUI
 import Metal
+import Combine
 
 // Local text-to-image via a bundled stable-diffusion.cpp engine. A model is one
 // or more files (a full checkpoint, or a diffusion transformer plus its VAE and
@@ -56,6 +57,8 @@ struct ImageGenModel: Identifiable {
     let cfgScale: Double
     /// Rough usable VRAM (GB) below which it won't fit well. Drives the pick.
     let minVRAMGB: Double
+    /// Extra sd-cli flags this model needs (e.g. Flux 2 samples with euler).
+    var extraArgs: [String] = []
 
     var id: String { name }
     var totalGB: Double { components.reduce(0) { $0 + $1.sizeGB } }
@@ -134,6 +137,48 @@ enum ImageGenCatalog {
         ],
         defaultSteps: 4, cfgScale: 1.0, minVRAMGB: 16)
 
+    /// Non-gated FLUX.2 autoencoder (full encoder + small decoder), shared by the
+    /// Flux 2 family; the reference `ae.safetensors` lives in a gated BFL repo.
+    private static let flux2VAE = ImageGenComponent(kind: .vae,
+        urlString: "https://huggingface.co/black-forest-labs/FLUX.2-small-decoder/resolve/main/full_encoder_small_decoder.safetensors",
+        fileName: "flux2_full_encoder_small_decoder.safetensors", sizeGB: 0.25)
+
+    /// Flux.2 klein 9B (step-distilled, Apache). Flux 2 quality for 16 GB GPUs.
+    static let flux2Klein9B = ImageGenModel(
+        name: "Flux.2 klein 9B",
+        detailES: "9B, 4 pasos, Apache. La calidad Flux 2 en GPUs de 16 GB.",
+        detailEN: "9B, 4 steps, Apache. Flux 2 quality on 16 GB GPUs.",
+        components: [
+            ImageGenComponent(kind: .diffusion,
+                urlString: "https://huggingface.co/leejet/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q4_0.gguf",
+                fileName: "flux-2-klein-9b-Q4_0.gguf", sizeGB: 5.6),
+            flux2VAE,
+            ImageGenComponent(kind: .textEncoder,
+                urlString: "https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+                fileName: "Qwen3-8B-Q4_K_M.gguf", sizeGB: 5.0),
+        ],
+        defaultSteps: 4, cfgScale: 1.0, minVRAMGB: 16,
+        extraArgs: ["--sampling-method", "euler"])
+
+    /// Flux.2 dev (32B). The quality reference; enormous, non-commercial license.
+    /// The 24B text encoder forces --offload-to-cpu so only the sampling model
+    /// holds VRAM at a time.
+    static let flux2Dev = ImageGenModel(
+        name: "Flux.2 dev",
+        detailES: "32B, la referencia de calidad. Muy pesado (34 GB de descarga); GPUs de 24 GB+. Licencia no comercial.",
+        detailEN: "32B, the quality reference. Very heavy (34 GB download); 24 GB+ GPUs. Non-commercial license.",
+        components: [
+            ImageGenComponent(kind: .diffusion,
+                urlString: "https://huggingface.co/city96/FLUX.2-dev-gguf/resolve/main/flux2-dev-Q4_K_S.gguf",
+                fileName: "flux2-dev-Q4_K_S.gguf", sizeGB: 19.3),
+            flux2VAE,
+            ImageGenComponent(kind: .textEncoder,
+                urlString: "https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
+                fileName: "Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf", sizeGB: 14.3),
+        ],
+        defaultSteps: 20, cfgScale: 1.0, minVRAMGB: 24,
+        extraArgs: ["--sampling-method", "euler", "--offload-to-cpu"])
+
     /// Qwen-Image (20B MMDiT). The one that renders legible text inside images.
     /// Heavy: for 24 GB+ GPUs. Text encoder is Qwen2.5-VL.
     static let qwenImage = ImageGenModel(
@@ -154,8 +199,10 @@ enum ImageGenCatalog {
         defaultSteps: 20, cfgScale: 2.5, minVRAMGB: 24)
 
     /// Curated order (small to large). Z-Image sits before SDXL so it wins the
-    /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD).
-    static let models: [ImageGenModel] = [sd15, zImageTurbo, sdxlTurbo, fluxSchnell, qwenImage]
+    /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD);
+    /// klein 9B sits before schnell to win the 16 GB tie the same way.
+    static let models: [ImageGenModel] = [sd15, zImageTurbo, sdxlTurbo,
+                                          flux2Klein9B, fluxSchnell, qwenImage, flux2Dev]
 
     /// The best model this GPU can run: the highest min-VRAM tier that fits, and
     /// within a tie the earliest listed (curated preference).
@@ -384,7 +431,10 @@ final class ImageGenerator: ObservableObject {
         }
         // Offloading the diffusion model to CPU trades speed for VRAM; measured to
         // make no difference here, so it's off by default and only a fallback.
-        if offloadToCPU { args.append("--offload-to-cpu") }
+        args += model.extraArgs
+        if offloadToCPU && !model.extraArgs.contains("--offload-to-cpu") {
+            args.append("--offload-to-cpu")
+        }
 
         var env = ProcessInfo.processInfo.environment
         // AMD discrete GPUs corrupt output without disabling Metal concurrency;
@@ -472,5 +522,159 @@ final class ImageGenerator: ObservableObject {
         progress = 1
         lastDuration = elapsed
         state = .done
+    }
+}
+
+// MARK: - Parallel instances
+
+/// Full configuration of one generation slot: every control the sidebar exposes,
+/// so each instance can run its own model, prompt and size on its own GPU.
+/// Decoding is field-tolerant so older payloads never wipe the user's setup.
+struct ImageInstanceConfig: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var modelID = ""
+    var customModelPath = ""
+    var customVAEPath = ""
+    var customCfg = 7.0
+    var prompt = ""
+    var initImagePath = ""
+    var strength = 0.6
+    var aspect = ImageAspect.square.rawValue
+    var baseSize = 1024
+    var gpuIndex = 0
+    var steps = 8
+    var seed = -1
+    var format = ImageFormat.png.rawValue
+    var offloadCPU = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        modelID = (try? c.decode(String.self, forKey: .modelID)) ?? ""
+        customModelPath = (try? c.decode(String.self, forKey: .customModelPath)) ?? ""
+        customVAEPath = (try? c.decode(String.self, forKey: .customVAEPath)) ?? ""
+        customCfg = (try? c.decode(Double.self, forKey: .customCfg)) ?? 7.0
+        prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
+        initImagePath = (try? c.decode(String.self, forKey: .initImagePath)) ?? ""
+        strength = (try? c.decode(Double.self, forKey: .strength)) ?? 0.6
+        aspect = (try? c.decode(String.self, forKey: .aspect)) ?? ImageAspect.square.rawValue
+        baseSize = (try? c.decode(Int.self, forKey: .baseSize)) ?? 1024
+        gpuIndex = (try? c.decode(Int.self, forKey: .gpuIndex)) ?? 0
+        steps = (try? c.decode(Int.self, forKey: .steps)) ?? 8
+        seed = (try? c.decode(Int.self, forKey: .seed)) ?? -1
+        format = (try? c.decode(String.self, forKey: .format)) ?? ImageFormat.png.rawValue
+        offloadCPU = (try? c.decode(Bool.self, forKey: .offloadCPU)) ?? false
+    }
+
+    var isCustom: Bool { modelID == ImageGenCatalog.customID }
+    var aspectValue: ImageAspect { ImageAspect(rawValue: aspect) ?? .square }
+    var formatValue: ImageFormat { ImageFormat(rawValue: format) ?? .png }
+    var dimensions: (Int, Int) { aspectValue.dimensions(base: baseSize) }
+
+    /// The model this instance runs: a catalog entry, the user's own files, or
+    /// the best pick for the hardware.
+    func resolvedModel(for hw: HardwareInfo) -> ImageGenModel {
+        if isCustom {
+            return ImageGenCatalog.custom(modelPath: customModelPath, vaePath: customVAEPath,
+                                          steps: steps, cfg: customCfg)
+        }
+        return ImageGenCatalog.model(id: modelID)
+            ?? ImageGenCatalog.recommended(for: hw)
+            ?? ImageGenCatalog.zImageTurbo
+    }
+}
+
+/// Owns the generation instances and one generator per slot; the sidebar
+/// (controls) and the canvas (tiles) share it so both see the same state.
+/// There is always at least one instance.
+@MainActor
+final class ImageGenPool: ObservableObject {
+    @Published var configs: [ImageInstanceConfig] { didSet { save() } }
+    private var generators: [UUID: ImageGenerator] = [:]
+    private var forwards: [UUID: AnyCancellable] = [:]
+
+    init() {
+        if let data = UserDefaults.standard.data(forKey: SettingsKeys.imagenInstances),
+           let c = try? JSONDecoder().decode([ImageInstanceConfig].self, from: data),
+           !c.isEmpty {
+            configs = c
+        } else {
+            configs = [Self.legacyConfig()]
+        }
+    }
+
+    /// Seed instance 1 from the pre-multi-instance per-key settings, so an
+    /// updated app keeps the user's prompt and choices.
+    private static func legacyConfig() -> ImageInstanceConfig {
+        let d = UserDefaults.standard
+        func int(_ key: String, _ def: Int) -> Int { d.object(forKey: key) == nil ? def : d.integer(forKey: key) }
+        func dbl(_ key: String, _ def: Double) -> Double { d.object(forKey: key) == nil ? def : d.double(forKey: key) }
+        var c = ImageInstanceConfig()
+        c.modelID = d.string(forKey: SettingsKeys.imagenModel) ?? ""
+        c.customModelPath = d.string(forKey: SettingsKeys.imagenCustomModel) ?? ""
+        c.customVAEPath = d.string(forKey: SettingsKeys.imagenCustomVAE) ?? ""
+        c.customCfg = dbl(SettingsKeys.imagenCustomCfg, 7.0)
+        c.prompt = d.string(forKey: SettingsKeys.imagenPrompt) ?? ""
+        c.initImagePath = d.string(forKey: SettingsKeys.imagenInitImage) ?? ""
+        c.strength = dbl(SettingsKeys.imagenStrength, 0.6)
+        c.aspect = d.string(forKey: SettingsKeys.imagenAspect) ?? ImageAspect.square.rawValue
+        c.baseSize = int(SettingsKeys.imagenBaseSize, 1024)
+        c.gpuIndex = int(SettingsKeys.imagenGPU, 0)
+        c.steps = int(SettingsKeys.imagenSteps, 8)
+        c.seed = int(SettingsKeys.imagenSeed, -1)
+        c.format = d.string(forKey: SettingsKeys.imagenFormat) ?? ImageFormat.png.rawValue
+        c.offloadCPU = d.bool(forKey: SettingsKeys.imagenOffloadCPU)
+        return c
+    }
+
+    /// Stable generator per slot, created lazily. Its changes are forwarded so
+    /// views observing the pool re-render on per-instance progress.
+    func generator(for id: UUID) -> ImageGenerator {
+        if let g = generators[id] { return g }
+        let g = ImageGenerator()
+        generators[id] = g
+        forwards[id] = g.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        return g
+    }
+
+    var anyBusy: Bool { configs.contains { generator(for: $0.id).isBusy } }
+    var anyResult: Bool { configs.contains { generator(for: $0.id).resultImage != nil } }
+
+    /// New instance as a copy of the last one, landing on a free GPU when there
+    /// is one. The prompt is not copied: empty means "inherit instance 1's".
+    func add() {
+        var c = configs.last ?? ImageInstanceConfig()
+        c.id = UUID()
+        c.prompt = ""
+        let used = Set(configs.map(\.gpuIndex))
+        if let free = (0 ..< max(hardware.gpus.count, 1)).first(where: { !used.contains($0) }) {
+            c.gpuIndex = free
+        }
+        configs.append(c)
+    }
+
+    /// The prompt an instance will actually run: its own, or instance 1's when
+    /// left empty (shared prompt with per-instance override).
+    func effectivePrompt(for c: ImageInstanceConfig) -> String {
+        let own = c.prompt.trimmingCharacters(in: .whitespaces)
+        if !own.isEmpty || c.id == configs.first?.id { return own }
+        return (configs.first?.prompt ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    func remove(_ id: UUID) {
+        guard configs.count > 1 else { return }
+        generator(for: id).cancel()
+        configs.removeAll { $0.id == id }
+        generators[id] = nil
+        forwards[id] = nil
+    }
+
+    func cancelAll() { for c in configs { generator(for: c.id).cancel() } }
+
+    private func save() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(configs),
+                                  forKey: SettingsKeys.imagenInstances)
     }
 }

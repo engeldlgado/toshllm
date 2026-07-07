@@ -18,6 +18,10 @@ struct BenchResult: Codable, Identifiable {
     /// lets any past run be saved as a profile, not just the most recent.
     var gpu: String?
     var profile: Profile?
+    /// Workload sizes of this run (llama-bench -p / -n). Nil on older results,
+    /// which always ran the pp512/tg128 defaults.
+    var ppN: Int?
+    var tgN: Int?
 
     var shortModel: String {
         model.replacingOccurrences(of: ".gguf", with: "")
@@ -28,6 +32,7 @@ struct BenchResult: Codable, Identifiable {
 
     var configLabel: String {
         var parts: [String] = []
+        if let ppN, let tgN, ppN != 512 || tgN != 128 { parts.append("pp\(ppN)/tg\(tgN)") }
         if ncmoe > 0 { parts.append("ncmoe \(ncmoe)") }
         if let ctk, ctk != "f16" { parts.append("K:\(ctk)") }
         if let ctv, ctv != "f16" { parts.append("V:\(ctv)") }
@@ -151,7 +156,9 @@ final class BenchmarkController: ObservableObject {
             return nil
         }
 
-        if let pp = speed("pp512"), let tg = speed("tg128") {
+        let ppTest = "pp\(settings.benchPPClamped)"
+        let tgTest = "tg\(settings.benchTGClamped)"
+        if let pp = speed(ppTest), let tg = speed(tgTest) {
             let name = URL(fileURLWithPath: settings.modelPath).lastPathComponent
             let engine: String
             if settings.serverBinary == ServerSettings.defaultBinary {
@@ -164,12 +171,13 @@ final class BenchmarkController: ObservableObject {
             history.insert(BenchResult(date: .now, model: name, ncmoe: settings.ncmoe, pp: pp, tg: tg,
                                        ctk: settings.cacheTypeK, ctv: settings.cacheTypeV, engine: engine,
                                        fa: settings.benchmarkFlashAttentionRoute,
-                                       gpu: settings.gpuLabel, profile: settings.makeProfile(name: name)),
+                                       gpu: settings.gpuLabel, profile: settings.makeProfile(name: name),
+                                       ppN: settings.benchPPClamped, tgN: settings.benchTGClamped),
                            at: 0)
             save()
-            fileLog.append(String(format: "→ result: pp512 = %.1f t/s · tg128 = %.1f t/s\n\n", pp, tg))
+            fileLog.append(String(format: "→ result: %@ = %.1f t/s · %@ = %.1f t/s\n\n", ppTest, pp, tgTest, tg))
         } else {
-            fileLog.append("→ result: could not parse pp512/tg128 (run failed or was cancelled)\n\n")
+            fileLog.append("→ result: could not parse \(ppTest)/\(tgTest) (run failed or was cancelled)\n\n")
         }
         fileLog.prune()
     }
@@ -207,7 +215,8 @@ final class BenchmarkController: ObservableObject {
             }
             return nil
         }
-        guard let pp = speed("pp512"), let tg = speed("tg128") else { return nil }
+        guard let pp = speed("pp\(settings.benchPPClamped)"),
+              let tg = speed("tg\(settings.benchTGClamped)") else { return nil }
         return (pp, tg)
     }
 
@@ -238,7 +247,8 @@ final class BenchmarkController: ObservableObject {
                                            ctk: settings.cacheTypeK, ctv: settings.cacheTypeV,
                                            engine: engine, fa: settings.benchmarkFlashAttentionRoute,
                                            gpu: settings.gpuLabel,
-                                           profile: settings.makeProfile(name: "\(name) ncmoe \(candidate)")),
+                                           profile: settings.makeProfile(name: "\(name) ncmoe \(candidate)"),
+                                           ppN: settings.benchPPClamped, tgN: settings.benchTGClamped),
                                at: 0)
                 save()
 
