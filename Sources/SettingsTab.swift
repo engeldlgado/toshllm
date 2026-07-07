@@ -12,6 +12,7 @@ struct SettingsView: View {
 
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
     @AppStorage(SettingsKeys.faAmd) private var faAmd = ServerSettings.defaultFaAmd
+    @AppStorage(SettingsKeys.prefetchExperts) private var prefetchExperts = true
     @AppStorage(SettingsKeys.persistCache) private var persistCache = false
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
@@ -453,6 +454,11 @@ struct SettingsView: View {
                                 "Current model has no MTP head: the option will be ignored."),
                           systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.orange)
+                }
+                if engineSelection.wrappedValue != "custom" {
+                    Toggle(loc.t("Prefetch de expertos MoE (prompt)", "MoE expert prefetch (prompt)"), isOn: $prefetchExperts)
+                        .infoTip(loc.t("Para modelos MoE con expertos en RAM (ncmoe > 0): sube los pesos de expertos a la GPU por una cola Metal paralela, solapando la subida con el cómputo. De 1.8× a 4.4× de velocidad de prompt medida (35B, gemma-4-26B, gpt-oss) sin costo de generación; el primer prompt tras cargar el modelo es algo más lento mientras se preparan los buffers.",
+                                    "For MoE models with experts in RAM (ncmoe > 0): uploads expert weights to the GPU through a parallel Metal queue, overlapping the upload with compute. Measured 1.8×-4.4× prompt speed (35B, gemma-4-26B, gpt-oss) at no generation cost; the first prompt after loading the model is slightly slower while buffers warm up."))
                 }
                 Picker(loc.t("Peticiones simultáneas", "Concurrent requests"), selection: $parallelSlots) {
                     Text(loc.t("1 (recomendado)", "1 (recommended)")).tag(1)

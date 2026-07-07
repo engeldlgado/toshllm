@@ -40,6 +40,7 @@ enum SettingsKeys {
     static let reasoningInline = "reasoningInline"
     static let specMTP = "specMTP"
     static let faAmd = "faAmd"
+    static let prefetchExperts = "prefetchExperts"
     static let persistCache = "persistCache"
     static let multiGPU = "multiGPU"
     static let multiGPUCount = "multiGPUCount"
@@ -90,7 +91,7 @@ enum SettingsKeys {
     static let resettableOptionKeys = [
         serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
         vramReserve, gpuIndex, gpuList, extraArgs, embeddings, cacheTypeK, cacheTypeV, mlock, cacheRAM,
-        parallelSlots, reasoningInline, specMTP, faAmd, persistCache, multiGPU, multiGPUCount,
+        parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, persistCache, multiGPU, multiGPUCount,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
         chatAutoCompact, smoothTyping,

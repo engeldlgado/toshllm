@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.51] - 2026-07-07
+
+### Added
+- **MoE prompt processing up to 4.4× faster**... for MoE models with experts in RAM (ncmoe > 0), expert weights are now streamed to the GPU through a second Metal queue that overlaps each upload with the compute of the previous chunk, and CPU-held experts keep their canonical layout so their matmuls can run on the GPU at all. Measured on the RX 6700 XT (prompt t/s): Qwen3.6-14B goes from 298 to 814, Qwen3.6-35B from 197 to 470, gemma-4-26B from 116 to 515, gpt-oss-20b from 57 to 184. Generation speed is unchanged at any context depth (gpt-oss even gains ~23%), vision prompts speed up too (+63% measured), and output is identical. The first prompt after loading a model pays a one-time buffer warm-up. New "MoE expert prefetch (prompt)" toggle in Settings, on by default; both engines. Builds on thecodacus' llama.cpp prefetch work, adapted to Metal. Full-GPU setups (ncmoe 0, e.g. multi-GPU splits with everything in VRAM) are not affected: their experts never leave VRAM.
+
 ## [0.81.50] - 2026-07-07
 
 ### Fixed

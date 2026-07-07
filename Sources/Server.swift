@@ -63,6 +63,10 @@ struct ServerSettings {
     /// Flash-Attention kernel (gated by the TOSH_FA_AMD env var in the engine).
     /// Forces `-fa 1`, but the patched engine routes supported AMD cases to TOSH_FA_AMD.
     var faAmd: Bool = true
+    /// MoE-offload prefill boost: upload expert weights through a second Metal
+    /// queue overlapping compute (GGML_SCHED_PREFETCH_EXPERTS) and keep CPU
+    /// experts unpacked so their matmuls can offload (GGML_CPU_NO_REPACK).
+    var prefetchExperts: Bool = true
     /// Persist each conversation's KV cache to disk (`--slot-save-path`) so
     /// reopening a chat — or restarting the app/engine — skips re-processing the
     /// prompt. Only effective on the turbo engine with the AMD FA kernel: without
@@ -280,6 +284,10 @@ struct ServerSettings {
             env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
+        if prefetchExperts && ncmoe > 0 {
+            env["GGML_SCHED_PREFETCH_EXPERTS"] = "1"
+            env["GGML_CPU_NO_REPACK"] = "1"
+        }
         // KEY=VALUE tokens from Extra arguments become env vars (e.g. the GCN/Vega
         // wave64 safe-mode flag). Applied last so the user can override the above.
         for (k, v) in extraArgTokens.env { env[k] = v }
@@ -356,6 +364,7 @@ struct ServerSettings {
             localNetworkDiscovery: bool(SettingsKeys.localNetworkDiscovery, false),
             specMTP: bool(SettingsKeys.specMTP, false),
             faAmd: bool(SettingsKeys.faAmd, defaultFaAmd),
+            prefetchExperts: bool(SettingsKeys.prefetchExperts, true),
             persistCache: bool(SettingsKeys.persistCache, false),
             multiGPU: bool(SettingsKeys.multiGPU, false),
             multiGPUCount: int(SettingsKeys.multiGPUCount, 0),
@@ -891,7 +900,8 @@ final class ServerController: ObservableObject {
         }.joined(separator: "\n")
         let envKeys = ["GGML_METAL_CONCURRENCY_DISABLE", "GGML_METAL_VRAM_RESERVE_MB",
                        "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES",
-                       "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD"]
+                       "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD",
+                       "GGML_SCHED_PREFETCH_EXPERTS", "GGML_CPU_NO_REPACK"]
         let env = settings.environment
         let envLine = envKeys.compactMap { k in env[k].map { "\(k)=\($0)" } }.joined(separator: " ")
         let gpuSel = settings.multiGPU ? "split-all" : (settings.gpuIndex >= 0 ? "index \(settings.gpuIndex)" : "default (macOS picks)")
