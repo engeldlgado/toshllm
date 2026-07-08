@@ -64,6 +64,7 @@ struct ChatMainView: View {
             toolbarActions
         }
         .onAppear {
+            imageGenPool.modelStore = models
             models.refresh()
             if !onboardingDone && models.models.isEmpty {
                 showOnboarding = true
@@ -108,6 +109,10 @@ struct ChatMainView: View {
     /// Web chat, config and the optional update badge. The web link only applies
     /// to the chat, so it's disabled outside chat mode.
     @ToolbarContentBuilder private var toolbarActions: some ToolbarContent {
+        ToolbarItem(placement: .automatic) {
+            GPUUsageBadge()
+                .padding(.leading, 12)
+        }
         ToolbarItemGroup(placement: .automatic) {
             if let version = updates.latestVersion {
                 Button {

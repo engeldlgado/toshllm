@@ -9,7 +9,6 @@ struct DashboardView: View {
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var profileStore: ProfileStore
-    @EnvironmentObject var vram: VRAMMonitor
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
     @AppStorage(SettingsKeys.port) private var port = 8080
@@ -34,7 +33,7 @@ struct DashboardView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
                               spacing: 16) {
                         hardwareCard
-                        gpuCard
+                        GPUsCard()
                         serverCard
                         // Array(...) not the ArraySlice from dropFirst(): a slice keeps its
                         // parent's 1-based indices, which ForEach mishandles (the first added
@@ -112,31 +111,6 @@ struct DashboardView: View {
         if server.state == .running || server.state == .starting {
             server.restart(.fromDefaults())
         }
-    }
-
-    private var gpuCard: some View {
-        Card(title: loc.t("GPUs", "GPUs"), icon: "rectangle.on.rectangle", fill: true) {
-            if vram.gpus.isEmpty {
-                row("rectangle.on.rectangle", loc.t("Sin datos de uso de GPU", "No GPU usage data"))
-            } else {
-                ForEach(vram.gpus) { gpuRow($0) }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func gpuRow(_ g: GPUStat) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(g.name).font(.callout).lineLimit(1)
-                Spacer(minLength: 8)
-                Text(String(format: "%.1f / %.0f GB", g.usedMB / 1024, g.totalMB / 1024))
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-            }
-            ProgressView(value: g.fraction)
-                .tint(g.fraction > 0.9 ? .red : g.fraction > 0.75 ? .orange : .accentColor)
-        }
-        .help(loc.t("VRAM en uso de \(g.name).", "VRAM in use on \(g.name)."))
     }
 
     private var profileMenu: some View {
@@ -425,6 +399,57 @@ struct DashboardView: View {
             Image(systemName: icon).frame(width: 18).foregroundStyle(.secondary)
             Text(text).font(.callout).lineLimit(1)
             Spacer(minLength: 0)
+        }
+    }
+}
+
+/// Per-GPU VRAM bars. Owns the 3s-polling monitor so its ticks re-render only this card.
+struct GPUsCard: View {
+    @EnvironmentObject var vram: VRAMMonitor
+    @EnvironmentObject var loc: Localizer
+
+    var body: some View {
+        Card(title: loc.t("GPUs", "GPUs"), icon: "rectangle.on.rectangle", fill: true) {
+            if vram.gpus.isEmpty {
+                Label(loc.t("Sin datos de uso de GPU", "No GPU usage data"),
+                      systemImage: "rectangle.on.rectangle")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ForEach(vram.gpus) { gpuRow($0) }
+            }
+        }
+    }
+
+    @ViewBuilder private func gpuRow(_ g: GPUStat) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(g.name).font(.callout).lineLimit(1)
+                Spacer(minLength: 8)
+                Text(String(format: "%.1f / %.0f GB", g.usedMB / 1024, g.totalMB / 1024))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            ProgressView(value: g.fraction)
+                .tint(g.fraction > 0.9 ? .red : g.fraction > 0.75 ? .orange : .accentColor)
+        }
+        .help(loc.t("VRAM en uso de \(g.name).", "VRAM in use on \(g.name)."))
+    }
+}
+
+/// Aggregate-VRAM badge for window toolbars, so it's visible outside the dashboard.
+struct GPUUsageBadge: View {
+    @EnvironmentObject var vram: VRAMMonitor
+    @EnvironmentObject var loc: Localizer
+
+    var body: some View {
+        if vram.totalMB > 0 {
+            HStack(spacing: 5) {
+                Image(systemName: "memorychip").font(.caption).foregroundStyle(.secondary)
+                ProgressView(value: min(vram.fraction, 1)).frame(width: 52)
+                    .tint(vram.fraction > 0.9 ? .red : vram.fraction > 0.75 ? .orange : .accentColor)
+                Text(String(format: "%.1f/%.0f", vram.usedMB / 1024, vram.totalMB / 1024))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            .help(loc.t("VRAM en uso (todas las GPUs).", "VRAM in use (all GPUs)."))
         }
     }
 }
