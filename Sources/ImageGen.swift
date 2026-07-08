@@ -57,6 +57,10 @@ struct ImageGenModel: Identifiable {
     let cfgScale: Double
     /// Rough usable VRAM (GB) below which it won't fit well. Drives the pick.
     let minVRAMGB: Double
+
+    /// Metal reports the working-set limit, not physical VRAM (a 16 GB card
+    /// shows ~15 GB), so the class check tolerates a small shortfall.
+    func fitsVRAMClass(_ vramGB: Double) -> Bool { vramGB >= minVRAMGB * 0.9 }
     /// Extra sd-cli flags this model needs (e.g. Flux 2 samples with euler).
     var extraArgs: [String] = []
 
@@ -210,7 +214,7 @@ enum ImageGenCatalog {
     /// The best model this GPU can run: the highest min-VRAM tier that fits, and
     /// within a tie the earliest listed (curated preference).
     static func recommended(for hw: HardwareInfo) -> ImageGenModel? {
-        let fitting = models.filter { hw.vramGB >= $0.minVRAMGB }
+        let fitting = models.filter { $0.fitsVRAMClass(hw.vramGB) }
         guard let top = fitting.map(\.minVRAMGB).max() else { return nil }
         return fitting.first { $0.minVRAMGB == top }
     }

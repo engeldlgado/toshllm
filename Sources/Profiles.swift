@@ -36,6 +36,8 @@ struct Profile: Codable, Identifiable {
     var localNetworkDiscovery: Bool? = nil
     var gpuList: [Int]? = nil
     var embeddings: Bool? = nil
+    var routerMode: Bool? = nil
+    var routerModelsMax: Int? = nil
 }
 
 @MainActor
@@ -135,6 +137,8 @@ final class ProfileStore: ObservableObject {
         if let v = p.cacheReuse { d.set(v, forKey: SettingsKeys.cacheReuse) }
         if let v = p.gpuList { d.set(v.map(String.init).joined(separator: ","), forKey: SettingsKeys.gpuList) }
         if let v = p.embeddings { d.set(v, forKey: SettingsKeys.embeddings) }
+        if let v = p.routerMode { d.set(v, forKey: SettingsKeys.routerMode) }
+        if let v = p.routerModelsMax { d.set(v, forKey: SettingsKeys.routerModelsMax) }
         switch p.engine {
         case "bundled": d.set(ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
         case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
@@ -189,7 +193,8 @@ extension ServerSettings {
                 multiGPU: multiGPU, forcePrivateBuffers: forcePrivateBuffers,
                 cacheReuse: cacheReuse, loadVision: loadVision,
                 localNetworkDiscovery: localNetworkDiscovery,
-                gpuList: gpuList, embeddings: embeddings)
+                gpuList: gpuList, embeddings: embeddings,
+                routerMode: routerMode, routerModelsMax: routerModelsMax)
     }
 
     /// Load a profile's config into this struct without touching UserDefaults,
@@ -213,6 +218,8 @@ extension ServerSettings {
         if let v = p.localNetworkDiscovery { localNetworkDiscovery = v }
         gpuList = p.gpuList ?? []
         if let v = p.embeddings { embeddings = v }
+        if let v = p.routerMode { routerMode = v }
+        if let v = p.routerModelsMax { routerModelsMax = v }
         switch p.engine {
         case "bundled": serverBinary = ServerSettings.defaultBinary
         case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary

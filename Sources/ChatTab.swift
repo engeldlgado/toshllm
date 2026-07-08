@@ -22,6 +22,8 @@ struct ChatMainView: View {
     @Environment(\.openWindow) private var openWindow
     @StateObject private var chat = ChatStore()
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
+    @AppStorage(SettingsKeys.routerMode) private var routerMode = false
+    @AppStorage(SettingsKeys.chatSelectedModel) private var chatSelectedModel = ""
     @AppStorage(SettingsKeys.onboardingDone) private var onboardingDone = false
     @State private var showOnboarding = false
     @State private var mode: MainMode = .chat
@@ -216,6 +218,12 @@ struct ChatMainView: View {
     /// Window subtitle with the engine state and loaded model, the native way
     /// to show document status on macOS. Full telemetry lives in Configuration.
     private var stateSubtitle: String {
+        if routerMode, server.state == .running {
+            guard !chatSelectedModel.isEmpty,
+                  let m = models.models.first(where: { ServerSettings.routerAlias(for: $0.url.path) == chatSelectedModel })
+            else { return loc.t("Router: elige un modelo", "Router: pick a model") }
+            return URL(fileURLWithPath: m.url.path).deletingPathExtension().lastPathComponent
+        }
         let model = URL(fileURLWithPath: modelPath).deletingPathExtension().lastPathComponent
         switch server.state {
         case .running: return model.isEmpty ? loc.t("Activo", "Running") : model

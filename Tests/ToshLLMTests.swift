@@ -712,3 +712,74 @@ final class CatalogTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Router mode
+
+final class RouterModeTests: XCTestCase {
+    private func makeSettings(routerMode: Bool = true) -> ServerSettings {
+        var s = ServerSettings(serverBinary: "/usr/bin/true", modelPath: "/tmp/unused.gguf", port: 8099,
+                                ngl: 99, ncmoe: 0, ctx: 8192, threads: 6, flashAttn: "auto",
+                                noMmap: true, jinja: false, concurrencyDisable: true,
+                                vramReserveMB: 1024, gpuIndex: -1, extraArgs: "",
+                                cacheTypeK: "f16", cacheTypeV: "f16", mlock: false)
+        s.routerMode = routerMode
+        s.routerModelsMax = 2
+        return s
+    }
+
+    func testRouterArgumentsHaveNoFixedModel() {
+        let args = makeSettings().arguments
+        XCTAssertFalse(args.contains("-m"), "el router no fija un solo modelo")
+        XCTAssertTrue(args.contains("--models-preset"))
+        XCTAssertTrue(args.contains("--models-autoload"))
+        XCTAssertEqual(args[args.firstIndex(of: "--models-max")! + 1], "2")
+    }
+
+    func testNonRouterArgumentsUnaffected() {
+        let args = makeSettings(routerMode: false).arguments
+        XCTAssertTrue(args.contains("-m"))
+        XCTAssertFalse(args.contains("--models-preset"))
+    }
+
+    func testRouterAliasIsSlugAndStable() {
+        XCTAssertEqual(ServerSettings.routerAlias(for: "/models/Qwen3.6-14B-A3B.gguf"), "qwen3-6-14b-a3b")
+        XCTAssertEqual(ServerSettings.routerAlias(for: "/other/Qwen3.6-14B-A3B.gguf"),
+                       ServerSettings.routerAlias(for: "/models/Qwen3.6-14B-A3B.gguf"),
+                       "el alias depende solo del nombre de archivo, no de la carpeta")
+    }
+
+    func testRouterPresetINIHasOneSectionPerModelWithNcmoe() {
+        let ini = makeSettings().routerPresetINI(
+            modelPaths: ["/models/dense-4b.gguf", "/models/moe-a3b.gguf"],
+            ncmoeByPath: ["/models/moe-a3b.gguf": 12])
+        XCTAssertTrue(ini.contains("[dense-4b]"))
+        XCTAssertTrue(ini.contains("[moe-a3b]"))
+        XCTAssertTrue(ini.contains("model = /models/dense-4b.gguf"))
+        XCTAssertTrue(ini.contains("n-cpu-moe = 12"))
+        // Dense entry has no ncmoe line: no false n-cpu-moe on a model with no experts.
+        let denseSection = ini.components(separatedBy: "\n\n").first { $0.contains("dense-4b") } ?? ""
+        XCTAssertFalse(denseSection.contains("n-cpu-moe"))
+        XCTAssertTrue(ini.contains("--host") == false, "el router no repite --host/--port por modelo")
+    }
+
+    func testRouterPresetAliasCollisionIsDisambiguated() {
+        let ini = makeSettings().routerPresetINI(
+            modelPaths: ["/a/model.gguf", "/b/model.gguf"], ncmoeByPath: [:])
+        let sections = ini.components(separatedBy: "\n\n").filter { $0.contains("model = ") }
+        XCTAssertEqual(sections.count, 2, "dos archivos con el mismo nombre deben quedar en secciones separadas")
+    }
+}
+
+final class ConversationDecodingTests: XCTestCase {
+    // New Conversation fields must be `Type?`, not just `= default`: the
+    // synthesized decoder still requires the key otherwise.
+    func testDecodesConversationSavedBeforePinnedExisted() throws {
+        let json = """
+        [{"id":"11111111-1111-1111-1111-111111111111","title":"Old chat",
+          "messages":[],"created":700000000,"updated":700000000}]
+        """.data(using: .utf8)!
+        let list = try JSONDecoder().decode([Conversation].self, from: json)
+        XCTAssertEqual(list.count, 1)
+        XCTAssertEqual(list[0].pinned, nil)
+    }
+}

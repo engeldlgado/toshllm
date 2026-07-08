@@ -19,6 +19,8 @@ struct DashboardView: View {
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
     @AppStorage(SettingsKeys.embeddings) private var embeddings = false
+    @AppStorage(SettingsKeys.routerMode) private var routerMode = false
+    @AppStorage(SettingsKeys.routerModelsMax) private var routerModelsMax = 1
 
     @EnvironmentObject var updates: UpdateChecker
 
@@ -205,19 +207,28 @@ struct DashboardView: View {
     private var serverCard: some View {
         Card(title: loc.t("Servidor", "Server"), icon: "server.rack", fill: true,
              trailing: profileStore.profiles.isEmpty ? nil : AnyView(profileMenu)) {
-            HStack(spacing: 8) {
-                Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
-                // Selecting a model also seeds ncmoe (remembered value, or the
-                // recommendation; 0 for dense) so it never carries over stale.
-                Picker("", selection: Binding(get: { modelPath }, set: { p in
-                    modelPath = p
-                    ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
-                })) {
-                    Text(loc.t("Sin modelo", "No model")).tag("")
-                    ForEach(models.models) { Text($0.name).tag($0.url.path) }
+            if routerMode {
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox.and.arrow.backward").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Router: sirve los \(models.models.count) modelos descargados",
+                               "Router: serves all \(models.models.count) downloaded models"))
+                        .font(.callout).foregroundStyle(.secondary)
                 }
-                .labelsHidden()
-                .disabled(server.state == .running || server.state == .starting)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
+                    // Selecting a model also seeds ncmoe (remembered value, or the
+                    // recommendation; 0 for dense) so it never carries over stale.
+                    Picker("", selection: Binding(get: { modelPath }, set: { p in
+                        modelPath = p
+                        ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
+                    })) {
+                        Text(loc.t("Sin modelo", "No model")).tag("")
+                        ForEach(models.models) { Text($0.name).tag($0.url.path) }
+                    }
+                    .labelsHidden()
+                    .disabled(server.state == .running || server.state == .starting)
+                }
             }
             if hardware.gpus.count > 1 {
                 HStack(spacing: 8) {
@@ -300,6 +311,30 @@ struct DashboardView: View {
                 .help(loc.t("Sirve /v1/embeddings con --embeddings para clientes RAG (p. ej. Obsidian Copilot). El servidor queda dedicado a embeddings: úsalo con un modelo de embeddings, no para chatear.",
                             "Serves /v1/embeddings via --embeddings for RAG clients (e.g. Obsidian Copilot). The server becomes embeddings-only: use it with an embedding model, not for chat."))
                 .padding(.top, 4)
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Router (multi-modelo)", "Router (multi-model)")).font(.callout)
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: $routerMode)
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                        .disabled(serverBusy)
+                }
+                .help(loc.t("Un solo servidor sirve todos los modelos descargados: un cliente externo (VS Code, Continue…) o el chat interno eligen el modelo por petición y el servidor lo carga solo, sin reiniciar.",
+                            "One server serves every downloaded model: an external client (VS Code, Continue…) or the built-in chat picks the model per request and the server loads it on demand, no restart."))
+                .padding(.top, 4)
+                if routerMode {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.stack.3d.up").frame(width: 18).foregroundStyle(.secondary)
+                        Text(loc.t("Modelos simultáneos", "Models loaded at once")).font(.callout)
+                        Spacer(minLength: 8)
+                        Stepper("\(routerModelsMax)", value: $routerModelsMax, in: 1...4)
+                            .fixedSize()
+                            .disabled(serverBusy)
+                    }
+                    .help(loc.t("Cuántos modelos mantiene cargados el router a la vez; el resto se descarga solo (LRU). 1 es lo más seguro con una sola GPU.",
+                                "How many models the router keeps loaded at once; the rest unload automatically (LRU). 1 is safest on a single GPU."))
+                    .padding(.top, 4)
+                }
             } label: {
                 Text(loc.t("Opciones avanzadas", "Advanced options"))
                     .font(.caption).foregroundStyle(.secondary)
@@ -322,7 +357,7 @@ struct DashboardView: View {
                     Button { server.start(.fromDefaults()) } label: {
                         Label(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill")
                     }
-                    .disabled(modelPath.isEmpty)
+                    .disabled(routerMode ? models.models.isEmpty : modelPath.isEmpty)
                 }
             }
             .padding(.top, 6)
@@ -428,19 +463,29 @@ struct AddedServerCard: View {
     var body: some View {
         let busy = c.state == .running || c.state == .starting
         let modelPath = c.profile?.modelPath ?? ""
+        let routerMode = c.profile?.routerMode ?? false
         Card(title: c.name, icon: "server.rack", fill: true, trailing: AnyView(accessory)) {
-            HStack(spacing: 8) {
-                Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
-                // Same ncmoe seeding as the primary server's picker.
-                Picker("", selection: Binding(get: { c.profile?.modelPath ?? "" }, set: { p in
-                    c.profile?.modelPath = p
-                    c.profile?.ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
-                    manager.persist()
-                })) {
-                    Text(loc.t("Sin modelo", "No model")).tag("")
-                    ForEach(models.models) { Text($0.name).tag($0.url.path) }
+            if routerMode {
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox.and.arrow.backward").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Router: sirve los \(models.models.count) modelos descargados",
+                               "Router: serves all \(models.models.count) downloaded models"))
+                        .font(.callout).foregroundStyle(.secondary)
                 }
-                .labelsHidden().disabled(busy)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
+                    // Same ncmoe seeding as the primary server's picker.
+                    Picker("", selection: Binding(get: { c.profile?.modelPath ?? "" }, set: { p in
+                        c.profile?.modelPath = p
+                        c.profile?.ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
+                        manager.persist()
+                    })) {
+                        Text(loc.t("Sin modelo", "No model")).tag("")
+                        ForEach(models.models) { Text($0.name).tag($0.url.path) }
+                    }
+                    .labelsHidden().disabled(busy)
+                }
             }
             HStack(spacing: 8) {
                 Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
@@ -489,6 +534,26 @@ struct AddedServerCard: View {
                 .help(loc.t("Sirve /v1/embeddings con --embeddings para clientes RAG (p. ej. Obsidian Copilot). El servidor queda dedicado a embeddings: úsalo con un modelo de embeddings, no para chatear.",
                             "Serves /v1/embeddings via --embeddings for RAG clients (e.g. Obsidian Copilot). The server becomes embeddings-only: use it with an embedding model, not for chat."))
                 .padding(.top, 4)
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Router (multi-modelo)", "Router (multi-model)")).font(.callout)
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: boolBind(\.routerMode, false))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
+                }
+                .help(loc.t("Un solo servidor sirve todos los modelos descargados: el modelo se elige por petición y se carga solo, sin reiniciar.",
+                            "One server serves every downloaded model: the model is picked per request and loads on demand, no restart."))
+                .padding(.top, 4)
+                if routerMode {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.stack.3d.up").frame(width: 18).foregroundStyle(.secondary)
+                        Text(loc.t("Modelos simultáneos", "Models loaded at once")).font(.callout)
+                        Spacer(minLength: 8)
+                        Stepper("\(c.profile?.routerModelsMax ?? 1)", value: intBind(\.routerModelsMax, 1), in: 1...4)
+                            .fixedSize().disabled(busy)
+                    }
+                    .padding(.top, 4)
+                }
             } label: {
                 Text(loc.t("Opciones avanzadas", "Advanced options"))
                     .font(.caption).foregroundStyle(.secondary)
@@ -547,6 +612,11 @@ struct AddedServerCard: View {
     }
 
     private func boolBind(_ kp: WritableKeyPath<Profile, Bool?>, _ fallback: Bool) -> Binding<Bool> {
+        Binding(get: { c.profile?[keyPath: kp] ?? fallback },
+                set: { c.profile?[keyPath: kp] = $0; manager.persist() })
+    }
+
+    private func intBind(_ kp: WritableKeyPath<Profile, Int?>, _ fallback: Int) -> Binding<Int> {
         Binding(get: { c.profile?[keyPath: kp] ?? fallback },
                 set: { c.profile?[keyPath: kp] = $0; manager.persist() })
     }

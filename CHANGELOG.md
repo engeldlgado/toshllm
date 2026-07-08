@@ -3,6 +3,18 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.52] - 2026-07-07
+
+### Added
+- **Router mode: one server, every model, no restart**... turn on "Router (multi-model)" on the server card (Home) and a single server auto-loads whichever model an OpenAI-compatible request names in its `model` field, unloading the previous one if needed. External clients (VS Code, Cursor, and generally anything speaking the OpenAI or Anthropic API format) and the built-in chat can switch models on the fly this way. A "Models loaded at once" setting controls how many stay resident. Both engines.
+- **Pin and sort conversations**... pin any conversation to keep it at the top regardless of order, and sort the list by recent use, creation date, or title from a new menu next to the search field.
+
+### Fixed
+- **Image models now match their real VRAM tier**... a 16 GB GPU couldn't use models tagged for 16 GB, because macOS reports a bit less usable VRAM than the card's physical amount and the check required an exact match. The comparison now tolerates that gap.
+
+### Improved
+- Some other improvements and fixes.
+
 ## [0.81.51] - 2026-07-07
 
 ### Added

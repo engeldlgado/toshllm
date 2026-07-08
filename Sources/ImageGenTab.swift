@@ -122,7 +122,7 @@ struct ImageControls: View {
         let (w, h) = c.dimensions
         return ImageGenerator.installed(model, in: models)
             && !pool.effectivePrompt(for: c).isEmpty
-            && v >= model.minVRAMGB
+            && model.fitsVRAMClass(v)
             && ImageGenLimits.fits(width: w, height: h, vramGB: v, residentGB: model.residentGB)
     }
 
@@ -176,7 +176,7 @@ struct ImageInstanceForm: View {
     private var model: ImageGenModel { cfg.resolvedModel(for: hardware) }
     private var installed: Bool { ImageGenerator.installed(model, in: models) }
     private var targetVRAM: Double { ImageControls.vram(of: cfg.gpuIndex) }
-    private var modelFitsGPU: Bool { targetVRAM >= model.minVRAMGB }
+    private var modelFitsGPU: Bool { model.fitsVRAMClass(targetVRAM) }
     private var baseSizes: [Int] {
         let sizes = ImageGenLimits.baseSizes(vramGB: targetVRAM, residentGB: model.residentGB)
         return sizes.isEmpty ? [512] : sizes

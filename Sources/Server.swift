@@ -67,6 +67,11 @@ struct ServerSettings {
     /// queue overlapping compute (GGML_SCHED_PREFETCH_EXPERTS) and keep CPU
     /// experts unpacked so their matmuls can offload (GGML_CPU_NO_REPACK).
     var prefetchExperts: Bool = true
+    /// Router mode (`--models-preset`): one process auto-loads/unloads whichever
+    /// model a request's "model" field names, instead of the fixed `modelPath`.
+    var routerMode: Bool = false
+    /// Models the router keeps loaded at once (LRU); 1 is safest on a single GPU.
+    var routerModelsMax: Int = 1
     /// Persist each conversation's KV cache to disk (`--slot-save-path`) so
     /// reopening a chat — or restarting the app/engine — skips re-processing the
     /// prompt. Only effective on the turbo engine with the AMD FA kernel: without
@@ -127,6 +132,7 @@ struct ServerSettings {
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
 
     var arguments: [String] {
+        if routerMode { return routerArguments }
         let faValue = effectiveFaAmd || kvNeedsFlashAttention ? "1" : flashAttn
         var args = [
             "-m", modelPath,
@@ -187,6 +193,83 @@ struct ServerSettings {
         if let ui = Self.chatUIPath { args += ["--path", ui] }
         args += extraArgTokens.cli
         return args
+    }
+
+    /// Router-mode CLI args: no `-m`, the preset file lists every model. Per-model
+    /// flags (mmproj, ncmoe, MTP...) live in that INI instead, see `routerPresetINI`.
+    private var routerArguments: [String] {
+        var args = [
+            "--models-preset", Self.routerPresetPath(port: port).path,
+            "--models-max", String(routerModelsMax),
+            "--models-autoload",
+            "--host", localNetworkDiscovery ? "0.0.0.0" : "127.0.0.1",
+            "--port", String(port),
+        ]
+        if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
+        if let ui = Self.chatUIPath { args += ["--path", ui] }
+        return args
+    }
+
+    /// Same folder `ModelStore` scans (`~/models` or the custom override),
+    /// resolved independently since `ServerController` has no `ModelStore`.
+    static var modelsDirectory: URL {
+        let custom = UserDefaults.standard.string(forKey: SettingsKeys.modelsDir) ?? ""
+        return custom.isEmpty ? ModelStore.defaultDirectory : URL(fileURLWithPath: custom, isDirectory: true)
+    }
+
+    static func routerPresetPath(port: Int) -> URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ToshLLM/router")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("preset-\(port).ini")
+    }
+
+    /// Stable, INI/URL-safe id derived from a model's filename: the router
+    /// preset's section name and the value clients send as `"model"`.
+    static func routerAlias(for modelPath: String) -> String {
+        let base = URL(fileURLWithPath: modelPath).deletingPathExtension().lastPathComponent
+        var slug = String(base.lowercased().map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" })
+        while slug.contains("--") { slug = slug.replacingOccurrences(of: "--", with: "-") }
+        slug = slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return slug.isEmpty ? "model" : slug
+    }
+
+    /// Builds the router's `--models-preset` INI: one `[alias]` section per model,
+    /// shared engine config plus per-path ncmoe/mmproj/MTP. `extraArgs` (free-form
+    /// CLI tokens) isn't representable generically here, so it's skipped.
+    func routerPresetINI(modelPaths: [String], ncmoeByPath: [String: Int]) -> String {
+        let faValue = effectiveFaAmd || kvNeedsFlashAttention ? "on" : flashAttn
+        let turboKV = cacheTypeK.hasPrefix("turbo") || cacheTypeV.hasPrefix("turbo")
+        var seenAliases = Set<String>()
+        var sections: [String] = []
+        for path in modelPaths.sorted() {
+            var alias = Self.routerAlias(for: path)
+            if seenAliases.contains(alias) { alias += "-\(abs(path.hashValue) % 1000)" }
+            seenAliases.insert(alias)
+
+            var lines = ["[\(alias)]", "model = \(path)", "n-gpu-layers = \(ngl)",
+                         "ctx-size = \(ctx)", "threads = \(threads)", "flash-attn = \(faValue)"]
+            if let ncmoe = ncmoeByPath[path], ncmoe > 0 { lines.append("n-cpu-moe = \(ncmoe)") }
+            if noMmap { lines.append("no-mmap = true") }
+            let mmproj = loadVision ? Self.mmprojPath(forModel: path) : nil
+            if let mmproj { lines.append("mmproj = \(mmproj)") }
+            if jinja || mmproj != nil { lines.append("jinja = true") }
+            if cacheTypeK != "f16" { lines.append("cache-type-k = \(cacheTypeK)") }
+            if cacheTypeV != "f16" { lines.append("cache-type-v = \(cacheTypeV)") }
+            if mlock { lines.append("mlock = true") }
+            lines.append("cache-ram = \(cacheRAM)")
+            if cacheReuse && !turboKV && mmproj == nil { lines.append("cache-reuse = 256") }
+            if parallelSlots > 0 { lines.append("parallel = \(parallelSlots)") }
+            if parallelSlots > 1 { lines.append("kv-unified = true") }
+            if multiGPU || gpuList.count >= 2 { lines.append("split-mode = layer") }
+            if persistCache && isTurboEngine {
+                lines.append("slot-save-path = \(Self.slotCacheDir(port: port).appendingPathComponent(alias).path)")
+            }
+            if reasoningInline { lines.append("reasoning-format = none") }
+            if specMTP && Self.modelHasMTP(at: path) { lines.append("spec-type = draft-mtp") }
+            sections.append(lines.joined(separator: "\n"))
+        }
+        return sections.joined(separator: "\n\n") + "\n"
     }
 
     /// Splits the Extra arguments field: a token shaped like `KEY=VALUE` whose name
@@ -284,7 +367,9 @@ struct ServerSettings {
             env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
-        if prefetchExperts && ncmoe > 0 {
+        // Router mode has no single ncmoe (it's per-model, in the preset INI);
+        // the envs are harmless no-ops for dense models, gated per-op internally.
+        if prefetchExperts && (ncmoe > 0 || routerMode) {
             env["GGML_SCHED_PREFETCH_EXPERTS"] = "1"
             env["GGML_CPU_NO_REPACK"] = "1"
         }
@@ -365,6 +450,8 @@ struct ServerSettings {
             specMTP: bool(SettingsKeys.specMTP, false),
             faAmd: bool(SettingsKeys.faAmd, defaultFaAmd),
             prefetchExperts: bool(SettingsKeys.prefetchExperts, true),
+            routerMode: bool(SettingsKeys.routerMode, false),
+            routerModelsMax: int(SettingsKeys.routerModelsMax, 1),
             persistCache: bool(SettingsKeys.persistCache, false),
             multiGPU: bool(SettingsKeys.multiGPU, false),
             multiGPUCount: int(SettingsKeys.multiGPUCount, 0),
@@ -664,6 +751,15 @@ struct ServerSettings {
     static func activeAPIKey() -> String? {
         UserDefaults.standard.bool(forKey: SettingsKeys.apiKeyEnabled) ? Keychain.apiKey() : nil
     }
+
+    /// The model alias the native chat should send as `"model"`, or nil when
+    /// the primary server isn't in router mode (single-model requests omit it).
+    static func activeRouterModel() -> String? {
+        let d = UserDefaults.standard
+        guard d.bool(forKey: SettingsKeys.routerMode) else { return nil }
+        let alias = d.string(forKey: SettingsKeys.chatSelectedModel) ?? ""
+        return alias.isEmpty ? nil : alias
+    }
 }
 
 /// Owns the running engine instance(s). For now there is exactly one, so behavior
@@ -839,19 +935,29 @@ final class ServerController: ObservableObject {
             state = .failed("No existe el binario llama-server en la ruta configurada")
             return
         }
-        guard FileManager.default.fileExists(atPath: settings.modelPath) else {
-            state = .failed("Selecciona un modelo en la pestaña Modelos")
-            return
-        }
-        // TurboQuant weight quants (tq3_1s/tq4_1s) decode to garbage on this
-        // engine; block the launch instead of serving it. KV-cache TurboQuant
-        // and standard quants are unaffected.
-        if ServerSettings.modelIsTurboQuantWeights(at: settings.modelPath) {
-            let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en"
-            state = .failed(lang == "es"
-                ? "Modelo TurboQuant no soportado: la cuantización de pesos TurboQuant (tq3_1s/tq4_1s) produce salida incorrecta en este motor, tanto en modelos densos como MoE. Usa un modelo en cuantización estándar (Q4_K, Q5_K, Q6_K, Q8_0…)."
-                : "TurboQuant model not supported: TurboQuant weight quantization (tq3_1s/tq4_1s) produces incorrect output on this engine, for both dense and MoE models. Use a standard-quant model (Q4_K, Q5_K, Q6_K, Q8_0…).")
-            return
+        if settings.routerMode {
+            guard !LocalModel.scan(in: ServerSettings.modelsDirectory).isEmpty else {
+                let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en"
+                state = .failed(lang == "es"
+                    ? "No hay modelos descargados en la carpeta de modelos"
+                    : "No models downloaded in the models folder")
+                return
+            }
+        } else {
+            guard FileManager.default.fileExists(atPath: settings.modelPath) else {
+                state = .failed("Selecciona un modelo en la pestaña Modelos")
+                return
+            }
+            // TurboQuant weight quants (tq3_1s/tq4_1s) decode to garbage on this
+            // engine; block the launch instead of serving it. KV-cache TurboQuant
+            // and standard quants are unaffected.
+            if ServerSettings.modelIsTurboQuantWeights(at: settings.modelPath) {
+                let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en"
+                state = .failed(lang == "es"
+                    ? "Modelo TurboQuant no soportado: la cuantización de pesos TurboQuant (tq3_1s/tq4_1s) produce salida incorrecta en este motor, tanto en modelos densos como MoE. Usa un modelo en cuantización estándar (Q4_K, Q5_K, Q6_K, Q8_0…)."
+                    : "TurboQuant model not supported: TurboQuant weight quantization (tq3_1s/tq4_1s) produces incorrect output on this engine, for both dense and MoE models. Use a standard-quant model (Q4_K, Q5_K, Q6_K, Q8_0…).")
+                return
+            }
         }
 
         log = ""
@@ -909,7 +1015,7 @@ final class ServerController: ObservableObject {
         ========================================================
          ToshLLM \(AppInfo.version) — server start (\(ServerSettings.isAppleSilicon ? "arm64" : "x86_64"))
          engine : \(engine)
-         model  : \((settings.modelPath as NSString).lastPathComponent)
+         model  : \(settings.routerMode ? "router (autoload, max \(settings.routerModelsMax) loaded)" : (settings.modelPath as NSString).lastPathComponent)
          GPUs detected:
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
@@ -924,8 +1030,18 @@ final class ServerController: ObservableObject {
     private func launch(_ settings: ServerSettings) {
         guard state == .starting else { return }   // user hit Stop meanwhile
 
-        prewarmActive = settings.persistCache && settings.isTurboEngine && !settings.isMultimodal
-            && !ServerSettings.modelHasMTP(at: settings.modelPath)
+        if settings.routerMode {
+            let models = LocalModel.scan(in: ServerSettings.modelsDirectory)
+            let paths = models.map(\.url.path)
+            let ncmoeByPath = Dictionary(uniqueKeysWithValues: paths.map {
+                ($0, Estimator.ncmoeForSelection(path: $0, models: models))
+            })
+            let ini = settings.routerPresetINI(modelPaths: paths, ncmoeByPath: ncmoeByPath)
+            try? ini.write(to: ServerSettings.routerPresetPath(port: settings.port), atomically: true, encoding: .utf8)
+        }
+
+        prewarmActive = !settings.routerMode && settings.persistCache && settings.isTurboEngine
+            && !settings.isMultimodal && !ServerSettings.modelHasMTP(at: settings.modelPath)
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: settings.serverBinary)

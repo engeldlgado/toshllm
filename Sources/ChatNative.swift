@@ -64,6 +64,9 @@ struct Conversation: Identifiable, Codable {
     // pre-compaction JSON decodable.
     var summary: String?
     var summarizedCount: Int?
+    /// Pinned conversations sort first. Optional for backward compatibility
+    /// with conversations.json saved by older builds.
+    var pinned: Bool? = nil
 }
 
 struct StreamError: LocalizedError {
@@ -288,6 +291,12 @@ final class ChatStore: ObservableObject {
         save()
     }
 
+    func togglePin(_ c: Conversation) {
+        guard let i = conversations.firstIndex(where: { $0.id == c.id }) else { return }
+        conversations[i].pinned = !(conversations[i].pinned ?? false)
+        save()
+    }
+
     func displayTitle(_ c: Conversation) -> String {
         if !c.title.isEmpty { return c.title }
         if let first = c.messages.first(where: { $0.role == "user" }) {
@@ -461,6 +470,7 @@ final class ChatStore: ObservableObject {
                     // Stream prompt-processing progress (in `prompt_progress`).
                     "return_progress": true,
                 ]
+                if let model = ServerSettings.activeRouterModel() { body["model"] = model }
                 if reasoningOff {
                     body["chat_template_kwargs"] = ["enable_thinking": false]
                     // For templates that ignore enable_thinking (Qwen3.6 still
@@ -857,7 +867,7 @@ final class ChatStore: ObservableObject {
             req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
         }
         let instructions = "You summarize conversations. Write a compact summary (at most ~250 words) of the conversation below, in the same language the conversation itself uses. Preserve key facts, decisions, names, numbers, code references and pending questions. Reply with the summary only."
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "messages": [["role": "system", "content": instructions],
                          ["role": "user", "content": prompt]],
             "stream": false,
@@ -865,6 +875,7 @@ final class ChatStore: ObservableObject {
             "max_tokens": 512,
             "chat_template_kwargs": ["enable_thinking": false],
         ]
+        if let model = ServerSettings.activeRouterModel() { body["model"] = model }
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         guard let (data, response) = try? await URLSession.shared.data(for: req),
               (response as? HTTPURLResponse)?.statusCode == 200,
@@ -974,12 +985,15 @@ struct NativeChatView: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var chat: ChatStore
+    @EnvironmentObject var models: ModelStore
     @AppStorage(SettingsKeys.chatTemp) private var temperature = 0.7
     @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = 2048
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
     @AppStorage(SettingsKeys.chatThinking) private var thinkingEnabled = true
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ctx) private var contextLimit = 16384
+    @AppStorage(SettingsKeys.routerMode) private var routerMode = false
+    @AppStorage(SettingsKeys.chatSelectedModel) private var chatSelectedModel = ""
     @State private var draft = ""
     @State private var attachments: [ChatAttachment] = []
     @State private var images: [String] = []   // attached images as data URIs (vision models)
@@ -1281,6 +1295,28 @@ struct NativeChatView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(loc.t("Parámetros del chat", "Chat parameters")).font(.headline)
 
+            if routerMode {
+                Picker(selection: $chatSelectedModel) {
+                    ForEach(models.models) { m in
+                        Text(m.name).tag(ServerSettings.routerAlias(for: m.url.path))
+                    }
+                } label: {
+                    Label(loc.t("Modelo", "Model"), systemImage: "shippingbox")
+                }
+                .infoTip(loc.t("Modelo para el próximo mensaje. El router lo carga solo (y descarga el anterior si hace falta), sin reiniciar el servidor.",
+                            "Model for the next message. The router loads it on demand (unloading the previous one if needed), no server restart."))
+                .task(id: models.models.map(\.url.path)) {
+                    guard chatSelectedModel.isEmpty || !models.models.contains(where: {
+                        ServerSettings.routerAlias(for: $0.url.path) == chatSelectedModel
+                    }) else { return }
+                    if let first = models.models.first {
+                        chatSelectedModel = ServerSettings.routerAlias(for: first.url.path)
+                    }
+                }
+
+                Divider()
+            }
+
             Toggle(isOn: $thinkingEnabled) {
                 Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
             }
@@ -1483,7 +1519,7 @@ struct NativeChatView: View {
 
     // Read cap (raw bytes) and extracted-text cap. Text beyond the latter is
     // truncated with a note; the proactive context warning catches huge totals.
-    private static let maxAttachBytes = 12 * 1024 * 1024
+    private static let maxAttachBytes = 40 * 1024 * 1024
     private static let maxAttachChars = 400_000
 
     private func addAttachments(urls: [URL]) {
@@ -1494,7 +1530,7 @@ struct NativeChatView: View {
                 errors.append(loc.t("\(name): no se pudo leer", "\(name): couldn't read it")); continue
             }
             guard data.count <= Self.maxAttachBytes else {
-                errors.append(loc.t("\(name): demasiado grande (máx 12 MB)", "\(name): too large (max 12 MB)")); continue
+                errors.append(loc.t("\(name): demasiado grande (máx 40 MB)", "\(name): too large (max 40 MB)")); continue
             }
 
             let ext = (name as NSString).pathExtension.lowercased()
@@ -1731,19 +1767,43 @@ struct NativeChatView: View {
 /// list. A native `List`/`.sidebar` inside the NavigationSplitView so it
 /// adopts the system's translucent sidebar — including macOS 26 Liquid Glass —
 /// on every supported release.
+enum ConversationSortOrder: String, CaseIterable {
+    case lastUsed, created, title
+
+    func label(_ loc: Localizer) -> String {
+        switch self {
+        case .lastUsed: return loc.t("Uso reciente", "Recently used")
+        case .created: return loc.t("Fecha de creación", "Date created")
+        case .title: return loc.t("Título (A-Z)", "Title (A-Z)")
+        }
+    }
+}
+
 struct ConversationListView: View {
     @EnvironmentObject var chat: ChatStore
     @EnvironmentObject var loc: Localizer
     @State private var searchText = ""
     @State private var renaming: Conversation?
     @State private var renameText = ""
+    @AppStorage(SettingsKeys.chatSortOrder) private var sortOrderRaw = ConversationSortOrder.lastUsed.rawValue
+
+    private var sortOrder: ConversationSortOrder {
+        ConversationSortOrder(rawValue: sortOrderRaw) ?? .lastUsed
+    }
 
     private var filtered: [Conversation] {
         let query = searchText.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return chat.conversations }
-        return chat.conversations.filter { c in
+        let base = query.isEmpty ? chat.conversations : chat.conversations.filter { c in
             chat.displayTitle(c).localizedCaseInsensitiveContains(query) ||
             c.messages.contains { $0.content.localizedCaseInsensitiveContains(query) }
+        }
+        return base.sorted { a, b in
+            if (a.pinned ?? false) != (b.pinned ?? false) { return a.pinned ?? false }
+            switch sortOrder {
+            case .lastUsed: return a.updated > b.updated
+            case .created: return a.created > b.created
+            case .title: return chat.displayTitle(a).localizedCaseInsensitiveCompare(chat.displayTitle(b)) == .orderedAscending
+            }
         }
     }
 
@@ -1770,23 +1830,52 @@ struct ConversationListView: View {
             .padding(.bottom, 8)
             .help(loc.t("Empieza una conversación nueva (⌘N).", "Start a new conversation (⌘N)."))
 
-            TextField(loc.t("Buscar…", "Search…"), text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.large)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
+            HStack(spacing: 8) {
+                TextField(loc.t("Buscar…", "Search…"), text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
+
+                Menu {
+                    ForEach(ConversationSortOrder.allCases, id: \.self) { order in
+                        Button {
+                            sortOrderRaw = order.rawValue
+                        } label: {
+                            if order == sortOrder {
+                                Label(order.label(loc), systemImage: "checkmark")
+                            } else {
+                                Text(order.label(loc))
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help(loc.t("Ordenar conversaciones", "Sort conversations"))
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
 
             List(selection: $chat.currentID) {
                 ForEach(filtered) { c in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(chat.displayTitle(c))
-                            .lineLimit(1)
-                        Text(relativeDate(c.updated))
-                            .font(.caption2).foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        if c.pinned ?? false {
+                            Image(systemName: "pin.fill")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(chat.displayTitle(c))
+                                .lineLimit(1)
+                            Text(relativeDate(c.updated))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.vertical, 5)
                     .tag(c.id)
                     .contextMenu {
+                        Button((c.pinned ?? false) ? loc.t("Desfijar", "Unpin") : loc.t("Fijar", "Pin")) {
+                            chat.togglePin(c)
+                        }
                         Button(loc.t("Renombrar…", "Rename…")) {
                             renameText = chat.displayTitle(c)
                             renaming = c

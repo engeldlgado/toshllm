@@ -261,6 +261,12 @@ struct BenchmarksView: View {
             Text(loc.t("Mide pp\(cfg.benchPPClamped) (prompt) y tg\(cfg.benchTGClamped) (generación), 2 repeticiones. Tarda varios minutos en modelos grandes.",
                        "Measures pp\(cfg.benchPPClamped) (prompt) and tg\(cfg.benchTGClamped) (generation), 2 repetitions. Takes minutes on large models."))
                 .font(.caption).foregroundStyle(.secondary)
+            if !cfg.modelPath.isEmpty && ServerSettings.modelHasMTP(at: cfg.modelPath) {
+                Label(loc.t("El benchmark mide el decode crudo: la aceleración MTP no se refleja aquí, solo en el chat y el servidor.",
+                            "The benchmark measures raw decode: MTP acceleration doesn't show here, only in chat and the server."),
+                      systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 

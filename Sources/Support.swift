@@ -41,6 +41,11 @@ enum SettingsKeys {
     static let specMTP = "specMTP"
     static let faAmd = "faAmd"
     static let prefetchExperts = "prefetchExperts"
+    static let routerMode = "routerMode"
+    static let routerModelsMax = "routerModelsMax"
+    /// Alias of the model the native chat targets in router mode. A runtime
+    /// pick, not a "setting", so it's excluded from resettableOptionKeys.
+    static let chatSelectedModel = "chatSelectedModel"
     static let persistCache = "persistCache"
     static let multiGPU = "multiGPU"
     static let multiGPUCount = "multiGPUCount"
@@ -57,6 +62,9 @@ enum SettingsKeys {
     static let chatMaxTokens = "chatMaxTokens"
     static let chatSystem = "chatSystem"
     static let chatThinking = "chatThinking"
+    /// Conversation list sort order. Like chatSelectedModel, a runtime UI
+    /// preference excluded from resettableOptionKeys, not a real "setting".
+    static let chatSortOrder = "chatSortOrder"
     static let chatAutoCompact = "chatAutoCompact"
     static let smoothTyping = "smoothTyping"
     static let onboardingDone = "onboardingDone"
@@ -91,7 +99,8 @@ enum SettingsKeys {
     static let resettableOptionKeys = [
         serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
         vramReserve, gpuIndex, gpuList, extraArgs, embeddings, cacheTypeK, cacheTypeV, mlock, cacheRAM,
-        parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, persistCache, multiGPU, multiGPUCount,
+        parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, routerMode, routerModelsMax,
+        persistCache, multiGPU, multiGPUCount,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
         chatAutoCompact, smoothTyping,

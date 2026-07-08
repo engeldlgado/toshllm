@@ -7,6 +7,22 @@ struct LocalModel: Identifiable, Hashable {
     var id: String { url.path }
     var sizeGB: String { String(format: "%.1f GB", Double(sizeBytes) / 1_073_741_824) }
     var isMoE: Bool { name.localizedCaseInsensitiveContains("a3b") || name.localizedCaseInsensitiveContains("moe") }
+
+    /// Top-level `.gguf` scan, excluding mmproj files. Shared by `ModelStore.refresh()`
+    /// and the router preset generator, which has no `ModelStore` instance to call.
+    nonisolated static func scan(in directory: URL) -> [LocalModel] {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        return files
+            .filter { $0.pathExtension.lowercased() == "gguf"
+                && !$0.lastPathComponent.lowercased().contains("mmproj") }
+            .compactMap { url in
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+                return LocalModel(url: url, name: url.lastPathComponent, sizeBytes: size)
+            }
+            .sorted { $0.sizeBytes < $1.sizeBytes }
+    }
 }
 
 
@@ -215,7 +231,7 @@ final class ModelStore: ObservableObject {
     init() { refresh() }
 
     /// The fixed default location, used when the user hasn't picked a custom folder.
-    static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("models")
+    nonisolated static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("models")
 
     /// Where models are scanned, downloaded and deleted. Defaults to `~/models`,
     /// overridable from Settings (persisted in `SettingsKeys.modelsDir`).
@@ -256,19 +272,7 @@ final class ModelStore: ObservableObject {
     }
 
     func refresh() {
-        let fm = FileManager.default
-        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        models = files
-            // .gguf models, excluding multimodal projectors (mmproj-*.gguf): those
-            // are loaded automatically alongside their model for vision, not picked.
-            .filter { $0.pathExtension.lowercased() == "gguf"
-                && !$0.lastPathComponent.lowercased().contains("mmproj") }
-            .compactMap { url in
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-                return LocalModel(url: url, name: url.lastPathComponent, sizeBytes: size)
-            }
-            .sorted { $0.sizeBytes < $1.sizeBytes }
+        models = LocalModel.scan(in: directory)
     }
 
     func isDownloaded(fileName: String) -> Bool {
