@@ -3,6 +3,25 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.53] - 2026-07-08
+
+### Added
+- **Image studio: a prompt queue with a live feed**... a new "Queue" tab lets you line up prompts, each with its own seed, and the next free instance renders them one after another (one generation per GPU on AMD). A feed shows everything as it happens... queued, in progress, and finished results with their prompt, seed, size and time... so nothing is lost when an instance moves on to the next prompt.
+- **Flux.2 klein 4B**... the lightest Flux 2 yet (step-distilled, 4 steps, Apache): a fast option that leaves more VRAM for larger frames. Available from 12 GB; Z-Image Turbo stays the recommended pick.
+- **Custom and cinematic aspect ratios**... pick "Custom" and type a free W:H ratio (e.g. 21:9), or use the new 2.39:1 cinemascope preset. The long edge still respects the base size and the GPU's VRAM.
+- **VRAM usage in the chat window**... the GPU-memory indicator now also rides in the chat window's toolbar, not only the configuration window and the menu bar.
+- **Per-image "Save as…" and "Save all…"**... every result in a multi-instance run has its own save button again, plus a "Save all…" that copies every image into a folder you pick.
+- **Delete images on app close**... an optional toggle clears generated images from the output folder when you quit, so the timestamped files don't pile up.
+
+### Fixed
+- **Multiple image instances no longer overwrite each other**... a batch generated in the same second shared one filename, so all instances pointed at a single image. Each output now gets a unique name.
+- **The server card's "Advanced options" is responsive again**... the VRAM monitor's periodic refresh was rebuilding the whole Home view and stuttering the expand/collapse; it now updates only the GPU card.
+- **Router chat always names a model**... the first message in router mode could go out with no model named and be rejected by the server; it now falls back to the first available model.
+
+### Improved
+- **Roomier multi-instance image layout**... several instances now stack vertically with a large preview and their timing and actions beside each image, instead of shrinking to thumbnails.
+- **img2img ratio hint**... a note appears when the reference image's proportion differs from the chosen frame, which can crop the subject (e.g. cut-off heads in portraits).
+
 ## [0.81.52] - 2026-07-07
 
 ### Added
