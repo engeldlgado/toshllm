@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ServerManager.shared.stopAll()
+        ImageGenPool.cleanupOutputsIfEnabled()
     }
 }
 

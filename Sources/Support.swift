@@ -90,6 +90,8 @@ enum SettingsKeys {
     static let imagenStrength = "imagenStrength"
     /// Extra parallel generation instances (JSON: [ImageInstanceConfig]).
     static let imagenInstances = "imagenInstances"
+    /// Delete generated output images (toshllm_*) when the app quits.
+    static let imagenCleanupOnClose = "imagenCleanupOnClose"
 
     /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
     /// so `@AppStorage` falls back to its declared defaults. The models folder, the

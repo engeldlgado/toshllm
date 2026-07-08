@@ -57,6 +57,8 @@ struct ImageGenModel: Identifiable {
     let cfgScale: Double
     /// Rough usable VRAM (GB) below which it won't fit well. Drives the pick.
     let minVRAMGB: Double
+    /// False = shown and usable, but never the auto-recommended pick.
+    var recommendable: Bool = true
 
     /// Metal reports the working-set limit, not physical VRAM (a 16 GB card
     /// shows ~15 GB), so the class check tolerates a small shortfall.
@@ -147,6 +149,23 @@ enum ImageGenCatalog {
         urlString: "https://huggingface.co/black-forest-labs/FLUX.2-small-decoder/resolve/main/full_encoder_small_decoder.safetensors",
         fileName: "flux2_full_encoder_small_decoder.safetensors", sizeGB: 0.25)
 
+    /// Flux.2 klein 4B: the lightest Flux 2 (4 steps). `recommendable:false` keeps Z-Image the curated AMD pick.
+    static let flux2Klein4B = ImageGenModel(
+        name: "Flux.2 klein 4B",
+        detailES: "4B, 4 pasos, Apache. El Flux 2 más ligero: rápido y deja más VRAM para imágenes grandes.",
+        detailEN: "4B, 4 steps, Apache. The lightest Flux 2: fast, and leaves more VRAM for larger images.",
+        components: [
+            ImageGenComponent(kind: .diffusion,
+                urlString: "https://huggingface.co/leejet/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q4_0.gguf",
+                fileName: "flux-2-klein-4b-Q4_0.gguf", sizeGB: 2.46),
+            flux2VAE,
+            ImageGenComponent(kind: .textEncoder,
+                urlString: "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
+                fileName: "Qwen3-4B-Q4_K_M.gguf", sizeGB: 2.5),
+        ],
+        defaultSteps: 4, cfgScale: 1.0, minVRAMGB: 12, recommendable: false,
+        extraArgs: ["--sampling-method", "euler"])
+
     /// Flux.2 klein 9B (step-distilled, Apache). Flux 2 quality for 16 GB GPUs.
     static let flux2Klein9B = ImageGenModel(
         name: "Flux.2 klein 9B",
@@ -209,12 +228,12 @@ enum ImageGenCatalog {
     /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD);
     /// klein 9B sits before schnell to win the 16 GB tie the same way.
     static let models: [ImageGenModel] = [sd15, zImageTurbo, sdxlTurbo,
-                                          flux2Klein9B, fluxSchnell, qwenImage, flux2Dev]
+                                          flux2Klein4B, flux2Klein9B, fluxSchnell, qwenImage, flux2Dev]
 
     /// The best model this GPU can run: the highest min-VRAM tier that fits, and
     /// within a tie the earliest listed (curated preference).
     static func recommended(for hw: HardwareInfo) -> ImageGenModel? {
-        let fitting = models.filter { $0.fitsVRAMClass(hw.vramGB) }
+        let fitting = models.filter { $0.recommendable && $0.fitsVRAMClass(hw.vramGB) }
         guard let top = fitting.map(\.minVRAMGB).max() else { return nil }
         return fitting.first { $0.minVRAMGB == top }
     }
@@ -295,20 +314,36 @@ enum ImageAspect: String, CaseIterable, Identifiable {
     case portrait = "9:16"
     case photo = "4:3"
     case photoTall = "3:4"
+    case cinema = "2.39:1"
+    case custom = "custom"
     var id: String { rawValue }
+
+    /// Snap to the latent grid (multiples of 64 px), min 256.
+    static func gridSnap(_ v: Double) -> Int { max(256, Int((v / 64).rounded()) * 64) }
 
     /// (width, height) with `base` as the longer edge, rounded to the latent grid.
     func dimensions(base: Int) -> (Int, Int) {
-        func g(_ v: Double) -> Int { max(256, Int((v / 64).rounded()) * 64) }
-        let short9x16 = g(Double(base) * 9 / 16)
-        let short3x4  = g(Double(base) * 3 / 4)
+        let short9x16 = Self.gridSnap(Double(base) * 9 / 16)
+        let short3x4  = Self.gridSnap(Double(base) * 3 / 4)
         switch self {
         case .square:    return (base, base)
         case .landscape: return (base, short9x16)
         case .portrait:  return (short9x16, base)
         case .photo:     return (base, short3x4)
         case .photoTall: return (short3x4, base)
+        case .cinema:    return (base, Self.gridSnap(Double(base) / 2.39))
+        case .custom:    return (base, base)   // ratio comes from the config, see customDimensions
         }
+    }
+
+    /// Dimensions for a free "W:H" ratio with `base` as the long edge. `base` still
+    /// caps the pixel count (VRAM stays safe); falls back to square if unparseable.
+    static func customDimensions(ratio: String, base: Int) -> (Int, Int) {
+        let parts = ratio.split(whereSeparator: { ":x/ ".contains($0) }).compactMap { Double($0) }
+        guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return (base, base) }
+        let (rw, rh) = (parts[0], parts[1])
+        return rw >= rh ? (base, gridSnap(Double(base) * rh / rw))
+                        : (gridSnap(Double(base) * rw / rh), base)
     }
 }
 
@@ -338,6 +373,15 @@ final class ImageGenerator: ObservableObject {
     @Published var resultURL: URL?
     /// Wall-clock seconds of the last completed run, for the "generated in" caption.
     @Published var lastDuration: Int = 0
+
+    /// Called after a run settles (done, failed or cancelled). The pool uses it to
+    /// dispatch the next queued prompt.
+    var onFinish: (() -> Void)?
+    /// The last run's inputs, so the session gallery can label the result.
+    private(set) var lastPrompt = ""
+    private(set) var lastSeed = -1
+    private(set) var lastWidth = 0
+    private(set) var lastHeight = 0
 
     private var process: Process?
     private var startedAt: Date?
@@ -407,11 +451,14 @@ final class ImageGenerator: ObservableObject {
                   format: ImageFormat, offloadToCPU: Bool, gpuIndex: Int,
                   initImagePath: String = "", strength: Double = 0.75) {
         guard !isBusy else { return }
+        lastPrompt = prompt; lastSeed = seed; lastWidth = width; lastHeight = height
         let dir = models.imagenDirectory
-        // Timestamped name so each generation keeps its own file.
+        // Timestamp plus a short token: a batch fired in the same second (one run
+        // per instance) would otherwise share a name and overwrite a single file.
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd_HH.mm.ss"
-        let out = dir.appendingPathComponent("toshllm_\(fmt.string(from: Date())).\(format.ext)")
+        let token = String(UUID().uuidString.prefix(4)).lowercased()
+        let out = dir.appendingPathComponent("toshllm_\(fmt.string(from: Date()))_\(token).\(format.ext)")
 
         // Each component maps to its own sd-cli flag (a full checkpoint via --model,
         // or a diffusion model plus its VAE and text encoders).
@@ -514,6 +561,7 @@ final class ImageGenerator: ObservableObject {
 
     private func finish(status: Int32, output: URL) {
         process = nil
+        defer { onFinish?() }
         guard status == 0, let img = NSImage(contentsOf: output) else {
             // 15/SIGTERM and 2/SIGINT are user cancels, not errors.
             if status == 15 || status == 2 { state = .failed(""); return }
@@ -547,6 +595,8 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     var initImagePath = ""
     var strength = 0.6
     var aspect = ImageAspect.square.rawValue
+    /// Free "W:H" ratio used only when `aspect` is `.custom` (e.g. "21:9").
+    var customAspect = "21:9"
     var baseSize = 1024
     var gpuIndex = 0
     var steps = 8
@@ -567,6 +617,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
         initImagePath = (try? c.decode(String.self, forKey: .initImagePath)) ?? ""
         strength = (try? c.decode(Double.self, forKey: .strength)) ?? 0.6
         aspect = (try? c.decode(String.self, forKey: .aspect)) ?? ImageAspect.square.rawValue
+        customAspect = (try? c.decode(String.self, forKey: .customAspect)) ?? "21:9"
         baseSize = (try? c.decode(Int.self, forKey: .baseSize)) ?? 1024
         gpuIndex = (try? c.decode(Int.self, forKey: .gpuIndex)) ?? 0
         steps = (try? c.decode(Int.self, forKey: .steps)) ?? 8
@@ -578,7 +629,11 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     var isCustom: Bool { modelID == ImageGenCatalog.customID }
     var aspectValue: ImageAspect { ImageAspect(rawValue: aspect) ?? .square }
     var formatValue: ImageFormat { ImageFormat(rawValue: format) ?? .png }
-    var dimensions: (Int, Int) { aspectValue.dimensions(base: baseSize) }
+    var dimensions: (Int, Int) {
+        aspectValue == .custom
+            ? ImageAspect.customDimensions(ratio: customAspect, base: baseSize)
+            : aspectValue.dimensions(base: baseSize)
+    }
 
     /// The model this instance runs: a catalog entry, the user's own files, or
     /// the best pick for the hardware.
@@ -593,12 +648,39 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     }
 }
 
+/// A prompt (with its own seed) waiting for the next free instance to render it.
+struct QueuedPrompt: Identifiable, Equatable {
+    let id = UUID()
+    var text: String
+    var seed: Int = -1
+}
+
+/// A finished image kept in the session gallery, with the inputs that made it.
+struct GeneratedImage: Identifiable {
+    let id = UUID()
+    let url: URL
+    let image: NSImage
+    let prompt: String
+    let seed: Int
+    let width: Int
+    let height: Int
+    let duration: Int
+}
+
 /// Owns the generation instances and one generator per slot; the sidebar
 /// (controls) and the canvas (tiles) share it so both see the same state.
 /// There is always at least one instance.
 @MainActor
 final class ImageGenPool: ObservableObject {
     @Published var configs: [ImageInstanceConfig] { didSet { save() } }
+    /// Pending prompts; the scheduler feeds them to idle instances.
+    @Published var queue: [QueuedPrompt] = []
+    /// While true, finished instances pull the next queued prompt automatically.
+    @Published var queueActive = false
+    /// Completed results this session (newest first), shown in the Queue feed.
+    @Published var gallery: [GeneratedImage] = []
+    /// Set by the view so the scheduler can launch runs (generate() needs it).
+    weak var modelStore: ModelStore?
     private var generators: [UUID: ImageGenerator] = [:]
     private var forwards: [UUID: AnyCancellable] = [:]
 
@@ -641,6 +723,11 @@ final class ImageGenPool: ObservableObject {
     func generator(for id: UUID) -> ImageGenerator {
         if let g = generators[id] { return g }
         let g = ImageGenerator()
+        g.onFinish = { [weak self, weak g] in
+            guard let self, let g else { return }
+            self.recordResult(from: g)
+            self.pump()
+        }
         generators[id] = g
         forwards[id] = g.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         return g
@@ -678,7 +765,64 @@ final class ImageGenPool: ObservableObject {
         forwards[id] = nil
     }
 
-    func cancelAll() { for c in configs { generator(for: c.id).cancel() } }
+    func cancelAll() {
+        queueActive = false
+        for c in configs { generator(for: c.id).cancel() }
+    }
+
+    // MARK: prompt queue
+
+    func enqueue(_ text: String, seed: Int = -1) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        queue.append(QueuedPrompt(text: t, seed: seed))
+        if queueActive { pump() }
+    }
+
+    func removeFromQueue(_ id: UUID) { queue.removeAll { $0.id == id } }
+
+    func startQueue() { queueActive = true; pump() }
+    func stopQueue() { queueActive = false }   // in-flight runs finish; nothing new starts
+
+    /// Append a generator's finished result to the session gallery (newest first),
+    /// so every render stays visible even as instances move on to the next prompt.
+    private func recordResult(from gen: ImageGenerator) {
+        guard let url = gen.resultURL, let img = gen.resultImage, gallery.first?.url != url else { return }
+        gallery.insert(GeneratedImage(url: url, image: img, prompt: gen.lastPrompt, seed: gen.lastSeed,
+                                      width: gen.lastWidth, height: gen.lastHeight, duration: gen.lastDuration), at: 0)
+        if gallery.count > 60 { gallery.removeLast() }
+    }
+
+    /// Assigns queued prompts to idle instances, at most one run per GPU: two Metal
+    /// contexts on one AMD GPU can hang it. Runs each on its instance's config.
+    func pump() {
+        guard queueActive, let models = modelStore else { return }
+        var busyGPUs = Set(configs.compactMap { generator(for: $0.id).isBusy ? $0.gpuIndex : nil })
+        for c in configs {
+            guard !queue.isEmpty else { break }
+            let gen = generator(for: c.id)
+            guard !gen.isBusy, !busyGPUs.contains(c.gpuIndex) else { continue }
+            let job = queue.removeFirst()
+            busyGPUs.insert(c.gpuIndex)
+            let (w, h) = c.dimensions
+            gen.generate(model: c.resolvedModel(for: hardware), models: models, prompt: job.text,
+                         width: w, height: h, steps: c.steps, seed: job.seed, format: c.formatValue,
+                         offloadToCPU: c.offloadCPU, gpuIndex: c.gpuIndex,
+                         initImagePath: c.initImagePath, strength: c.strength)
+        }
+        if queue.isEmpty && !anyBusy { queueActive = false }
+    }
+
+    /// Deletes generated outputs (`toshllm_*`) from the imagen folder, when the
+    /// user opts in. Called on app close so the timestamped files don't pile up.
+    nonisolated static func cleanupOutputsIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: SettingsKeys.imagenCleanupOnClose) else { return }
+        let dir = ServerSettings.modelsDirectory.appendingPathComponent("imagen", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for f in files where f.lastPathComponent.hasPrefix("toshllm_") {
+            try? FileManager.default.removeItem(at: f)
+        }
+    }
 
     private func save() {
         UserDefaults.standard.set(try? JSONEncoder().encode(configs),
