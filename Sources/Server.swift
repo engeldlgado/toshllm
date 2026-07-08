@@ -758,7 +758,10 @@ struct ServerSettings {
         let d = UserDefaults.standard
         guard d.bool(forKey: SettingsKeys.routerMode) else { return nil }
         let alias = d.string(forKey: SettingsKeys.chatSelectedModel) ?? ""
-        return alias.isEmpty ? nil : alias
+        if !alias.isEmpty { return alias }
+        // Default to the first model when the chat hasn't picked one yet (its
+        // picker's default-selection task lives in a lazily-built popover).
+        return LocalModel.scan(in: modelsDirectory).first.map { routerAlias(for: $0.url.path) }
     }
 }
 
