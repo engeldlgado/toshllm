@@ -3,6 +3,18 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.54] - 2026-07-08
+
+### Added
+- **Dedicated build for pre-AVX2 Macs**... older Mac Pros and Hackintoshes whose Xeons lack AVX2 (which made the normal app crash on launch with an "illegal instruction") now have their own download. It stays on its own update channel, so it never pulls a build that won't run on that CPU.
+- **More of the model runs on the GPU on AMD GCN/Vega cards**... on wave64 cards (RX 500 series, Vega, Radeon VII) the GPU now also handles the legacy quantizations (Q4_0/Q4_1/Q5_0/Q5_1), the group/L2 normalization steps, and the Mixture-of-Experts expert math... all of which previously fell back to the CPU. Together with the existing K-quant path, most of a model's decode now runs on the GPU on these cards. It turns on automatically when a wave64 card is detected (set `GGML_METAL_WAVE64_DECODE_DISABLE=1` in Extra arguments to turn it off).
+
+### Fixed
+- **Image generation no longer runs out of memory at high resolutions**... the resolution limits now account for the fact that SD1.5/SDXL attention memory grows with the square of the image size, not linearly. Very large frames that the old estimate wrongly allowed (and that could crash the GPU) are now capped per model, so the offered sizes stay within what the card can actually render.
+
+### Improved
+- **Larger image queue previews and a multi-line queue prompt**... results in the Queue feed now show a large preview instead of a small thumbnail, and the queue's prompt box grows to several lines so longer prompts are easier to read and edit.
+
 ## [0.81.53] - 2026-07-08
 
 ### Added

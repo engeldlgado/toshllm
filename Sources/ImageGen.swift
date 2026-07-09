@@ -59,6 +59,13 @@ struct ImageGenModel: Identifiable {
     let minVRAMGB: Double
     /// False = shown and usable, but never the auto-recommended pick.
     var recommendable: Bool = true
+    /// Largest long-edge (px) to offer as a quality guard: UNet models blur past
+    /// their native size. VRAM is handled separately by attnVRAMSq.
+    var maxLongEdge: Int = 2048
+    /// Extra VRAM (GB) per pixel² from UNet self-attention, which grows quadratically
+    /// with resolution (issue #25: SD1.5 OOMs far below the linear budget). Empirical,
+    /// scaled by the model's top-block token count; 0 for DiT/Flow (linear is enough).
+    var attnVRAMSq: Double = 0
 
     /// Metal reports the working-set limit, not physical VRAM (a 16 GB card
     /// shows ~15 GB), so the class check tolerates a small shortfall.
@@ -96,7 +103,7 @@ enum ImageGenCatalog {
         components: [ImageGenComponent(kind: .checkpoint,
             urlString: "https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/main/stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
             fileName: "sd-v1-5-Q8_0.gguf", sizeGB: 1.68)],
-        defaultSteps: 20, cfgScale: 7.0, minVRAMGB: 3)
+        defaultSteps: 20, cfgScale: 7.0, minVRAMGB: 3, maxLongEdge: 768, attnVRAMSq: 3.4e-12)
 
     /// SDXL Turbo (3.5B, single checkpoint). Few steps, opens the LoRA/style world.
     static let sdxlTurbo = ImageGenModel(
@@ -106,7 +113,7 @@ enum ImageGenCatalog {
         components: [ImageGenComponent(kind: .checkpoint,
             urlString: "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors",
             fileName: "sd_xl_turbo_1.0_fp16.safetensors", sizeGB: 6.6)],
-        defaultSteps: 6, cfgScale: 1.0, minVRAMGB: 8)
+        defaultSteps: 6, cfgScale: 1.0, minVRAMGB: 8, maxLongEdge: 1280, attnVRAMSq: 5e-13)
 
     /// Z-Image Turbo (6B DiT, 8 steps, Apache). Diffusion + VAE + Qwen3-4B encoder.
     static let zImageTurbo = ImageGenModel(
@@ -256,10 +263,12 @@ enum ImageGenCatalog {
         if !vaePath.isEmpty {
             comps.append(ImageGenComponent(kind: .vae, urlString: "", fileName: vaePath, sizeGB: gb(vaePath)))
         }
+        // Assume the SD/SDXL UNet family (the common custom case) for the VRAM cap.
         return ImageGenModel(name: "Custom",
             detailES: "Tu propio modelo. Ajusta pasos y CFG según su ficha.",
             detailEN: "Your own model. Set steps and CFG to match its card.",
-            components: comps, defaultSteps: steps, cfgScale: cfg, minVRAMGB: 0)
+            components: comps, defaultSteps: steps, cfgScale: cfg, minVRAMGB: 0,
+            attnVRAMSq: 3.4e-12)
     }
 }
 
@@ -268,30 +277,41 @@ enum ImageGenCatalog {
 /// pixels) and the macOS GPU watchdog (a single command buffer that runs too long
 /// is killed). These pick sizes that clear both.
 enum ImageGenLimits {
-    /// Largest width*height that fits VRAM. ~4.5e-6 GB per output pixel on top of
-    /// the resident model, with headroom (empirical: Z-Image on 12 GB fits
-    /// 1600x900, OOMs at 1600x1600). `residentGB` makes it model-aware, so a
-    /// heavier model correctly allows smaller images.
-    static func maxPixels(vramGB: Double, residentGB: Double) -> Int {
-        let budget = max(0.4, vramGB - residentGB - 1.0)
-        return Int(budget / 4.5e-6)
+    /// Estimated peak VRAM (GB) for a frame: resident model + ~1 GB overhead + a
+    /// linear per-pixel term (buffers/activations) + a quadratic attention term for
+    /// UNet models (attnVRAMSq). Linear calibrated on Z-Image (12 GB fits 1600x900,
+    /// OOMs at 1600x1600); the quadratic term is what makes SD1.5 realistic (#25).
+    static func estVRAMGB(px: Int, residentGB: Double, attnVRAMSq: Double) -> Double {
+        let p = Double(px)
+        return residentGB + 1.0 + 4.5e-6 * p + attnVRAMSq * p * p
     }
 
     /// Base (long-edge) sizes to offer: a 16:9 frame at that base must fit VRAM,
-    /// so the list scales with the card and the model.
-    static func baseSizes(vramGB: Double, residentGB: Double) -> [Int] {
-        let maxPx = maxPixels(vramGB: vramGB, residentGB: residentGB)
+    /// capped by the model's quality ceiling. Scales with the card and the model.
+    static func baseSizes(vramGB: Double, residentGB: Double,
+                          attnVRAMSq: Double = 0, maxLongEdge: Int = .max) -> [Int] {
         let candidates = [512, 640, 768, 896, 1024, 1152, 1280, 1440,
                           1600, 1792, 2048, 2304, 2560, 3072]
         return candidates.filter { base in
+            guard base <= maxLongEdge else { return false }
             let short = max(256, Int((Double(base) * 9 / 16 / 64).rounded()) * 64)
-            return base * short <= maxPx
+            return fits(width: base, height: short, vramGB: vramGB,
+                        residentGB: residentGB, attnVRAMSq: attnVRAMSq)
         }
     }
 
-    /// True when a specific frame fits VRAM (a square at a large base may not).
-    static func fits(width: Int, height: Int, vramGB: Double, residentGB: Double) -> Bool {
-        width * height <= maxPixels(vramGB: vramGB, residentGB: residentGB)
+    /// True when a specific frame's estimated VRAM fits (a square at a large base,
+    /// or any UNet frame at high res, may not even when a 16:9 base does).
+    static func fits(width: Int, height: Int, vramGB: Double,
+                     residentGB: Double, attnVRAMSq: Double = 0) -> Bool {
+        estVRAMGB(px: width * height, residentGB: residentGB, attnVRAMSq: attnVRAMSq) <= vramGB
+    }
+
+    /// Fraction of VRAM the frame is estimated to use (drives the near-limit note).
+    static func vramFraction(width: Int, height: Int, vramGB: Double,
+                             residentGB: Double, attnVRAMSq: Double = 0) -> Double {
+        estVRAMGB(px: width * height, residentGB: residentGB, attnVRAMSq: attnVRAMSq)
+            / max(0.1, vramGB)
     }
 
     /// Command buffers to split each diffusion step into so none exceeds the

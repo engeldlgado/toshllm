@@ -133,7 +133,8 @@ struct ImageControls: View {
         return ImageGenerator.installed(model, in: models)
             && !pool.effectivePrompt(for: c).isEmpty
             && model.fitsVRAMClass(v)
-            && ImageGenLimits.fits(width: w, height: h, vramGB: v, residentGB: model.residentGB)
+            && ImageGenLimits.fits(width: w, height: h, vramGB: v,
+                                   residentGB: model.residentGB, attnVRAMSq: model.attnVRAMSq)
     }
 
     /// VRAM of a specific GPU slot, for per-instance fit checks.
@@ -207,7 +208,7 @@ struct QueueFeedView: View {
         VStack(spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
                 TextField(loc.t("Prompt para la cola…", "Prompt for the queue…"), text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder).lineLimit(1...3).onSubmit(add)
+                    .textFieldStyle(.roundedBorder).lineLimit(2...6).onSubmit(add)
                 VStack(spacing: 4) {
                     HStack(spacing: 4) {
                         Text(loc.t("Semilla", "Seed")).font(.caption).foregroundStyle(.secondary)
@@ -295,7 +296,8 @@ struct QueueFeedView: View {
     private func resultRow(_ g: GeneratedImage) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(nsImage: g.image).resizable().scaledToFit()
-                .frame(width: 150, height: 150)
+                .containerRelativeFrame(.horizontal) { w, _ in min(w * 0.55, 460) }
+                .frame(maxHeight: 520)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 6) {
                 Text(g.prompt.isEmpty ? loc.t("(sin prompt)", "(no prompt)") : g.prompt)
@@ -351,18 +353,21 @@ struct ImageInstanceForm: View {
     private var targetVRAM: Double { ImageControls.vram(of: cfg.gpuIndex) }
     private var modelFitsGPU: Bool { model.fitsVRAMClass(targetVRAM) }
     private var baseSizes: [Int] {
-        let sizes = ImageGenLimits.baseSizes(vramGB: targetVRAM, residentGB: model.residentGB)
+        let sizes = ImageGenLimits.baseSizes(vramGB: targetVRAM, residentGB: model.residentGB,
+                                             attnVRAMSq: model.attnVRAMSq, maxLongEdge: model.maxLongEdge)
         return sizes.isEmpty ? [512] : sizes
     }
     private var fitsVRAM: Bool {
         let (w, h) = cfg.dimensions
-        return ImageGenLimits.fits(width: w, height: h, vramGB: targetVRAM, residentGB: model.residentGB)
+        return ImageGenLimits.fits(width: w, height: h, vramGB: targetVRAM,
+                                   residentGB: model.residentGB, attnVRAMSq: model.attnVRAMSq)
     }
     /// Fits, but close enough to the VRAM ceiling that a freeze or crash is possible.
     private var nearVRAMLimit: Bool {
         let (w, h) = cfg.dimensions
-        return fitsVRAM && Double(w * h) >= 0.8 *
-            Double(ImageGenLimits.maxPixels(vramGB: targetVRAM, residentGB: model.residentGB))
+        return fitsVRAM && ImageGenLimits.vramFraction(width: w, height: h, vramGB: targetVRAM,
+                                                       residentGB: model.residentGB,
+                                                       attnVRAMSq: model.attnVRAMSq) >= 0.8
     }
 
     var body: some View {

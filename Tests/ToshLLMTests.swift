@@ -121,15 +121,15 @@ final class ImageGenTests: XCTestCase {
 
     func testResolutionLimitsScaleWithVRAM() {
         let r = ImageGenCatalog.zImageTurbo.residentGB
-        // Bigger cards allow more pixels and larger base sizes.
-        let px12 = ImageGenLimits.maxPixels(vramGB: 12, residentGB: r)
-        let px8 = ImageGenLimits.maxPixels(vramGB: 8, residentGB: r)
-        XCTAssertGreaterThan(px12, px8)
         // 12 GB fits a 1600x900 frame but not a 1600x1600 square (measured, Z-Image).
         XCTAssertTrue(ImageGenLimits.fits(width: 1600, height: 900, vramGB: 12, residentGB: r))
         XCTAssertFalse(ImageGenLimits.fits(width: 1600, height: 1600, vramGB: 12, residentGB: r))
-        // A heavier model (larger resident) allows fewer pixels on the same card.
-        XCTAssertLessThan(ImageGenLimits.maxPixels(vramGB: 12, residentGB: ImageGenCatalog.fluxSchnell.residentGB), px12)
+        // A smaller card can't fit the frame the 12 GB card can.
+        XCTAssertFalse(ImageGenLimits.fits(width: 1600, height: 900, vramGB: 8, residentGB: r))
+        // A heavier model (larger resident) needs more VRAM for the same frame.
+        XCTAssertGreaterThan(
+            ImageGenLimits.estVRAMGB(px: 1600*900, residentGB: ImageGenCatalog.fluxSchnell.residentGB, attnVRAMSq: 0),
+            ImageGenLimits.estVRAMGB(px: 1600*900, residentGB: r, attnVRAMSq: 0))
         // The offered base sizes scale with the card: more VRAM unlocks larger.
         let max8 = ImageGenLimits.baseSizes(vramGB: 8, residentGB: r).max() ?? 0
         let max12 = ImageGenLimits.baseSizes(vramGB: 12, residentGB: r).max() ?? 0

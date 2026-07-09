@@ -4,7 +4,10 @@ import Charts
 // MARK: - About
 
 enum AppInfo {
-    static let version = "0.81.53"
+    static let version = "0.81.54"
+    /// True for the pre-AVX2 legacy build (Info.plist TOSHNoAVX2). Kept on its own
+    /// update channel so it never pulls an AVX2 DMG that would SIGILL on those CPUs.
+    static let isNoAVX2 = Bundle.main.object(forInfoDictionaryKey: "TOSHNoAVX2") as? Bool ?? false
     static let developerName = "Engelbert Delgado"
     static let developerHandle = "engeldlgado"
     static let githubURL = "https://github.com/engeldlgado"

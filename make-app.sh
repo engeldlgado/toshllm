@@ -21,6 +21,11 @@ fi
 sed -i '' -E "s/static let version = \"[^\"]*\"/static let version = \"$VERSION\"/" Sources/AboutTab.swift
 echo "version: $VERSION"
 
+# Stamp the no-AVX2 variant so the updater keeps it on its own channel (an AVX2 DMG
+# would SIGILL on those CPUs). Set via TOSH_NO_AVX2=1 alongside build-engines.sh.
+NOAVX2=$([ "$TOSH_NO_AVX2" = "1" ] && echo true || echo false)
+echo "no-AVX2 variant: $NOAVX2"
+
 if [ "$TOSH_ARCH" = "universal" ]; then
     swift build -c release --arch x86_64 --arch arm64
     SWIFT_BIN=".build/apple/Products/Release/ToshLLM"
@@ -104,6 +109,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleExecutable</key>      <string>ToshLLM</string>
     <key>CFBundleVersion</key>         <string>$VERSION</string>
     <key>CFBundleShortVersionString</key> <string>$VERSION</string>
+    <key>TOSHNoAVX2</key>              <$NOAVX2/>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>  <string>14.0</string>
     <key>NSHighResolutionCapable</key> <true/>

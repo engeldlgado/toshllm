@@ -37,11 +37,15 @@ final class UpdateChecker: ObservableObject {
             latestVersion = remote
             releaseURL = (obj["html_url"] as? String).flatMap(URL.init(string:))
             if let assets = obj["assets"] as? [[String: Any]] {
+                // A release carries both DMGs (AVX2 + no-AVX2, suffix "-noavx2").
+                // Each build stays on its own channel: pick the asset matching this
+                // bundle's variant so a no-AVX2 install never grabs an AVX2 DMG.
                 for asset in assets {
                     guard let name = asset["name"] as? String,
                           let urlString = asset["browser_download_url"] as? String,
                           let url = URL(string: urlString) else { continue }
-                    if name.hasSuffix(".dmg") { dmgURL = url }
+                    if name.hasSuffix(".dmg"),
+                       name.contains("-noavx2") == AppInfo.isNoAVX2 { dmgURL = url }
                     if name == "checksums.txt" { checksumsURL = url }
                 }
             }

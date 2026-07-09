@@ -26,9 +26,32 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ToshLLM (x86_64)
+  # Direct pushes to main only run the unit tests — a fast gate. The full app +
+  # DMG build for both CPU variants happens once, on the release tag (below), so
+  # a version-bump commit and its tag don't compile the app twice on the same SHA.
+  test:
+    if: github.event_name == 'push' && github.ref_type == 'branch'
+    name: Unit tests
     runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - run: swift test
+
+  build:
+    # PRs validate a single variant; tags and manual runs build BOTH CPU variants
+    # (standard = AVX2, noavx2 = pre-AVX2 legacy) and ship a DMG for each. Branch
+    # pushes are handled by the test job above, so build is skipped for them.
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
+    name: Build ${{ matrix.variant }} (x86_64)
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && fromJSON('["standard","noavx2"]') || fromJSON('["standard"]') }}
+    env:
+      # The no-AVX2 leg lowers the CPU baseline in build-engines.sh and stamps the
+      # bundle (make-app.sh) so the updater keeps it on its own release channel.
+      TOSH_NO_AVX2: ${{ matrix.variant == 'noavx2' && '1' || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -37,9 +60,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: vendor
-          key: engines-${{ hashFiles('patches/*.patch', 'scripts/build-engines.sh') }}
+          # Per variant: the two ISA baselines produce different engine binaries.
+          key: engines-${{ matrix.variant }}-${{ hashFiles('patches/*.patch', 'scripts/build-engines.sh') }}
 
       - name: Run unit tests
+        if: github.event_name == 'pull_request'
         run: swift test
 
       - name: Build inference engines (x86_64)
@@ -78,29 +103,47 @@ jobs:
           xcrun stapler staple dist/ToshLLM.app
 
       # The DMG is only consumed by releases; packaging + uploading it on every
-      # push/PR just burns time and artifact storage. PRs and main pushes still
-      # build + test above (the real check); only tags and manual runs ship a DMG.
+      # push/PR just burns time and artifact storage. Only tags and manual runs
+      # ship a DMG. make-dmg.sh reads the bundle's variant to name it (-noavx2).
       - name: Package DMG
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           VERSION="${GITHUB_REF_NAME}"
           [[ "$VERSION" == v* ]] || VERSION="dev-${GITHUB_SHA::7}"
           ./scripts/make-dmg.sh "$VERSION"
-          (cd dist && shasum -a 256 *.dmg > checksums.txt)
-          echo "DMG=$(ls dist/*.dmg)" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
-          name: ToshLLM-dmg
+          name: dmg-${{ matrix.variant }}
           path: dist/*.dmg
+
+  # Collect both variants' DMGs and publish one release with both assets, so the
+  # updater can pick the matching one per install (AppInfo.isNoAVX2).
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    name: Publish release
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download built DMGs
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          pattern: dmg-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: (cd dist && shasum -a 256 *.dmg > checksums.txt && cat checksums.txt)
 
       # Pull the section for this tag's version out of CHANGELOG.md so the
       # release body shows the human-written notes; generate_release_notes then
       # appends the auto commit/PR list under it.
       - name: Extract changelog section
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v v="$VERSION" '
@@ -111,7 +154,6 @@ jobs:
           echo "----- release body -----"; cat release-notes.md
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           files: |
