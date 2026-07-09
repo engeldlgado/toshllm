@@ -34,7 +34,7 @@ jobs:
     name: Unit tests
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: swift test
 
   build:
@@ -54,7 +54,7 @@ jobs:
       TOSH_NO_AVX2: ${{ matrix.variant == 'noavx2' && '1' || '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Cache engine builds
         uses: actions/cache@v5
@@ -128,7 +128,7 @@ jobs:
     runs-on: macos-26
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download built DMGs
         uses: actions/download-artifact@v7
