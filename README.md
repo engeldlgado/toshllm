@@ -89,6 +89,22 @@ The built-in benchmark runs prompt and generation tests for any configuration an
   <img src="Assets/benchmarks.jpg" alt="ToshLLM benchmarks comparison" width="760">
 </div>
 
+Measured on the development card (**RX 6700 XT 12 GB**, RDNA 2, bundled engine, KV f16, `pp512` / `tg128`):
+
+| Model | Type | Prompt (t/s) | Generation (t/s) |
+|---|---|---:|---:|
+| gemma-3-4B Q4_K_M | dense | 1168 | 90 |
+| Qwen3-4B Q4_K_M | dense | 1005 | 94 |
+| Qwen3-8B Q4_K_M | dense | 312 | 58 |
+| Qwen3.5-9B Q4_K_M | dense | 411 | 45 |
+| gemma-4-12B Q4_K_XL | dense | 342 | 34 |
+| Qwen3.6-14B-A3B Q5_K_M | MoE (full VRAM) | 736 | 56 |
+| gpt-oss-20B Q4_K_M | MoE | 430 | 26 |
+| gemma-4-26B-A4B MXFP4 | MoE (offload) | 552 | 22 |
+| Qwen3.6-35B-A3B Q4_K_S | MoE (offload) | 434 | 25 |
+
+Numbers vary with quant, context depth and cooling; the app records your own history so you can compare configurations directly.
+
 ## Install
 
 1. **[Download the latest `.dmg`](https://github.com/engeldlgado/toshllm/releases/latest)**, open it, and drag **ToshLLM** to Applications.
@@ -101,6 +117,8 @@ The built-in benchmark runs prompt and generation tests for any configuration an
 > xattr -dr com.apple.quarantine /Applications/ToshLLM.app
 > ```
 > You only need to do this once per update. Notarized releases are planned.
+
+> **Older Macs without AVX2 (e.g. Mac Pro 5,1 and other pre-2013 Xeons):** the normal build needs the AVX2 CPU instructions and will crash on launch with "illegal hardware instruction" on those machines. Each release also ships a dedicated **no-AVX2 build** — download the `.dmg` whose name ends in **`-noavx2`**. It updates on its own channel, so once installed it will only ever offer you no-AVX2 builds.
 
 ## Requirements
 
@@ -214,9 +232,13 @@ Since 0.81.49 both engines route small transfers through one persistent staging 
 
 Dense models gain ~4% and were never at risk (too few copies per token). The prompt-processing gain has the same source: each large batched copy used to pin megabytes of host memory per call. The variance collapse (±7.7 → ±0.2) shows the churn was also where the run-to-run noise came from.
 
-### Vega / GCN cards (in progress)
+### AMD GCN / Vega cards (RX 500-series, Vega, Radeon VII)
 
-Older AMD GPUs (GCN: RX 500-series, Vega) use a 64-wide wavefront, while the simdgroup kernels assume 32 — that mismatch produces garbage output. An opt-in **wave64 safe mode** (`GGML_METAL_WAVE64_SAFEMODE=1`) routes the affected ops to correct (slower) fallbacks; it was confirmed coherent on an RX 580 by a tester, and is off by default so wave32 cards (Apple / AMD RDNA) are unaffected. A fast wave64 path (GCN has no simdgroup matrix or reduction, so it needs a custom kernel) is still being worked on — no benchmarks yet.
+These older AMD GPUs use a 64-wide wavefront ("wave64"), while llama.cpp's Metal kernels assume 32 — that mismatch produced garbage output, and GCN has no simdgroup-matrix or simdgroup-reduction units, so it can't run the stock fast paths at all. ToshLLM now ships a **custom wave64 GPU path**, turned on automatically when a wave64 card is detected. It runs the weight decode (K-quants, the Q4_0/Q4_1/Q5_0/Q5_1 legacy quants, and Mixture-of-Experts expert math), the prompt-processing matmul, and the softmax/normalization reductions on the GPU. Attention still runs on the CPU for now — a GPU flash-attention kernel for wave64 is the next step, and it's the current ceiling on generation speed.
+
+On an **RX 580** a tester measured a K-quant model go from **1.3 t/s (CPU decode) to ~51 t/s (GPU decode)**, coherent, with prompt processing around 115–190 t/s. Recommended on these cards: a dense K-quant model, Flash Attention left **ON** (not off), and the KV cache at f16. The GPU decode is on by default; set `GGML_METAL_WAVE64_DECODE_DISABLE=1` in **Extra arguments** to fall back to the CPU path.
+
+> The wave64 path is validated on RDNA (wave32) as a byte-exact no-op, so it never affects Apple Silicon or AMD RDNA cards. On real GCN/Vega hardware it is still being validated with testers — if you have one of these cards, [your benchmark and coherence reports](https://github.com/engeldlgado/toshllm/issues) are exactly what moves it forward.
 
 ## Community benchmarks
 
@@ -310,12 +332,15 @@ Funciones nuevas, aún en validación — actívalas en Ajustes, pero pueden ten
 
 - **Recordar conversaciones (caché en disco)** *(motor experimental)* — guarda la caché KV de cada chat, así al reabrirlo o reiniciar la app no se reprocesa el prompt; la restauración es byte-exacta y un chat largo vuelve en menos de un segundo. También pre-calienta la caché para clientes externos (VS Code/Cline), evitando el prefill frío de varios minutos en la primera petición.
 - **Repartir el modelo entre varias GPUs** *(ambos motores)* — validado en un equipo con dos GPUs (RX 6900 XT + RX 6800 XT por eGPU): un MoE de 35B con todos los expertos en VRAM generó a ~3× la velocidad de una sola GPU con offload. Puedes elegir el conjunto exacto de tarjetas por servidor; sigue marcado experimental mientras llegan más configuraciones.
+- **Tarjetas AMD GCN / Vega (RX 500, Vega, Radeon VII)** — usan wavefront de 64 (los kernels de Metal asumen 32), lo que producía salida corrupta. ToshLLM incluye ahora un **path wave64 en GPU** que se activa solo al detectar una de estas tarjetas: corre el decode de pesos (K-quants, quants legacy Q4_0/Q5_0 y expertos MoE), el matmul de prompt y las reducciones en GPU; la atención sigue en CPU por ahora. Un tester midió en una RX 580 un modelo K-quant pasar de **1.3 a ~51 t/s**, coherente. Recomendado: modelo denso K-quant, Flash Attention en **ON** y KV en f16. Es no-op verificado en RDNA (wave32); en GCN/Vega real sigue validándose con testers.
 
 ### Instalación
 
 Descarga el `.dmg` desde [Releases](https://github.com/engeldlgado/toshllm/releases/latest), ábrelo y arrastra **ToshLLM** a Aplicaciones. Todo viene incluido — sin Homebrew, sin Python.
 
 > **Primer arranque (Gatekeeper):** las versiones aún no están notarizadas, así que macOS bloqueará la primera apertura. Ve a **Ajustes del Sistema → Privacidad y Seguridad** y pulsa **"Abrir igualmente"**, o ejecuta `xattr -dr com.apple.quarantine /Applications/ToshLLM.app`. Solo se hace una vez por actualización.
+
+> **Macs antiguos sin AVX2 (p. ej. Mac Pro 5,1 y otros Xeon anteriores a 2013):** el build normal necesita las instrucciones AVX2 y arranca con "illegal hardware instruction" en esas máquinas. Cada versión publica además un **build sin AVX2** — descarga el `.dmg` cuyo nombre termina en **`-noavx2`**. Se actualiza por su propio canal, así que una vez instalado solo te ofrecerá builds sin AVX2.
 
 ### Requisitos y notas
 
