@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.55] - 2026-07-09
+
+### Added
+- **GPU Flash Attention on AMD GCN/Vega cards**... the AMD flash-attention kernel now has wave64 variants, so on these cards (RX 500 series, Vega, Radeon VII) the attention itself... the last big piece that still ran on the CPU... moves to the GPU, including quantized KV caches. It engages automatically with Flash Attention on. First build with this on real GCN hardware, so reports are very welcome: if anything looks off, turning Flash Attention off returns to the previous behavior.
+
+### Fixed
+- **Legacy-quant models could output garbage on GCN/Vega**... on wave64 cards, dense models in the older quantization formats (Q4_0, Q4_1, Q5_0, Q5_1) were dispatched 64 lanes wide while their pipeline was still built 32 wide, corrupting the output in 0.81.54. K-quant models were not affected.
+
 ## [0.81.54] - 2026-07-08
 
 ### Added

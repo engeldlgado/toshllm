@@ -585,7 +585,7 @@ index 32d97cd5..a0c092a8 100644
  
          ggml_metal_event_encode_wait(ev, cmd_buf);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 0e1f1de4..bbdfdc8c 100644
+index 0e1f1de4..9604a3d4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -468,7 +468,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_soft_max(ggml_me
@@ -628,7 +628,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
-@@ -920,8 +924,24 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -920,8 +924,26 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
      const int16_t r2 = (int16_t) (ne12 / ne02);
      const int16_t r3 = (int16_t) (ne13 / ne03);
  
@@ -639,7 +639,9 @@ index 0e1f1de4..bbdfdc8c 100644
 +    int16_t nw = 32;
 +    if (props->wave64_decode) {
 +        const bool helper_reduce = (tsrc0 == GGML_TYPE_F16 || tsrc0 == GGML_TYPE_F32 || tsrc0 == GGML_TYPE_Q8_0);
-+        const bool simd_reduce   = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K || tsrc0 == GGML_TYPE_Q6_K);
++        const bool simd_reduce   = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K || tsrc0 == GGML_TYPE_Q6_K ||
++                                    tsrc0 == GGML_TYPE_Q4_0 || tsrc0 == GGML_TYPE_Q4_1 ||
++                                    tsrc0 == GGML_TYPE_Q5_0 || tsrc0 == GGML_TYPE_Q5_1);
 +        if (helper_reduce || simd_reduce) {
 +            nw = (int16_t) props->simd_width;
 +        }
@@ -654,7 +656,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
-@@ -931,6 +951,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -931,6 +953,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
          ggml_metal_cv_set_int16(cv, (int16_t) ne12, FC_MUL_MV + 2);
          ggml_metal_cv_set_int16(cv, r2,             FC_MUL_MV + 3);
          ggml_metal_cv_set_int16(cv, r3,             FC_MUL_MV + 4);
@@ -662,7 +664,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
-@@ -971,14 +992,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+@@ -971,14 +994,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
  
      const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
  
@@ -682,7 +684,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
-@@ -1140,8 +1164,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -1140,8 +1166,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
              }
      };
  
@@ -705,7 +707,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
-@@ -1151,6 +1188,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -1151,6 +1190,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
          ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 2);
          ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 3);
          ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 4);
@@ -713,7 +715,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
-@@ -1633,7 +1671,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_l2_norm(ggml_met
+@@ -1633,7 +1673,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_l2_norm(ggml_met
      }
  
      res.c4   = is_c4;
@@ -723,7 +725,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
      return res;
  }
-@@ -1654,7 +1693,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_group_norm(ggml_
+@@ -1654,7 +1695,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_group_norm(ggml_
          res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
      }
  
@@ -732,7 +734,7 @@ index 0e1f1de4..bbdfdc8c 100644
  
      return res;
  }
-@@ -1697,7 +1736,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_norm(ggml_metal_
+@@ -1697,7 +1738,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_norm(ggml_metal_
          res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
      }
  
@@ -794,7 +796,7 @@ index d465f31c..affd9d0b 100644
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60e..322a7b51 100644
+index a7cbc60e..62f48161 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1145,7 +1147,7 @@ index a7cbc60e..322a7b51 100644
          case GGML_OP_ROPE:
          case GGML_OP_ROPE_BACK:
              return true;
-@@ -1254,6 +1505,36 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1254,6 +1505,40 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
@@ -1155,9 +1157,13 @@ index a7cbc60e..322a7b51 100644
 +            // cases via simdgroup reduction. Everything else still requires simdgroup
 +            // matrix multiply and will stay off Metal instead of taking the broken
 +            // upstream vec path.
++            // wave32 rides on simdgroup_reduction; wave64 uses the _w64 kernel
++            // instantiations and is gated by wave64_decode.
++            const bool fa_amd_width_ok = dev->props.simd_width == 32
++                ? has_simdgroup_reduction
++                : wave64_decode;
 +            if (getenv("TOSH_FA_AMD") != NULL &&
-+                !has_simdgroup_mm && has_simdgroup_reduction &&
-+                dev->props.simd_width == 32 &&
++                !has_simdgroup_mm && fa_amd_width_ok &&
 +                op->src[0]->ne[0] % 32 == 0) {
 +                float max_bias = 0.0f;
 +                float softcap  = 0.0f;
@@ -1182,7 +1188,7 @@ index a7cbc60e..322a7b51 100644
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
          case GGML_OP_SSM_SCAN:
-@@ -1264,9 +1545,55 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1264,9 +1549,55 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
          case GGML_OP_GATED_DELTA_NET:
              return has_simdgroup_reduction && op->src[2]->ne[0] % 32 == 0;
          case GGML_OP_SOLVE_TRI:
@@ -1241,7 +1247,7 @@ index a7cbc60e..322a7b51 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2044,123 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2048,123 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1365,7 +1371,7 @@ index a7cbc60e..322a7b51 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2168,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2172,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -1423,7 +1429,7 @@ index a7cbc60e..322a7b51 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1772,6 +2252,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1772,6 +2256,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -1434,7 +1440,7 @@ index a7cbc60e..322a7b51 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1782,30 +2266,78 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1782,30 +2270,78 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
          struct ggml_metal_buffer_id bid_src = ggml_metal_buffer_get_id(buf, tensor);
          bid_src.offs += offset;
  
@@ -1526,7 +1532,7 @@ index a7cbc60e..322a7b51 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 18656b34..26b2e797 100644
+index 18656b34..0e540afc 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -2061,7 +2061,10 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
@@ -1649,7 +1655,7 @@ index 18656b34..26b2e797 100644
  bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
      assert(op->op == GGML_OP_FLASH_ATTN_EXT);
  
-@@ -2712,6 +2766,107 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2712,6 +2766,118 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      ggml_metal_buffer_id bid_tmp = bid_blk;
      bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
  
@@ -1661,12 +1667,17 @@ index 18656b34..26b2e797 100644
 +        const char * ks = ggml_metal_fa_amd_type_suffix(op->src[1]->type);
 +        const char * vs = ggml_metal_fa_amd_type_suffix(op->src[2]->type);
 +        if (ks && vs && ggml_metal_fa_amd_pair_ok(op->src[1]->type, op->src[2]->type)) {
-+            snprintf(fa_amd_pipeline, sizeof(fa_amd_pipeline), "kernel_flash_attn_ext_vec_amd_dk%d_k%s_v%s", (int) ne00, ks, vs);
++            snprintf(fa_amd_pipeline, sizeof(fa_amd_pipeline), "kernel_flash_attn_ext_vec_amd_dk%d_k%s_v%s%s", (int) ne00, ks, vs,
++                     props_dev->simd_width == 64 ? "_w64" : "");
 +        }
 +    }
++    // wave32 rides on simdgroup_reduction; wave64 uses the _w64 instantiations and
++    // is gated by wave64_decode (simdgroup_reduction is forced off there).
++    const bool fa_amd_width_ok = props_dev->simd_width == 32
++        ? props_dev->has_simdgroup_reduction
++        : props_dev->wave64_decode;
 +    if (getenv("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
-+        !props_dev->has_simdgroup_mm && props_dev->has_simdgroup_reduction &&
-+        props_dev->simd_width == 32 &&   // wave32 only: the kernel assumes 32-lane simdgroups
++        !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
 +        has_mask && !has_sinks && !has_bias && !has_scap) {
 +
 +        ggml_metal_kargs_flash_attn_ext_vec args = {
@@ -1708,8 +1719,9 @@ index 18656b34..26b2e797 100644
 +        // decode keeps the per-query vec kernel
 +        if (ne01 >= 16 && getenv("TOSH_FA_TILE_DISABLE") == NULL) {
 +            char fa_tile_pipeline[80];
-+            snprintf(fa_tile_pipeline, sizeof(fa_tile_pipeline), "kernel_flash_attn_ext_tile_amd_dk%d_k%s_v%s", (int) ne00,
-+                     ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type));
++            snprintf(fa_tile_pipeline, sizeof(fa_tile_pipeline), "kernel_flash_attn_ext_tile_amd_dk%d_k%s_v%s%s", (int) ne00,
++                     ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type),
++                     props_dev->simd_width == 64 ? "_w64" : "");
 +
 +            auto pipeline = ggml_metal_library_get_pipeline(lib, fa_tile_pipeline);
 +            if (!pipeline.pipeline) {
@@ -1726,7 +1738,9 @@ index 18656b34..26b2e797 100644
 +            ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
 +            ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
 +
-+            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + 15)/16, ne02, ne03, 32, 16, 1);
++            // queries per threadgroup must match the instantiation: 16 on wave32, 8 on wave64
++            const int fa_nq = props_dev->simd_width == 64 ? 8 : 16;
++            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + fa_nq - 1)/fa_nq, ne02, ne03, props_dev->simd_width, fa_nq, 1);
 +
 +            return 1;
 +        }
@@ -1746,10 +1760,13 @@ index 18656b34..26b2e797 100644
 +        ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
 +        ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
 +
-+        // NSG must match the kernel instantiation for this head dim: 32 (128), 16 (256),
-+        // 8 (512), keeping the sh_acc threadgroup buffer at 16 KiB.
-+        const int fa_amd_nsg = (ne00 == 128) ? 32 : (ne00 == 256) ? 16 : 8;
-+        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, 32, fa_amd_nsg, 1);
++        // NSG must match the kernel instantiation for this head dim: 32/16/8 on wave32
++        // (sh_acc at 16 KiB), halved on wave64 so the threadgroup stays at 1024 threads.
++        int fa_amd_nsg = (ne00 == 128) ? 32 : (ne00 == 256) ? 16 : 8;
++        if (props_dev->simd_width == 64) {
++            fa_amd_nsg /= 2;
++        }
++        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, props_dev->simd_width, fa_amd_nsg, 1);
 +
 +        return 1;
 +    }
@@ -1809,7 +1826,7 @@ index a1003b3a..167b9af3 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 25e78e10..e8f86acf 100644
+index 25e78e10..81245c62 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -1902,6 +1902,7 @@ kernel void kernel_soft_max(
@@ -1885,21 +1902,20 @@ index 25e78e10..e8f86acf 100644
  
      threadgroup float * shmem_f32[NR0];
  
-@@ -3435,8 +3442,11 @@ void mul_vec_q_n_f32_impl(
+@@ -3435,8 +3442,10 @@ void mul_vec_q_n_f32_impl(
          ushort sgitg) {
      const short NSG = FC_mul_mv_nsg;
  
 -    constexpr short NW = N_SIMDWIDTH;
 -    constexpr short NQ = 16;
-+    // wave64: keep 2 threads per block-half (the q4_0/q5_0 packing needs il=0/8),
-+    // but scale blocks-in-flight (NQ) with the real simd width so every block is
-+    // still covered exactly once. On wave32 NW=32 -> NQ=16, identical to upstream.
++    // 2 threads per block-half (the packing needs il=0/8); blocks-in-flight
++    // scale with the simd width. wave32: NQ=16, identical to upstream.
 +    const short NW = FC_mul_mv_nw;
 +    const short NQ = NW/2;
  
      const int nb = args.ne00/QK4_0;
  
-@@ -3494,7 +3504,7 @@ void mul_vec_q_n_f32_impl(
+@@ -3494,7 +3503,7 @@ void mul_vec_q_n_f32_impl(
              sumf[row] += block_q_n_dot_y(ax[row] + ib, sumy[0] + sumy[1], yl, il);
          }
  
@@ -1908,7 +1924,7 @@ index 25e78e10..e8f86acf 100644
          //yb += NSG*NQ*QK4_0;
      }
  
-@@ -3650,8 +3660,11 @@ void kernel_mul_mv_q8_0_f32_impl(
+@@ -3650,8 +3659,11 @@ void kernel_mul_mv_q8_0_f32_impl(
          ushort sgitg) {
      const short NSG = FC_mul_mv_nsg;
  
@@ -1921,7 +1937,7 @@ index 25e78e10..e8f86acf 100644
  
      const int nb = args.ne00/QK8_0;
  
-@@ -3678,17 +3691,17 @@ void kernel_mul_mv_q8_0_f32_impl(
+@@ -3678,17 +3690,17 @@ void kernel_mul_mv_q8_0_f32_impl(
  
      float sumf[NR0] = { 0.f };
  
@@ -1943,7 +1959,7 @@ index 25e78e10..e8f86acf 100644
          for (short i = 0; i < NQ; ++i) {
              yl[i] = yb[i];
          }
-@@ -3704,7 +3717,7 @@ void kernel_mul_mv_q8_0_f32_impl(
+@@ -3704,7 +3716,7 @@ void kernel_mul_mv_q8_0_f32_impl(
              sumf[row] += sumq*ax[row][ib].d;
          }
  
@@ -1952,7 +1968,7 @@ index 25e78e10..e8f86acf 100644
      }
  
      device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
-@@ -4059,9 +4072,12 @@ void kernel_mul_mv_t_t_impl(
+@@ -4059,9 +4071,12 @@ void kernel_mul_mv_t_t_impl(
          ushort sgitg) {
      const short NSG = FC_mul_mv_nsg;
  
@@ -1966,7 +1982,7 @@ index 25e78e10..e8f86acf 100644
  
      const int nb = args.ne00/NB;
  
-@@ -4088,16 +4104,16 @@ void kernel_mul_mv_t_t_impl(
+@@ -4088,16 +4103,16 @@ void kernel_mul_mv_t_t_impl(
  
      float sumf[NR0] = { 0.f };
  
@@ -1987,7 +2003,7 @@ index 25e78e10..e8f86acf 100644
          for (short i = 0; i < NF; ++i) {
              yl[i] = yb[i];
          }
-@@ -4113,7 +4129,7 @@ void kernel_mul_mv_t_t_impl(
+@@ -4113,7 +4128,7 @@ void kernel_mul_mv_t_t_impl(
              sumf[row] += sumq;
          }
  
@@ -1996,7 +2012,7 @@ index 25e78e10..e8f86acf 100644
      }
  
      for (int i = nb*NB + sgitg*NW + tiisg; i < args.ne00; i += NW*NSG) {
-@@ -4180,10 +4196,13 @@ void kernel_mul_mv_t_t_4_impl(
+@@ -4180,10 +4195,13 @@ void kernel_mul_mv_t_t_4_impl(
          ushort sgitg) {
      const short NSG = FC_mul_mv_nsg;
  
@@ -2011,7 +2027,7 @@ index 25e78e10..e8f86acf 100644
  
      const int nb = args.ne00/NB;
  
-@@ -4212,16 +4231,16 @@ void kernel_mul_mv_t_t_4_impl(
+@@ -4212,16 +4230,16 @@ void kernel_mul_mv_t_t_4_impl(
  
      float sumf[NR0] = { 0.f };
  
@@ -2032,7 +2048,7 @@ index 25e78e10..e8f86acf 100644
          for (short i = 0; i < NF4; ++i) {
              yl4[i] = yb4[i];
          }
-@@ -4237,7 +4256,7 @@ void kernel_mul_mv_t_t_4_impl(
+@@ -4237,7 +4255,7 @@ void kernel_mul_mv_t_t_4_impl(
              sumf[row] += sumq;
          }
  
@@ -2041,7 +2057,7 @@ index 25e78e10..e8f86acf 100644
      }
  
      for (int i = nb*NB + sgitg*NW + tiisg; i < args.ne00; i += NW*NSG) {
-@@ -7189,6 +7208,322 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -7189,6 +7207,389 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NS20
  }
  
@@ -2051,7 +2067,8 @@ index 25e78e10..e8f86acf 100644
 +template<
 +    short DK, short NSG,
 +    typename k_t, short NKK, void (*deq_k)(device const k_t *, short, thread float4 &),
-+    typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &)>
++    typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &),
++    short NW = 32>
 +kernel void kernel_flash_attn_ext_vec_amd(
 +        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
 +        device const char * q     [[buffer(1)]],
@@ -2065,7 +2082,9 @@ index 25e78e10..e8f86acf 100644
 +        ushort tiisg [[thread_index_in_simdgroup]],
 +        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
 +    constexpr short DV4 = DK/4;   // float4 per head row (32 for DK=128, 64 for DK=256)
-+    constexpr short NC  = DV4/32; // float4 chunks each lane owns (1 for DK=128, 2 for DK=256)
++    // chunks per lane scale with the simd width; on wave64 with DK=128 the upper
++    // lanes own no chunk (guarded below) but still join the simd_sum reductions.
++    constexpr short NC  = (DV4 + NW - 1)/NW;
 +    // NSG (simdgroups per threadgroup) is a template parameter, kept in sync with
 +    // the host dispatch. More simdgroups split the KV stream into shorter serial
 +    // loops, which is a large decode win at depth; it is chosen per head dim so
@@ -2093,7 +2112,8 @@ index 25e78e10..e8f86acf 100644
 +
 +    float4 myq[NC];  // this lane's slice(s) of the query
 +    for (short c = 0; c < NC; ++c) {
-+        myq[c] = q4[tiisg + c*32];
++        const short ch = tiisg + c*NW;
++        myq[c] = ch < DV4 ? q4[ch] : float4(0.0f);
 +    }
 +
 +    float4 acc[NC];  // this lane's slice(s) of the output
@@ -2112,10 +2132,12 @@ index 25e78e10..e8f86acf 100644
 +        device const k_t * kb = (device const k_t *) (kp + (uint64_t) j*args.nb11);
 +        float pl = 0.0f;
 +        for (short c = 0; c < NC; ++c) {
-+            const short ch = tiisg + c*32;
-+            float4 kreg;
-+            deq_k(kb + ch/NKK, ch%NKK, kreg);
-+            pl += dot(myq[c], kreg);
++            const short ch = tiisg + c*NW;
++            if (ch < DV4) {
++                float4 kreg;
++                deq_k(kb + ch/NKK, ch%NKK, kreg);
++                pl += dot(myq[c], kreg);
++            }
 +        }
 +        const float p = simd_sum(pl); // full DK-dim Q.K
 +
@@ -2126,10 +2148,12 @@ index 25e78e10..e8f86acf 100644
 +
 +        device const v_t * vb = (device const v_t *) (vp + (uint64_t) j*args.nb21);
 +        for (short c = 0; c < NC; ++c) {
-+            const short ch = tiisg + c*32;
-+            float4 vreg;
-+            deq_v(vb + ch/NKV, ch%NKV, vreg);
-+            acc[c] = acc[c]*corr + w*vreg;
++            const short ch = tiisg + c*NW;
++            if (ch < DV4) {
++                float4 vreg;
++                deq_v(vb + ch/NKV, ch%NKV, vreg);
++                acc[c] = acc[c]*corr + w*vreg;
++            }
 +        }
 +        s = s*corr + w;
 +        m = nm;
@@ -2137,7 +2161,10 @@ index 25e78e10..e8f86acf 100644
 +
 +    // publish this simdgroup's partials (acc, m, s) and merge in simdgroup 0
 +    for (short c = 0; c < NC; ++c) {
-+        sh_acc[sgitg*DV4 + tiisg + c*32] = acc[c];
++        const short ch = tiisg + c*NW;
++        if (ch < DV4) {
++            sh_acc[sgitg*DV4 + ch] = acc[c];
++        }
 +    }
 +    if (tiisg == 0) {
 +        sh_m[sgitg] = m;
@@ -2158,7 +2185,10 @@ index 25e78e10..e8f86acf 100644
 +        for (short g = 0; g < NSG; ++g) {
 +            const float f = exp(sh_m[g] - gm);
 +            for (short c = 0; c < NC; ++c) {
-+                num[c] += f * sh_acc[g*DV4 + tiisg + c*32];
++                const short ch = tiisg + c*NW;
++                if (ch < DV4) {
++                    num[c] += f * sh_acc[g*DV4 + ch];
++                }
 +            }
 +            den += f * sh_s[g];
 +        }
@@ -2167,7 +2197,10 @@ index 25e78e10..e8f86acf 100644
 +        const int64_t rid = (int64_t) iq3*args.ne2*args.ne1 + iq2 + (int64_t) iq1*args.ne1;
 +        device float4 * dst4 = (device float4 *) dst;
 +        for (short c = 0; c < NC; ++c) {
-+            dst4[rid*DV4 + tiisg + c*32] = num[c]*inv;
++            const short ch = tiisg + c*NW;
++            if (ch < DV4) {
++                dst4[rid*DV4 + ch] = num[c]*inv;
++            }
 +        }
 +    }
 +}
@@ -2200,6 +2233,26 @@ index 25e78e10..e8f86acf 100644
 +FA_AMD_PAIR("kf16_vq4_0",        half4,          1,  dequantize_f16_t4,      block_q4_0,     8,  dequantize_q4_0_t4)
 +FA_AMD_PAIR("kq8_0_vq4_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
 +FA_AMD_PAIR("kq4_0_vq8_0",       block_q4_0,     8,  dequantize_q4_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
++// wave64 (AMD GCN/Vega) variants: 64-lane simdgroups, half the simdgroups per
++// threadgroup so the group stays within 1024 threads. Host appends "_w64".
++#define FA_AMD_INST_W64(dk, nsg, nm, kt, nkk, dkf, vt, nkv, dvf) \
++template [[host_name("kernel_flash_attn_ext_vec_amd_dk" #dk "_" nm "_w64")]] kernel flash_attn_ext_vec_amd_t \
++    kernel_flash_attn_ext_vec_amd<dk, nsg, kt, nkk, dkf, vt, nkv, dvf, 64>;
++#define FA_AMD_PAIR_W64(nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_W64(128, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_W64(256,  8, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_W64(512,  4, nm, kt, nkk, dkf, vt, nkv, dvf)
++FA_AMD_PAIR_W64("kf16_vf16",   half4,      1, dequantize_f16_t4,  half4,      1, dequantize_f16_t4)
++FA_AMD_PAIR_W64("kq8_0_vq8_0", block_q8_0, 8, dequantize_q8_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
++FA_AMD_PAIR_W64("kq4_0_vq4_0", block_q4_0, 8, dequantize_q4_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_PAIR_W64("kq8_0_vf16",  block_q8_0, 8, dequantize_q8_0_t4, half4,      1, dequantize_f16_t4)
++FA_AMD_PAIR_W64("kq4_0_vf16",  block_q4_0, 8, dequantize_q4_0_t4, half4,      1, dequantize_f16_t4)
++FA_AMD_PAIR_W64("kf16_vq8_0",  half4,      1, dequantize_f16_t4,  block_q8_0, 8, dequantize_q8_0_t4)
++FA_AMD_PAIR_W64("kf16_vq4_0",  half4,      1, dequantize_f16_t4,  block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_PAIR_W64("kq8_0_vq4_0", block_q8_0, 8, dequantize_q8_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_PAIR_W64("kq4_0_vq8_0", block_q4_0, 8, dequantize_q4_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
++#undef FA_AMD_PAIR_W64
++#undef FA_AMD_INST_W64
 +#undef FA_AMD_PAIR
 +#undef FA_AMD_INST
 +
@@ -2209,7 +2262,8 @@ index 25e78e10..e8f86acf 100644
 +template<
 +    short DK, short NQ,
 +    typename k_t, short NKK, void (*deq_k)(device const k_t *, short, thread float4 &),
-+    typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &)>
++    typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &),
++    short NW = 32>
 +kernel void kernel_flash_attn_ext_tile_amd(
 +        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
 +        device const char * q     [[buffer(1)]],
@@ -2223,7 +2277,7 @@ index 25e78e10..e8f86acf 100644
 +        ushort tiisg [[thread_index_in_simdgroup]],
 +        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
 +    constexpr short DK4 = DK/4;    // float4 per head row
-+    constexpr short NC  = DK4/32;  // float4 chunks each lane owns
++    constexpr short NC  = (DK4 + NW - 1)/NW; // float4 chunks each lane owns (upper wave64 lanes guarded)
 +    constexpr short TK  = 4096/DK; // KV rows per tile (sk + sv = 16 KiB)
 +
 +    threadgroup half4 sk[TK*DK4];
@@ -2251,7 +2305,8 @@ index 25e78e10..e8f86acf 100644
 +
 +    float4 myq[NC];
 +    for (short c = 0; c < NC; ++c) {
-+        myq[c] = q4[tiisg + c*32];
++        const short ch = tiisg + c*NW;
++        myq[c] = ch < DK4 ? q4[ch] : float4(0.0f);
 +    }
 +
 +    float4 acc[NC];
@@ -2261,7 +2316,7 @@ index 25e78e10..e8f86acf 100644
 +    float m = -FLT_MAX/2;
 +    float s = 0.0f;
 +
-+    const short tl = 32*sgitg + tiisg; // linear thread id for cooperative loads
++    const short tl = NW*sgitg + tiisg; // linear thread id for cooperative loads
 +
 +    for (int j0 = 0; j0 < args.ne11; j0 += TK) {
 +        const short tn = (args.ne11 - j0 < TK) ? (short)(args.ne11 - j0) : TK;
@@ -2273,7 +2328,7 @@ index 25e78e10..e8f86acf 100644
 +        threadgroup_barrier(mem_flags::mem_threadgroup);
 +        {
 +            float mx = -FLT_MAX;
-+            for (short jj = tiisg; jj < tn; jj += 32) {
++            for (short jj = tiisg; jj < tn; jj += NW) {
 +                mx = max(mx, (float) pm[j0 + jj]);
 +            }
 +            mx = simd_max(mx);
@@ -2287,7 +2342,7 @@ index 25e78e10..e8f86acf 100644
 +        }
 +
 +        // cooperative dequant of the K/V tile rows into threadgroup memory
-+        for (short c = tl; c < tn*DK4; c += 32*NQ) {
++        for (short c = tl; c < tn*DK4; c += NW*NQ) {
 +            const short jj = c / DK4;
 +            const short ch = c % DK4;
 +            float4 t;
@@ -2308,7 +2363,10 @@ index 25e78e10..e8f86acf 100644
 +
 +            float pl = 0.0f;
 +            for (short c = 0; c < NC; ++c) {
-+                pl += dot(myq[c], (float4) sk[jj*DK4 + tiisg + c*32]);
++                const short ch = tiisg + c*NW;
++                if (ch < DK4) {
++                    pl += dot(myq[c], (float4) sk[jj*DK4 + ch]);
++                }
 +            }
 +            const float p = simd_sum(pl); // full DK-dim Q.K
 +
@@ -2318,7 +2376,10 @@ index 25e78e10..e8f86acf 100644
 +            const float w    = exp(pp - nm);
 +
 +            for (short c = 0; c < NC; ++c) {
-+                acc[c] = acc[c]*corr + w*(float4) sv[jj*DK4 + tiisg + c*32];
++                const short ch = tiisg + c*NW;
++                if (ch < DK4) {
++                    acc[c] = acc[c]*corr + w*(float4) sv[jj*DK4 + ch];
++                }
 +            }
 +            s = s*corr + w;
 +            m = nm;
@@ -2334,7 +2395,10 @@ index 25e78e10..e8f86acf 100644
 +    const int64_t rid = (int64_t) iq3*args.ne2*args.ne1 + iq2 + (int64_t) iq1*args.ne1;
 +    device float4 * dst4 = (device float4 *) dst;
 +    for (short c = 0; c < NC; ++c) {
-+        dst4[rid*DK4 + tiisg + c*32] = acc[c]*inv;
++        const short ch = tiisg + c*NW;
++        if (ch < DK4) {
++            dst4[rid*DK4 + ch] = acc[c]*inv;
++        }
 +    }
 +}
 +
@@ -2358,13 +2422,32 @@ index 25e78e10..e8f86acf 100644
 +FA_AMD_TILE_PAIR("kf16_vq4_0",  half4,      1, dequantize_f16_t4,  block_q4_0, 8, dequantize_q4_0_t4)
 +FA_AMD_TILE_PAIR("kq8_0_vq4_0", block_q8_0, 8, dequantize_q8_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
 +FA_AMD_TILE_PAIR("kq4_0_vq8_0", block_q4_0, 8, dequantize_q4_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
++// wave64 variants: 64-lane simdgroups, 8 queries per threadgroup (512 threads).
++#define FA_AMD_TILE_INST_W64(dk, nm, kt, nkk, dkf, vt, nkv, dvf) \
++template [[host_name("kernel_flash_attn_ext_tile_amd_dk" #dk "_" nm "_w64")]] kernel flash_attn_ext_tile_amd_t \
++    kernel_flash_attn_ext_tile_amd<dk, 8, kt, nkk, dkf, vt, nkv, dvf, 64>;
++#define FA_AMD_TILE_PAIR_W64(nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_TILE_INST_W64(128, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_TILE_INST_W64(256, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_TILE_INST_W64(512, nm, kt, nkk, dkf, vt, nkv, dvf)
++FA_AMD_TILE_PAIR_W64("kf16_vf16",   half4,      1, dequantize_f16_t4,  half4,      1, dequantize_f16_t4)
++FA_AMD_TILE_PAIR_W64("kq8_0_vq8_0", block_q8_0, 8, dequantize_q8_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
++FA_AMD_TILE_PAIR_W64("kq4_0_vq4_0", block_q4_0, 8, dequantize_q4_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_TILE_PAIR_W64("kq8_0_vf16",  block_q8_0, 8, dequantize_q8_0_t4, half4,      1, dequantize_f16_t4)
++FA_AMD_TILE_PAIR_W64("kq4_0_vf16",  block_q4_0, 8, dequantize_q4_0_t4, half4,      1, dequantize_f16_t4)
++FA_AMD_TILE_PAIR_W64("kf16_vq8_0",  half4,      1, dequantize_f16_t4,  block_q8_0, 8, dequantize_q8_0_t4)
++FA_AMD_TILE_PAIR_W64("kf16_vq4_0",  half4,      1, dequantize_f16_t4,  block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_TILE_PAIR_W64("kq8_0_vq4_0", block_q8_0, 8, dequantize_q8_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
++FA_AMD_TILE_PAIR_W64("kq4_0_vq8_0", block_q4_0, 8, dequantize_q4_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
++#undef FA_AMD_TILE_PAIR_W64
++#undef FA_AMD_TILE_INST_W64
 +#undef FA_AMD_TILE_PAIR
 +#undef FA_AMD_TILE_INST
 +
  // note: I think the s_t can be half instead of float, because the Q*K scaling is done before storing to shared mem
  //       in the other (non-vec) kernel, we need s_t to also be float because we scale during the soft_max
  //
-@@ -7846,12 +8181,15 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -7846,12 +8247,15 @@ void kernel_mul_mv_q4_K_f32_impl(
          ushort tiisg,
          ushort sgitg) {
      const short NSG = FC_mul_mv_nsg;
@@ -2381,7 +2464,7 @@ index 25e78e10..e8f86acf 100644
      const short it = tiisg%8;  // 0...7
      const short iq = it/4;     // 0 or 1
      const short ir = it%4;     // 0...3
-@@ -7883,7 +8221,7 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -7883,7 +8287,7 @@ void kernel_mul_mv_q4_K_f32_impl(
      uint16_t sc16[4];
      thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
  
@@ -2390,7 +2473,7 @@ index 25e78e10..e8f86acf 100644
          float4 sumy = {0.f, 0.f, 0.f, 0.f};
  
          for (short i = 0; i < 8; ++i) {
-@@ -7930,7 +8268,7 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -7930,7 +8334,7 @@ void kernel_mul_mv_q4_K_f32_impl(
              dh += args.nb01/2;
          }
  
@@ -2399,7 +2482,7 @@ index 25e78e10..e8f86acf 100644
      }
  
      device float * dst_f32 = (device float *) dst + (int64_t)im*args.ne0*args.ne1 + (int64_t)r1*args.ne0;
-@@ -7993,8 +8331,11 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -7993,8 +8397,11 @@ void kernel_mul_mv_q5_K_f32_impl(
      constexpr uint16_t kmask2 = 0x0f0f;
      constexpr uint16_t kmask3 = 0xc0c0;
  
@@ -2413,7 +2496,7 @@ index 25e78e10..e8f86acf 100644
      const short iq  = tid/4;
      const short ir  = tid%4;
  
-@@ -8012,7 +8353,7 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8012,7 +8419,7 @@ void kernel_mul_mv_q5_K_f32_impl(
  
      device const float * y1 = yy + ix*QK_K + y_offset;
  
@@ -2422,7 +2505,7 @@ index 25e78e10..e8f86acf 100644
          device const uint8_t * q1 = x[i].qs + q_offset;
          device const uint8_t * qh = x[i].qh + l0;
          device const half * dh = &x[i].d;
-@@ -8061,7 +8402,7 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8061,7 +8468,7 @@ void kernel_mul_mv_q5_K_f32_impl(
              a  += args.nb01/2;
          }
  
@@ -2431,7 +2514,7 @@ index 25e78e10..e8f86acf 100644
      }
  
      device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
-@@ -8125,8 +8466,11 @@ void kernel_mul_mv_q6_K_f32_impl(
+@@ -8125,8 +8532,11 @@ void kernel_mul_mv_q6_K_f32_impl(
  
      float yl[16];
  
@@ -2445,7 +2528,7 @@ index 25e78e10..e8f86acf 100644
      const short ip  = tid/8;         // 0 or 1
      const short il  = tid%8;
      const short l0  = 4*il;
-@@ -8136,7 +8480,7 @@ void kernel_mul_mv_q6_K_f32_impl(
+@@ -8136,7 +8546,7 @@ void kernel_mul_mv_q6_K_f32_impl(
      const short q_offset_l =  64*ip + l0;
      const short q_offset_h =  32*ip + l0;
  
@@ -2454,7 +2537,7 @@ index 25e78e10..e8f86acf 100644
          device const uint8_t * q1 = x[i].ql + q_offset_l;
          device const uint8_t * q2 = q1 + 32;
          device const uint8_t * qh = x[i].qh + q_offset_h;
-@@ -9431,6 +9775,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
+@@ -9431,6 +9841,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
  constant short FC_mul_mm_ne13  [[function_constant(FC_MUL_MM + 3)]];
  constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
  constant short FC_mul_mm_r3    [[function_constant(FC_MUL_MM + 5)]];
@@ -2462,7 +2545,7 @@ index 25e78e10..e8f86acf 100644
  
  // each block_q contains 16*nl weights
  #ifdef GGML_METAL_HAS_TENSOR
-@@ -9616,13 +9961,26 @@ kernel void kernel_mul_mm(
+@@ -9616,13 +10027,26 @@ kernel void kernel_mul_mm(
          + args.nb11*(r1 + lr1)
          + args.nb10*iy);
  
@@ -2492,7 +2575,7 @@ index 25e78e10..e8f86acf 100644
      }
  
      for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
-@@ -9635,14 +9993,17 @@ kernel void kernel_mul_mm(
+@@ -9635,14 +10059,17 @@ kernel void kernel_mul_mm(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -2513,7 +2596,7 @@ index 25e78e10..e8f86acf 100644
              }
          } else {
              S0_4x4 temp_a;
-@@ -9654,17 +10015,14 @@ kernel void kernel_mul_mm(
+@@ -9654,17 +10081,14 @@ kernel void kernel_mul_mm(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -2533,7 +2616,7 @@ index 25e78e10..e8f86acf 100644
              }
          }
  
-@@ -9703,45 +10061,91 @@ kernel void kernel_mul_mm(
+@@ -9703,45 +10127,91 @@ kernel void kernel_mul_mm(
  
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
@@ -2646,7 +2729,7 @@ index 25e78e10..e8f86acf 100644
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
-@@ -9896,9 +10300,12 @@ kernel void kernel_mul_mm_id(
+@@ -9896,9 +10366,12 @@ kernel void kernel_mul_mm_id(
  
      const int id = ids_i32[im*args.ne21 + r1 + lr1];
  
@@ -2662,7 +2745,7 @@ index 25e78e10..e8f86acf 100644
  
      const uint64_t offset0 = im*args.nb02 + i13*args.nb03;
      const short    offset1 = il0/nl;
-@@ -9914,13 +10321,27 @@ kernel void kernel_mul_mm_id(
+@@ -9914,13 +10387,27 @@ kernel void kernel_mul_mm_id(
          + args.nb10*iy);
  
  #ifndef GGML_METAL_HAS_TENSOR
@@ -2692,7 +2775,7 @@ index 25e78e10..e8f86acf 100644
      }
  #else
      auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
-@@ -9951,7 +10372,11 @@ kernel void kernel_mul_mm_id(
+@@ -9951,7 +10438,11 @@ kernel void kernel_mul_mm_id(
  
                  const short ib = 8*sx + sy;
  
@@ -2705,7 +2788,7 @@ index 25e78e10..e8f86acf 100644
              }
          } else {
              S0_4x4 temp_a;
-@@ -9963,17 +10388,14 @@ kernel void kernel_mul_mm_id(
+@@ -9963,17 +10454,14 @@ kernel void kernel_mul_mm_id(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -2725,7 +2808,7 @@ index 25e78e10..e8f86acf 100644
              }
          }
  
-@@ -10074,30 +10496,66 @@ kernel void kernel_mul_mm_id(
+@@ -10074,30 +10562,66 @@ kernel void kernel_mul_mm_id(
  
  #ifndef GGML_METAL_HAS_TENSOR
          // load matrices from threadgroup memory and conduct outer products
@@ -2808,7 +2891,7 @@ index 25e78e10..e8f86acf 100644
          }
  #else
          auto sA = tA.slice(0, 0);
-@@ -10116,8 +10574,17 @@ kernel void kernel_mul_mm_id(
+@@ -10116,8 +10640,17 @@ kernel void kernel_mul_mm_id(
  #else
      threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
  
@@ -2828,7 +2911,7 @@ index 25e78e10..e8f86acf 100644
      }
  #endif
  
-@@ -10126,8 +10593,10 @@ kernel void kernel_mul_mm_id(
+@@ -10126,8 +10659,10 @@ kernel void kernel_mul_mm_id(
      for (short j = sgitg; j < nr1; j += 4) {
          const int id = ids_i32[im*args.ne21 + r1 + j];
  
