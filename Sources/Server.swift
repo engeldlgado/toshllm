@@ -1016,7 +1016,7 @@ final class ServerController: ObservableObject {
         let gpuSel = settings.multiGPU ? "split-all" : (settings.gpuIndex >= 0 ? "index \(settings.gpuIndex)" : "default (macOS picks)")
         return """
         ========================================================
-         ToshLLM \(AppInfo.version) — server start (\(ServerSettings.isAppleSilicon ? "arm64" : "x86_64"))
+         ToshLLM \(AppInfo.version) — server start (\(ServerSettings.isAppleSilicon ? "arm64" : "x86_64")\(AppInfo.isNoAVX2 ? " · no-AVX2 build" : ""))
          engine : \(engine)
          model  : \(settings.routerMode ? "router (autoload, max \(settings.routerModelsMax) loaded)" : (settings.modelPath as NSString).lastPathComponent)
          GPUs detected:
@@ -1137,6 +1137,11 @@ final class ServerController: ObservableObject {
         if tail.contains("invalid magic") || tail.contains("failed to load model")
             || tail.contains("error loading model") {
             return "Modelo dañado o incompleto: vuelve a descargarlo / model file damaged or incomplete: re-download it"
+        }
+        if exitCode == SIGILL {
+            return AppInfo.isNoAVX2
+                ? "Instrucción ilegal (SIGILL): este CPU no soporta el motor — reporta tu modelo de CPU en GitHub / illegal instruction (SIGILL): this CPU can't run the engine — report your CPU model on GitHub"
+                : "Instrucción ilegal (SIGILL): este CPU no soporta AVX2 — instala la versión no-AVX2 del release / illegal instruction (SIGILL): this CPU lacks AVX2 — install the no-AVX2 build from the release"
         }
         return "El motor terminó con código \(exitCode) — revisa el registro en Ajustes / engine exited with code \(exitCode) — see the log in Settings"
     }

@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.56] - 2026-07-09
+
+### Fixed
+- **The no-AVX2 build now really is AVX2-free**... the 0.81.54/55 "noavx2" downloads were still compiled with AVX2/FMA/BMI2 (the engine build system silently re-enables them unless each one is turned off explicitly), so on pre-AVX2 Xeons they crashed with the same illegal-instruction error (code 4) they were meant to fix. The legacy variant now pins an SSE4.2 baseline for all three engines (official, turbo and image).
+
+### Improved
+- **The server log identifies the running build**... the startup banner now says "no-AVX2 build" on the legacy variant, and an engine killed by an illegal instruction is diagnosed as a CPU-instruction mismatch pointing to the right download, instead of a bare "exited with code 4".
+
 ## [0.81.55] - 2026-07-09
 
 ### Added

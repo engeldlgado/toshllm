@@ -80,13 +80,20 @@ CMAKE_FLAGS=(
     -DLLAMA_OPENSSL=OFF
 )
 
-# GGML_NATIVE=OFF emits an SSE2 baseline on a native x86 host build (no AVX2/FMA),
-# which halves CPU-side MoE-offload throughput; a cross-build on an arm64 CI runner
-# happens to enable AVX2, so local builds regressed silently vs the released binary.
-# Every Metal-capable Intel Mac is Haswell+ (AVX2/FMA), so force the ISA explicitly.
-# TOSH_NO_AVX2=1 builds the legacy variant for the rare no-AVX2 Xeon Hackintosh.
-if [ "$ARCH" = "x86_64" ] && [ -z "${TOSH_NO_AVX2:-}" ]; then
-    CMAKE_FLAGS+=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
+# Never rely on ggml's ISA defaults: with GGML_NATIVE=OFF they flip with the
+# host (an arm64->x86_64 CI build is NOT CMAKE_CROSSCOMPILING, so AVX/AVX2/FMA/
+# F16C/BMI2 all default ON). Both variants pin every ISA flag explicitly.
+# Standard = Haswell+ (every Metal-capable Intel Mac); TOSH_NO_AVX2=1 = legacy
+# SSE4.2 baseline for pre-AVX Xeon Hackintoshes.
+ISA_FLAGS=()
+if [ "$ARCH" = "x86_64" ]; then
+    if [ -z "${TOSH_NO_AVX2:-}" ]; then
+        ISA_FLAGS=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
+    else
+        ISA_FLAGS=(-DGGML_SSE42=ON -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF
+                   -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_AVX_VNNI=OFF)
+    fi
+    CMAKE_FLAGS+=("${ISA_FLAGS[@]}")
 fi
 
 build_engine() {
@@ -161,10 +168,7 @@ build_image_engine() {
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/0003-image-metal-ncb.patch"
     echo "applied ggml-metal hunks of 0001 + 0003 to stable-diffusion.cpp"
 
-    local isa=()
-    if [ "$ARCH" = "x86_64" ] && [ -z "${TOSH_NO_AVX2:-}" ]; then
-        isa=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
-    fi
+    local isa=("${ISA_FLAGS[@]}")
     cmake -B build-static \
         -DCMAKE_BUILD_TYPE=Release \
         -DSD_METAL=ON \
