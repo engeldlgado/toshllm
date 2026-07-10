@@ -3,6 +3,22 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.57] - 2026-07-10
+
+### Added
+- **Encoder and VAE on a second GPU**... on multi-GPU Macs, each image instance can send the text encoder and the VAE to another card, leaving the main one entirely to the diffusion model, so bigger models or larger frames fit. The fit checks, the queue scheduling and the GPU warnings all account for the second card.
+- **Queued prompts can target an instance**... a "Target" picker in the queue composer pins a prompt to one instance (its model, GPU and settings). A targeted prompt waits for its instance without blocking the rest of the queue, and the feed badges every entry with the instance that renders it.
+- **Per-prompt reference image in the queue**... an optional "Image" chooser attaches an img2img source to the prompts you add with it, overriding the rendering instance's own reference for that run only. Pending entries show a small thumbnail of it.
+- **List or grid results**... both the queue feed and the multi-instance canvas can switch between the full-width list and a grid whose columns adapt to the window width. Each view remembers its choice.
+- **Save all from the queue feed**... one button copies every result of the session's gallery into a folder you pick, like the instances canvas already offered.
+
+### Fixed
+- **The queue's prompt box handles long prompts**... long text used to run off the right edge (or get cut off with no way to scroll) and didn't re-wrap when the window was resized. The box now wraps at its width, grows up to 8 lines and scrolls beyond that; Cmd+Return adds the prompt to the queue.
+- **Chat and images on different GPUs no longer warn**... the "chat shares a GPU" notice only appears when the chat server could actually land on a card an image instance uses, so chat on one GPU and image instances on the others run together without noise.
+
+### Improved
+- **Results show their prompt and full details**... every instance tile and the single-instance canvas now display the prompt that made the image (hover for the full text) plus its real output size, format, seed and timing, and the queue composer keeps the target, seed and image options in one tidy row.
+
 ## [0.81.56] - 2026-07-09
 
 ### Fixed
