@@ -92,6 +92,9 @@ enum SettingsKeys {
     static let imagenInstances = "imagenInstances"
     /// Delete generated output images (toshllm_*) when the app quits.
     static let imagenCleanupOnClose = "imagenCleanupOnClose"
+    /// Show results as a grid instead of a list (queue feed / instances canvas).
+    static let imagenQueueGrid = "imagenQueueGrid"
+    static let imagenCanvasGrid = "imagenCanvasGrid"
 
     /// Tunable option keys (engine / GPU / inference / chat). Resetting clears these
     /// so `@AppStorage` falls back to its declared defaults. The models folder, the

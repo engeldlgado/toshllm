@@ -205,6 +205,7 @@ struct QueueFeedView: View {
     @State private var draftSeed = -1
     /// nil = any free instance (default).
     @State private var draftTarget: UUID? = nil
+    @AppStorage(SettingsKeys.imagenQueueGrid) private var grid = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -213,6 +214,12 @@ struct QueueFeedView: View {
             if pool.queue.isEmpty && pool.gallery.isEmpty && !pool.anyBusy {
                 emptyState
             } else {
+                if !pool.gallery.isEmpty {
+                    HStack {
+                        Spacer()
+                        FeedLayoutPicker(grid: $grid)
+                    }
+                }
                 ScrollView {
                     VStack(spacing: 10) {
                         ForEach(pool.queue) { pendingRow($0) }
@@ -220,7 +227,14 @@ struct QueueFeedView: View {
                             let gen = pool.generator(for: c.id)
                             if gen.isBusy { progressRow(gen, instanceLabel: pool.instanceLabel(for: c.id)) }
                         }
-                        ForEach(pool.gallery) { resultRow($0) }
+                        if grid {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 460), spacing: 10)],
+                                      alignment: .leading, spacing: 10) {
+                                ForEach(pool.gallery) { resultCard($0) }
+                            }
+                        } else {
+                            ForEach(pool.gallery) { resultRow($0) }
+                        }
                     }
                     .padding(.vertical, 2)
                 }
@@ -228,48 +242,46 @@ struct QueueFeedView: View {
         }
     }
 
+    /// Prompt on top, then one row with the send options (target instance and
+    /// seed) and Add, then the queue controls. Keeps related controls together
+    /// instead of scattering them around the field.
     private var composer: some View {
         VStack(spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                TextField(loc.t("Prompt para la cola…", "Prompt for the queue…"), text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder).lineLimit(2...6).onSubmit(add)
-                VStack(spacing: 4) {
-                    HStack(spacing: 4) {
-                        Text(loc.t("Semilla", "Seed")).font(.caption).foregroundStyle(.secondary)
-                        TextField("-1", value: $draftSeed, format: .number.grouping(.never))
-                            .textFieldStyle(.roundedBorder).frame(width: 68)
+            TextField(loc.t("Prompt para la cola…", "Prompt for the queue…"), text: $draft, axis: .vertical)
+                .textFieldStyle(.roundedBorder).lineLimit(2...6).onSubmit(add)
+            HStack(spacing: 14) {
+                HStack(spacing: 4) {
+                    Text(loc.t("Destino", "Target")).font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: $draftTarget) {
+                        Text(loc.t("Cualquiera", "Any")).tag(nil as UUID?)
+                        ForEach(pool.configs) { c in
+                            Text(pool.instanceLabel(for: c.id) ?? "").tag(c.id as UUID?)
+                        }
                     }
-                    Button(action: add) {
-                        Label(loc.t("Añadir", "Add"), systemImage: "plus").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-                .fixedSize()
-            }
-            HStack(spacing: 4) {
-                Text(loc.t("Destino", "Target")).font(.caption).foregroundStyle(.secondary)
-                Picker("", selection: $draftTarget) {
-                    Text(loc.t("Cualquiera", "Any")).tag(nil as UUID?)
-                    ForEach(pool.configs) { c in
-                        Text(pool.instanceLabel(for: c.id) ?? "").tag(c.id as UUID?)
+                    .labelsHidden().fixedSize()
+                    .help(loc.t("Instancia que debe generar este prompt. \"Cualquiera\" toma la siguiente libre; si eliges una y está ocupada, el prompt espera por ella sin bloquear a los demás.",
+                                "Instance that must render this prompt. \"Any\" takes the next free one; if you pick one and it's busy, this prompt waits for it without blocking the others."))
+                    .onChange(of: pool.configs.map(\.id)) {
+                        if let t = draftTarget, !pool.configs.contains(where: { $0.id == t }) { draftTarget = nil }
                     }
                 }
-                .labelsHidden().fixedSize()
-                .help(loc.t("Instancia que debe generar este prompt. \"Cualquiera\" toma la siguiente libre; si eliges una y está ocupada, el prompt espera por ella sin bloquear a los demás.",
-                            "Instance that must render this prompt. \"Any\" takes the next free one; if you pick one and it's busy, this prompt waits for it without blocking the others."))
-                .onChange(of: pool.configs.map(\.id)) {
-                    if let t = draftTarget, !pool.configs.contains(where: { $0.id == t }) { draftTarget = nil }
-                }
-                Spacer(minLength: 0)
-            }
-            HStack {
-                if !pool.queue.isEmpty {
-                    Text(loc.t("\(pool.queue.count) en cola", "\(pool.queue.count) queued"))
-                        .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(loc.t("Semilla", "Seed")).font(.caption).foregroundStyle(.secondary)
+                    TextField("-1", value: $draftSeed, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder).frame(width: 68)
                 }
                 Spacer()
-                if !pool.queue.isEmpty || pool.queueActive {
+                Button(action: add) { Label(loc.t("Añadir", "Add"), systemImage: "plus") }
+                    .buttonStyle(.bordered)
+                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if !pool.queue.isEmpty || pool.queueActive {
+                HStack {
+                    if !pool.queue.isEmpty {
+                        Text(loc.t("\(pool.queue.count) en cola", "\(pool.queue.count) queued"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
                     Button(action: toggle) {
                         Label(pool.queueActive ? loc.t("Detener", "Stop") : loc.t("Procesar cola", "Process queue"),
                               systemImage: pool.queueActive ? "stop.fill" : "play.fill")
@@ -369,6 +381,35 @@ struct QueueFeedView: View {
         .padding(12).background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
     }
 
+    /// Grid tile: image on top, prompt excerpt and metadata below. Hovering the
+    /// prompt shows the full text.
+    private func resultCard(_ g: GeneratedImage) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(nsImage: g.image).resizable().scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: 280)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            Text(g.prompt.isEmpty ? loc.t("(sin prompt)", "(no prompt)") : g.prompt)
+                .font(.caption).lineLimit(2)
+                .help(g.prompt)
+            HStack(spacing: 6) {
+                Text("\(g.width)×\(g.height) · \(g.duration)s" + (g.seed >= 0 ? " · #\(g.seed)" : ""))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if let label = g.instanceLabel { instanceBadge(label) }
+            }
+            HStack(spacing: 10) {
+                Button { save(g) } label: { Label(loc.t("Guardar…", "Save…"), systemImage: "square.and.arrow.down") }
+                    .help(loc.t("Guarda una copia donde elijas.", "Save a copy wherever you choose."))
+                Button { NSWorkspace.shared.activateFileViewerSelecting([g.url]) } label: {
+                    Label(loc.t("Finder", "Finder"), systemImage: "folder")
+                }
+                .help(loc.t("Abre el archivo en el Finder.", "Reveal the file in Finder."))
+            }
+            .controlSize(.small)
+        }
+        .padding(10).background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+    }
+
     private func add() {
         pool.enqueue(draft, seed: draftSeed, targetInstanceID: draftTarget)
         draft = ""
@@ -393,6 +434,21 @@ struct QueueFeedView: View {
             try? FileManager.default.removeItem(at: dest)
             try? FileManager.default.copyItem(at: g.url, to: dest)
         }
+    }
+}
+
+/// Segmented list/grid switch shared by the queue feed and the instances canvas.
+struct FeedLayoutPicker: View {
+    @Binding var grid: Bool
+    @EnvironmentObject var loc: Localizer
+
+    var body: some View {
+        Picker("", selection: $grid) {
+            Label(loc.t("Lista", "List"), systemImage: "list.bullet").tag(false)
+            Label(loc.t("Cuadrícula", "Grid"), systemImage: "square.grid.2x2").tag(true)
+        }
+        .pickerStyle(.segmented).labelsHidden().labelStyle(.iconOnly).fixedSize()
+        .help(loc.t("Resultados en lista o en cuadrícula.", "Results as a list or a grid."))
     }
 }
 
@@ -793,6 +849,7 @@ struct ImageCanvas: View {
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var models: ModelStore
     @State private var detailTab: ImageDetailTab = .instances
+    @AppStorage(SettingsKeys.imagenCanvasGrid) private var canvasGrid = false
 
     var body: some View {
         Group {
@@ -884,36 +941,48 @@ struct ImageCanvas: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-            HStack(spacing: 14) {
-                if gen.lastDuration > 0 {
-                    Label(loc.t("Generado en \(gen.lastDuration)s", "Generated in \(gen.lastDuration)s"),
-                          systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 6) {
+                if !gen.lastPrompt.isEmpty {
+                    Text(gen.lastPrompt)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(2).help(gen.lastPrompt)
                 }
-                Spacer()
-                Button { if let url = gen.resultURL { saveAs(url, format: format) } } label: {
-                    Label(loc.t("Guardar como…", "Save as…"), systemImage: "square.and.arrow.down")
-                }
-                .help(loc.t("Guarda una copia donde elijas.", "Save a copy wherever you choose."))
-                if let url = gen.resultURL {
-                    Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
-                        Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
+                HStack(spacing: 14) {
+                    if gen.lastDuration > 0 {
+                        Label(loc.t("Generado en \(gen.lastDuration)s", "Generated in \(gen.lastDuration)s"),
+                              systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(.green)
                     }
-                    .help(loc.t("Abre el archivo en el Finder.", "Reveal the file in Finder."))
+                    Text("\(gen.lastWidth) × \(gen.lastHeight) · \(format.rawValue.uppercased())"
+                         + (gen.lastSeed >= 0 ? " · #\(gen.lastSeed)" : ""))
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button { if let url = gen.resultURL { saveAs(url, format: format) } } label: {
+                        Label(loc.t("Guardar como…", "Save as…"), systemImage: "square.and.arrow.down")
+                    }
+                    .help(loc.t("Guarda una copia donde elijas.", "Save a copy wherever you choose."))
+                    if let url = gen.resultURL {
+                        Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
+                            Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
+                        }
+                        .help(loc.t("Abre el archivo en el Finder.", "Reveal the file in Finder."))
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     // MARK: several instances
 
-    /// Vertical canvas: one full-width row per instance (image left, info and
-    /// actions right), so nothing collapses to a thumbnail with several running.
+    /// Canvas with one tile per instance: full-width rows (image left, info
+    /// right) or an adaptive grid whose column count follows the window width.
     private var multiCanvas: some View {
         VStack(spacing: 12) {
             let savable = pool.configs.compactMap { pool.generator(for: $0.id).resultURL }
-            if savable.count > 1 {
-                HStack {
-                    Spacer()
+            HStack(spacing: 12) {
+                Spacer()
+                FeedLayoutPicker(grid: $canvasGrid)
+                if savable.count > 1 {
                     Button { saveAll(savable) } label: {
                         Label(loc.t("Guardar todas…", "Save all…"), systemImage: "square.and.arrow.down.on.square")
                     }
@@ -922,25 +991,36 @@ struct ImageCanvas: View {
                 }
             }
             ScrollView {
-                VStack(spacing: 14) {
-                    ForEach(pool.configs) { cfg in
-                        ImageInstanceRow(gen: pool.generator(for: cfg.id), title: tileTitle(cfg),
-                                         dims: cfg.dimensions, format: cfg.formatValue,
-                                         onSave: { saveAs($0, format: cfg.formatValue) })
+                if canvasGrid {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 14)],
+                              alignment: .leading, spacing: 14) {
+                        ForEach(pool.configs) { instanceTile($0, grid: true) }
                     }
+                    .padding(4)
+                } else {
+                    VStack(spacing: 14) {
+                        ForEach(pool.configs) { instanceTile($0, grid: false) }
+                    }
+                    .padding(4)
                 }
-                .padding(4)
             }
         }
     }
 
+    private func instanceTile(_ cfg: ImageInstanceConfig, grid: Bool) -> some View {
+        ImageInstanceRow(gen: pool.generator(for: cfg.id), title: tileTitle(cfg),
+                         dims: cfg.dimensions, format: cfg.formatValue, grid: grid,
+                         onSave: { saveAs($0, format: cfg.formatValue) })
+    }
+
+    /// Instance number, model and GPU. Seed and dimensions live in the tile's
+    /// metadata line, next to the run they actually belong to.
     private func tileTitle(_ cfg: ImageInstanceConfig) -> String {
         let n = (pool.configs.firstIndex { $0.id == cfg.id } ?? 0) + 1
         var parts = ["\(n) · \(cfg.resolvedModel(for: hardware).name)"]
         if hardware.gpus.count > 1, cfg.gpuIndex < hardware.gpus.count {
             parts.append(hardware.gpus[cfg.gpuIndex].name)
         }
-        if cfg.seed >= 0 { parts.append("seed \(cfg.seed)") }
         return parts.joined(separator: " · ")
     }
 
@@ -988,23 +1068,38 @@ struct ImageCanvas: View {
     }
 }
 
-/// One row on the multi-instance canvas: the image fills the width on the left,
-/// with its title, timing and save/reveal actions in a fixed panel on the right.
+/// One tile on the multi-instance canvas. As a list row the image fills the
+/// width with the info panel on the right; as a grid card the info sits under
+/// the image. Both show the run's prompt and full metadata.
 struct ImageInstanceRow: View {
     @ObservedObject var gen: ImageGenerator
     let title: String
     let dims: (Int, Int)
     let format: ImageFormat
+    let grid: Bool
     let onSave: (URL) -> Void
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            imageArea
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: 240, maxHeight: 460)
-            sidePanel
-                .frame(width: 200, alignment: .leading)
+        Group {
+            if grid {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(title).font(.callout.weight(.medium))
+                        .lineLimit(1).truncationMode(.middle)
+                    imageArea
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: 180, maxHeight: 320)
+                    infoPanel
+                }
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    imageArea
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: 240, maxHeight: 460)
+                    sidePanel
+                        .frame(width: 220, alignment: .leading)
+                }
+            }
         }
         .padding(14)
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
@@ -1032,38 +1127,74 @@ struct ImageInstanceRow: View {
         }
     }
 
-    @ViewBuilder private var sidePanel: some View {
+    private var sidePanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.callout.weight(.medium))
                 .fixedSize(horizontal: false, vertical: true)
-            if gen.isBusy {
-                Label("\(gen.elapsed)s", systemImage: "clock")
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                if let eta = gen.etaSeconds {
-                    Label(loc.t("~\(eta)s restantes", "~\(eta)s left"), systemImage: "hourglass")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                }
-            } else if let url = gen.resultURL, gen.resultImage != nil {
-                if gen.lastDuration > 0 {
-                    Label(loc.t("Generado en \(gen.lastDuration)s", "Generated in \(gen.lastDuration)s"),
-                          systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(.green)
-                }
-                Text("\(dims.0) × \(dims.1) · \(format.rawValue.uppercased())")
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                Button { onSave(url) } label: {
-                    Label(loc.t("Guardar como…", "Save as…"), systemImage: "square.and.arrow.down")
-                }
-                .help(loc.t("Guarda una copia donde elijas.", "Save a copy wherever you choose."))
-                Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
-                    Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
-                }
-                .help(loc.t("Abre el archivo en el Finder.", "Reveal the file in Finder."))
-            } else if case .failed = gen.state {
-                EmptyView()
-            } else {
-                Text(loc.t("En espera", "Idle")).font(.caption).foregroundStyle(.tertiary)
-            }
+            infoPanel
             Spacer(minLength: 0)
         }
+    }
+
+    /// Prompt, dimensions, seed and timing of the last run, plus save/reveal.
+    @ViewBuilder private var infoPanel: some View {
+        if gen.isBusy {
+            Label("\(gen.elapsed)s", systemImage: "clock")
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            if let eta = gen.etaSeconds {
+                Label(loc.t("~\(eta)s restantes", "~\(eta)s left"), systemImage: "hourglass")
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            }
+        } else if let url = gen.resultURL, gen.resultImage != nil {
+            if !gen.lastPrompt.isEmpty {
+                Text(gen.lastPrompt)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(grid ? 2 : 4)
+                    .help(gen.lastPrompt)
+            }
+            Text(metaLine)
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            if gen.lastDuration > 0 {
+                Label(loc.t("Generado en \(gen.lastDuration)s", "Generated in \(gen.lastDuration)s"),
+                      systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(.green)
+            }
+            if grid {
+                HStack(spacing: 10) {
+                    saveButton(url)
+                    revealButton(url)
+                }
+                .controlSize(.small)
+            } else {
+                saveButton(url)
+                revealButton(url)
+            }
+        } else if case .failed = gen.state {
+            EmptyView()
+        } else {
+            Text(loc.t("En espera", "Idle")).font(.caption).foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Real output size when the run recorded one, the configured size otherwise.
+    private var metaLine: String {
+        let w = gen.lastWidth > 0 ? gen.lastWidth : dims.0
+        let h = gen.lastHeight > 0 ? gen.lastHeight : dims.1
+        var s = "\(w) × \(h) · \(format.rawValue.uppercased())"
+        if gen.lastSeed >= 0 { s += " · #\(gen.lastSeed)" }
+        return s
+    }
+
+    private func saveButton(_ url: URL) -> some View {
+        Button { onSave(url) } label: {
+            Label(loc.t("Guardar como…", "Save as…"), systemImage: "square.and.arrow.down")
+        }
+        .help(loc.t("Guarda una copia donde elijas.", "Save a copy wherever you choose."))
+    }
+
+    private func revealButton(_ url: URL) -> some View {
+        Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
+            Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
+        }
+        .help(loc.t("Abre el archivo en el Finder.", "Reveal the file in Finder."))
     }
 }
