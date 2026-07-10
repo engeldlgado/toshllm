@@ -15,8 +15,12 @@ struct HardwareInfo {
 
     var bestGPU: GPUDevice? { gpus.max(by: { $0.vramMB < $1.vramMB }) }
     var vramGB: Double { Double(bestGPU?.vramMB ?? 0) / 1024 }
-    /// Total VRAM across all GPUs. Only meaningful for a multi-GPU layer split.
-    var combinedVramGB: Double { Double(gpus.reduce(0) { $0 + $1.vramMB }) / 1024 }
+    /// Total VRAM across the split-eligible GPUs (iGPUs are never auto-selected).
+    /// Only meaningful for a multi-GPU layer split.
+    var combinedVramGB: Double {
+        let eligible = gpus.filter { !$0.isIntegrated }
+        return Double((eligible.isEmpty ? gpus : eligible).reduce(0) { $0 + $1.vramMB }) / 1024
+    }
 
     static func detect() -> HardwareInfo {
         func sysctlString(_ name: String) -> String {
@@ -146,8 +150,9 @@ enum Estimator {
         // A layer split is sequential (pipeline): combined VRAM raises capacity,
         // not per-token speed. Use summed VRAM (driver reserve per device) when
         // the user enabled the split and there are 2+ GPUs; otherwise one card.
-        let splitting = multiGPU && hw.gpus.count >= 2
-        let vramBudget = (splitting ? hw.combinedVramGB : hw.vramGB) - Double(splitting ? hw.gpus.count : 1)
+        let splitGPUs = hw.gpus.filter { !$0.isIntegrated }.count
+        let splitting = multiGPU && splitGPUs >= 2
+        let vramBudget = (splitting ? hw.combinedVramGB : hw.vramGB) - Double(splitting ? splitGPUs : 1)
         let kvGB = kvCache(spec: spec, ctx: ctx) * kvScale
         let computeGB = 0.9 + spec.paramsB * 0.012
 

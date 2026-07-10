@@ -60,6 +60,28 @@ final class EstimatorTests: XCTestCase {
         XCTAssertEqual(split.suggestedNcmoe, 0)
     }
 
+    func testIntegratedGPUExcludedFromSplitBudget() {
+        // An Intel iGPU next to two discrete cards must not inflate the split
+        // budget nor count as a split device (it is never auto-selected).
+        let withIGPU = HardwareInfo(
+            cpuBrand: "Test", physicalCores: 16, logicalCores: 32,
+            ramGB: 96, arch: "x86_64", model: "", osVersion: "",
+            gpus: [GPUDevice(index: 0, name: "GPU0", vramMB: 16368),
+                   GPUDevice(index: 1, name: "GPU1", vramMB: 16368),
+                   GPUDevice(index: 2, name: "Intel UHD 630", vramMB: 1024, isIntegrated: true)])
+        XCTAssertEqual(withIGPU.combinedVramGB, 2 * 16368.0 / 1024, accuracy: 0.01)
+        let spec = ModelSpec(fileGB: 19.5, paramsB: 35.4, layers: 40, isMoE: true)
+        let split = Estimator.estimate(spec: spec, hw: withIGPU, multiGPU: true)
+        XCTAssertEqual(split.level, .ideal)
+        XCTAssertEqual(split.suggestedNcmoe, 0)
+        // iGPU-only Mac: the fallback keeps the old behavior instead of a zero budget.
+        let igpuOnly = HardwareInfo(
+            cpuBrand: "Test", physicalCores: 4, logicalCores: 8,
+            ramGB: 16, arch: "x86_64", model: "", osVersion: "",
+            gpus: [GPUDevice(index: 0, name: "Intel Iris", vramMB: 1536, isIntegrated: true)])
+        XCTAssertEqual(igpuOnly.combinedVramGB, 1536.0 / 1024, accuracy: 0.01)
+    }
+
     func testEstimatedSpecFromFileSize() {
         let spec = ModelSpec.estimated(fileBytes: 5_000_000_000, isMoE: false)
         XCTAssertEqual(spec.fileGB, 4.66, accuracy: 0.05)

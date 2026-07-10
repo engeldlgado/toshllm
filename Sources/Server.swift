@@ -11,6 +11,7 @@ struct GPUDevice: Identifiable, Hashable {
     let name: String
     let vramMB: Int
     var isExternal: Bool = false   // eGPU (MTLDeviceLocation.external)
+    var isIntegrated: Bool = false // iGPU (MTLDevice.isLowPower); never auto-selected
     var id: Int { index }
 }
 
@@ -321,7 +322,9 @@ struct ServerSettings {
         let gpus = ServerController.availableGPUs()
         if gpuList.count >= 2 { return "Split · \(gpuList.count) GPUs" }
         if multiGPU {
-            let n = multiGPUCount > 0 ? min(multiGPUCount, gpus.count) : gpus.count
+            let discrete = gpus.filter { !$0.isIntegrated }.count
+            let limit = discrete > 0 ? discrete : gpus.count
+            let n = multiGPUCount > 0 ? min(multiGPUCount, limit) : limit
             return "Split · \(max(2, n)) GPUs"
         }
         if gpuIndex >= 0 { return gpus.first { $0.index == gpuIndex }?.name ?? "GPU \(gpuIndex)" }
@@ -348,7 +351,10 @@ struct ServerSettings {
         } else if multiGPU {
             // Split across N GPUs. Fewer than all lets the user trade prompt speed
             // (more GPUs) for generation speed (fewer, less cross-card sync). 0 = all.
-            let n = multiGPUCount > 0 ? min(multiGPUCount, gpus.count) : gpus.count
+            // Integrated iGPUs don't count: the engine skips them when mapping slots.
+            let discrete = gpus.filter { !$0.isIntegrated }.count
+            let limit = discrete > 0 ? discrete : gpus.count
+            let n = multiGPUCount > 0 ? min(multiGPUCount, limit) : limit
             env["GGML_METAL_DEVICES"] = String(max(2, n))
         } else if gpuIndex >= 0 {
             // Pin the engine to one physical GPU by index.
@@ -922,7 +928,8 @@ final class ServerController: ObservableObject {
         MTLCopyAllDevices().enumerated().map { i, dev in
             GPUDevice(index: i, name: dev.name,
                       vramMB: Int(dev.recommendedMaxWorkingSetSize / 1_048_576),
-                      isExternal: dev.location == .external)
+                      isExternal: dev.location == .external,
+                      isIntegrated: dev.isLowPower)
         }
     }
 
@@ -1005,7 +1012,7 @@ final class ServerController: ObservableObject {
         default:                           engine = "external"
         }
         let gpus = availableGPUs().map {
-            "    [\($0.index)] \($0.name) · \($0.vramMB / 1024) GB\($0.isExternal ? " · EXTERNAL/eGPU" : "")"
+            "    [\($0.index)] \($0.name) · \($0.vramMB / 1024) GB\($0.isExternal ? " · EXTERNAL/eGPU" : "")\($0.isIntegrated ? " · iGPU (not auto-selected)" : "")"
         }.joined(separator: "\n")
         let envKeys = ["GGML_METAL_CONCURRENCY_DISABLE", "GGML_METAL_VRAM_RESERVE_MB",
                        "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES",

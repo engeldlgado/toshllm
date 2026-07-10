@@ -843,7 +843,9 @@ final class ImageGenPool: ObservableObject {
         c.id = UUID()
         c.prompt = ""
         let used = Set(configs.map(\.gpuIndex))
-        if let free = (0 ..< max(hardware.gpus.count, 1)).first(where: { !used.contains($0) }) {
+        let candidates = hardware.gpus.filter { !$0.isIntegrated }.map(\.index)
+        if let free = (candidates.isEmpty ? Array(0 ..< max(hardware.gpus.count, 1)) : candidates)
+            .first(where: { !used.contains($0) }) {
             c.gpuIndex = free
         }
         configs.append(c)
