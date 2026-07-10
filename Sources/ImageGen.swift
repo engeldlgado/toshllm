@@ -741,6 +741,8 @@ struct QueuedPrompt: Identifiable, Equatable {
     /// Instance this must run on, by config id; nil = any free instance. If the
     /// target instance is later removed, the scheduler treats it as untargeted.
     var targetInstanceID: UUID? = nil
+    /// img2img source for this prompt only; nil = the instance's own init image.
+    var initImagePath: String? = nil
 }
 
 /// A finished image kept in the session gallery, with the inputs that made it.
@@ -870,10 +872,11 @@ final class ImageGenPool: ObservableObject {
 
     // MARK: prompt queue
 
-    func enqueue(_ text: String, seed: Int = -1, targetInstanceID: UUID? = nil) {
+    func enqueue(_ text: String, seed: Int = -1, targetInstanceID: UUID? = nil, initImagePath: String? = nil) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        queue.append(QueuedPrompt(text: t, seed: seed, targetInstanceID: targetInstanceID))
+        let img = initImagePath?.isEmpty == false ? initImagePath : nil
+        queue.append(QueuedPrompt(text: t, seed: seed, targetInstanceID: targetInstanceID, initImagePath: img))
         if queueActive { pump() }
     }
 
@@ -926,7 +929,7 @@ final class ImageGenPool: ObservableObject {
             gen.generate(model: c.resolvedModel(for: hardware), models: models, prompt: job.text,
                          width: w, height: h, steps: c.steps, seed: job.seed, format: c.formatValue,
                          offloadToCPU: c.offloadCPU, gpuIndex: c.gpuIndex, auxGPUIndex: aux ?? -1,
-                         initImagePath: c.initImagePath, strength: c.strength)
+                         initImagePath: job.initImagePath ?? c.initImagePath, strength: c.strength)
         }
         if queue.isEmpty && !anyBusy { queueActive = false }
     }

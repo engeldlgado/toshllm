@@ -205,6 +205,8 @@ struct QueueFeedView: View {
     @State private var draftSeed = -1
     /// nil = any free instance (default).
     @State private var draftTarget: UUID? = nil
+    /// img2img source for queued prompts; empty = the instance's own init image.
+    @State private var draftInitImage = ""
     @AppStorage(SettingsKeys.imagenQueueGrid) private var grid = false
 
     var body: some View {
@@ -215,9 +217,16 @@ struct QueueFeedView: View {
                 emptyState
             } else {
                 if !pool.gallery.isEmpty {
-                    HStack {
+                    HStack(spacing: 12) {
                         Spacer()
                         FeedLayoutPicker(grid: $grid)
+                        if pool.gallery.count > 1 {
+                            Button { saveImagesToFolder(pool.gallery.map(\.url), loc: loc) } label: {
+                                Label(loc.t("Guardar todas…", "Save all…"), systemImage: "square.and.arrow.down.on.square")
+                            }
+                            .help(loc.t("Copia todas las imágenes generadas a una carpeta que elijas.",
+                                        "Copies every generated image into a folder you choose."))
+                        }
                     }
                 }
                 ScrollView {
@@ -242,9 +251,8 @@ struct QueueFeedView: View {
         }
     }
 
-    /// Prompt on top, then one row with the send options (target instance and
-    /// seed) and Add, then the queue controls. Keeps related controls together
-    /// instead of scattering them around the field.
+    /// Prompt on top, send options (target, seed, image) and Add in one row,
+    /// queue controls below.
     private var composer: some View {
         VStack(spacing: 8) {
             TextField(loc.t("Prompt para la cola…", "Prompt for the queue…"), text: $draft, axis: .vertical)
@@ -270,6 +278,7 @@ struct QueueFeedView: View {
                     TextField("-1", value: $draftSeed, format: .number.grouping(.never))
                         .textFieldStyle(.roundedBorder).frame(width: 68)
                 }
+                initImageChip
                 Spacer()
                 Button(action: add) { Label(loc.t("Añadir", "Add"), systemImage: "plus") }
                     .buttonStyle(.bordered)
@@ -315,6 +324,9 @@ struct QueueFeedView: View {
                 }
             }
             Spacer()
+            if let path = q.initImagePath {
+                initImageThumb(path)
+            }
             // A removed target falls back to "any", so only badge it while it still exists.
             if let target = q.targetInstanceID, let label = pool.instanceLabel(for: target) {
                 instanceBadge(label)
@@ -381,8 +393,7 @@ struct QueueFeedView: View {
         .padding(12).background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// Grid tile: image on top, prompt excerpt and metadata below. Hovering the
-    /// prompt shows the full text.
+    /// Grid tile: image on top, prompt excerpt (hover = full text) and metadata below.
     private func resultCard(_ g: GeneratedImage) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Image(nsImage: g.image).resizable().scaledToFit()
@@ -410,9 +421,58 @@ struct QueueFeedView: View {
         .padding(10).background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
     }
 
+    /// Optional img2img source for queued prompts; sticks across adds, like the
+    /// seed and the target.
+    @ViewBuilder private var initImageChip: some View {
+        HStack(spacing: 4) {
+            Text(loc.t("Imagen", "Image")).font(.caption).foregroundStyle(.secondary)
+            Button(action: pickDraftImage) {
+                Label(draftInitImage.isEmpty
+                          ? loc.t("Elegir…", "Choose…")
+                          : (draftInitImage as NSString).lastPathComponent,
+                      systemImage: "photo")
+            }
+            .font(.caption).lineLimit(1).truncationMode(.middle).frame(maxWidth: 160)
+            if !draftInitImage.isEmpty {
+                Button { draftInitImage = "" } label: {
+                    Label(loc.t("Quitar imagen", "Clear image"), systemImage: "xmark.circle")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                .help(loc.t("Quita la imagen; los siguientes prompts vuelven a usar la de cada instancia.",
+                            "Clears the image; following prompts use each instance's own again."))
+            }
+        }
+        .help(loc.t("Imagen inicial (img2img) solo para los prompts que añadas con ella; sin imagen se usa la de la instancia que lo genere, y la intensidad siempre es la de la instancia.",
+                    "Init image (img2img) only for the prompts you add with it; without one, the rendering instance's own image applies, and strength always comes from the instance."))
+    }
+
+    private func pickDraftImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ["png", "jpg", "jpeg", "webp"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { draftInitImage = url.path }
+    }
+
     private func add() {
-        pool.enqueue(draft, seed: draftSeed, targetInstanceID: draftTarget)
+        pool.enqueue(draft, seed: draftSeed, targetInstanceID: draftTarget,
+                     initImagePath: draftInitImage.isEmpty ? nil : draftInitImage)
         draft = ""
+    }
+
+    /// Tiny preview of a queued prompt's own img2img source (hover = filename).
+    @ViewBuilder private func initImageThumb(_ path: String) -> some View {
+        if let img = NSImage(contentsOfFile: path) {
+            Image(nsImage: img).resizable().scaledToFill()
+                .frame(width: 28, height: 28)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .help((path as NSString).lastPathComponent)
+                .accessibilityLabel(loc.t("Imagen inicial", "Init image"))
+        } else {
+            Label(loc.t("Imagen inicial", "Init image"), systemImage: "photo")
+                .labelStyle(.iconOnly).foregroundStyle(.secondary)
+                .help((path as NSString).lastPathComponent)
+        }
     }
 
     /// Subtle capsule tag naming an instance, matching the experimental badge style.
@@ -829,6 +889,20 @@ struct ImageInstanceForm: View {
     }
 }
 
+/// Copies finished images into one folder the user picks. Output names are
+/// unique (timestamp + token), so nothing clobbers inside the destination.
+@MainActor private func saveImagesToFolder(_ urls: [URL], loc: Localizer) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    panel.prompt = loc.t("Guardar aquí", "Save here")
+    guard panel.runModal() == .OK, let dir = panel.url else { return }
+    for src in urls {
+        try? FileManager.default.copyItem(at: src, to: dir.appendingPathComponent(src.lastPathComponent))
+    }
+}
+
 /// Turn the engine's failure sentinel into a bilingual, actionable message.
 private func imageFailureText(_ raw: String, _ loc: Localizer) -> String {
     switch raw {
@@ -983,7 +1057,7 @@ struct ImageCanvas: View {
                 Spacer()
                 FeedLayoutPicker(grid: $canvasGrid)
                 if savable.count > 1 {
-                    Button { saveAll(savable) } label: {
+                    Button { saveImagesToFolder(savable, loc: loc) } label: {
                         Label(loc.t("Guardar todas…", "Save all…"), systemImage: "square.and.arrow.down.on.square")
                     }
                     .help(loc.t("Copia todas las imágenes generadas a una carpeta que elijas.",
@@ -1013,8 +1087,7 @@ struct ImageCanvas: View {
                          onSave: { saveAs($0, format: cfg.formatValue) })
     }
 
-    /// Instance number, model and GPU. Seed and dimensions live in the tile's
-    /// metadata line, next to the run they actually belong to.
+    /// Instance number, model and GPU; seed and size live in the tile's metadata line.
     private func tileTitle(_ cfg: ImageInstanceConfig) -> String {
         let n = (pool.configs.firstIndex { $0.id == cfg.id } ?? 0) + 1
         var parts = ["\(n) · \(cfg.resolvedModel(for: hardware).name)"]
@@ -1053,24 +1126,10 @@ struct ImageCanvas: View {
         }
     }
 
-    /// Copies every result into one folder the user picks. Output names are unique
-    /// (timestamp + token), so nothing clobbers inside the destination.
-    private func saveAll(_ urls: [URL]) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = loc.t("Guardar aquí", "Save here")
-        guard panel.runModal() == .OK, let dir = panel.url else { return }
-        for src in urls {
-            try? FileManager.default.copyItem(at: src, to: dir.appendingPathComponent(src.lastPathComponent))
-        }
-    }
 }
 
-/// One tile on the multi-instance canvas. As a list row the image fills the
-/// width with the info panel on the right; as a grid card the info sits under
-/// the image. Both show the run's prompt and full metadata.
+/// One tile on the multi-instance canvas: as a list row the image fills the
+/// width with the info panel on the right; as a grid card the info sits below.
 struct ImageInstanceRow: View {
     @ObservedObject var gen: ImageGenerator
     let title: String
