@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.58] - 2026-07-10
+
+### Fixed
+- **Qwen3.5/3.6 models no longer output garbage on AMD GCN/Vega cards**... on wave64 GPUs (RX 500 series, Vega, Radeon VII) the Gated Delta Net family produced endless repeated characters instead of text (#1, #25, #21). Two Metal kernels in that op chain assumed 32-lane SIMD groups: the cumulative-sum kernel read its group total from the wrong lane and wrote past its scratch memory, and the triangular solver left half the columns unsolved. Both now follow the hardware's real SIMD width, so these models run fully on the GPU on these cards. Other GPUs are untouched: on RDNA the fixed engine benchmarks identical to the previous release, output verified coherent across the whole model suite.
+- **The integrated GPU is never picked automatically**... on Macs with an Intel iGPU next to discrete cards, macOS could hand the ~1 GB integrated GPU to the engine as the system default (typically when the display is on the internal port), which crashes with any real model. The engine now switches to the largest discrete card and says so in the log, multi-GPU splits count and use discrete cards only, and the VRAM estimator and the image tab's automatic GPU pick skip integrated GPUs. Selecting the iGPU explicitly still works, and iGPU-only Macs are unaffected.
+
 ## [0.81.57] - 2026-07-10
 
 ### Added
