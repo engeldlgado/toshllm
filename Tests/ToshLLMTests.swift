@@ -144,6 +144,50 @@ final class ImageGenTests: XCTestCase {
         XCTAssertGreaterThan(ImageGenLimits.nCB(width: 1600, height: 900), 1)
         XCTAssertLessThanOrEqual(ImageGenLimits.nCB(width: 1600, height: 1600), 4)
     }
+
+    func testQueueTargetingRunsOnlyOnItsOwnInstance() {
+        var a = ImageInstanceConfig(); a.id = UUID()
+        var b = ImageInstanceConfig(); b.id = UUID()
+        let existingIDs: Set<UUID> = [a.id, b.id]
+
+        // Untargeted: runnable anywhere.
+        let anyJob = QueuedPrompt(text: "x")
+        XCTAssertTrue(ImageGenPool.runnable(anyJob, on: a, existingIDs: existingIDs))
+        XCTAssertTrue(ImageGenPool.runnable(anyJob, on: b, existingIDs: existingIDs))
+
+        // Targeted at A: only runnable on A, not on B.
+        let targetedJob = QueuedPrompt(text: "x", targetInstanceID: a.id)
+        XCTAssertTrue(ImageGenPool.runnable(targetedJob, on: a, existingIDs: existingIDs))
+        XCTAssertFalse(ImageGenPool.runnable(targetedJob, on: b, existingIDs: existingIDs))
+
+        // Target removed from the pool: falls back to "any free instance".
+        let orphanedJob = QueuedPrompt(text: "x", targetInstanceID: UUID())
+        XCTAssertTrue(ImageGenPool.runnable(orphanedJob, on: a, existingIDs: existingIDs))
+        XCTAssertTrue(ImageGenPool.runnable(orphanedJob, on: b, existingIDs: existingIDs))
+    }
+
+    func testSplitBackendSpec() {
+        XCTAssertEqual(ImageGenerator.splitBackendSpec(overriding: nil),
+                       "diffusion=mtl0,te=mtl1,vae=mtl1")
+        // A model's own assignment wins per module (qwen-image forces vae=cpu).
+        XCTAssertEqual(ImageGenerator.splitBackendSpec(overriding: "vae=cpu"),
+                       "diffusion=mtl0,te=mtl1,vae=cpu")
+        // Synonyms sd-cli accepts must override the same module, not add a duplicate.
+        XCTAssertEqual(ImageGenerator.splitBackendSpec(overriding: "clip=cpu, tae=cpu"),
+                       "diffusion=mtl0,te=cpu,vae=cpu")
+    }
+
+    func testAuxGPUResolution() {
+        var c = ImageInstanceConfig()
+        c.gpuIndex = 0
+        c.auxGPUIndex = 1
+        XCTAssertEqual(c.auxGPU(gpuCount: 2), 1)
+        XCTAssertNil(c.auxGPU(gpuCount: 1))    // slot gone (GPU unplugged)
+        c.auxGPUIndex = 0
+        XCTAssertNil(c.auxGPU(gpuCount: 2))    // same as main = split off
+        c.auxGPUIndex = -1
+        XCTAssertNil(c.auxGPU(gpuCount: 2))
+    }
 }
 
 // MARK: - Server configuration

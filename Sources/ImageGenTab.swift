@@ -23,7 +23,7 @@ struct ImageControls: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 experimentalBadge
-                if server.state == .running { serverBusyWarning }
+                if server.state == .running && serverGPUOverlap { serverBusyWarning }
                 ForEach($pool.configs) { $cfg in
                     instanceAccordion($cfg)
                 }
@@ -64,14 +64,15 @@ struct ImageControls: View {
     }
 
     /// Two Metal contexts at once can hang an AMD GPU, so warn while the chat
-    /// engine holds it and offer to free it before generating.
+    /// engine holds a GPU that an image instance could also land on, and offer
+    /// to free it before generating.
     private var serverBusyWarning: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(loc.t("Un modelo de chat usa la GPU", "A chat model is using the GPU"),
+            Label(loc.t("El chat comparte GPU con una instancia", "Chat shares a GPU with an instance"),
                   systemImage: "exclamationmark.triangle.fill")
                 .font(.callout.weight(.medium)).foregroundStyle(.orange)
-            Text(loc.t("Generar mientras el chat ocupa la GPU puede colgar la tarjeta en Macs AMD.",
-                       "Generating while chat holds the GPU can hang the card on AMD Macs."))
+            Text(loc.t("Generar mientras el chat usa la misma GPU puede colgar la tarjeta en Macs AMD.",
+                       "Generating while chat uses the same GPU can hang the card on AMD Macs."))
                 .font(.caption).foregroundStyle(.secondary)
             Button { server.stop() } label: {
                 Label(loc.t("Detener el chat", "Stop chat"), systemImage: "stop.circle")
@@ -84,11 +85,29 @@ struct ImageControls: View {
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 
+    /// True when the chat server's GPU could be the same card as an instance's:
+    /// multi-GPU split, "system default" (unknown card), a matching index, or a
+    /// single-GPU Mac. Chat pinned to a card no instance uses is the safe combo.
+    private var serverGPUOverlap: Bool {
+        guard !ServerSettings.isAppleSilicon else { return false }
+        guard hardware.gpus.count > 1 else { return true }
+        let s = server.effectiveSettings()
+        if s.multiGPU || s.gpuIndex < 0 { return true }
+        return pool.configs.contains {
+            $0.gpuIndex == s.gpuIndex || $0.auxGPU(gpuCount: hardware.gpus.count) == s.gpuIndex
+        }
+    }
+
     /// Two runs on one GPU is the risky case on AMD Macs (same reason as the
-    /// chat-server warning); flag it instead of blocking it.
+    /// chat-server warning); flag it instead of blocking it. A split instance
+    /// claims its encoder/VAE GPU too.
     private var duplicatedGPU: Bool {
         guard pool.configs.count > 1, !ServerSettings.isAppleSilicon else { return false }
-        let all = pool.configs.map(\.gpuIndex)
+        let all = pool.configs.flatMap { c -> [Int] in
+            var g = [c.gpuIndex]
+            if let aux = c.auxGPU(gpuCount: hardware.gpus.count) { g.append(aux) }
+            return g
+        }
         return Set(all).count < all.count
     }
 
@@ -125,14 +144,15 @@ struct ImageControls: View {
     }
 
     /// An instance can run: model installed, an (own or inherited) prompt, and
-    /// a frame that fits its GPU.
+    /// a frame that fits its GPU(s).
     private func runnable(_ c: ImageInstanceConfig) -> Bool {
         let model = c.resolvedModel(for: hardware)
         let v = ImageControls.vram(of: c.gpuIndex)
+        let aux = c.auxGPU(gpuCount: hardware.gpus.count)
         let (w, h) = c.dimensions
         return ImageGenerator.installed(model, in: models)
             && !pool.effectivePrompt(for: c).isEmpty
-            && model.fitsVRAMClass(v)
+            && model.fitsGPU(mainVRAM: v, auxVRAM: aux.map { ImageControls.vram(of: $0) })
             && ImageGenLimits.fits(width: w, height: h, vramGB: v,
                                    residentGB: model.residentGB, attnVRAMSq: model.attnVRAMSq)
     }
@@ -159,7 +179,9 @@ struct ImageControls: View {
                         prompt: pool.effectivePrompt(for: c),
                         width: w, height: h, steps: c.steps,
                         seed: c.seed, format: c.formatValue, offloadToCPU: c.offloadCPU,
-                        gpuIndex: c.gpuIndex, initImagePath: c.initImagePath, strength: c.strength)
+                        gpuIndex: c.gpuIndex,
+                        auxGPUIndex: c.auxGPU(gpuCount: hardware.gpus.count) ?? -1,
+                        initImagePath: c.initImagePath, strength: c.strength)
                 }
             } label: {
                 Label(loc.t("Generar", "Generate"), systemImage: "sparkles").frame(maxWidth: .infinity)
@@ -181,6 +203,8 @@ struct QueueFeedView: View {
     @EnvironmentObject var loc: Localizer
     @State private var draft = ""
     @State private var draftSeed = -1
+    /// nil = any free instance (default).
+    @State private var draftTarget: UUID? = nil
 
     var body: some View {
         VStack(spacing: 12) {
@@ -194,7 +218,7 @@ struct QueueFeedView: View {
                         ForEach(pool.queue) { pendingRow($0) }
                         ForEach(pool.configs) { c in
                             let gen = pool.generator(for: c.id)
-                            if gen.isBusy { progressRow(gen) }
+                            if gen.isBusy { progressRow(gen, instanceLabel: pool.instanceLabel(for: c.id)) }
                         }
                         ForEach(pool.gallery) { resultRow($0) }
                     }
@@ -222,6 +246,22 @@ struct QueueFeedView: View {
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 .fixedSize()
+            }
+            HStack(spacing: 4) {
+                Text(loc.t("Destino", "Target")).font(.caption).foregroundStyle(.secondary)
+                Picker("", selection: $draftTarget) {
+                    Text(loc.t("Cualquiera", "Any")).tag(nil as UUID?)
+                    ForEach(pool.configs) { c in
+                        Text(pool.instanceLabel(for: c.id) ?? "").tag(c.id as UUID?)
+                    }
+                }
+                .labelsHidden().fixedSize()
+                .help(loc.t("Instancia que debe generar este prompt. \"Cualquiera\" toma la siguiente libre; si eliges una y está ocupada, el prompt espera por ella sin bloquear a los demás.",
+                            "Instance that must render this prompt. \"Any\" takes the next free one; if you pick one and it's busy, this prompt waits for it without blocking the others."))
+                .onChange(of: pool.configs.map(\.id)) {
+                    if let t = draftTarget, !pool.configs.contains(where: { $0.id == t }) { draftTarget = nil }
+                }
+                Spacer(minLength: 0)
             }
             HStack {
                 if !pool.queue.isEmpty {
@@ -263,6 +303,10 @@ struct QueueFeedView: View {
                 }
             }
             Spacer()
+            // A removed target falls back to "any", so only badge it while it still exists.
+            if let target = q.targetInstanceID, let label = pool.instanceLabel(for: target) {
+                instanceBadge(label)
+            }
             Text(loc.t("En cola", "Queued")).font(.caption).foregroundStyle(.secondary)
             Button { pool.removeFromQueue(q.id) } label: { Image(systemName: "xmark.circle") }
                 .buttonStyle(.borderless).foregroundStyle(.secondary)
@@ -270,12 +314,15 @@ struct QueueFeedView: View {
         .padding(12).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func progressRow(_ gen: ImageGenerator) -> some View {
+    private func progressRow(_ gen: ImageGenerator, instanceLabel: String?) -> some View {
         HStack(alignment: .top, spacing: 12) {
             ProgressView().controlSize(.small)
             VStack(alignment: .leading, spacing: 5) {
-                Text(gen.lastPrompt.isEmpty ? loc.t("Generando…", "Generating…") : gen.lastPrompt)
-                    .font(.callout).lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(gen.lastPrompt.isEmpty ? loc.t("Generando…", "Generating…") : gen.lastPrompt)
+                        .font(.callout).lineLimit(2)
+                    if let instanceLabel { instanceBadge(instanceLabel) }
+                }
                 HStack(spacing: 8) {
                     if gen.lastSeed >= 0 {
                         Text("#\(gen.lastSeed)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
@@ -300,8 +347,11 @@ struct QueueFeedView: View {
                 .frame(maxHeight: 520)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 6) {
-                Text(g.prompt.isEmpty ? loc.t("(sin prompt)", "(no prompt)") : g.prompt)
-                    .font(.callout).lineLimit(3)
+                HStack(spacing: 6) {
+                    Text(g.prompt.isEmpty ? loc.t("(sin prompt)", "(no prompt)") : g.prompt)
+                        .font(.callout).lineLimit(3)
+                    if let label = g.instanceLabel { instanceBadge(label) }
+                }
                 Text("\(g.width)×\(g.height) · \(g.duration)s" + (g.seed >= 0 ? " · #\(g.seed)" : ""))
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                 HStack(spacing: 10) {
@@ -320,9 +370,19 @@ struct QueueFeedView: View {
     }
 
     private func add() {
-        pool.enqueue(draft, seed: draftSeed)
+        pool.enqueue(draft, seed: draftSeed, targetInstanceID: draftTarget)
         draft = ""
     }
+
+    /// Subtle capsule tag naming an instance, matching the experimental badge style.
+    private func instanceBadge(_ label: String) -> some View {
+        Text(label)
+            .font(.caption2)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(.secondary.opacity(0.15), in: Capsule())
+            .foregroundStyle(.secondary)
+    }
+
     private func toggle() {
         pool.queueActive ? pool.stopQueue() : pool.startQueue()
     }
@@ -351,7 +411,10 @@ struct ImageInstanceForm: View {
     private var model: ImageGenModel { cfg.resolvedModel(for: hardware) }
     private var installed: Bool { ImageGenerator.installed(model, in: models) }
     private var targetVRAM: Double { ImageControls.vram(of: cfg.gpuIndex) }
-    private var modelFitsGPU: Bool { model.fitsVRAMClass(targetVRAM) }
+    private var auxGPU: Int? { cfg.auxGPU(gpuCount: hardware.gpus.count) }
+    private var modelFitsGPU: Bool {
+        model.fitsGPU(mainVRAM: targetVRAM, auxVRAM: auxGPU.map { ImageControls.vram(of: $0) })
+    }
     private var baseSizes: [Int] {
         let sizes = ImageGenLimits.baseSizes(vramGB: targetVRAM, residentGB: model.residentGB,
                                              attnVRAMSq: model.attnVRAMSq, maxLongEdge: model.maxLongEdge)
@@ -605,6 +668,21 @@ struct ImageInstanceForm: View {
                         Text(hardware.gpus[0].name)
                             .font(.callout).foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.tail).frame(width: 140, alignment: .trailing)
+                    }
+                }
+            }
+            if hardware.gpus.count > 1 {
+                row(loc.t("Encoder/VAE en GPU", "Encoder/VAE on GPU"),
+                    loc.t("Manda el text-encoder y el VAE a otra GPU y deja esta libre para el modelo de difusión: caben modelos más grandes o imágenes mayores.",
+                          "Moves the text encoder and VAE to another GPU, leaving this one to the diffusion model: bigger models or larger frames fit.")) {
+                    Picker("", selection: $cfg.auxGPUIndex) {
+                        Text(loc.t("Misma GPU", "Same GPU")).tag(-1)
+                        ForEach(Array(hardware.gpus.enumerated()), id: \.offset) { i, g in
+                            if i != cfg.gpuIndex { Text(g.name).tag(i) }
+                        }
+                    }.labelsHidden().frame(width: 140)
+                    .onChange(of: cfg.gpuIndex) {
+                        if cfg.auxGPUIndex == cfg.gpuIndex { cfg.auxGPUIndex = -1 }
                     }
                 }
             }

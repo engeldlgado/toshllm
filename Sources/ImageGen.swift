@@ -70,6 +70,17 @@ struct ImageGenModel: Identifiable {
     /// Metal reports the working-set limit, not physical VRAM (a 16 GB card
     /// shows ~15 GB), so the class check tolerates a small shortfall.
     func fitsVRAMClass(_ vramGB: Double) -> Bool { vramGB >= minVRAMGB * 0.9 }
+
+    /// Fit check aware of the encoder/VAE split: minVRAMGB assumes everything on
+    /// one card, so with an aux GPU gate on the diffusion-resident budget instead,
+    /// plus the aux card holding the moved components.
+    func fitsGPU(mainVRAM: Double, auxVRAM: Double?) -> Bool {
+        guard let auxVRAM else { return fitsVRAMClass(mainVRAM) }
+        return auxVRAM >= totalGB - residentGB
+            && !ImageGenLimits.baseSizes(vramGB: mainVRAM, residentGB: residentGB,
+                                         attnVRAMSq: attnVRAMSq, maxLongEdge: maxLongEdge).isEmpty
+    }
+
     /// Extra sd-cli flags this model needs (e.g. Flux 2 samples with euler).
     var extraArgs: [String] = []
 
@@ -464,11 +475,35 @@ final class ImageGenerator: ObservableObject {
         if isBusy { state = .idle }
     }
 
+    /// sd-cli --backend spec for the encoder/VAE split: diffusion on Metal slot 0,
+    /// text encoder and VAE on slot 1. Entries from the model's own spec win per
+    /// module (keys normalized, since sd-cli accepts synonyms like clip/t5/tae).
+    nonisolated static func splitBackendSpec(overriding overrides: String?) -> String {
+        func canon(_ key: String) -> String {
+            switch key {
+            case "model", "unet", "dit": return "diffusion"
+            case "clip", "text", "textencoder", "textencoders",
+                 "conditioner", "cond", "llm", "t5", "t5xxl": return "te"
+            case "firststage", "autoencoder", "tae": return "vae"
+            default: return key
+            }
+        }
+        var map = ["diffusion": "mtl0", "te": "mtl1", "vae": "mtl1"]
+        for pair in (overrides ?? "").split(separator: ",") {
+            let kv = pair.split(separator: "=", maxSplits: 1).map {
+                $0.trimmingCharacters(in: .whitespaces).lowercased()
+            }
+            if kv.count == 2, !kv[0].isEmpty, !kv[1].isEmpty { map[canon(kv[0])] = kv[1] }
+        }
+        return map.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+    }
+
     /// Generate an image. `prompt` is required; the rest are the tuned defaults
     /// unless the caller overrides them.
     func generate(model: ImageGenModel, models: ModelStore, prompt: String,
                   width: Int, height: Int, steps: Int, seed: Int,
                   format: ImageFormat, offloadToCPU: Bool, gpuIndex: Int,
+                  auxGPUIndex: Int = -1,
                   initImagePath: String = "", strength: Double = 0.75) {
         guard !isBusy else { return }
         lastPrompt = prompt; lastSeed = seed; lastWidth = width; lastHeight = height
@@ -503,10 +538,23 @@ final class ImageGenerator: ObservableObject {
         if !initImagePath.isEmpty {
             args += ["-i", initImagePath, "--strength", String(format: "%.2f", strength)]
         }
+        let split = auxGPUIndex >= 0 && auxGPUIndex != gpuIndex && gpuIndex >= 0
+            && MTLCopyAllDevices().count > 1
+        var extra = model.extraArgs
+        if split {
+            // Merge the split assignment with the model's own --backend (e.g.
+            // qwen-image forces vae=cpu), which wins per module.
+            var overrides: String? = nil
+            if let i = extra.firstIndex(of: "--backend"), i + 1 < extra.count {
+                overrides = extra[i + 1]
+                extra.removeSubrange(i...(i + 1))
+            }
+            args += ["--backend", Self.splitBackendSpec(overriding: overrides)]
+        }
         // Offloading the diffusion model to CPU trades speed for VRAM; measured to
         // make no difference here, so it's off by default and only a fallback.
-        args += model.extraArgs
-        if offloadToCPU && !model.extraArgs.contains("--offload-to-cpu") {
+        args += extra
+        if offloadToCPU && !extra.contains("--offload-to-cpu") {
             args.append("--offload-to-cpu")
         }
 
@@ -519,7 +567,12 @@ final class ImageGenerator: ObservableObject {
         // Pin the chosen GPU (slot maps to MTLCopyAllDevices order, as in the picker).
         // Index 0 must also be exported: without it Metal falls back to the system
         // default, which on multi-GPU Macs may be a different card than picked.
-        if gpuIndex >= 0 && MTLCopyAllDevices().count > 1 {
+        if split {
+            // Two Metal slots: 0 = diffusion GPU, 1 = encoder/VAE GPU. The list
+            // replaces DEVICE_INDEX (which would offset both slots).
+            env["GGML_METAL_DEVICES"] = "2"
+            env["GGML_METAL_DEVICE_LIST"] = "\(gpuIndex),\(auxGPUIndex)"
+        } else if gpuIndex >= 0 && MTLCopyAllDevices().count > 1 {
             env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex)
         }
 
@@ -619,6 +672,9 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     var customAspect = "21:9"
     var baseSize = 1024
     var gpuIndex = 0
+    /// GPU that hosts the text encoder + VAE, freeing `gpuIndex` for the
+    /// diffusion model; -1 = everything on the same GPU.
+    var auxGPUIndex = -1
     var steps = 8
     var seed = -1
     var format = ImageFormat.png.rawValue
@@ -640,6 +696,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
         customAspect = (try? c.decode(String.self, forKey: .customAspect)) ?? "21:9"
         baseSize = (try? c.decode(Int.self, forKey: .baseSize)) ?? 1024
         gpuIndex = (try? c.decode(Int.self, forKey: .gpuIndex)) ?? 0
+        auxGPUIndex = (try? c.decode(Int.self, forKey: .auxGPUIndex)) ?? -1
         steps = (try? c.decode(Int.self, forKey: .steps)) ?? 8
         seed = (try? c.decode(Int.self, forKey: .seed)) ?? -1
         format = (try? c.decode(String.self, forKey: .format)) ?? ImageFormat.png.rawValue
@@ -647,6 +704,14 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     }
 
     var isCustom: Bool { modelID == ImageGenCatalog.customID }
+
+    /// Auxiliary GPU for the encoder/VAE split, or nil when the split is off,
+    /// points at the main GPU, or the slot no longer exists.
+    func auxGPU(gpuCount: Int) -> Int? {
+        auxGPUIndex >= 0 && auxGPUIndex != gpuIndex && auxGPUIndex < gpuCount && gpuCount > 1
+            ? auxGPUIndex : nil
+    }
+
     var aspectValue: ImageAspect { ImageAspect(rawValue: aspect) ?? .square }
     var formatValue: ImageFormat { ImageFormat(rawValue: format) ?? .png }
     var dimensions: (Int, Int) {
@@ -673,6 +738,9 @@ struct QueuedPrompt: Identifiable, Equatable {
     let id = UUID()
     var text: String
     var seed: Int = -1
+    /// Instance this must run on, by config id; nil = any free instance. If the
+    /// target instance is later removed, the scheduler treats it as untargeted.
+    var targetInstanceID: UUID? = nil
 }
 
 /// A finished image kept in the session gallery, with the inputs that made it.
@@ -685,6 +753,9 @@ struct GeneratedImage: Identifiable {
     let width: Int
     let height: Int
     let duration: Int
+    /// "index · model" of the instance that rendered it; nil if it was removed
+    /// from the pool before this result was recorded.
+    let instanceLabel: String?
 }
 
 /// Owns the generation instances and one generator per slot; the sidebar
@@ -745,12 +816,19 @@ final class ImageGenPool: ObservableObject {
         let g = ImageGenerator()
         g.onFinish = { [weak self, weak g] in
             guard let self, let g else { return }
-            self.recordResult(from: g)
+            self.recordResult(from: g, instanceID: id)
             self.pump()
         }
         generators[id] = g
         forwards[id] = g.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         return g
+    }
+
+    /// "index · model" label matching the accordion title, for the queue target
+    /// picker and the feed badges. Nil if the instance no longer exists.
+    func instanceLabel(for id: UUID) -> String? {
+        guard let idx = configs.firstIndex(where: { $0.id == id }) else { return nil }
+        return "\(idx + 1) · \(configs[idx].resolvedModel(for: hardware).name)"
     }
 
     var anyBusy: Bool { configs.contains { generator(for: $0.id).isBusy } }
@@ -792,10 +870,10 @@ final class ImageGenPool: ObservableObject {
 
     // MARK: prompt queue
 
-    func enqueue(_ text: String, seed: Int = -1) {
+    func enqueue(_ text: String, seed: Int = -1, targetInstanceID: UUID? = nil) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        queue.append(QueuedPrompt(text: t, seed: seed))
+        queue.append(QueuedPrompt(text: t, seed: seed, targetInstanceID: targetInstanceID))
         if queueActive { pump() }
     }
 
@@ -806,28 +884,48 @@ final class ImageGenPool: ObservableObject {
 
     /// Append a generator's finished result to the session gallery (newest first),
     /// so every render stays visible even as instances move on to the next prompt.
-    private func recordResult(from gen: ImageGenerator) {
+    private func recordResult(from gen: ImageGenerator, instanceID: UUID) {
         guard let url = gen.resultURL, let img = gen.resultImage, gallery.first?.url != url else { return }
         gallery.insert(GeneratedImage(url: url, image: img, prompt: gen.lastPrompt, seed: gen.lastSeed,
-                                      width: gen.lastWidth, height: gen.lastHeight, duration: gen.lastDuration), at: 0)
+                                      width: gen.lastWidth, height: gen.lastHeight, duration: gen.lastDuration,
+                                      instanceLabel: instanceLabel(for: instanceID)), at: 0)
         if gallery.count > 60 { gallery.removeLast() }
     }
 
-    /// Assigns queued prompts to idle instances, at most one run per GPU: two Metal
-    /// contexts on one AMD GPU can hang it. Runs each on its instance's config.
+    /// True when `job` may run on `c`: untargeted, targeted at `c`, or its target
+    /// was removed from the pool (falls back to "any free instance").
+    nonisolated static func runnable(_ job: QueuedPrompt, on c: ImageInstanceConfig, existingIDs: Set<UUID>) -> Bool {
+        guard let target = job.targetInstanceID else { return true }
+        return target == c.id || !existingIDs.contains(target)
+    }
+
+    /// Assigns queued prompts to idle instances, at most one run per GPU (two
+    /// Metal contexts on one AMD GPU can hang it). Each free instance takes its
+    /// first *runnable* item, so a targeted prompt never blocks untargeted ones.
     func pump() {
         guard queueActive, let models = modelStore else { return }
-        var busyGPUs = Set(configs.compactMap { generator(for: $0.id).isBusy ? $0.gpuIndex : nil })
+        let gpuCount = hardware.gpus.count
+        // A split instance occupies its encoder/VAE GPU too.
+        var busyGPUs = Set<Int>()
+        for c in configs where generator(for: c.id).isBusy {
+            busyGPUs.insert(c.gpuIndex)
+            if let aux = c.auxGPU(gpuCount: gpuCount) { busyGPUs.insert(aux) }
+        }
+        let existingIDs = Set(configs.map(\.id))
         for c in configs {
             guard !queue.isEmpty else { break }
             let gen = generator(for: c.id)
-            guard !gen.isBusy, !busyGPUs.contains(c.gpuIndex) else { continue }
-            let job = queue.removeFirst()
+            let aux = c.auxGPU(gpuCount: gpuCount)
+            guard !gen.isBusy, !busyGPUs.contains(c.gpuIndex),
+                  aux.map({ !busyGPUs.contains($0) }) ?? true else { continue }
+            guard let idx = queue.firstIndex(where: { Self.runnable($0, on: c, existingIDs: existingIDs) }) else { continue }
+            let job = queue.remove(at: idx)
             busyGPUs.insert(c.gpuIndex)
+            if let aux { busyGPUs.insert(aux) }
             let (w, h) = c.dimensions
             gen.generate(model: c.resolvedModel(for: hardware), models: models, prompt: job.text,
                          width: w, height: h, steps: c.steps, seed: job.seed, format: c.formatValue,
-                         offloadToCPU: c.offloadCPU, gpuIndex: c.gpuIndex,
+                         offloadToCPU: c.offloadCPU, gpuIndex: c.gpuIndex, auxGPUIndex: aux ?? -1,
                          initImagePath: c.initImagePath, strength: c.strength)
         }
         if queue.isEmpty && !anyBusy { queueActive = false }
