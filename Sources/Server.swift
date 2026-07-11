@@ -477,14 +477,6 @@ struct ServerSettings {
             benchTG: int(SettingsKeys.benchTG, 128))
     }
 
-    /// Whether a GGUF ships the MTP (multi-token prediction) head. Detected by
-    /// scanning the header for the `nextn` marker — it appears both in the
-    /// `nextn_predict_layers` metadata key and in the MTP tensor names, so this
-    /// catches models that keep the tensors but drop/rename the metadata key
-    /// (a common cause of missed detection). We deliberately do NOT match "mtp"
-    /// or "MTP": that word lives in the model's `general.name` (these repos are
-    /// named "…-MTP-GGUF"), which would make every model a false positive.
-    /// Cached per path+size so repeated calls are free.
     /// True when the model's attention head dim exceeds 256 (Gemma 4's global
     /// layers use key_length 512). Reads the real uint32 value from
     /// the GGUF header (`<arch>.attention.key_length`), skipping the `_swa`
@@ -542,6 +534,13 @@ struct ServerSettings {
         }
     }
 
+    /// Whether a GGUF ships the MTP (multi-token prediction) head. The
+    /// `<arch>.nextn_predict_layers` metadata key decides when present:
+    /// quantizers often strip the head but keep the key at 0 (a bare "nextn"
+    /// grep reads that as MTP and the server then aborts on the missing draft
+    /// tensors). Without the key, the `.nextn.` tensor names decide, for
+    /// conversions that keep the tensors but drop the metadata.
+    /// Cached per path+size.
     nonisolated static func modelHasMTP(at path: String) -> Bool {
         struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
@@ -549,10 +548,12 @@ struct ServerSettings {
         if let cached = Cache.store[key] { return cached }
 
         var found = false
-        if let handle = FileHandle(forReadingAtPath: path),
-           let head = try? handle.read(upToCount: 32 * 1024 * 1024) {
-            found = head.range(of: Data("nextn".utf8)) != nil
+        if let layers = ggufUInt32("nextn_predict_layers", at: path) {
+            found = layers >= 1
+        } else if let handle = FileHandle(forReadingAtPath: path),
+                  let head = try? handle.read(upToCount: 32 * 1024 * 1024) {
             try? handle.close()
+            found = head.range(of: Data(".nextn.".utf8)) != nil
         }
         Cache.store[key] = found
         return found

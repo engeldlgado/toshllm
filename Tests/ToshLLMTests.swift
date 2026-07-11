@@ -406,6 +406,38 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--host")! + 1], "0.0.0.0")
     }
 
+    /// Minimal GGUF: magic + v3 header, one uint32 KV (optional), one tensor info.
+    private func makeGGUF(nextnLayers: UInt32?, tensorName: String) -> URL {
+        var d = Data("GGUF".utf8)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func u64(_ v: UInt64) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func str(_ s: String) { u64(UInt64(s.utf8.count)); d.append(contentsOf: Array(s.utf8)) }
+        u32(3)                          // version
+        u64(1)                          // tensor count
+        u64(nextnLayers != nil ? 1 : 0) // kv count
+        if let layers = nextnLayers {
+            str("qwen35moe.nextn_predict_layers")
+            u32(4)                      // GGUF_TYPE_UINT32
+            u32(layers)
+        }
+        str(tensorName)                 // tensor info: name, n_dims, dims, type, offset
+        u32(1); u64(8); u32(0); u64(0)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-\(UUID().uuidString).gguf")
+        try? d.write(to: url)
+        return url
+    }
+
+    func testMTPDetectionReadsKeyValueAndTensors() {
+        // Key present decides by value: 1 = MTP, 0 = stripped head (the common
+        // quantizer case that used to false-positive on a bare "nextn" grep).
+        XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 1, tensorName: "blk.0.attn_q.weight").path))
+        XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 0, tensorName: "blk.0.attn_q.weight").path))
+        // No key: the .nextn. tensor names decide.
+        XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: nil, tensorName: "blk.0.nextn.eh_proj.weight").path))
+        XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: nil, tensorName: "blk.0.attn_q.weight").path))
+    }
+
     func testFlashAttentionPolicy() {
         // AMD kernel rides on auto: the engine keeps FA on GPU only where the
         // kernel covers the model, instead of a forced "1" falling back to CPU.
