@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.62] - 2026-07-11
+
+### Improved
+- **Mixed key/value quantized caches now run on the GPU on AMD**... a cache like q8_0 keys with f16 values (the recommended trade-off) was quietly falling back to CPU attention, because a same-type check rejected it before the AMD Flash Attention kernel could take it. That kernel handles keys and values independently, so mixed pairs now reach it. Measured on an RX 6700 XT, q8_0/f16 goes from CPU-fallback speed to 56 tokens/s, matching f16/f16. Works on both RDNA (wave32) and GCN/Vega (wave64) cards. Verified against the CPU reference across the key/value type matrix.
+
+### Changed
+- **The MTP toggle's help text now says where it helps**... multi-token prediction speeds up generation on MoE models with experts offloaded to the CPU, and can be neutral or a little slower on dense or full-GPU models. The tooltip reflects that, and the toggle still lets you enable it anywhere.
+
 ## [0.81.61] - 2026-07-11
 
 ### Improved
