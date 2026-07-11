@@ -447,8 +447,8 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(amdFlashActive ? .green : .secondary)
                 }
                 Toggle(loc.t("Aceleración MTP (especulativa)", "MTP acceleration (speculative)"), isOn: $specMTP)
-                    .infoTip(loc.t("Multi-token prediction: ~+30% de generación sin pérdida de calidad. Requiere un GGUF con cabezal MTP (variantes '-MTP-'); con otros modelos se ignora automáticamente.",
-                                "Multi-token prediction: ~+30% generation with zero quality loss. Requires a GGUF with the MTP head ('-MTP-' variants); silently skipped for other models."))
+                    .infoTip(loc.t("Multi-token prediction: acelera la generación, sobre todo en modelos MoE con expertos descargados a CPU (offload). En densos o full-GPU puede no ayudar. Requiere un GGUF con cabezal MTP (variantes '-MTP-'); se ignora en los que no lo traen.",
+                                "Multi-token prediction: speeds up generation, most on MoE models with experts offloaded to the CPU. On dense or full-GPU models it may not help. Requires a GGUF with the MTP head ('-MTP-' variants); skipped for those without it."))
                 if specMTP && !modelPath.isEmpty && !ServerSettings.modelHasMTP(at: modelPath) {
                     Label(loc.t("El modelo actual no trae cabezal MTP: la opción se ignorará.",
                                 "Current model has no MTP head: the option will be ignored."),

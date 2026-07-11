@@ -252,7 +252,7 @@
   "Most popular right now. Expand to see quants and whether they fit.": "",
   "Move to Trash": "Sposta nel Cestino",
   "Moves the text encoder and VAE to another GPU, leaving this one to the diffusion model: bigger models or larger frames fit.": "",
-  "Multi-token prediction: ~+30% generation with zero quality loss. Requires a GGUF with the MTP head ('-MTP-' variants); silently skipped for other models.": "",
+  "Multi-token prediction: speeds up generation, most on MoE models with experts offloaded to the CPU. On dense or full-GPU models it may not help. Requires a GGUF with the MTP head ('-MTP-' variants); skipped for those without it.": "",
   "My models": "",
   "Near the VRAM limit. If it freezes or crashes, lower the size.": "",
   "New chat": "Nuova chat",

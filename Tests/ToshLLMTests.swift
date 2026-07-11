@@ -374,6 +374,16 @@ final class ServerSettingsTests: XCTestCase {
                        "MTP must be silently skipped when the GGUF lacks the head")
     }
 
+    func testMTPAppliesForModelsWithTheHead() {
+        var s = makeSettings()
+        s.specMTP = true
+        s.modelPath = makeGGUF(nextnLayers: 1, tensorName: "blk.0.nextn.eh_proj.weight").path
+        // The toggle drives MTP: on a model that ships the head it applies,
+        // regardless of expert offload (best paired with offload, guided in the UI).
+        XCTAssertTrue(s.arguments.contains("--spec-type"),
+                      "MTP must apply when the toggle is on and the GGUF ships the head")
+    }
+
     func testStabilityEnvironment() {
         let env = makeSettings().environment
         XCTAssertEqual(env["GGML_METAL_CONCURRENCY_DISABLE"], "1")
