@@ -134,7 +134,11 @@ struct ServerSettings {
 
     var arguments: [String] {
         if routerMode { return routerArguments }
-        let faValue = effectiveFaAmd || kvNeedsFlashAttention ? "1" : flashAttn
+        // Quantized KV requires FA, so it stays forced. The AMD kernel rides on
+        // "auto": the engine keeps FA on GPU where the kernel covers the model
+        // (head 128/256/512) and disables it elsewhere, never the CPU fallback
+        // that an explicit "1" causes on uncovered models.
+        let faValue = kvNeedsFlashAttention ? "1" : (effectiveFaAmd ? "auto" : flashAttn)
         var args = [
             "-m", modelPath,
             "-ngl", String(ngl),
@@ -239,7 +243,8 @@ struct ServerSettings {
     /// shared engine config plus per-path ncmoe/mmproj/MTP. `extraArgs` (free-form
     /// CLI tokens) isn't representable generically here, so it's skipped.
     func routerPresetINI(modelPaths: [String], ncmoeByPath: [String: Int]) -> String {
-        let faValue = effectiveFaAmd || kvNeedsFlashAttention ? "on" : flashAttn
+        // Same FA policy as `arguments`: force only for quantized KV.
+        let faValue = kvNeedsFlashAttention ? "on" : (effectiveFaAmd ? "auto" : flashAttn)
         let turboKV = cacheTypeK.hasPrefix("turbo") || cacheTypeV.hasPrefix("turbo")
         var seenAliases = Set<String>()
         var sections: [String] = []
@@ -307,7 +312,11 @@ struct ServerSettings {
         if ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
-        if effectiveFaAmd || flashAttn == "on" || kvNeedsFlashAttention { args += ["-fa", "1"] }
+        if kvNeedsFlashAttention || flashAttn == "on" {
+            args += ["-fa", "1"]
+        } else if effectiveFaAmd {
+            args += ["-fa", "auto"]
+        }
         if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
         return args
     }

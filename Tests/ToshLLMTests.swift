@@ -406,13 +406,27 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--host")! + 1], "0.0.0.0")
     }
 
-    func testBenchmarkForcesFlashAttentionForEffectiveAmdKernel() {
+    func testFlashAttentionPolicy() {
+        // AMD kernel rides on auto: the engine keeps FA on GPU only where the
+        // kernel covers the model, instead of a forced "1" falling back to CPU.
         var s = makeSettings()
         s.faAmd = true
         s.flashAttn = "auto"
         s.cacheTypeV = "f16"
+        XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "-fa")! + 1], "auto")
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "auto")
 
+        // Quantized KV still forces FA on (the engine requires it).
+        s.cacheTypeV = "q8_0"
         XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "-fa")! + 1], "1")
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "1")
+
+        // Manual fa=on keeps the explicit CPU-capable route for whoever asks.
+        s.cacheTypeV = "f16"
+        s.faAmd = false
+        s.flashAttn = "on"
+        XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "-fa")! + 1], "1")
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-fa")! + 1], "on")
     }
 
     func testAmdFlashAttentionDefaultsOnWhenUnset() {
