@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.60] - 2026-07-11
+
+### Improved
+- **Qwen3.5/3.6 speed on AMD GCN/Vega cards**... the Gated Delta Net layers of these models now run their fused GPU kernel on wave64 cards (RX 500 series, Vega, Radeon VII) instead of the step-by-step fallback, which padded every generated token to a 64-token block. Since 0.81.58 these models were correct but slow on those cards; generation should now be several times faster. Verified numerically against the CPU reference; speed reports from GCN/Vega owners are welcome.
+
+### Fixed
+- **The MTP toggle no longer breaks models with a stripped MTP head**... many community quantizations remove the multi-token-prediction tensors but keep the metadata entry, and the app could read that as MTP support, making the server abort at startup with the toggle on. Detection now reads the metadata's real value, falling back to the tensor names, so only models that actually ship the head use speculative decoding.
+
 ## [0.81.59] - 2026-07-11
 
 ### Added
