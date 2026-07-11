@@ -488,13 +488,17 @@ struct SettingsView: View {
                 Picker(loc.t("Motor de inferencia", "Inference engine"), selection: engineSelection) {
                     Text(loc.t("Integrado (oficial)", "Bundled (official)")).tag("bundled")
                     if ServerSettings.turboBinary != nil {
-                        Text(loc.t("Experimental (TurboQuant)", "Experimental (TurboQuant)")).tag("turbo")
+                        Text(loc.t("Experimental (TurboQuant) · en retirada", "Experimental (TurboQuant) · being retired")).tag("turbo")
                     }
                     Text(loc.t("Externo…", "External…")).tag("custom")
                 }
-                .infoTip(loc.t("Integrado: llama.cpp oficial, recomendado. Experimental (TurboQuant): motor experimental con KV cache turbo2/3/4 (~6× más contexto, pero la generación baja ~3× en GPU AMD) e incluye el kernel Flash Attention AMD activable abajo. Externo: cualquier llama-server tuyo.",
-                            "Bundled: official llama.cpp, recommended. Experimental (TurboQuant): experimental engine with turbo2/3/4 KV cache (~6× more context, but generation drops ~3× on AMD GPUs); also bundles the AMD Flash Attention kernel you can enable below. External: any llama-server of yours."))
+                .infoTip(loc.t("Integrado: llama.cpp oficial, recomendado. Experimental (TurboQuant): motor experimental con KV cache turbo2/3/4; será retirado en una versión futura y se estudiará integrar TurboQuant en el motor oficial. Externo: cualquier llama-server tuyo.",
+                            "Bundled: official llama.cpp, recommended. Experimental (TurboQuant): experimental engine with turbo2/3/4 KV cache; it will be retired in a future version, with TurboQuant studied for integration into the official engine. External: any llama-server of yours."))
                 if engineSelection.wrappedValue == "turbo" {
+                    Label(loc.t("Este motor será retirado: las mejoras nuevas van al oficial. TurboQuant se estudiará para integrarse allí.",
+                                "This engine will be retired: new improvements go to the official one. TurboQuant will be studied for integration there."),
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
                     Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
                         .disabled(!amdFlashActive || currentModelIsVision)
                         .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",

@@ -3,6 +3,17 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.59] - 2026-07-11
+
+### Added
+- **GPU Flash Attention for Llama 3.x and gpt-oss on AMD**... the AMD Flash Attention kernel now covers head size 64 and attention sinks, the two things these families needed, so their attention runs on the GPU instead of falling back to the CPU. Measured on an RX 6700 XT: gpt-oss-20b goes from 33.5 to 93.2 tokens/s with Flash Attention on (and now beats Flash Attention off, 90.3), Llama-3.2-1B from 72 to 250. Quantized KV caches ride the same kernel: gpt-oss with q4_0 keys and values holds 87 tokens/s. Verified against the CPU reference on 512 attention shapes.
+
+### Fixed
+- **Flash Attention no longer collapses to the CPU on uncovered models**... the AMD Flash Attention toggle used to force FA unconditionally, and any model the kernel didn't cover ran its attention on the CPU at ~3× the cost, silently. The toggle now lets the engine decide per model: GPU Flash Attention where the kernel covers it, cleanly disabled where it doesn't, the CPU path never. A quantized KV cache still forces FA on (the engine requires it), and setting Flash Attention to "on" manually keeps the explicit behavior.
+
+### Deprecated
+- **The experimental TurboQuant engine will be retired**... new improvements land in the official engine only, and the turbo2/3/4 KV quantization will be studied for integration there. The engine picker marks it, and selecting it shows a notice. It still works in this version.
+
 ## [0.81.58] - 2026-07-10
 
 ### Fixed
