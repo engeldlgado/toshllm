@@ -94,17 +94,20 @@ Measured on the development card (**RX 6700 XT 12 GB**, RDNA 2, bundled engine, 
 
 | Model | Type | Prompt (t/s) | Generation (t/s) |
 |---|---|---:|---:|
+| Llama-3.2-1B Q4_K_M | dense | 2994 | 250 |
 | gemma-3-4B Q4_K_M | dense | 1168 | 90 |
 | Qwen3-4B Q4_K_M | dense | 1005 | 94 |
-| Qwen3-8B Q4_K_M | dense | 312 | 58 |
+| Qwen3-8B Q4_K_M | dense | 476 | 60 |
 | Qwen3.5-9B Q4_K_M | dense | 411 | 45 |
 | gemma-4-12B Q4_K_XL | dense | 342 | 34 |
 | Qwen3.6-14B-A3B Q5_K_M | MoE (full VRAM) | 736 | 56 |
-| gpt-oss-20B Q4_K_M | MoE | 430 | 26 |
+| gpt-oss-20B Q4_K_M | MoE (full VRAM) | 972 | 93 |
 | gemma-4-26B-A4B MXFP4 | MoE (offload) | 552 | 22 |
 | Qwen3.6-35B-A3B Q4_K_S | MoE (offload) | 434 | 25 |
 
 Numbers vary with quant, context depth and cooling; the app records your own history so you can compare configurations directly.
+
+For scale: 93 t/s on gpt-oss-20B puts this 2020-era AMD card ahead of every Apple M4 result on [MetriLLM's public gpt-oss-20b board](https://metrillm.dev) at the time of writing, including an M4 Pro running Ollama (54.5 t/s).
 
 ## Install
 
