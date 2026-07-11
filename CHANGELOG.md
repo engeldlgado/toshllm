@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.81.61] - 2026-07-11
+
+### Improved
+- **Qwen3.5/3.6 generation speed on AMD GCN/Vega cards (continued)**... the short convolution that runs in front of every Gated Delta Net layer was still executing on the CPU on wave64 cards, so each generated token crossed to the CPU and back for every one of those layers. That kernel needs no cross-thread reduction, so it now runs on the GPU with the rest of the layer. This is the piece 0.81.60 missed... the fused delta-net kernel moved to the GPU there, but the convolution beside it did not, which is why generation had not sped up on those cards. Verified numerically against the CPU reference; speed reports from GCN/Vega owners are welcome.
+
 ## [0.81.60] - 2026-07-11
 
 ### Improved
