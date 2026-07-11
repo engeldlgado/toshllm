@@ -107,7 +107,7 @@ Measured on the development card (**RX 6700 XT 12 GB**, RDNA 2, bundled engine, 
 
 Numbers vary with quant, context depth and cooling; the app records your own history so you can compare configurations directly.
 
-For scale, against [llama.cpp's official gpt-oss benchmarks](https://github.com/ggml-org/llama.cpp/discussions/15396) (MXFP4, `pp2048`/`tg128`): this 2020-era card generates at 87.5 t/s, at the level of an M4 Max (92.4) and ahead of an M1 Max (75.2); only the Ultra chips pull away. Against consumer apps the gap widens: [MetriLLM's public board](https://metrillm.dev) shows an M4 Pro on Ollama at 54.5 t/s.
+For scale: on [llama.cpp's official gpt-oss benchmarks](https://github.com/ggml-org/llama.cpp/discussions/15396), that generation speed sits at M4 Max level (92.4 t/s) and ahead of an M1 Max (75.2).
 
 ## Install
 
