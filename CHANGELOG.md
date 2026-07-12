@@ -8,6 +8,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ### Improved
 - **MoE auto-sweep leaves VRAM headroom**... it measures pp512/tg128, shows temporary samples and saves only the final recommendation, three `ncmoe` steps above the tight edge when safe.
 - **MTP is automatic**... it activates only when the GGUF has an MTP head and MoE experts are offloaded, avoiding regressions on dense and full-GPU models.
+- **Long-prompt prefill is faster on AMD RDNA** for head sizes 64/128/256/512 (up to 54% at pp4096), with no measured decode regression; quantized KV and wave64 keep Flash Attention.
 
 ### Fixed
 - **MoE auto-sweep no longer hangs on verbose output** and now parses Metal VRAM sizes correctly.

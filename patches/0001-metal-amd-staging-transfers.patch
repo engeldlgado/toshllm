@@ -954,7 +954,7 @@ index d465f31c0..538b337bb 100644
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..538f35c9b 100644
+index a7cbc60eb..8fc719196 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1116,7 +1116,7 @@ index a7cbc60eb..538f35c9b 100644
  
          if (dev->mtl_device) {
              dev->mtl_queue = [dev->mtl_device newCommandQueue];
-@@ -690,13 +806,84 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -690,13 +806,90 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
                  GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
              }
  
@@ -1155,6 +1155,12 @@ index a7cbc60eb..538f35c9b 100644
 +                // even when the ggml log callback filters init-time INFO messages.
 +                fprintf(stderr, "ggml_metal: probed SIMD-group width = %d (32 = Apple/AMD RDNA, 64 = AMD GCN/Vega)\n",
 +                        dev->props.simd_width);
++                // Expose the measured width to ToshLLM's graph-level AMD FA policy.
++                // A wave64 process records 64 and therefore never takes the RDNA-only
++                // head-64 prefill path below.
++                char simd_width_env[16];
++                snprintf(simd_width_env, sizeof(simd_width_env), "%d", dev->props.simd_width);
++                setenv("TOSH_METAL_SIMD_WIDTH", simd_width_env, 1);
 +            }
 +
              dev->props.has_simdgroup_reduction  = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
@@ -1201,7 +1207,7 @@ index a7cbc60eb..538f35c9b 100644
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
              dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
-@@ -925,6 +1112,27 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
+@@ -925,6 +1118,27 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
      ggml_metal_library_free(dev->library);
      dev->library = NULL;
  
@@ -1229,7 +1235,7 @@ index a7cbc60eb..538f35c9b 100644
      if (dev->mtl_queue) {
          [dev->mtl_queue release];
          dev->mtl_queue = nil;
-@@ -946,6 +1154,97 @@ void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
+@@ -946,6 +1160,97 @@ void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
      return dev->mtl_queue;
  }
  
@@ -1327,7 +1333,7 @@ index a7cbc60eb..538f35c9b 100644
  ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev) {
      return dev->library;
  }
-@@ -1051,6 +1350,8 @@ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t
+@@ -1051,6 +1356,8 @@ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t
  bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_tensor * op) {
      const bool has_simdgroup_mm        = dev->props.has_simdgroup_mm;
      const bool has_simdgroup_reduction = dev->props.has_simdgroup_reduction;
@@ -1336,7 +1342,7 @@ index a7cbc60eb..538f35c9b 100644
      const bool has_bfloat              = dev->props.has_bfloat;
  
      if (!has_bfloat) {
-@@ -1166,13 +1467,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1166,13 +1473,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              return has_simdgroup_reduction && ggml_is_contiguous(op->src[0]);
          case GGML_OP_TRI:
              return ggml_is_contiguous_rows(op->src[0]);
@@ -1355,7 +1361,7 @@ index a7cbc60eb..538f35c9b 100644
          case GGML_OP_COUNT_EQUAL:
              return has_simdgroup_reduction &&
                  op->src[0]->type == GGML_TYPE_I32 &&
-@@ -1182,7 +1486,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1182,7 +1492,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              return has_simdgroup_reduction;
          case GGML_OP_NORM:
          case GGML_OP_RMS_NORM:
@@ -1366,7 +1372,7 @@ index a7cbc60eb..538f35c9b 100644
          case GGML_OP_ROPE:
          case GGML_OP_ROPE_BACK:
              return true;
-@@ -1234,6 +1540,40 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1234,6 +1546,40 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  op->src[0]->ne[0] != 576) {
                  return false;
              }
@@ -1407,7 +1413,7 @@ index a7cbc60eb..538f35c9b 100644
              if (op->src[1]->type != op->src[2]->type) {
                  return false;
              }
-@@ -1256,17 +1596,70 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1256,17 +1602,70 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              }
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
@@ -1482,7 +1488,7 @@ index a7cbc60eb..538f35c9b 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2110,123 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2116,123 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1606,7 +1612,7 @@ index a7cbc60eb..538f35c9b 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2234,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2240,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -1664,7 +1670,7 @@ index a7cbc60eb..538f35c9b 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1772,6 +2318,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1772,6 +2324,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
  }
  
  void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -1675,7 +1681,7 @@ index a7cbc60eb..538f35c9b 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1782,30 +2332,78 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+@@ -1782,30 +2338,78 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
          struct ggml_metal_buffer_id bid_src = ggml_metal_buffer_get_id(buf, tensor);
          bid_src.offs += offset;
  
@@ -3504,6 +3510,35 @@ index 25e78e100..2b4693165 100644
  
          device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
          device float4 * D4 = (device float4 *) D;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 4c86e43c1..b10de7e50 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -2395,7 +2395,23 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+ 
+     ggml_tensor * cur;
+ 
+-    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr;
++    // Independent RDNA prefill optimization (not the Qwen3-0.6B wave64 issue):
++    // AMD FA wins decode, while the decomposed graph wins long f16/f16 prefill
++    // for the measured head sizes. Quantized KV and wave64 keep AMD FA unchanged.
++    const char * metal_simd_width = getenv("TOSH_METAL_SIMD_WIDTH");
++    const bool measured_head_size =
++        q->ne[0] == 64 || q->ne[0] == 128 || q->ne[0] == 256 || q->ne[0] == 512;
++    // Head-256 is neutral through 1024 tokens and only pulls ahead on longer
++    // prompts; keep FA for pp512, where it measured slightly faster.
++    const int64_t decomposed_min_tokens = q->ne[0] == 256 ? 512 : 32;
++    const bool amd_prefill_decomposed =
++        getenv("TOSH_FA_AMD") != nullptr &&
++        getenv("TOSH_FA_AMD_PREFILL_DECOMPOSED_DISABLE") == nullptr &&
++        getenv("TOSH_FA_AMD_HEAD64_PREFILL_DISABLE") == nullptr &&
++        metal_simd_width != nullptr && strcmp(metal_simd_width, "32") == 0 &&
++        n_tokens > decomposed_min_tokens && measured_head_size &&
++        k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16;
++    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr && !amd_prefill_decomposed;
+     if (use_flash_attn) {
+         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
+ 
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 index 12bf5c379..bc6ce32d7 100644
 --- a/src/llama-kv-cache.cpp
