@@ -20,6 +20,9 @@ enum SettingsKeys {
     static let ncmoe = "ncmoe"
     /// Last user-set ncmoe per model file, restored when that model is re-selected.
     static let ncmoeByModel = "ncmoeByModel"
+    /// Per-model ncmoe at which prompt processing collapses (expert-prefetch overlap
+    /// stalls at/above it); the sweep measures it and prefetch is gated below it.
+    static let prefetchCliffByModel = "prefetchCliffByModel"
     static let ctx = "ctx"
     static let threads = "threads"
     static let flashAttn = "flashAttn"

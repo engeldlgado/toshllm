@@ -693,6 +693,24 @@ final class CompactionTests: XCTestCase {
 // MARK: - Benchmarks and profiles
 
 final class BenchAndProfileTests: XCTestCase {
+    func testBenchmarkVRAMFractionUsesBufferSizeInsteadOfDeviceIndex() throws {
+        let log = """
+        ggml_metal_device_init: 12271 MiB free
+        MTL0_Private model buffer size = 9000.00 MiB
+        MTL0_Private compute buffer size = 200.00 MiB
+        MTL0_Private KV buffer size = 100.00 MiB
+        MTL0_Private RS buffer size = 50.00 MiB
+        """
+        let value = try XCTUnwrap(BenchmarkController.vramFraction(fromLog: log))
+        XCTAssertEqual(value, (9000 + 200 + 100 + 50 + 650) / 12271, accuracy: 0.0001)
+    }
+
+    func testSweepChoosesBestMeasuredSafeCandidateWithoutCliff() {
+        let pp = [24: 351.0, 22: 366.0, 20: 370.0]
+        let vram = [24: 0.80, 22: 0.90, 20: 0.97]
+        XCTAssertEqual(BenchmarkController.bestSweepCandidate(pp: pp, vram: vram, ceiling: 0.95), 22)
+    }
+
     func testBenchConfigLabel() {
         let r = BenchResult(date: .now, model: "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf",
                             ncmoe: 24, pp: 68.3, tg: 15.7,

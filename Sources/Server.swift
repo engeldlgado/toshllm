@@ -385,8 +385,14 @@ struct ServerSettings {
         // Router mode has no single ncmoe (it's per-model, in the preset INI);
         // the envs are harmless no-ops for dense models, gated per-op internally.
         if prefetchExperts && (ncmoe > 0 || routerMode) {
-            env["GGML_SCHED_PREFETCH_EXPERTS"] = "1"
-            env["GGML_CPU_NO_REPACK"] = "1"
+            // At/above the measured per-model cliff the prefetch overlap collapses and
+            // the GPU stalls (slower than plain repack), so only enable it below the
+            // cliff. Router mode carries per-model ncmoe in the INI, so keep it on there.
+            let cliff = Self.recalledPrefetchCliff(forModel: modelPath)
+            if routerMode || cliff == nil || ncmoe < cliff! {
+                env["GGML_SCHED_PREFETCH_EXPERTS"] = "1"
+                env["GGML_CPU_NO_REPACK"] = "1"
+            }
         }
         // KEY=VALUE tokens from Extra arguments become env vars (e.g. the GCN/Vega
         // wave64 safe-mode flag). Applied last so the user can override the above.
@@ -696,6 +702,21 @@ struct ServerSettings {
 
     nonisolated static func recalledNcmoe(forModel path: String) -> Int? {
         (UserDefaults.standard.dictionary(forKey: SettingsKeys.ncmoeByModel) as? [String: Int])?[path]
+    }
+
+    /// Remembers the ncmoe at which prompt processing collapses for a MoE model: at and
+    /// above it the expert-prefetch overlap stalls the GPU (slower than plain repack), so
+    /// prefetch is only enabled below this value. Passing nil clears it (e.g. before a
+    /// sweep re-measures, so every candidate runs with prefetch on).
+    nonisolated static func rememberPrefetchCliff(_ value: Int?, forModel path: String) {
+        guard !path.isEmpty else { return }
+        var map = UserDefaults.standard.dictionary(forKey: SettingsKeys.prefetchCliffByModel) as? [String: Int] ?? [:]
+        if let value { map[path] = value } else { map.removeValue(forKey: path) }
+        UserDefaults.standard.set(map, forKey: SettingsKeys.prefetchCliffByModel)
+    }
+
+    nonisolated static func recalledPrefetchCliff(forModel path: String) -> Int? {
+        (UserDefaults.standard.dictionary(forKey: SettingsKeys.prefetchCliffByModel) as? [String: Int])?[path]
     }
 
     /// Finds the multimodal projector (mmproj) paired with a model, if any. The

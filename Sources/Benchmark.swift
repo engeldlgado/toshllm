@@ -182,29 +182,39 @@ final class BenchmarkController: ObservableObject {
         fileLog.prune()
     }
 
-    /// Runs llama-bench to completion and returns the parsed speeds.
-    private func runOnce(settings: ServerSettings) async -> (pp: Double, tg: Double)? {
+    /// Runs llama-bench to completion and returns the parsed speeds plus, when the
+    /// verbose load log is present, the fraction of device VRAM the run occupied.
+    private func runOnce(settings: ServerSettings, extraArgs: [String] = []) async -> (pp: Double, tg: Double, vram: Double?)? {
         let benchPath = URL(fileURLWithPath: settings.serverBinary)
             .deletingLastPathComponent().appendingPathComponent("llama-bench").path
         guard FileManager.default.fileExists(atPath: benchPath) else { return nil }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: benchPath)
-        p.arguments = settings.benchmarkArguments
+        p.arguments = settings.benchmarkArguments + extraArgs
         p.environment = settings.environment
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = pipe
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("toshllm-sweep-\(UUID().uuidString).log")
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil),
+              let outputHandle = try? FileHandle(forWritingTo: outputURL) else { return nil }
+        p.standardOutput = outputHandle
+        p.standardError = outputHandle
 
         fileLog.append(header(for: settings))
-        let text: String = await withCheckedContinuation { continuation in
-            p.terminationHandler = { _ in
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
+        await withCheckedContinuation { continuation in
+            p.terminationHandler = { _ in continuation.resume() }
+            do {
+                try p.run()
+                self.process = p
+            } catch {
+                continuation.resume()
             }
-            do { try p.run(); self.process = p } catch { continuation.resume(returning: "") }
         }
         process = nil
+        try? outputHandle.close()
+        let data = (try? Data(contentsOf: outputURL)) ?? Data()
+        try? FileManager.default.removeItem(at: outputURL)
+        let text = String(data: data, encoding: .utf8) ?? ""
         fileLog.append(text)
 
         func speed(_ test: String) -> Double? {
@@ -217,56 +227,145 @@ final class BenchmarkController: ObservableObject {
         }
         guard let pp = speed("pp\(settings.benchPPClamped)"),
               let tg = speed("tg\(settings.benchTGClamped)") else { return nil }
-        return (pp, tg)
+        return (pp, tg, Self.vramFraction(fromLog: text))
     }
 
-    /// Finds the best `--n-cpu-moe` automatically: starts at the configured
-    /// value and walks down (more experts on GPU) until VRAM saturation makes
-    /// performance collapse, recording every run in the history.
+    /// Parses the Metal buffer sizes from a verbose llama-bench load log and returns the
+    /// fraction of the device's free VRAM they occupy (model + compute + KV + recurrent +
+    /// a prefetch-slot allowance), or nil if the log doesn't carry them.
+    nonisolated static func vramFraction(fromLog text: String) -> Double? {
+        func mib(_ pattern: String) -> Double? {
+            guard let r = text.range(of: pattern, options: .regularExpression) else { return nil }
+            let s = String(text[r])
+            return s.split { !$0.isNumber && $0 != "." }.compactMap { Double($0) }.last
+        }
+        // free VRAM reported at device selection, e.g. "... - 12271 MiB free"
+        guard let total = mib(#"[0-9]+ MiB free"#), total > 0, total < 1_000_000 else { return nil }
+        guard let model = mib(#"MTL0_Private model buffer size = *[0-9.]+ MiB"#), model > 0 else { return nil }
+        let compute = mib(#"MTL0_Private compute buffer size = *[0-9.]+ MiB"#) ?? 0
+        let kv = mib(#"MTL0_Private KV buffer size = *[0-9.]+ MiB"#) ?? 0
+        let rs = mib(#"MTL0_Private RS buffer size = *[0-9.]+ MiB"#) ?? 0
+        // prefetch reserves ~3 VRAM slots of the largest expert tensor; a rough allowance
+        // so the fraction reflects real occupancy while prefetch is on.
+        let slots = 650.0
+        return (model + compute + kv + rs + slots) / total
+    }
+
+    nonisolated static func bestSweepCandidate(pp: [Int: Double], vram: [Int: Double], ceiling: Double) -> Int? {
+        pp.keys
+            .filter { (vram[$0] ?? 0) <= ceiling }
+            .max { (pp[$0] ?? 0) < (pp[$1] ?? 0) }
+    }
+
+    /// Finds the best `--n-cpu-moe` and the prefetch cliff automatically. Walks down
+    /// from the configured ncmoe (more experts on the GPU) until prompt processing jumps
+    /// up abruptly (crossed the per-model cliff into the fast regime where the expert
+    /// prefetch overlaps), then steps back up by one to pin the exact edge. Records the
+    /// cliff so the server enables prefetch only below it (at/above it the overlap stalls
+    /// the GPU and plain repack is faster). Uses a short pp128 prompt to keep the cliff
+    /// sharp while running fast, and tracks VRAM occupancy so it never recommends or
+    /// descends into a saturated setting. Records every run in the history.
     func sweep(settings base: ServerSettings) {
         guard !running, !sweeping, base.ncmoe > 0 else { return }
         sweeping = true
         sweepBest = nil
 
+        let modelPath = base.modelPath
+        // Re-measure from scratch: clearing the stored cliff makes every candidate run
+        // with prefetch on (the server gates prefetch below the stored cliff).
+        ServerSettings.rememberPrefetchCliff(nil, forModel: modelPath)
+
         Task {
-            var best: (ncmoe: Int, tg: Double)?
-            var candidate = base.ncmoe
-            let floorValue = max(0, base.ncmoe - 8)
-            let name = URL(fileURLWithPath: base.modelPath).lastPathComponent
+            let name = URL(fileURLWithPath: modelPath).lastPathComponent
+            // Short prompt keeps the cliff sharp while each run stays fast; a tiny tg keeps
+            // the history rows populated. Verbose exposes the VRAM buffer sizes.
+            var fast = base
+            fast.benchPP = 128
+            fast.benchTG = 16
 
-            while candidate >= floorValue {
-                var settings = base
-                settings.ncmoe = candidate
+            var pp: [Int: Double] = [:]
+            var vram: [Int: Double] = [:]
+            let vramCeiling = 0.95   // never descend into (or recommend) a saturated setting
+
+            @MainActor func measure(_ candidate: Int) async -> Double? {
+                if let cached = pp[candidate] { return cached }
+                var s = fast
+                s.ncmoe = candidate
                 sweepStatus = "ncmoe \(candidate)…"
-
-                guard let result = await runOnce(settings: settings) else { break }
-                let engine = settings.serverBinary == ServerSettings.defaultBinary ? "bundled"
-                    : settings.serverBinary == ServerSettings.turboBinary ? "turbo" : "externo"
+                guard let r = await runOnce(settings: s, extraArgs: ["-v"]) else { return nil }
+                let engine = s.serverBinary == ServerSettings.defaultBinary ? "bundled"
+                    : s.serverBinary == ServerSettings.turboBinary ? "turbo" : "externo"
                 history.insert(BenchResult(date: .now, model: name, ncmoe: candidate,
-                                           pp: result.pp, tg: result.tg,
-                                           ctk: settings.cacheTypeK, ctv: settings.cacheTypeV,
-                                           engine: engine, fa: settings.benchmarkFlashAttentionRoute,
-                                           gpu: settings.gpuLabel,
-                                           profile: settings.makeProfile(name: "\(name) ncmoe \(candidate)"),
-                                           ppN: settings.benchPPClamped, tgN: settings.benchTGClamped),
+                                           pp: r.pp, tg: r.tg,
+                                           ctk: s.cacheTypeK, ctv: s.cacheTypeV,
+                                           engine: engine, fa: s.benchmarkFlashAttentionRoute,
+                                           gpu: s.gpuLabel,
+                                           profile: s.makeProfile(name: "\(name) ncmoe \(candidate)"),
+                                           ppN: s.benchPPClamped, tgN: s.benchTGClamped),
                                at: 0)
                 save()
+                pp[candidate] = r.pp
+                if let v = r.vram { vram[candidate] = v }
+                return r.pp
+            }
 
-                if let current = best {
-                    // VRAM saturation shows up as a sharp drop; stop one step late.
-                    if result.tg < current.tg * 0.90 || result.pp < 1 {
-                        break
-                    }
-                    if result.tg > current.tg { best = (candidate, result.tg) }
-                } else {
-                    best = (candidate, result.tg)
-                }
+            // Phase 1 — coarse: walk down by 2 until pp jumps up (crossed the cliff), VRAM
+            // nears saturation, or we reach the floor.
+            let floorValue = max(0, base.ncmoe - 8)
+            var candidate = base.ncmoe
+            var prevPp: Double? = nil
+            var crossed = false
+            while candidate >= floorValue {
+                guard let cur = await measure(candidate) else { break }
+                if cur < 1 { break }
+                if let v = vram[candidate], v > vramCeiling { break }
+                if let pv = prevPp, cur >= pv * 1.5 { crossed = true; break }
+                prevPp = cur
                 candidate -= 2
             }
 
-            sweepBest = best?.ncmoe
-            sweepStatus = best.map { String(format: "Óptimo: ncmoe %d (%.1f t/s)", $0.ncmoe, $0.tg) }
-                ?? "Sweep sin resultados / sweep produced no results"
+            guard var highestGood = Self.bestSweepCandidate(pp: pp, vram: vram, ceiling: vramCeiling) else {
+                sweepBest = nil
+                sweepStatus = pp.isEmpty
+                    ? "Sweep sin resultados / sweep produced no results"
+                    : "Sweep sin configuración VRAM segura / no VRAM-safe result"
+                sweeping = false
+                fileLog.prune()
+                return
+            }
+
+            // Phase 2 — fine: the step-2 gap can hide the exact edge, so from the first
+            // fast ncmoe walk up +1 while pp stays high and VRAM stays safe.
+            if crossed, let fastPp = pp[candidate] {
+                highestGood = candidate
+                var up = candidate + 1
+                while up < base.ncmoe {
+                    guard let p = await measure(up) else { break }
+                    if p >= fastPp * 0.7, (vram[up] ?? 0) <= vramCeiling {
+                        highestGood = up
+                        up += 1
+                    } else { break }
+                }
+            }
+
+            // A cliff only exists if some candidate was clearly slow (above it). Persist it
+            // so the running server disables prefetch at/above it.
+            let bestPp = pp[highestGood] ?? 0
+            let sawSlow = pp.values.contains { $0 < bestPp * 0.6 }
+            if crossed && sawSlow {
+                ServerSettings.rememberPrefetchCliff(highestGood + 1, forModel: modelPath)
+            }
+
+            sweepBest = highestGood
+            let vpct = vram[highestGood].map { String(format: " · VRAM %.0f%%", $0 * 100) } ?? ""
+            if pp.isEmpty {
+                sweepStatus = "Sweep sin resultados / sweep produced no results"
+            } else if crossed && sawSlow {
+                sweepStatus = String(format: "Óptimo: ncmoe %d (%.0f pp)%@ · cliff %d, prefetch off ≥%d",
+                                     highestGood, bestPp, vpct, highestGood + 1, highestGood + 1)
+            } else {
+                sweepStatus = String(format: "Óptimo: ncmoe %d (%.0f pp)%@", highestGood, bestPp, vpct)
+            }
             sweeping = false
             fileLog.prune()
         }
