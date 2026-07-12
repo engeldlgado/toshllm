@@ -257,14 +257,14 @@ final class BenchmarkController: ObservableObject {
             .max { (pp[$0] ?? 0) < (pp[$1] ?? 0) }
     }
 
-    /// Finds the best `--n-cpu-moe` and the prefetch cliff automatically. From the
-    /// configured ncmoe it scans upward (more experts on the CPU, less VRAM) until prompt
-    /// processing collapses — the per-model cliff where the expert-prefetch overlap stalls
-    /// the GPU — then refines the edge by one and recommends the highest ncmoe still in the
-    /// fast regime (the most VRAM headroom). Records the cliff so the server enables
-    /// prefetch only below it (at/above it plain repack is faster). Falls back to scanning
-    /// downward if the start already sits above the cliff, tracks VRAM so it never
-    /// recommends a saturated setting, and records every run in the history.
+    /// Finds the best `--n-cpu-moe` and the prefetch cliff automatically. Walks down
+    /// from the configured ncmoe (more experts on the GPU) until prompt processing jumps
+    /// up abruptly (crossed the per-model cliff into the fast regime where the expert
+    /// prefetch overlaps), then steps back up by one to pin the exact edge. Records the
+    /// cliff so the server enables prefetch only below it (at/above it the overlap stalls
+    /// the GPU and plain repack is faster). Uses a short pp128 prompt to keep the cliff
+    /// sharp while running fast, and tracks VRAM occupancy so it never recommends or
+    /// descends into a saturated setting. Records every run in the history.
     func sweep(settings base: ServerSettings) {
         guard !running, !sweeping, base.ncmoe > 0 else { return }
         sweeping = true
@@ -277,10 +277,11 @@ final class BenchmarkController: ObservableObject {
 
         Task {
             let name = URL(fileURLWithPath: modelPath).lastPathComponent
-            // Standard pp512/tg128 workload; verbose exposes the VRAM buffer sizes.
+            // Short prompt keeps the cliff sharp while each run stays fast; a tiny tg keeps
+            // the history rows populated. Verbose exposes the VRAM buffer sizes.
             var fast = base
-            fast.benchPP = 512
-            fast.benchTG = 128
+            fast.benchPP = 128
+            fast.benchTG = 16
 
             var pp: [Int: Double] = [:]
             var vram: [Int: Double] = [:]
@@ -308,71 +309,62 @@ final class BenchmarkController: ObservableObject {
                 return r.pp
             }
 
-            // Recommend the HIGHEST ncmoe that is still fast: it offloads the most experts,
-            // so it leaves the most VRAM headroom. Higher ncmoe uses less VRAM (safe
-            // direction); lower ncmoe is faster but tighter. We locate the cliff (where pp
-            // collapses) and take the setting just below it.
-            guard let startPp = await measure(base.ncmoe), startPp > 0 else {
+            // Phase 1 — coarse: walk down by 2 until pp jumps up (crossed the cliff), VRAM
+            // nears saturation, or we reach the floor.
+            let floorValue = max(0, base.ncmoe - 8)
+            var candidate = base.ncmoe
+            var prevPp: Double? = nil
+            var crossed = false
+            while candidate >= floorValue {
+                guard let cur = await measure(candidate) else { break }
+                if cur < 1 { break }
+                if let v = vram[candidate], v > vramCeiling { break }
+                if let pv = prevPp, cur >= pv * 1.5 { crossed = true; break }
+                prevPp = cur
+                candidate -= 2
+            }
+
+            guard var highestGood = Self.bestSweepCandidate(pp: pp, vram: vram, ceiling: vramCeiling) else {
                 sweepBest = nil
-                sweepStatus = "Sweep sin resultados / sweep produced no results"
+                sweepStatus = pp.isEmpty
+                    ? "Sweep sin resultados / sweep produced no results"
+                    : "Sweep sin configuración VRAM segura / no VRAM-safe result"
                 sweeping = false
                 fileLog.prune()
                 return
             }
 
-            var highestGood = base.ncmoe
-            var refPp = startPp
-            var cliff: Int? = nil
-
-            // Scan upward by 2 (less VRAM each step) until pp collapses, then refine by 1.
-            var n = base.ncmoe + 2
-            while n <= base.ncmoe + 8 {
-                guard let p = await measure(n), p > 0 else { break }
-                if p >= refPp * 0.6 {
-                    highestGood = n; refPp = max(refPp, p); n += 2
-                } else {
-                    // cliff is between n-2 (fast) and n (slow); pin the exact edge with n-1
-                    if let mid = await measure(n - 1), mid >= refPp * 0.6 {
-                        highestGood = n - 1; cliff = n
-                    } else {
-                        cliff = highestGood + 1
-                    }
-                    break
+            // Phase 2 — fine: the step-2 gap can hide the exact edge, so from the first
+            // fast ncmoe walk up +1 while pp stays high and VRAM stays safe.
+            if crossed, let fastPp = pp[candidate] {
+                highestGood = candidate
+                var up = candidate + 1
+                while up < base.ncmoe {
+                    guard let p = await measure(up) else { break }
+                    if p >= fastPp * 0.7, (vram[up] ?? 0) <= vramCeiling {
+                        highestGood = up
+                        up += 1
+                    } else { break }
                 }
             }
 
-            // Never saw a collapse going up: base may sit at/above the cliff. Probe downward
-            // (more experts on the GPU) for the fast regime, stopping before VRAM saturates.
-            if cliff == nil {
-                var prev = startPp
-                var d = base.ncmoe - 1
-                while d >= max(0, base.ncmoe - 8) {
-                    guard let p = await measure(d), p > 0 else { break }
-                    if let v = vram[d], v > vramCeiling { break }
-                    if p >= prev * 1.5 { highestGood = d; cliff = d + 1; break }
-                    prev = p; d -= 1
-                }
-            }
-
-            // Guard against recommending a VRAM-saturated setting.
-            if (vram[highestGood] ?? 0) > vramCeiling,
-               let safe = Self.bestSweepCandidate(pp: pp, vram: vram, ceiling: vramCeiling) {
-                highestGood = safe
-                cliff = nil
-            }
-
-            // Persist the cliff so the running server enables prefetch only below it.
-            if let c = cliff {
-                ServerSettings.rememberPrefetchCliff(c, forModel: modelPath)
+            // A cliff only exists if some candidate was clearly slow (above it). Persist it
+            // so the running server disables prefetch at/above it.
+            let bestPp = pp[highestGood] ?? 0
+            let sawSlow = pp.values.contains { $0 < bestPp * 0.6 }
+            if crossed && sawSlow {
+                ServerSettings.rememberPrefetchCliff(highestGood + 1, forModel: modelPath)
             }
 
             sweepBest = highestGood
             let vpct = vram[highestGood].map { String(format: " · VRAM %.0f%%", $0 * 100) } ?? ""
-            if let c = cliff {
+            if pp.isEmpty {
+                sweepStatus = "Sweep sin resultados / sweep produced no results"
+            } else if crossed && sawSlow {
                 sweepStatus = String(format: "Óptimo: ncmoe %d (%.0f pp)%@ · cliff %d, prefetch off ≥%d",
-                                     highestGood, pp[highestGood] ?? 0, vpct, c, c)
+                                     highestGood, bestPp, vpct, highestGood + 1, highestGood + 1)
             } else {
-                sweepStatus = String(format: "Óptimo: ncmoe %d (%.0f pp)%@", highestGood, pp[highestGood] ?? 0, vpct)
+                sweepStatus = String(format: "Óptimo: ncmoe %d (%.0f pp)%@", highestGood, bestPp, vpct)
             }
             sweeping = false
             fileLog.prune()
