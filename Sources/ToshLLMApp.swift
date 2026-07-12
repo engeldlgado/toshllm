@@ -52,12 +52,11 @@ struct ToshLLMApp: App {
         // Release VRAM held by an engine orphaned by a previous force-quit.
         EngineLock.reapOrphans()
 
-        // Migrate the legacy raw flag into the dedicated MTP toggle.
+        // Remove the legacy raw flag; MTP is selected automatically per model.
         if var extra = defaultsMigrationExtraArgs(), extra.contains("--spec-type draft-mtp") {
             extra = extra.replacingOccurrences(of: "--spec-type draft-mtp", with: "")
                 .trimmingCharacters(in: .whitespaces)
             UserDefaults.standard.set(extra, forKey: SettingsKeys.extraArgs)
-            UserDefaults.standard.set(true, forKey: SettingsKeys.specMTP)
         }
 
         // Heal the stored engine path: legacy builds or paths from another machine

@@ -6,10 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Improved
-- **The automatic MoE sweep now leaves practical VRAM headroom**... it measures the standard pp512/tg128 workload down to the lowest fast setting that remains within the estimated VRAM budget, then recommends three `ncmoe` steps above that tight edge. For example, a lowest safe result of 20 recommends 23. If a model still shows a prefetch cliff, the recommendation remains below it. Each intermediate result appears temporarily with prompt speed, generation speed and VRAM usage, while only the final recommendation is saved to benchmark history.
+- **MoE auto-sweep leaves VRAM headroom**... it measures pp512/tg128, shows temporary samples and saves only the final recommendation, three `ncmoe` steps above the tight edge when safe.
+- **MTP is automatic**... it activates only when the GGUF has an MTP head and MoE experts are offloaded, avoiding regressions on dense and full-GPU models.
 
 ### Fixed
-- **The automatic MoE sweep no longer stays stuck while collecting verbose output**... verbose `llama-bench` output could fill its process pipe before the app started reading it, leaving both sides waiting forever. Sweep output now goes through a temporary log without pipe backpressure. VRAM parsing also reads the buffer size instead of the device index in names such as `MTL0`, and the final choice always comes from a configuration that was actually measured.
+- **MoE auto-sweep no longer hangs on verbose output** and now parses Metal VRAM sizes correctly.
+- **BF16 decode is covered by the AMD wave64 GPU path** instead of falling back to CPU.
 
 ## [0.81.62] - 2026-07-11
 

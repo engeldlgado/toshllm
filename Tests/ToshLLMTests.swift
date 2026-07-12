@@ -368,20 +368,27 @@ final class ServerSettingsTests: XCTestCase {
 
     func testMTPIsSkippedForModelsWithoutTheHead() {
         var s = makeSettings()
-        s.specMTP = true
+        s.ncmoe = 12
         s.modelPath = "/tmp/definitely-not-a-model.gguf"
         XCTAssertFalse(s.arguments.contains("--spec-type"),
                        "MTP must be silently skipped when the GGUF lacks the head")
     }
 
-    func testMTPAppliesForModelsWithTheHead() {
+    func testMTPAppliesAutomaticallyWithExpertOffload() {
         var s = makeSettings()
+        s.ncmoe = 12
+        s.modelPath = makeGGUF(nextnLayers: 1, tensorName: "blk.0.nextn.eh_proj.weight").path
+        XCTAssertTrue(s.arguments.contains("--spec-type"),
+                      "MTP must apply automatically when the model has a head and experts are offloaded")
+    }
+
+    func testMTPIsSkippedWithoutExpertOffload() {
+        var s = makeSettings()
+        s.ncmoe = 0
         s.specMTP = true
         s.modelPath = makeGGUF(nextnLayers: 1, tensorName: "blk.0.nextn.eh_proj.weight").path
-        // The toggle drives MTP: on a model that ships the head it applies,
-        // regardless of expert offload (best paired with offload, guided in the UI).
-        XCTAssertTrue(s.arguments.contains("--spec-type"),
-                      "MTP must apply when the toggle is on and the GGUF ships the head")
+        XCTAssertFalse(s.arguments.contains("--spec-type"),
+                       "MTP must stay off for dense and full-GPU models")
     }
 
     func testStabilityEnvironment() {

@@ -146,18 +146,14 @@ Cómo funciona: el servidor carga el modelo la primera vez que se pide (por su n
 
 Dentro de la app, el chat muestra un selector de modelo (icono de caja) junto al campo de mensaje cuando el router está activo. Desde un cliente externo (VS Code, Continue…), simplemente indica el nombre del modelo en el campo `model` de la petición; la app deriva ese nombre del nombre del archivo .gguf (ej. `Qwen3.6-14B-A3B.gguf` → `qwen3-6-14b-a3b`), consultable en `GET /v1/models`.
 
-Cada modelo conserva su propia configuración de expertos MoE, visión y MTP, calculada automáticamente. Disponible en ambos motores.
+Cada modelo conserva su propia configuración de expertos MoE y visión. MTP se decide automáticamente. Disponible en ambos motores.
 """),
         DocSection(title: "MTP: generación acelerada", icon: "hare", body: """
 **MTP (Multi-Token Prediction)** es una técnica donde el modelo predice varios tokens por pasada y luego los verifica — sin ninguna pérdida de calidad (solo acepta lo que habría generado de todas formas).
 
 Última medición en este equipo: **+34% de velocidad de generación** (19.3 → 25.7 t/s en Qwen3.6-35B) con 82% de aceptación. Esa cifra es previa al fix de staging persistente, que ya subió el "sin MTP" de ~19 a ~25 t/s por sí solo. Falta remedir la ganancia real de MTP sobre el motor actual.
 
-Para usarlo necesitas dos cosas:
-1. Un GGUF con cabezal MTP (busca repos con "MTP" en el nombre, p. ej. `Qwen3.6-35B-A3B-MTP-GGUF` de unsloth — los GGUF normales no lo traen)
-2. Agregar `--spec-type draft-mtp` en Ajustes → Avanzado → Argumentos extra
-
-Funciona en ambos motores (Integrado y Experimental). El perfil "Diario (MTP)" ya lo configura todo. La ganancia depende mucho del modelo y del contenido generado: en algunos casos no acelera nada, o incluso sale un poco más lento. `llama-bench` no puede medirlo (no soporta el flag): compara siempre con generación real desde el chat o el servidor.
+MTP se activa automáticamente cuando el GGUF trae el cabezal y hay expertos MoE en CPU (`ncmoe > 0`). Se omite en densos y modelos completamente en GPU, donde la sincronización extra puede hacerlo más lento. Funciona en ambos motores. `llama-bench` no puede medirlo: compara siempre con generación real desde el chat o el servidor.
 """),
         DocSection(title: "API para desarrolladores", icon: "terminal", body: """
 Con el servidor activo, tienes una **API compatible con OpenAI** en `http://127.0.0.1:8080` (puerto configurable). Funciona con cualquier librería o app que hable ese protocolo.

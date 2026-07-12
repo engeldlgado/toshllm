@@ -40,7 +40,6 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.cacheRAM) private var cacheRAM = 2048
     @AppStorage(SettingsKeys.parallelSlots) private var parallelSlots = 1
     @AppStorage(SettingsKeys.reasoningInline) private var reasoningInline = false
-    @AppStorage(SettingsKeys.specMTP) private var specMTP = false
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.modelsDir) private var modelsDir = ""
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
@@ -446,14 +445,16 @@ struct SettingsView: View {
                           systemImage: amdFlashActive ? "bolt.fill" : "cpu")
                         .font(.caption).foregroundStyle(amdFlashActive ? .green : .secondary)
                 }
-                Toggle(loc.t("Aceleración MTP (especulativa)", "MTP acceleration (speculative)"), isOn: $specMTP)
-                    .infoTip(loc.t("Multi-token prediction: acelera la generación, sobre todo en modelos MoE con expertos descargados a CPU (offload). En densos o full-GPU puede no ayudar. Requiere un GGUF con cabezal MTP (variantes '-MTP-'); se ignora en los que no lo traen.",
-                                "Multi-token prediction: speeds up generation, most on MoE models with experts offloaded to the CPU. On dense or full-GPU models it may not help. Requires a GGUF with the MTP head ('-MTP-' variants); skipped for those without it."))
-                if specMTP && !modelPath.isEmpty && !ServerSettings.modelHasMTP(at: modelPath) {
-                    Label(loc.t("El modelo actual no trae cabezal MTP: la opción se ignorará.",
-                                "Current model has no MTP head: the option will be ignored."),
-                          systemImage: "info.circle")
-                        .font(.caption).foregroundStyle(.orange)
+                if !modelPath.isEmpty && ServerSettings.modelHasMTP(at: modelPath) {
+                    Label(ncmoe > 0
+                            ? loc.t("MTP automático activo", "Automatic MTP active")
+                            : loc.t("MTP automático en espera: requiere expertos MoE en CPU",
+                                    "Automatic MTP waiting: requires MoE experts on CPU"),
+                          systemImage: ncmoe > 0 ? "hare.fill" : "hare")
+                        .font(.caption)
+                        .foregroundStyle(ncmoe > 0 ? .green : .secondary)
+                        .infoTip(loc.t("MTP se activa automáticamente cuando el GGUF trae el cabezal y ncmoe es mayor que cero. Se omite en modelos densos o completamente en GPU, donde puede reducir la velocidad.",
+                                    "MTP turns on automatically when the GGUF has the head and ncmoe is greater than zero. It is skipped for dense or full-GPU models, where it can reduce speed."))
                 }
                 if engineSelection.wrappedValue != "custom" {
                     Toggle(loc.t("Prefetch de expertos MoE (prompt)", "MoE expert prefetch (prompt)"), isOn: $prefetchExperts)

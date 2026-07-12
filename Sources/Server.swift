@@ -57,8 +57,8 @@ struct ServerSettings {
     /// the OpenAI-compatible API, so pairing it with `apiKeyEnabled` is strongly
     /// recommended.
     var localNetworkDiscovery: Bool = false
-    /// MTP self-speculative decoding (+30% generation). Only applied when the
-    /// selected GGUF actually ships the MTP head; silently skipped otherwise.
+    /// Legacy profile field kept for decoding older saved settings. MTP is now
+    /// selected automatically from model capability and expert offload.
     var specMTP: Bool = false
     /// Experimental: route attention through the dedicated AMD Metal
     /// Flash-Attention kernel (gated by the TOSH_FA_AMD env var in the engine).
@@ -192,7 +192,7 @@ struct ServerSettings {
         }
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
-        if specMTP && Self.modelHasMTP(at: modelPath) {
+        if ncmoe > 0 && Self.modelHasMTP(at: modelPath) {
             args += ["--spec-type", "draft-mtp"]
         }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
@@ -272,7 +272,9 @@ struct ServerSettings {
                 lines.append("slot-save-path = \(Self.slotCacheDir(port: port).appendingPathComponent(alias).path)")
             }
             if reasoningInline { lines.append("reasoning-format = none") }
-            if specMTP && Self.modelHasMTP(at: path) { lines.append("spec-type = draft-mtp") }
+            if (ncmoeByPath[path] ?? 0) > 0 && Self.modelHasMTP(at: path) {
+                lines.append("spec-type = draft-mtp")
+            }
             sections.append(lines.joined(separator: "\n"))
         }
         return sections.joined(separator: "\n\n") + "\n"
