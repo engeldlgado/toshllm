@@ -5,9 +5,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.81.63] - 2026-07-12
+
 ### Improved
-- **MoE auto-sweep leaves VRAM headroom**... it measures pp512/tg128, shows temporary samples and saves only the final recommendation, three `ncmoe` steps above the tight edge when safe.
-- **MTP is automatic**... it activates only when the GGUF has an MTP head and MoE experts are offloaded, avoiding regressions on dense and full-GPU models.
+- **MoE auto-sweep leaves VRAM headroom**... it measures pp512/tg128, shows live samples and saves only the final recommendation, three `ncmoe` steps above the tight edge when safe.
+- **MTP is automatic**... it activates only for GGUFs with an MTP head and offloaded MoE experts, avoiding measured regressions on full-GPU models.
+- **Qwen3.5/3.6 decode uses one less Metal dispatch per GDN layer** by fusing SSM_CONV with its following SiLU activation.
 - **Long-prompt prefill is faster on AMD RDNA** for head sizes 64/128/256/512 (up to 54% at pp4096), with no measured decode regression; quantized KV and wave64 keep Flash Attention.
 
 ### Fixed
