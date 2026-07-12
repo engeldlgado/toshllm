@@ -182,9 +182,14 @@ struct BenchmarksView: View {
                             cfg.ncmoe = best
                             ServerSettings.rememberNcmoe(best, forModel: cfg.modelPath)
                             bench.sweepBest = nil
+                            bench.sweepSamples = []
                         }
                         .controlSize(.small)
                     }
+                }
+
+                if !bench.sweepSamples.isEmpty {
+                    sweepProgress
                 }
 
                 Divider().opacity(0.35)
@@ -236,8 +241,8 @@ struct BenchmarksView: View {
                     Label(loc.t("Buscar óptimo", "Find optimum"), systemImage: "scope")
                 }
                 .disabled(cfg.modelPath.isEmpty || cfg.ncmoe == 0 || server.state == .running || server.state == .starting)
-                .help(loc.t("Solo modelos MoE: prueba varios valores de 'Expertos en CPU' bajando hasta detectar la saturación de VRAM, y reporta el mejor. Tarda varios minutos.",
-                            "MoE models only: tries several 'experts on CPU' values going down until VRAM saturates, then reports the best. Takes several minutes."))
+                .help(loc.t("Solo modelos MoE: busca el ncmoe mínimo seguro y recomienda tres pasos por encima para dejar margen de VRAM. Muestra cada medición temporalmente y solo guarda el óptimo.",
+                            "MoE models only: finds the lowest safe ncmoe and recommends three steps above it for VRAM headroom. Shows each measurement temporarily and saves only the optimum."))
                 Button {
                     ServerSettings.rememberNcmoe(cfg.ncmoe, forModel: cfg.modelPath)
                     rememberWorkload()
@@ -249,6 +254,61 @@ struct BenchmarksView: View {
                 .disabled(cfg.modelPath.isEmpty || server.state == .running || server.state == .starting)
             }
         }
+    }
+
+    private var sweepProgress: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: bench.sweeping ? "waveform.path.ecg" : "checkmark.circle.fill")
+                    .foregroundStyle(bench.sweeping ? .pink : .green)
+                Text(bench.sweeping
+                     ? loc.t("Midiendo configuraciones", "Measuring configurations")
+                     : loc.t("Resultados temporales del sweep", "Temporary sweep results"))
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("\(bench.sweepSamples.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(bench.sweepSamples) { sample in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("ncmoe \(sample.ncmoe)")
+                                .font(.caption.weight(.semibold).monospacedDigit())
+                            HStack(spacing: 7) {
+                                Text(sample.pp, format: .number.precision(.fractionLength(1)))
+                                Text("pp").foregroundStyle(.tertiary)
+                                Text(sample.tg, format: .number.precision(.fractionLength(1)))
+                                Text("tg").foregroundStyle(.tertiary)
+                            }
+                            .font(.system(size: 10.5, design: .monospaced))
+                            if let vram = sample.vram {
+                                ProgressView(value: min(vram, 1))
+                                    .tint(vram > 0.95 ? .orange : .pink)
+                                Text(vram, format: .percent.precision(.fractionLength(0)))
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(.quaternary.opacity(0.45), in: .rect(cornerRadius: 8))
+                        .help(loc.t("Resultado temporal; solo el óptimo se guarda en el historial.",
+                                    "Temporary result; only the optimum is saved to history."))
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+        .padding(10)
+        .background(.pink.opacity(0.055), in: .rect(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.pink.opacity(0.14), lineWidth: 1)
+        }
+        .animation(.easeInOut(duration: 0.2), value: bench.sweepSamples.count)
     }
 
     @ViewBuilder private var statusNote: some View {

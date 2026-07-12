@@ -711,6 +711,12 @@ final class BenchAndProfileTests: XCTestCase {
         XCTAssertEqual(BenchmarkController.bestSweepCandidate(pp: pp, vram: vram, ceiling: 0.95), 22)
     }
 
+    func testSweepAddsThreeStepsOfVRAMHeadroom() {
+        XCTAssertEqual(BenchmarkController.sweepHeadroomCandidate(lowestSafe: 20, cliff: nil), 23)
+        XCTAssertEqual(BenchmarkController.sweepHeadroomCandidate(lowestSafe: 20, cliff: 24), 23)
+        XCTAssertEqual(BenchmarkController.sweepHeadroomCandidate(lowestSafe: 20, cliff: 22), 21)
+    }
+
     func testBenchConfigLabel() {
         let r = BenchResult(date: .now, model: "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf",
                             ncmoe: 24, pp: 68.3, tg: 15.7,

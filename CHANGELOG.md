@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+- **The automatic MoE sweep now leaves practical VRAM headroom**... it measures the standard pp512/tg128 workload down to the lowest fast setting that remains within the estimated VRAM budget, then recommends three `ncmoe` steps above that tight edge. For example, a lowest safe result of 20 recommends 23. If a model still shows a prefetch cliff, the recommendation remains below it. Each intermediate result appears temporarily with prompt speed, generation speed and VRAM usage, while only the final recommendation is saved to benchmark history.
+
+### Fixed
+- **The automatic MoE sweep no longer stays stuck while collecting verbose output**... verbose `llama-bench` output could fill its process pipe before the app started reading it, leaving both sides waiting forever. Sweep output now goes through a temporary log without pipe backpressure. VRAM parsing also reads the buffer size instead of the device index in names such as `MTL0`, and the final choice always comes from a configuration that was actually measured.
+
 ## [0.81.62] - 2026-07-11
 
 ### Improved
