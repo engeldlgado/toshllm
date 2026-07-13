@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.81.65] - 2026-07-13
 
 ### Added
 - **`llama-perplexity` ships with the bundled engine**... numeric validation A/Bs no longer require building from source.
