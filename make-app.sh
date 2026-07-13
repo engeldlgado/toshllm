@@ -50,7 +50,8 @@ LLAMA_STATIC="vendor/llama.cpp/build-static/bin"
 [ -x "$LLAMA_STATIC/llama-server" ] || LLAMA_STATIC="$HOME/dev/repositorios/llama.cpp/build-static/bin"
 if [ -x "$LLAMA_STATIC/llama-server" ]; then
     mkdir -p "$APP/Contents/Resources/bin"
-    cp "$LLAMA_STATIC/llama-server" "$LLAMA_STATIC/llama-bench" "$APP/Contents/Resources/bin/"
+    # llama-perplexity ships so testers can run numeric A/Bs without building
+    cp "$LLAMA_STATIC/llama-server" "$LLAMA_STATIC/llama-bench" "$LLAMA_STATIC/llama-perplexity" "$APP/Contents/Resources/bin/"
     # Precompiled Metal library (loaded instead of compiling shaders at runtime;
     # see ggml-metal-device.m). Optional: without it the engine still works,
     # just slower to load. Must sit next to the binary.
