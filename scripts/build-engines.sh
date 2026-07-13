@@ -23,14 +23,14 @@ if [ "$ARCH" = "universal" ]; then
         ARCH="$slice" SKIP_TURBO="$SKIP_TURBO" "$0"
         for dir in vendor/llama.cpp vendor/llama.cpp-turbo; do
             [ -d "$dir/build-static/bin" ] || continue
-            for tool in llama-server llama-bench; do
+            for tool in llama-server llama-bench llama-perplexity; do
                 mv "$dir/build-static/bin/$tool" "$dir/build-static/bin/$tool.$slice" 2>/dev/null || true
             done
         done
     done
     for dir in vendor/llama.cpp vendor/llama.cpp-turbo; do
         [ -d "$dir/build-static/bin" ] || continue
-        for tool in llama-server llama-bench; do
+        for tool in llama-server llama-bench llama-perplexity; do
             if [ -f "$dir/build-static/bin/$tool.x86_64" ] && [ -f "$dir/build-static/bin/$tool.arm64" ]; then
                 lipo -create -output "$dir/build-static/bin/$tool" \
                     "$dir/build-static/bin/$tool.x86_64" "$dir/build-static/bin/$tool.arm64"
@@ -115,7 +115,7 @@ build_engine() {
     done
 
     cmake -B build-static "${CMAKE_FLAGS[@]}"
-    cmake --build build-static --config Release -j "$(sysctl -n hw.ncpu)" -t llama-server llama-bench
+    cmake --build build-static --config Release -j "$(sysctl -n hw.ncpu)" -t llama-server llama-bench llama-perplexity
 
     # Precompile the embedded shader source into a portable default.metallib so
     # the engine loads it instantly instead of compiling at runtime. Built from
