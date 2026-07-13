@@ -5,6 +5,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.81.64] - 2026-07-13
+
 ### Added
 - **Experimental: faster long prompts with quantized-key KV caches on AMD RDNA** (up to +54% at pp4096, generation and quality unchanged)... q8_0/f16 and q4_0/f16 caches take the decomposed-prefill route of 0.81.63 when `TOSH_FA_AMD_QKV_PREFILL_DECOMPOSED=1` is set in Extra arguments.
 
