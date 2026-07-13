@@ -5,6 +5,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **The fast long-prompt prefill now covers every KV cache combination by default** (opt-in and keys-only in 0.81.64)... all f16/q8_0/q4_0 pairs take the route, worth up to +37% at pp4096 with fully quantized caches; validated across head sizes 64-512 with no regression, and `TOSH_QK_PREFILL_DISABLE=1` in Extra arguments turns just this route off.
+
 ## [0.81.64] - 2026-07-13
 
 ### Added
