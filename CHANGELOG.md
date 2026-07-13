@@ -5,6 +5,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **Row-sum and mean operations no longer overflow their scratch memory on AMD GCN/Vega cards**... on wave64 GPUs these kernels indexed shared memory by the hardware's real SIMD lane, but the buffer was sized for 32 lanes, so rows longer than 32 elements wrote past it (silent corruption risk for mean pooling and similar ops). The buffer now follows the measured SIMD width, like the rest of the wave64 kernels. No change on RDNA or Apple Silicon.
+- **The wave64 safe-mode variable documented in the app now works**... the tooltip recommended `GGML_METAL_WAVE64_SAFEMODE=1` but the engine only read a different internal name, so typing it did nothing. The engine now accepts both.
+
 ## [0.81.63] - 2026-07-12
 
 ### Improved
