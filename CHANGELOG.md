@@ -5,9 +5,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Experimental: faster long prompts with quantized-key KV caches on AMD RDNA** (up to +54% at pp4096, generation and quality unchanged)... q8_0/f16 and q4_0/f16 caches take the decomposed-prefill route of 0.81.63 when `TOSH_FA_AMD_QKV_PREFILL_DECOMPOSED=1` is set in Extra arguments.
+
 ### Fixed
-- **Row-sum and mean operations no longer overflow their scratch memory on AMD GCN/Vega cards**... on wave64 GPUs these kernels indexed shared memory by the hardware's real SIMD lane, but the buffer was sized for 32 lanes, so rows longer than 32 elements wrote past it (silent corruption risk for mean pooling and similar ops). The buffer now follows the measured SIMD width, like the rest of the wave64 kernels. No change on RDNA or Apple Silicon.
-- **The wave64 safe-mode variable documented in the app now works**... the tooltip recommended `GGML_METAL_WAVE64_SAFEMODE=1` but the engine only read a different internal name, so typing it did nothing. The engine now accepts both.
+- **Row-sum and mean kernels no longer overflow their scratch memory on AMD GCN/Vega**, a silent-corruption risk for rows longer than 32 elements; the buffer now follows the hardware's real SIMD width. No change on other GPUs.
+- **`GGML_METAL_WAVE64_SAFEMODE=1` now works as the app documents it**... the engine only read an internal name; it accepts both.
 
 ## [0.81.63] - 2026-07-12
 

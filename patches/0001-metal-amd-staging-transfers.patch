@@ -3523,10 +3523,10 @@ index 25e78e100..2b4693165 100644
          device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
          device float4 * D4 = (device float4 *) D;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 4c86e43c1..b10de7e50 100644
+index 4c86e43c1..b77e918e6 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -2395,7 +2395,23 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+@@ -2395,7 +2395,31 @@ ggml_tensor * llm_graph_context::build_attn_mha(
  
      ggml_tensor * cur;
  
@@ -3540,13 +3540,21 @@ index 4c86e43c1..b10de7e50 100644
 +    // Head-256 is neutral through 1024 tokens and only pulls ahead on longer
 +    // prompts; keep FA for pp512, where it measured slightly faster.
 +    const int64_t decomposed_min_tokens = q->ne[0] == 256 ? 512 : 32;
++    // Experimental: extend the decomposed prefill to quantized keys + f16 values
++    // (the recommended cache pairs). K stays quantized as mul_mat's left operand;
++    // only f16 V is transposable, so quantized-V caches keep FA.
++    const bool decomposed_kv_ok =
++        (k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16) ||
++        (getenv("TOSH_FA_AMD_QKV_PREFILL_DECOMPOSED") != nullptr &&
++         (k->type == GGML_TYPE_Q8_0 || k->type == GGML_TYPE_Q4_0) &&
++         v->type == GGML_TYPE_F16);
 +    const bool amd_prefill_decomposed =
 +        getenv("TOSH_FA_AMD") != nullptr &&
 +        getenv("TOSH_FA_AMD_PREFILL_DECOMPOSED_DISABLE") == nullptr &&
 +        getenv("TOSH_FA_AMD_HEAD64_PREFILL_DISABLE") == nullptr &&
 +        metal_simd_width != nullptr && strcmp(metal_simd_width, "32") == 0 &&
 +        n_tokens > decomposed_min_tokens && measured_head_size &&
-+        k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16;
++        decomposed_kv_ok;
 +    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr && !amd_prefill_decomposed;
      if (use_flash_attn) {
          GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
