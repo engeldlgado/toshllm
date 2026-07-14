@@ -67,6 +67,24 @@ struct Conversation: Identifiable, Codable {
     /// Pinned conversations sort first. Optional for backward compatibility
     /// with conversations.json saved by older builds.
     var pinned: Bool? = nil
+    /// Project this conversation belongs to; nil = ungrouped. Optionals keep
+    /// pre-projects JSON decodable, and older builds ignore the extra keys.
+    var projectID: UUID? = nil
+    /// Per-conversation system prompt. Empty/nil falls back to the project's,
+    /// then to the global one.
+    var systemPrompt: String? = nil
+}
+
+/// Folder in the chat sidebar grouping conversations, with its own system
+/// prompt inherited by every chat inside.
+struct ChatProject: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var systemPrompt: String = ""
+    var pinned: Bool? = nil
+    /// Sidebar disclosure state, persisted so folders keep their fold.
+    var collapsed: Bool? = nil
+    var created = Date()
 }
 
 struct StreamError: LocalizedError {
@@ -202,6 +220,7 @@ final class StreamBuffer: @unchecked Sendable {
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var conversations: [Conversation] = []
+    @Published var projects: [ChatProject] = []
     @Published var currentID: UUID?
     @Published var generating = false
     /// Conversation currently streaming, so its live bubble only shows there.
@@ -245,6 +264,12 @@ final class ChatStore: ObservableObject {
         return dir.appendingPathComponent("conversations.json")
     }
 
+    /// Projects live in their own file so conversations.json keeps its schema
+    /// and older builds simply show the flat list.
+    private var projectsURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("projects.json")
+    }
+
     init() {
         load()
         // Open ready to type a new message: reuse the most recent empty
@@ -265,8 +290,16 @@ final class ChatStore: ObservableObject {
     var currentIndex: Int? { conversations.firstIndex { $0.id == currentID } }
     var current: Conversation? { currentIndex.map { conversations[$0] } }
 
-    func newConversation() {
-        let c = Conversation(title: "")
+    func newConversation(in projectID: UUID? = nil) {
+        // Reuse an existing empty conversation in the same scope instead of
+        // piling up blanks when the button is clicked repeatedly.
+        if let empty = conversations.first(where: { $0.messages.isEmpty && $0.projectID == projectID }) {
+            currentID = empty.id
+            lastError = nil
+            contextUsed = nil
+            return
+        }
+        let c = Conversation(title: "", projectID: projectID)
         conversations.insert(c, at: 0)
         currentID = c.id
         lastError = nil
@@ -300,9 +333,103 @@ final class ChatStore: ObservableObject {
     func displayTitle(_ c: Conversation) -> String {
         if !c.title.isEmpty { return c.title }
         if let first = c.messages.first(where: { $0.role == "user" }) {
-            return String(first.content.prefix(40))
+            let smart = Self.smartTitle(from: first.content)
+            if !smart.isEmpty { return smart }
+            if let name = first.attachments?.first?.name { return name }
         }
         return "…"
+    }
+
+    /// Sidebar title derived from a message: first meaningful line, markdown
+    /// markers stripped, cut at a word boundary instead of mid-word.
+    nonisolated static func smartTitle(from text: String, limit: Int = 48) -> String {
+        let line = text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+        var clean = line.drop { "#>-*• \t".contains($0) }
+            .replacingOccurrences(of: "`", with: "")
+        clean = clean.trimmingCharacters(in: .whitespaces)
+        guard clean.count > limit else { return clean }
+        let cut = String(clean.prefix(limit))
+        let word = cut.lastIndex(of: " ").map { String(cut[..<$0]) } ?? cut
+        return (word.count >= limit / 2 ? word : cut) + "…"
+    }
+
+    // MARK: projects
+
+    func project(id: UUID?) -> ChatProject? {
+        guard let id else { return nil }
+        return projects.first { $0.id == id }
+    }
+
+    @discardableResult
+    func newProject(name: String) -> ChatProject {
+        let p = ChatProject(name: name.trimmingCharacters(in: .whitespaces))
+        projects.insert(p, at: 0)
+        save()
+        return p
+    }
+
+    func renameProject(_ p: ChatProject, to name: String) {
+        guard let i = projects.firstIndex(where: { $0.id == p.id }) else { return }
+        projects[i].name = name.trimmingCharacters(in: .whitespaces)
+        save()
+    }
+
+    func togglePinProject(_ p: ChatProject) {
+        guard let i = projects.firstIndex(where: { $0.id == p.id }) else { return }
+        projects[i].pinned = !(projects[i].pinned ?? false)
+        save()
+    }
+
+    func setProjectCollapsed(_ p: ChatProject, _ collapsed: Bool) {
+        guard let i = projects.firstIndex(where: { $0.id == p.id }) else { return }
+        projects[i].collapsed = collapsed
+        save()
+    }
+
+    func setProjectPrompt(_ p: ChatProject, _ prompt: String) {
+        guard let i = projects.firstIndex(where: { $0.id == p.id }) else { return }
+        projects[i].systemPrompt = prompt
+        save()
+    }
+
+    /// Removes the folder; its conversations survive as ungrouped.
+    func deleteProject(_ p: ChatProject) {
+        for i in conversations.indices where conversations[i].projectID == p.id {
+            conversations[i].projectID = nil
+        }
+        projects.removeAll { $0.id == p.id }
+        save()
+    }
+
+    func move(_ c: Conversation, toProject projectID: UUID?) {
+        guard let i = conversations.firstIndex(where: { $0.id == c.id }) else { return }
+        conversations[i].projectID = projectID
+        save()
+    }
+
+    func setConversationPrompt(_ c: Conversation, _ prompt: String) {
+        guard let i = conversations.firstIndex(where: { $0.id == c.id }) else { return }
+        conversations[i].systemPrompt = prompt.isEmpty ? nil : prompt
+        save()
+    }
+
+    /// System prompt actually sent: the chat's own, else its project's, else
+    /// the global one. First non-empty wins.
+    func effectiveSystemPrompt(global: String) -> String {
+        guard let c = current else { return global }
+        return Self.resolvePrompt(chat: c.systemPrompt,
+                                  project: project(id: c.projectID)?.systemPrompt,
+                                  global: global)
+    }
+
+    nonisolated static func resolvePrompt(chat: String?, project: String?, global: String) -> String {
+        func meaningful(_ s: String?) -> String? {
+            guard let s, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return s
+        }
+        return meaningful(chat) ?? meaningful(project) ?? global
     }
 
     // MARK: sending
@@ -316,9 +443,8 @@ final class ChatStore: ObservableObject {
                                                      attachments: attachments.isEmpty ? nil : attachments,
                                                      imageURIs: images.isEmpty ? nil : images))
         if conversations[i].title.isEmpty {
-            conversations[i].title = text.isEmpty
-                ? (attachments.first?.name ?? "…")
-                : String(text.prefix(40))
+            let smart = Self.smartTitle(from: text)
+            conversations[i].title = smart.isEmpty ? (attachments.first?.name ?? "…") : smart
         }
         stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system, thinking: thinking)
     }
@@ -950,9 +1076,14 @@ final class ChatStore: ObservableObject {
     // MARK: persistence
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let list = try? JSONDecoder().decode([Conversation].self, from: data) else { return }
-        conversations = list
+        if let data = try? Data(contentsOf: fileURL),
+           let list = try? JSONDecoder().decode([Conversation].self, from: data) {
+            conversations = list
+        }
+        if let data = try? Data(contentsOf: projectsURL),
+           let list = try? JSONDecoder().decode([ChatProject].self, from: data) {
+            projects = list
+        }
     }
 
     // Serial queue: keeps writes ordered while encoding off the main thread,
@@ -961,10 +1092,16 @@ final class ChatStore: ObservableObject {
 
     func save() {
         let snapshot = conversations
+        let projectsSnapshot = projects
         let url = fileURL
+        let pURL = projectsURL
         Self.saveQueue.async {
-            guard let data = try? JSONEncoder().encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: url, options: .atomic)
+            }
+            if let data = try? JSONEncoder().encode(projectsSnapshot) {
+                try? data.write(to: pURL, options: .atomic)
+            }
         }
     }
 
@@ -1001,6 +1138,10 @@ struct NativeChatView: View {
     @State private var ocrPending = 0
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @State private var showSystem = false
+    @State private var promptConversation: Conversation?
+    @State private var promptProject: ChatProject?
+    @State private var headerTitle = ""
+    @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
     // True while the newest message is on screen (inverted scroll rests here).
     @State private var atBottom = true
     @FocusState private var inputFocused: Bool
@@ -1044,6 +1185,22 @@ struct NativeChatView: View {
                 if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
                 pasteMonitor = nil
             }
+            .sheet(item: $promptConversation) { c in
+                PromptEditorSheet(
+                    title: loc.t("Prompt de esta conversación", "This conversation's prompt"),
+                    hint: loc.t("Sustituye al prompt del proyecto y al global solo en esta conversación. Vacío = heredar.",
+                                "Overrides the project and global prompts for this conversation only. Empty = inherit."),
+                    initial: c.systemPrompt ?? ""
+                ) { chat.setConversationPrompt(c, $0) }
+            }
+            .sheet(item: $promptProject) { p in
+                PromptEditorSheet(
+                    title: loc.t("Prompt del proyecto \"\(p.name)\"", "Project prompt for \"\(p.name)\""),
+                    hint: loc.t("Lo heredan todas las conversaciones del proyecto que no tengan prompt propio.",
+                                "Inherited by every conversation in the project without its own prompt."),
+                    initial: p.systemPrompt
+                ) { chat.setProjectPrompt(p, $0) }
+            }
             // Markdown links: open valid web/mail URLs in the default browser
             // and silently drop malformed ones (e.g. placeholder "#" links),
             // instead of the system's "can't open the application (-50)" dialog.
@@ -1061,10 +1218,70 @@ struct NativeChatView: View {
 
     private var chatColumn: some View {
         VStack(spacing: 0) {
+            conversationHeader
+            Divider()
             messagesScroll
             Divider()
             inputArea
         }
+    }
+
+    /// Compact bar over the transcript: project chip + in-place editable title.
+    private var conversationHeader: some View {
+        HStack(spacing: 8) {
+            if let p = chat.project(id: chat.current?.projectID) {
+                Menu {
+                    Button(loc.t("Quitar del proyecto", "Remove from project")) {
+                        if let c = chat.current { chat.move(c, toProject: nil) }
+                    }
+                    Button(loc.t("Prompt del proyecto…", "Project prompt…")) { promptProject = p }
+                } label: {
+                    Label(p.name, systemImage: "folder")
+                        .font(.caption.weight(.medium)).lineLimit(1)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .tint(.secondary)
+                .glassSurface(in: Capsule(), interactive: true)
+                .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
+                .help(loc.t("Proyecto de esta conversación.", "This conversation's project."))
+            }
+            TextField(loc.t("Título de la conversación", "Conversation title"),
+                      text: $headerTitle)
+                .textFieldStyle(.plain)
+                .font(.callout.weight(.medium))
+                .onSubmit {
+                    if let c = chat.current { chat.rename(c, to: headerTitle) }
+                }
+                .task(id: chat.currentID) { syncHeaderTitle() }
+                .onChange(of: chat.current?.title) { syncHeaderTitle() }
+                .help(loc.t("Haz clic para renombrar la conversación (Enter guarda).",
+                            "Click to rename the conversation (Enter saves)."))
+            Spacer()
+            if !(chat.current?.systemPrompt ?? "").isEmpty {
+                Button {
+                    promptConversation = chat.current
+                } label: {
+                    Image(systemName: "text.bubble.fill").font(.caption)
+                }
+                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                .help(loc.t("Esta conversación tiene prompt propio; clic para editarlo.",
+                            "This conversation has its own prompt; click to edit it."))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
+
+    /// Header shows the stored title; a brand-new empty chat starts blank
+    /// instead of the "…" placeholder so typing sets a real title.
+    private func syncHeaderTitle() {
+        guard let c = chat.current else { headerTitle = ""; return }
+        headerTitle = c.title.isEmpty
+            ? (c.messages.isEmpty ? "" : chat.displayTitle(c))
+            : c.title
     }
 
     /// First message not covered by the compaction summary; the transcript
@@ -1150,7 +1367,8 @@ struct NativeChatView: View {
                     canRegenerate: !chat.generating,
                     onRegenerate: {
                         chat.regenerate(port: port, temperature: temperature,
-                                        maxTokens: maxTokens, system: systemPrompt,
+                                        maxTokens: maxTokens,
+                                        system: chat.effectiveSystemPrompt(global: systemPrompt),
                                         thinking: thinkingEnabled)
                     },
                     onEdit: {
@@ -1185,7 +1403,7 @@ struct NativeChatView: View {
         VStack(spacing: 10) {
             Image(systemName: "bubble.left.and.text.bubble.right")
                 .font(.system(size: 34))
-                .foregroundStyle(.pink.opacity(0.8))
+                .foregroundStyle(Color.appAccent.opacity(0.8))
             Text(loc.t("¿En qué puedo ayudarte?", "What can I help with?"))
                 .font(.title2.weight(.semibold))
             Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo. Adjunta código, texto o PDF con el clip para preguntar sobre ellos.",
@@ -1251,7 +1469,7 @@ struct NativeChatView: View {
                     Button(action: send) {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 26))
-                            .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.45))
+                            .foregroundStyle(canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
                     }
                     .buttonStyle(.borderless)
                     .padding(.bottom, 2)
@@ -1281,11 +1499,10 @@ struct NativeChatView: View {
             showSystem.toggle()
         } label: {
             Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 16))
-                .foregroundStyle(systemPrompt.isEmpty ? Color.secondary : Color.accentColor)
         }
-        .buttonStyle(.borderless)
-        .padding(.bottom, 6)
+        .buttonStyle(GlassIconButtonStyle(
+            active: !chat.effectiveSystemPrompt(global: systemPrompt).isEmpty))
+        .padding(.bottom, 4)
         .popover(isPresented: $showSystem, arrowEdge: .top) { paramsPopover }
         .help(loc.t("Parámetros del chat: razonamiento, creatividad, longitud de respuesta y prompt de sistema.",
                     "Chat parameters: reasoning, creativity, response length and system prompt."))
@@ -1350,32 +1567,68 @@ struct NativeChatView: View {
 
             Divider()
 
-            Label(loc.t("Prompt de sistema", "System prompt"), systemImage: "gearshape")
+            Label(loc.t("Prompt de sistema global", "Global system prompt"), systemImage: "gearshape")
                 .font(.subheadline.weight(.medium))
-                .infoTip(loc.t("Instrucciones permanentes para el modelo.",
-                               "Permanent instructions for the model."))
+                .infoTip(loc.t("Instrucciones permanentes para el modelo. Prioridad: prompt de la conversación, luego el del proyecto, luego este global.",
+                               "Permanent instructions for the model. Priority: the conversation's prompt, then the project's, then this global one."))
             TextEditor(text: $systemPrompt)
                 .font(.system(size: 12))
                 .frame(height: 90)
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
-            Text(loc.t("Se aplica a los mensajes nuevos de todas las conversaciones.",
-                       "Applies to new messages in all conversations."))
+
+            HStack(spacing: 10) {
+                Button {
+                    showSystem = false
+                    promptConversation = chat.current
+                } label: {
+                    Label(loc.t("De esta conversación…", "This conversation's…"),
+                          systemImage: (chat.current?.systemPrompt ?? "").isEmpty ? "text.bubble" : "text.bubble.fill")
+                }
+                .buttonStyle(.link).font(.caption)
+                .help(loc.t("Prompt propio de esta conversación; sustituye al del proyecto y al global.",
+                            "This conversation's own prompt; overrides the project and global ones."))
+                if let p = chat.project(id: chat.current?.projectID) {
+                    Button {
+                        showSystem = false
+                        promptProject = p
+                    } label: {
+                        Label(loc.t("Del proyecto…", "Project's…"),
+                              systemImage: p.systemPrompt.isEmpty ? "folder" : "folder.fill")
+                    }
+                    .buttonStyle(.link).font(.caption)
+                    .help(loc.t("Prompt compartido por las conversaciones del proyecto \"\(p.name)\".",
+                                "Prompt shared by the conversations in project \"\(p.name)\"."))
+                }
+            }
+            Text(activePromptCaption)
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .padding(14)
         .frame(width: 380)
     }
 
+    /// Which system prompt actually applies to the open conversation.
+    private var activePromptCaption: String {
+        if !(chat.current?.systemPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return loc.t("Activo: el prompt de esta conversación.", "Active: this conversation's prompt.")
+        }
+        if let p = chat.project(id: chat.current?.projectID),
+           !p.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return loc.t("Activo: el prompt del proyecto \"\(p.name)\".", "Active: project \"\(p.name)\"'s prompt.")
+        }
+        return systemPrompt.isEmpty
+            ? loc.t("Sin prompt de sistema.", "No system prompt.")
+            : loc.t("Activo: el prompt global.", "Active: the global prompt.")
+    }
+
     private var attachButton: some View {
         Button(action: pickAttachments) {
             Image(systemName: "paperclip")
-                .font(.system(size: 16))
-                .foregroundStyle(attachments.isEmpty ? Color.secondary : Color.accentColor)
         }
-        .buttonStyle(.borderless)
-        .padding(.bottom, 6)
+        .buttonStyle(GlassIconButtonStyle(active: !attachments.isEmpty))
+        .padding(.bottom, 4)
         .disabled(chat.generating)
         .help(loc.t("Adjuntar archivos: texto, código y PDF (se extrae su texto; los PDF escaneados por OCR); de otros binarios se extraen las cadenas legibles. Imágenes solo si el modelo tiene visión (su mmproj). También puedes arrastrarlos al área de escritura.",
                     "Attach files: text, code and PDF (text is extracted; scanned PDFs via OCR); other binaries contribute their readable strings. Images only if the model has vision (its mmproj). You can also drag them onto the input area."))
@@ -1757,7 +2010,8 @@ struct NativeChatView: View {
         attachError = nil
         atBottom = true
         chat.send(text: text, attachments: files, images: imgs, port: port, temperature: temperature,
-                  maxTokens: maxTokens, system: systemPrompt, thinking: thinkingEnabled)
+                  maxTokens: maxTokens, system: chat.effectiveSystemPrompt(global: systemPrompt),
+                  thinking: thinkingEnabled)
     }
 }
 
@@ -1782,28 +2036,54 @@ enum ConversationSortOrder: String, CaseIterable {
 struct ConversationListView: View {
     @EnvironmentObject var chat: ChatStore
     @EnvironmentObject var loc: Localizer
+    @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
     @State private var searchText = ""
     @State private var renaming: Conversation?
     @State private var renameText = ""
+    @State private var renamingProject: ChatProject?
+    @State private var projectRenameText = ""
+    @State private var creatingProject = false
+    @State private var newProjectName = ""
+    @State private var promptProject: ChatProject?
+    @State private var promptConversation: Conversation?
     @AppStorage(SettingsKeys.chatSortOrder) private var sortOrderRaw = ConversationSortOrder.lastUsed.rawValue
 
     private var sortOrder: ConversationSortOrder {
         ConversationSortOrder(rawValue: sortOrderRaw) ?? .lastUsed
     }
 
-    private var filtered: [Conversation] {
-        let query = searchText.trimmingCharacters(in: .whitespaces)
-        let base = query.isEmpty ? chat.conversations : chat.conversations.filter { c in
-            chat.displayTitle(c).localizedCaseInsensitiveContains(query) ||
-            c.messages.contains { $0.content.localizedCaseInsensitiveContains(query) }
-        }
-        return base.sorted { a, b in
-            if (a.pinned ?? false) != (b.pinned ?? false) { return a.pinned ?? false }
+    private var searching: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    private func sorted(_ base: [Conversation]) -> [Conversation] {
+        base.sorted { a, b in
             switch sortOrder {
             case .lastUsed: return a.updated > b.updated
             case .created: return a.created > b.created
             case .title: return chat.displayTitle(a).localizedCaseInsensitiveCompare(chat.displayTitle(b)) == .orderedAscending
             }
+        }
+    }
+
+    private var searchResults: [Conversation] {
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        return sorted(chat.conversations.filter { c in
+            chat.displayTitle(c).localizedCaseInsensitiveContains(query) ||
+            c.messages.contains { $0.content.localizedCaseInsensitiveContains(query) }
+        })
+    }
+
+    /// Pinned chats surface in their own section; the rest stay in their group.
+    private var pinnedChats: [Conversation] { sorted(chat.conversations.filter { $0.pinned ?? false }) }
+    private var ungroupedChats: [Conversation] {
+        sorted(chat.conversations.filter { !($0.pinned ?? false) && $0.projectID == nil })
+    }
+    private func projectChats(_ p: ChatProject) -> [Conversation] {
+        sorted(chat.conversations.filter { !($0.pinned ?? false) && $0.projectID == p.id })
+    }
+    private var sortedProjects: [ChatProject] {
+        chat.projects.sorted { a, b in
+            if (a.pinned ?? false) != (b.pinned ?? false) { return a.pinned ?? false }
+            return a.created > b.created
         }
     }
 
@@ -1818,22 +2098,31 @@ struct ConversationListView: View {
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                chat.newConversation()
+                chat.newConversation(in: chat.current?.projectID)
             } label: {
                 Label(loc.t("Nueva conversación", "New chat"), systemImage: "square.and.pencil")
                     .frame(maxWidth: .infinity)
             }
-            .controlSize(.large)
+            .buttonStyle(GlassPillButtonStyle(prominent: true))
             .keyboardShortcut("n", modifiers: .command)
             .padding(.horizontal, 12)
             .padding(.top, 12)
-            .padding(.bottom, 8)
-            .help(loc.t("Empieza una conversación nueva (⌘N).", "Start a new conversation (⌘N)."))
+            .padding(.bottom, 10)
+            .help(loc.t("Empieza una conversación nueva en el proyecto actual (⌘N).",
+                        "Start a new conversation in the current project (⌘N)."))
 
             HStack(spacing: 8) {
-                TextField(loc.t("Buscar…", "Search…"), text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.large)
+                GlassSearchField(placeholder: loc.t("Buscar…", "Search…"), text: $searchText)
+
+                Button {
+                    newProjectName = ""
+                    creatingProject = true
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                }
+                .buttonStyle(GlassIconButtonStyle())
+                .help(loc.t("Nuevo proyecto: una carpeta con su propio prompt de sistema.",
+                            "New project: a folder with its own system prompt."))
 
                 Menu {
                     ForEach(ConversationSortOrder.allCases, id: \.self) { order in
@@ -1849,56 +2138,55 @@ struct ConversationListView: View {
                     }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
-                .menuStyle(.borderlessButton).fixedSize()
+                .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                .tint(.secondary)
+                .frame(width: 28, height: 28)
+                .glassSurface(in: Circle(), interactive: true)
+                .overlay(Circle().strokeBorder(.primary.opacity(0.07)))
                 .help(loc.t("Ordenar conversaciones", "Sort conversations"))
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
 
-            List(selection: $chat.currentID) {
-                ForEach(filtered) { c in
-                    HStack(spacing: 6) {
-                        if c.pinned ?? false {
-                            Image(systemName: "pin.fill")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(chat.displayTitle(c))
-                                .lineLimit(1)
-                            Text(relativeDate(c.updated))
-                                .font(.caption2).foregroundStyle(.secondary)
+            List {
+                if searching {
+                    ForEach(searchResults) { chatRow($0, showsProject: true) }
+                } else {
+                    if !pinnedChats.isEmpty {
+                        Section(loc.t("Fijados", "Pinned")) {
+                            ForEach(pinnedChats) { chatRow($0, showsProject: true) }
                         }
                     }
-                    .padding(.vertical, 5)
-                    .tag(c.id)
-                    .contextMenu {
-                        Button((c.pinned ?? false) ? loc.t("Desfijar", "Unpin") : loc.t("Fijar", "Pin")) {
-                            chat.togglePin(c)
-                        }
-                        Button(loc.t("Renombrar…", "Rename…")) {
-                            renameText = chat.displayTitle(c)
-                            renaming = c
-                        }
-                        Button(loc.t("Copiar conversación", "Copy conversation")) {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(chat.exportText(c), forType: .string)
-                        }
-                        Button(loc.t("Exportar a Markdown…", "Export to Markdown…")) {
-                            let panel = NSSavePanel()
-                            panel.nameFieldStringValue = chat.displayTitle(c)
-                                .replacingOccurrences(of: "/", with: "-") + ".md"
-                            if panel.runModal() == .OK, let url = panel.url {
-                                try? chat.exportText(c).write(to: url, atomically: true, encoding: .utf8)
+                    if !chat.projects.isEmpty {
+                        Section(loc.t("Proyectos", "Projects")) {
+                            ForEach(sortedProjects) { p in
+                                DisclosureGroup(isExpanded: expandBinding(p)) {
+                                    let rows = projectChats(p)
+                                    if rows.isEmpty {
+                                        Text(loc.t("Sin conversaciones", "No conversations"))
+                                            .font(.caption).foregroundStyle(.tertiary)
+                                    } else {
+                                        ForEach(rows) { chatRow($0, showsProject: false) }
+                                    }
+                                } label: {
+                                    projectRow(p)
+                                }
                             }
                         }
-                        Button(loc.t("Eliminar", "Delete"), role: .destructive) { chat.delete(c) }
+                    }
+                    if !ungroupedChats.isEmpty {
+                        Section(loc.t("Conversaciones", "Chats")) {
+                            ForEach(ungroupedChats) { chatRow($0, showsProject: false) }
+                        }
                     }
                 }
             }
             .listStyle(.sidebar)
         }
-        .navigationSplitViewColumnWidth(min: 200, ideal: 235, max: 320)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 340)
         .alert(loc.t("Renombrar conversación", "Rename conversation"),
                isPresented: Binding(get: { renaming != nil },
                                     set: { if !$0 { renaming = nil } })) {
@@ -1909,5 +2197,216 @@ struct ConversationListView: View {
             }
             Button(loc.t("Cancelar", "Cancel"), role: .cancel) { renaming = nil }
         }
+        .alert(loc.t("Nuevo proyecto", "New project"), isPresented: $creatingProject) {
+            TextField(loc.t("Nombre", "Name"), text: $newProjectName)
+            Button(loc.t("Crear", "Create")) {
+                let name = newProjectName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                let p = chat.newProject(name: name)
+                chat.newConversation(in: p.id)
+            }
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(loc.t("Una carpeta para tus conversaciones. Si le defines un prompt de sistema al proyecto, todas las conversaciones dentro lo heredan.",
+                       "A folder for your conversations. If you set a system prompt on the project, every conversation inside inherits it."))
+        }
+        .alert(loc.t("Renombrar proyecto", "Rename project"),
+               isPresented: Binding(get: { renamingProject != nil },
+                                    set: { if !$0 { renamingProject = nil } })) {
+            TextField(loc.t("Nombre", "Name"), text: $projectRenameText)
+            Button(loc.t("Guardar", "Save")) {
+                if let p = renamingProject { chat.renameProject(p, to: projectRenameText) }
+                renamingProject = nil
+            }
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { renamingProject = nil }
+        }
+        .sheet(item: $promptProject) { p in
+            PromptEditorSheet(
+                title: loc.t("Prompt del proyecto \"\(p.name)\"", "Project prompt for \"\(p.name)\""),
+                hint: loc.t("Lo heredan todas las conversaciones del proyecto que no tengan prompt propio.",
+                            "Inherited by every conversation in the project without its own prompt."),
+                initial: p.systemPrompt
+            ) { chat.setProjectPrompt(p, $0) }
+        }
+        .sheet(item: $promptConversation) { c in
+            PromptEditorSheet(
+                title: loc.t("Prompt de esta conversación", "This conversation's prompt"),
+                hint: loc.t("Sustituye al prompt del proyecto y al global solo en esta conversación. Vacío = heredar.",
+                            "Overrides the project and global prompts for this conversation only. Empty = inherit."),
+                initial: c.systemPrompt ?? ""
+            ) { chat.setConversationPrompt(c, $0) }
+        }
+    }
+
+    private func expandBinding(_ p: ChatProject) -> Binding<Bool> {
+        Binding(get: { !(p.collapsed ?? false) },
+                set: { chat.setProjectCollapsed(p, !$0) })
+    }
+
+    // MARK: rows
+
+    @ViewBuilder private func projectRow(_ p: ChatProject) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(AppTheme.accent(accentRaw).opacity(0.85))
+            Text(p.name)
+                .font(.callout.weight(.medium)).lineLimit(1)
+            if p.pinned ?? false {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 8)).foregroundStyle(.tertiary)
+            }
+            if !p.systemPrompt.trimmingCharacters(in: .whitespaces).isEmpty {
+                Image(systemName: "text.bubble")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .help(loc.t("Este proyecto tiene prompt de sistema propio.",
+                                "This project has its own system prompt."))
+            }
+            Spacer(minLength: 4)
+            Text("\(chat.conversations.filter { $0.projectID == p.id }.count)")
+                .font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 1)
+                .background(.quaternary.opacity(0.6), in: Capsule())
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .dropDestination(for: String.self) { ids, _ in
+            let moved = ids.compactMap { UUID(uuidString: $0) }
+                .compactMap { id in chat.conversations.first { $0.id == id } }
+            guard !moved.isEmpty else { return false }
+            moved.forEach { chat.move($0, toProject: p.id) }
+            return true
+        }
+        .contextMenu {
+            Button(loc.t("Nueva conversación aquí", "New chat here")) {
+                chat.setProjectCollapsed(p, false)
+                chat.newConversation(in: p.id)
+            }
+            Button(loc.t("Prompt del proyecto…", "Project prompt…")) { promptProject = p }
+            Button(loc.t("Renombrar…", "Rename…")) {
+                projectRenameText = p.name
+                renamingProject = p
+            }
+            Button((p.pinned ?? false) ? loc.t("Desfijar proyecto", "Unpin project")
+                                       : loc.t("Fijar proyecto", "Pin project")) {
+                chat.togglePinProject(p)
+            }
+            Divider()
+            Button(loc.t("Eliminar proyecto", "Delete project"), role: .destructive) {
+                chat.deleteProject(p)
+            }
+        }
+    }
+
+    @ViewBuilder private func chatRow(_ c: Conversation, showsProject: Bool) -> some View {
+        HStack(spacing: 7) {
+            if c.pinned ?? false {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 9)).foregroundStyle(AppTheme.accent(accentRaw).opacity(0.7))
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(chat.displayTitle(c))
+                    .font(.callout).lineLimit(1)
+                HStack(spacing: 5) {
+                    if showsProject, let p = chat.project(id: c.projectID) {
+                        Label(p.name, systemImage: "folder")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .labelStyle(.titleAndIcon).lineLimit(1)
+                    }
+                    Text(relativeDate(c.updated))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            if !(c.systemPrompt ?? "").isEmpty {
+                Spacer(minLength: 2)
+                Image(systemName: "text.bubble")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .help(loc.t("Esta conversación tiene prompt propio.",
+                                "This conversation has its own prompt."))
+            }
+        }
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { chat.currentID = c.id }
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(chat.currentID == c.id
+                      ? AppTheme.accent(accentRaw).opacity(0.26) : Color.clear)
+                .padding(.horizontal, 4))
+        .draggable(c.id.uuidString)
+        .contextMenu {
+            Button((c.pinned ?? false) ? loc.t("Desfijar", "Unpin") : loc.t("Fijar", "Pin")) {
+                chat.togglePin(c)
+            }
+            Button(loc.t("Renombrar…", "Rename…")) {
+                renameText = chat.displayTitle(c)
+                renaming = c
+            }
+            Button(loc.t("Prompt de esta conversación…", "This conversation's prompt…")) {
+                promptConversation = c
+            }
+            Menu(loc.t("Mover a proyecto", "Move to project")) {
+                Button(loc.t("Ninguno", "None")) { chat.move(c, toProject: nil) }
+                ForEach(sortedProjects) { p in
+                    Button(p.name + (c.projectID == p.id ? " ✓" : "")) {
+                        chat.move(c, toProject: p.id)
+                    }
+                }
+            }
+            Divider()
+            Button(loc.t("Copiar conversación", "Copy conversation")) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(chat.exportText(c), forType: .string)
+            }
+            Button(loc.t("Exportar a Markdown…", "Export to Markdown…")) {
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = chat.displayTitle(c)
+                    .replacingOccurrences(of: "/", with: "-") + ".md"
+                if panel.runModal() == .OK, let url = panel.url {
+                    try? chat.exportText(c).write(to: url, atomically: true, encoding: .utf8)
+                }
+            }
+            Button(loc.t("Eliminar", "Delete"), role: .destructive) { chat.delete(c) }
+        }
+    }
+}
+
+/// Shared editor for project and per-conversation system prompts.
+struct PromptEditorSheet: View {
+    @EnvironmentObject var loc: Localizer
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let hint: String
+    let initial: String
+    let onSave: (String) -> Void
+    @State private var text = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: "text.bubble")
+                .font(.headline)
+            TextEditor(text: $text)
+                .font(.system(size: 12))
+                .frame(minHeight: 140)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
+            Text(hint)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button(loc.t("Cancelar", "Cancel"), role: .cancel) { dismiss() }
+                Button(loc.t("Guardar", "Save")) {
+                    onSave(text)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 440)
+        .onAppear { text = initial }
     }
 }

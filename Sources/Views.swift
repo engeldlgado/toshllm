@@ -47,11 +47,23 @@ let hardware = HardwareInfo.detect()
 struct ControlPanelView: View {
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var control: ControlPanelState
+    @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
 
     var body: some View {
         NavigationSplitView {
-            List(Section_.allCases.filter { $0 != .chat }, selection: $control.section) { s in
-                Label(s.title(loc), systemImage: s.icon).tag(s)
+            // Selection drawn by the app so it follows the theme accent
+            // instead of the system one (same as the chat sidebar).
+            List(Section_.allCases.filter { $0 != .chat }) { s in
+                Label(s.title(loc), systemImage: s.icon)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { control.section = s }
+                    .listRowBackground(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(control.section == s
+                                  ? Color.appAccent.opacity(0.26) : Color.clear)
+                            .padding(.horizontal, 4))
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 185, max: 220)
         } detail: {
@@ -65,7 +77,9 @@ struct ControlPanelView: View {
             case .about: AboutView()
             }
         }
-        .tint(.pink)
+        .tint(AppTheme.accent(accentRaw))
+        // Rebuild on theme change so static accent reads refresh everywhere.
+        .id(accentRaw)
         .navigationTitle(loc.t("Configuración", "Configuration"))
         // Telemetry rides in the glass title bar (macOS 26), shared across all
         // sections, instead of a flat strip beneath the large title.
@@ -84,7 +98,7 @@ struct OnboardingSheet: View {
     var body: some View {
         VStack(spacing: 18) {
             Image(systemName: "cpu.fill")
-                .font(.system(size: 40)).foregroundStyle(.pink)
+                .font(.system(size: 40)).foregroundStyle(Color.appAccent)
             Text(loc.t("Bienvenido a ToshLLM", "Welcome to ToshLLM"))
                 .font(.title.bold())
             Text(loc.t("Modelos de lenguaje corriendo en tu GPU, sin nube y sin cuentas.",
@@ -122,8 +136,8 @@ struct OnboardingSheet: View {
             Text(number)
                 .font(.system(.callout, design: .rounded).bold())
                 .frame(width: 24, height: 24)
-                .background(.pink.opacity(0.18), in: Circle())
-                .foregroundStyle(.pink)
+                .background(Color.appAccent.opacity(0.18), in: Circle())
+                .foregroundStyle(Color.appAccent)
             Text(text)
         }
     }

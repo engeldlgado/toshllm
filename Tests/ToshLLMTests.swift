@@ -934,5 +934,52 @@ final class ConversationDecodingTests: XCTestCase {
         let list = try JSONDecoder().decode([Conversation].self, from: json)
         XCTAssertEqual(list.count, 1)
         XCTAssertEqual(list[0].pinned, nil)
+        XCTAssertNil(list[0].projectID)
+        XCTAssertNil(list[0].systemPrompt)
+    }
+}
+
+final class SystemPromptResolutionTests: XCTestCase {
+    func testChatPromptWinsOverProjectAndGlobal() {
+        XCTAssertEqual(ChatStore.resolvePrompt(chat: "chat", project: "proj", global: "glob"), "chat")
+    }
+
+    func testProjectPromptWinsWhenChatIsEmptyOrNil() {
+        XCTAssertEqual(ChatStore.resolvePrompt(chat: "  \n", project: "proj", global: "glob"), "proj")
+        XCTAssertEqual(ChatStore.resolvePrompt(chat: nil, project: "proj", global: "glob"), "proj")
+    }
+
+    func testGlobalIsTheFallback() {
+        XCTAssertEqual(ChatStore.resolvePrompt(chat: nil, project: "", global: "glob"), "glob")
+        XCTAssertEqual(ChatStore.resolvePrompt(chat: nil, project: nil, global: ""), "")
+    }
+}
+
+final class ReleaseNotesRangeTests: XCTestCase {
+    let all = [("0.81.66", "c"), ("0.81.65", "b"), ("0.81.64", "a"), ("0.81.63", "z")]
+
+    func testShowsEverythingNewerThanCurrentNewestFirst() {
+        let out = UpdateChecker.notesToShow(all: all, current: "0.81.64")
+        XCTAssertEqual(out.map(\.0), ["0.81.66", "0.81.65"])
+    }
+
+    func testUpToDateShowsOnlyTheCurrentVersion() {
+        let out = UpdateChecker.notesToShow(all: all, current: "0.81.66")
+        XCTAssertEqual(out.map(\.0), ["0.81.66"])
+    }
+}
+
+final class SmartTitleTests: XCTestCase {
+    func testStripsMarkdownAndCutsAtWordBoundary() {
+        XCTAssertEqual(ChatStore.smartTitle(from: "## Hola mundo"), "Hola mundo")
+        let long = "Explícame paso a paso cómo funciona el prefill descompuesto en tarjetas AMD"
+        let t = ChatStore.smartTitle(from: long)
+        XCTAssertTrue(t.hasSuffix("…"))
+        XCTAssertLessThanOrEqual(t.count, 50)
+    }
+
+    func testUsesFirstMeaningfulLine() {
+        XCTAssertEqual(ChatStore.smartTitle(from: "\n\n- item uno\nresto"), "item uno")
+        XCTAssertEqual(ChatStore.smartTitle(from: "hola"), "hola")
     }
 }

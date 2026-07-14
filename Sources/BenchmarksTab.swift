@@ -177,7 +177,7 @@ struct BenchmarksView: View {
                 if let best = bench.sweepBest, !bench.sweeping {
                     HStack(spacing: 10) {
                         Label(bench.sweepStatus, systemImage: "scope")
-                            .font(.callout).foregroundStyle(.pink)
+                            .font(.callout).foregroundStyle(Color.appAccent)
                         Button(loc.t("Aplicar ncmoe \(best)", "Apply ncmoe \(best)")) {
                             cfg.ncmoe = best
                             ServerSettings.rememberNcmoe(best, forModel: cfg.modelPath)
@@ -260,7 +260,7 @@ struct BenchmarksView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: bench.sweeping ? "waveform.path.ecg" : "checkmark.circle.fill")
-                    .foregroundStyle(bench.sweeping ? .pink : .green)
+                    .foregroundStyle(bench.sweeping ? Color.appAccent : .green)
                 Text(bench.sweeping
                      ? loc.t("Midiendo configuraciones", "Measuring configurations")
                      : loc.t("Resultados temporales del sweep", "Temporary sweep results"))
@@ -303,10 +303,10 @@ struct BenchmarksView: View {
             .scrollIndicators(.hidden)
         }
         .padding(10)
-        .background(.pink.opacity(0.055), in: .rect(cornerRadius: 10))
+        .background(Color.appAccent.opacity(0.055), in: .rect(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .stroke(.pink.opacity(0.14), lineWidth: 1)
+                .stroke(Color.appAccent.opacity(0.14), lineWidth: 1)
         }
         .animation(.easeInOut(duration: 0.2), value: bench.sweepSamples.count)
     }
@@ -345,9 +345,9 @@ struct BenchmarksView: View {
         }
         .font(.system(size: 10.5, design: .monospaced))
         .padding(.horizontal, 7).padding(.vertical, 2)
-        .background(active ? AnyShapeStyle(.pink.opacity(0.18)) : AnyShapeStyle(.quaternary.opacity(0.5)),
+        .background(active ? AnyShapeStyle(Color.appAccent.opacity(0.18)) : AnyShapeStyle(.quaternary.opacity(0.5)),
                     in: Capsule())
-        .foregroundStyle(active ? .pink : .secondary)
+        .foregroundStyle(active ? Color.appAccent : .secondary)
     }
 
     private func faChipText(_ route: String) -> String {
@@ -381,7 +381,7 @@ struct BenchmarksView: View {
         HStack(spacing: 16) {
             if let best = bench.history.max(by: { $0.tg < $1.tg }) {
                 bestCard(title: loc.t("Mejor generación", "Best generation"),
-                         icon: "bolt.fill", value: best.tg, color: .pink, result: best)
+                         icon: "bolt.fill", value: best.tg, color: Color.appAccent, result: best)
             }
             if let best = bench.history.max(by: { $0.pp < $1.pp }) {
                 bestCard(title: loc.t("Mejor prompt", "Best prompt"),
@@ -412,7 +412,7 @@ struct BenchmarksView: View {
     private func rowAction(_ system: String, _ help: String, destructive: Bool = false,
                            _ action: @escaping () -> Void) -> some View {
         Button(action: action) { Image(systemName: system) }
-            .buttonStyle(HoverIconButtonStyle(tint: destructive ? .red : .pink))
+            .buttonStyle(HoverIconButtonStyle(tint: destructive ? .red : Color.appAccent))
             .help(help)
     }
 
@@ -486,7 +486,7 @@ struct BenchmarksView: View {
                                 }
                                 Spacer(minLength: 0)
                             }
-                            metricBar(loc.t("Gen", "Gen"), value: r.tg, max: maxTG, color: .pink)
+                            metricBar(loc.t("Gen", "Gen"), value: r.tg, max: maxTG, color: Color.appAccent)
                             metricBar("Prompt", value: r.pp, max: maxPP, color: Color.blue.opacity(0.8))
                         }
                         if r.profile != nil {
@@ -506,7 +506,7 @@ struct BenchmarksView: View {
                     if r.id != recent.last?.id { Divider().opacity(0.4) }
                 }
                 HStack(spacing: 16) {
-                    legendDot(.pink, loc.t("Generación", "Generation"))
+                    legendDot(Color.appAccent, loc.t("Generación", "Generation"))
                     legendDot(Color.blue.opacity(0.8), "Prompt")
                     Spacer()
                     Text(loc.t("t/s · barras normalizadas por métrica",
@@ -551,58 +551,20 @@ struct BenchmarksView: View {
 
     private var historyCard: some View {
         let bestTG = bench.history.max(by: { $0.tg < $1.tg })?.id
+        let lastID = bench.history.last?.id
         return Card(title: loc.t("Historial completo", "Full history"), icon: "clock",
                     trailing: bench.history.isEmpty ? nil : AnyView(clearHistoryButton)) {
-            ForEach(bench.history) { r in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 5) {
-                            if r.id == bestTG {
-                                Image(systemName: "crown.fill")
-                                    .font(.system(size: 9)).foregroundStyle(.yellow)
-                                    .help(loc.t("Mejor generación", "Best generation"))
-                            }
-                            Text(r.shortModel).font(.callout.weight(.medium))
-                        }
-                        HStack(spacing: 5) {
-                            Text(r.configLabel)
-                                .font(.system(size: 10, design: .monospaced))
-                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(.quaternary.opacity(0.6), in: Capsule())
-                            if let gpu = r.gpu {
-                                Label(gpu, systemImage: "cpu")
-                                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                            Text(r.date.formatted(date: .abbreviated, time: .shortened))
-                                .font(.caption2).foregroundStyle(.tertiary)
-                        }
-                    }
-                    Spacer()
-                    HStack(spacing: 14) {
-                        VStack(alignment: .trailing, spacing: 1) {
-                            Text("prompt").font(.system(size: 9)).foregroundStyle(.tertiary)
-                            Text(String(format: "%.1f", r.pp))
-                                .font(.system(.callout, design: .monospaced))
-                        }
-                        VStack(alignment: .trailing, spacing: 1) {
-                            Text("gen").font(.system(size: 9)).foregroundStyle(.tertiary)
-                            Text(String(format: "%.1f", r.tg))
-                                .font(.system(.callout, design: .monospaced).weight(.semibold))
-                                .foregroundStyle(.pink)
-                        }
-                    }
-                    HStack(spacing: 4) {
-                        if r.profile != nil {
-                            rowAction("square.and.arrow.down",
-                                      loc.t("Guardar como perfil", "Save as profile")) { promptSave(r) }
-                            rowAction("checkmark.circle",
-                                      loc.t("Aplicar a los Ajustes globales", "Apply to global Settings")) { applyGlobal(r) }
-                        }
-                        rowAction("trash", loc.t("Eliminar", "Delete"), destructive: true) { bench.delete(r) }
-                    }
+            // Lazy + Equatable rows: offscreen rows aren't built, and visible
+            // ones skip re-rendering during the frequent in-run publishes.
+            LazyVStack(spacing: 0) {
+                ForEach(bench.history) { r in
+                    BenchHistoryRow(r: r, isBest: r.id == bestTG, showsDivider: r.id != lastID,
+                                    loc: loc,
+                                    onSaveProfile: { promptSave(r) },
+                                    onApplyGlobal: { applyGlobal(r) },
+                                    onDelete: { bench.delete(r) })
+                        .equatable()
                 }
-                .padding(.vertical, 3)
-                if r.id != bench.history.last?.id { Divider() }
             }
         }
     }
@@ -619,7 +581,7 @@ struct BenchmarksView: View {
 /// Icon button that highlights on hover — used for the per-row save/apply/delete
 /// actions so they read as interactive without cluttering the row at rest.
 private struct HoverIconButtonStyle: ButtonStyle {
-    var tint: Color = .pink
+    var tint: Color = Color.appAccent
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
@@ -633,5 +595,83 @@ private struct HoverIconButtonStyle: ButtonStyle {
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// One history row; Equatable so in-run publishes don't re-render the list.
+private struct BenchHistoryRow: View, Equatable {
+    let r: BenchResult
+    let isBest: Bool
+    let showsDivider: Bool
+    let loc: Localizer
+    let onSaveProfile: () -> Void
+    let onApplyGlobal: () -> Void
+    let onDelete: () -> Void
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.r.id == b.r.id && a.isBest == b.isBest && a.showsDivider == b.showsDivider
+    }
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    if isBest {
+                        Image(systemName: "crown.fill")
+                            .font(.system(size: 9)).foregroundStyle(.yellow)
+                            .help(loc.t("Mejor generación", "Best generation"))
+                    }
+                    Text(r.shortModel).font(.callout.weight(.medium))
+                }
+                HStack(spacing: 5) {
+                    Text(r.configLabel)
+                        .font(.system(size: 10, design: .monospaced))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(.quaternary.opacity(0.6), in: Capsule())
+                    if let gpu = r.gpu {
+                        Label(gpu, systemImage: "cpu")
+                            .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Text(r.date, format: .dateTime.day().month().hour().minute())
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer(minLength: 12)
+            // Fixed-width metric columns so values line up across rows.
+            HStack(spacing: 18) {
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("prompt").font(.system(size: 9)).foregroundStyle(.tertiary)
+                    Text(String(format: "%.1f", r.pp))
+                        .font(.system(.callout, design: .monospaced))
+                }
+                .frame(minWidth: 58, alignment: .trailing)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("gen").font(.system(size: 9)).foregroundStyle(.tertiary)
+                    Text(String(format: "%.1f", r.tg))
+                        .font(.system(.callout, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(Color.appAccent)
+                }
+                .frame(minWidth: 48, alignment: .trailing)
+            }
+            HStack(spacing: 6) {
+                if r.profile != nil {
+                    action("square.and.arrow.down",
+                           loc.t("Guardar como perfil", "Save as profile"), onSaveProfile)
+                    action("checkmark.circle",
+                           loc.t("Aplicar a los Ajustes globales", "Apply to global Settings"), onApplyGlobal)
+                }
+                action("trash", loc.t("Eliminar", "Delete"), destructive: true, onDelete)
+            }
+            .padding(.leading, 10)
+        }
+        .padding(.vertical, 6)
+        if showsDivider { Divider() }
+    }
+
+    private func action(_ system: String, _ help: String, destructive: Bool = false,
+                        _ run: @escaping () -> Void) -> some View {
+        Button(action: run) { Image(systemName: system) }
+            .buttonStyle(HoverIconButtonStyle(tint: destructive ? .red : Color.appAccent))
+            .help(help)
     }
 }

@@ -3,6 +3,23 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **Projects in the chat sidebar**... folders that group conversations, pinnable like chats, with drag and drop and a shared system prompt.
+- **System prompts per conversation and per project**... the conversation's wins, then the project's, then the global one; the parameters popover shows which applies.
+- **Hourly update check**... the app silently re-checks while it stays open and lights the update badge; toggle in Settings.
+- **Release notes in-app**... the Notes button now shows what changed from your version up to the latest in a popup; when up to date, the current version's notes (also from About, next to the version).
+
+### Improved
+- **The app icon is native on macOS 26**... rebuilt as a layered Liquid Glass icon (gradient background + chip glyph) with a rendered fallback for older systems.
+- **The chat adopts the macOS 26 design language**... capsule and glass controls (new-chat, search, composer, project chips) using Liquid Glass on macOS 26 and translucent materials on 14-15.
+- **The Benchmarks history stays smooth with long lists**... rows render lazily and skip redraws during runs.
+- **Conversation titles**... smarter auto-titles and in-place renaming from the new header bar over the transcript.
+
+### Fixed
+- **Chat text no longer cuts off with "…" on indented lines** at certain window widths (#32).
+
 ## [0.81.65] - 2026-07-13
 
 ### Added

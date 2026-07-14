@@ -555,7 +555,7 @@ private struct RoleChip: View {
 }
 
 struct MoEBadge: View {
-    var body: some View { TagBadge(text: "MoE", color: .pink) }
+    var body: some View { TagBadge(text: "MoE", color: Color.appAccent) }
 }
 
 /// Small capsule tag (MoE / Vision / Coder) shown on model cards.

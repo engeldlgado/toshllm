@@ -69,6 +69,8 @@ struct ToshLLMApp: App {
         }
     }
 
+    @AppStorage(SettingsKeys.appAccent) private var appAccentRaw = AppTheme.defaultKey
+
     var body: some Scene {
         // Main window: the chat. A single Window (not WindowGroup) keeps ⌘N
         // for "new conversation" instead of "new window".
@@ -84,14 +86,18 @@ struct ToshLLMApp: App {
                 .environmentObject(profiles)
                 .environmentObject(updates)
                 .environmentObject(control)
-                .tint(.pink)
+                .tint(AppTheme.accent(appAccentRaw))
                 .frame(minWidth: 760, minHeight: 540)
-                .task { await updates.check() }
+                .task {
+                    await updates.check()
+                    updates.startPeriodicChecks()
+                }
         }
         .defaultSize(width: 1240, height: 820)
 
         Window(loc.t("Configuración", "Configuration"), id: "control") {
             ControlPanelView()
+                .tint(AppTheme.accent(appAccentRaw))
                 .environmentObject(server)
                 .environmentObject(manager)
                 .environmentObject(models)

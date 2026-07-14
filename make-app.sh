@@ -129,6 +129,29 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+# macOS 26 Liquid Glass icon: compile the layered AppIcon.icon when the
+# toolchain has actool 26+; ships Assets.car plus a freshly rendered legacy
+# icns. Without it the repo icns above remains the icon.
+# CLT-only setups need Xcode.app spelled out (same story as scripts/test.sh).
+ACTOOL=$(xcrun --find actool 2>/dev/null || true)
+if [ -z "$ACTOOL" ] && [ -x /Applications/Xcode.app/Contents/Developer/usr/bin/actool ]; then
+    ACTOOL=/Applications/Xcode.app/Contents/Developer/usr/bin/actool
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
+if [ -d AppIcon.icon ] && [ -n "$ACTOOL" ]; then
+    ICONTMP=$(mktemp -d)
+    if "$ACTOOL" AppIcon.icon --compile "$ICONTMP" --platform macosx \
+        --minimum-deployment-target 14.0 --app-icon AppIcon \
+        --output-partial-info-plist "$ICONTMP/icon.plist" > /dev/null 2>&1 \
+        && [ -f "$ICONTMP/Assets.car" ]; then
+        cp "$ICONTMP/Assets.car" "$APP/Contents/Resources/"
+        [ -f "$ICONTMP/AppIcon.icns" ] && cp "$ICONTMP/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+        /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$APP/Contents/Info.plist" 2>/dev/null || true
+        echo "bundled Liquid Glass icon (Assets.car + rendered icns)"
+    fi
+    rm -rf "$ICONTMP"
+fi
+
 [ -x "$APP/Contents/Resources/bin/llama-server" ] && codesign --force -s - "$APP/Contents/Resources/bin/"*
 [ -x "$APP/Contents/Resources/bin-turbo/llama-server" ] && codesign --force -s - "$APP/Contents/Resources/bin-turbo/"*
 [ -x "$APP/Contents/Resources/bin-image/sd-cli" ] && codesign --force -s - "$APP/Contents/Resources/bin-image/"*

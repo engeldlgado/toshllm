@@ -43,6 +43,8 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.modelsDir) private var modelsDir = ""
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
+    @AppStorage(SettingsKeys.updateAutoCheck) private var updateAutoCheck = true
+    @AppStorage(SettingsKeys.appAccent) private var appAccentRaw = AppTheme.defaultKey
     @AppStorage(SettingsKeys.menuBarGPU) private var menuBarGPU = "panel"
     @AppStorage(SettingsKeys.autoStart) private var autoStart = false
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
@@ -162,6 +164,20 @@ struct SettingsView: View {
                 }
                 .infoTip(loc.t("Idioma de toda la interfaz de ToshLLM. Los idiomas aportados por la comunidad aparecen automáticamente.",
                             "Language for the entire ToshLLM interface. Community-contributed languages appear here automatically."))
+                Picker(selection: $appAccentRaw) {
+                    ForEach(AppTheme.palette, id: \.key) { entry in
+                        Label {
+                            Text(AppTheme.label(entry.key, loc))
+                        } icon: {
+                            Image(nsImage: AppTheme.swatchImage(entry.color))
+                        }
+                        .tag(entry.key)
+                    }
+                } label: {
+                    Text(loc.t("Color de la app", "App color"))
+                }
+                .infoTip(loc.t("Color de marca de botones, iconos y controles de toda la app. Independiente del color de acento del sistema.",
+                            "Brand color for buttons, icons and controls across the app. Independent from the system accent color."))
                 Toggle(loc.t("Icono en la barra de menús", "Menu bar icon"), isOn: $menuBarIcon)
                     .infoTip(loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
                                 "Shows a menu bar icon with server status and quick controls, even with the window closed."))
@@ -176,6 +192,9 @@ struct SettingsView: View {
                 Toggle(loc.t("Iniciar servidor al abrir la app", "Start server on app launch"), isOn: $autoStart)
                     .infoTip(loc.t("Arranca automáticamente el último modelo configurado al abrir ToshLLM.",
                                 "Automatically starts the last configured model when ToshLLM opens."))
+                Toggle(loc.t("Buscar actualizaciones cada hora", "Check for updates hourly"), isOn: $updateAutoCheck)
+                    .infoTip(loc.t("Además del chequeo al abrir la app, revisa en silencio cada hora mientras esté abierta y enciende el aviso de actualización si hay versión nueva. No descarga ni instala nada solo.",
+                                "Besides the launch check, silently re-checks every hour while the app is open and lights the update badge when a new version exists. Never downloads or installs on its own."))
                 Toggle(loc.t("Proteger la API con clave", "Protect the API with a key"), isOn: $apiKeyEnabled)
                     .infoTip(loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
                                 "Generates a key (stored in the Keychain) required on every request. The in-app chat uses it automatically; useful on shared Macs."))

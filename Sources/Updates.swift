@@ -1,9 +1,16 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 struct UpdateError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
+}
+
+struct ReleaseNote: Identifiable {
+    let version: String
+    let body: String
+    var id: String { version }
 }
 
 /// Checks GitHub Releases for a newer published version and installs it:
@@ -18,8 +25,24 @@ final class UpdateChecker: ObservableObject {
 
     private var dmgURL: URL?
     private var checksumsURL: URL?
+    private var periodicTask: Task<Void, Never>?
 
     static let releasesAPI = "https://api.github.com/repos/engeldlgado/toshllm/releases/latest"
+
+    /// Re-checks every hour while the app stays open, for people who never
+    /// relaunch. Silent: it only lights up the existing update badge.
+    func startPeriodicChecks(interval: TimeInterval = 3600) {
+        guard periodicTask == nil else { return }
+        periodicTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                let enabled = UserDefaults.standard.object(forKey: SettingsKeys.updateAutoCheck) == nil
+                    || UserDefaults.standard.bool(forKey: SettingsKeys.updateAutoCheck)
+                if enabled { await self?.check() }
+            }
+        }
+    }
 
     func check() async {
         guard !checking else { return }
@@ -177,6 +200,37 @@ final class UpdateChecker: ObservableObject {
         NSApp.terminate(nil)
     }
 
+    // MARK: release notes
+
+    @Published var releaseNotes: [ReleaseNote]?
+    @Published var loadingNotes = false
+
+    /// Notes from the running version up to the newest release; when already
+    /// up to date, just the running version's notes.
+    func fetchReleaseNotes() async {
+        guard !loadingNotes else { return }
+        loadingNotes = true
+        defer { loadingNotes = false }
+        guard let url = URL(string: "https://api.github.com/repos/engeldlgado/toshllm/releases?per_page=30"),
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+        let all = list.compactMap { obj -> (String, String)? in
+            guard let tag = obj["tag_name"] as? String else { return nil }
+            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            return (version, obj["body"] as? String ?? "")
+        }
+        releaseNotes = Self.notesToShow(all: all, current: AppInfo.version)
+            .map { ReleaseNote(version: $0.0, body: $0.1) }
+    }
+
+    nonisolated static func notesToShow(all: [(String, String)], current: String) -> [(String, String)] {
+        let newer = all.filter { isVersion($0.0, newerThan: current) }
+            .sorted { isVersion($0.0, newerThan: $1.0) }
+        if !newer.isEmpty { return newer }
+        return all.filter { $0.0 == current }
+    }
+
     /// Numeric per-component comparison (0.81.1 < 0.82 < 1.0).
     nonisolated static func isVersion(_ a: String, newerThan b: String) -> Bool {
         let pa = a.split(separator: ".").map { Int($0) ?? 0 }
@@ -187,5 +241,62 @@ final class UpdateChecker: ObservableObject {
             if x != y { return x > y }
         }
         return false
+    }
+}
+
+/// Popup with the release notes covered by `fetchReleaseNotes`.
+struct ReleaseNotesPopover: View {
+    @EnvironmentObject var updates: UpdateChecker
+    @EnvironmentObject var loc: Localizer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(loc.t("Notas de la versión", "Release notes"), systemImage: "doc.text")
+                .font(.headline)
+            if updates.loadingNotes {
+                HStack {
+                    Spacer()
+                    ProgressView().controlSize(.small)
+                    Spacer()
+                }
+                .frame(minHeight: 80)
+            } else if let notes = updates.releaseNotes, !notes.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(notes) { note in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 6) {
+                                    Text("v\(note.version)").font(.subheadline.weight(.semibold))
+                                    if note.version == AppInfo.version {
+                                        Text(loc.t("actual", "current"))
+                                            .font(.caption2)
+                                            .padding(.horizontal, 6).padding(.vertical, 1)
+                                            .background(.quaternary, in: Capsule())
+                                    }
+                                }
+                                RichText(text: note.body)
+                                    .font(.callout)
+                            }
+                            if note.id != notes.last?.id { Divider() }
+                        }
+                    }
+                    .padding(.trailing, 6)
+                }
+                .frame(maxHeight: 420)
+            } else {
+                Text(loc.t("No se pudieron cargar las notas.", "Could not load the notes."))
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(minHeight: 60)
+            }
+            Divider()
+            Button(loc.t("Ver en GitHub", "View on GitHub")) {
+                let tag = updates.releaseNotes?.first.map { "v\($0.version)" } ?? "v\(AppInfo.version)"
+                NSWorkspace.shared.open(URL(string: "https://github.com/engeldlgado/toshllm/releases/tag/\(tag)")!)
+            }
+            .buttonStyle(.link).font(.caption)
+        }
+        .padding(14)
+        .frame(width: 480)
+        .task { await updates.fetchReleaseNotes() }
     }
 }

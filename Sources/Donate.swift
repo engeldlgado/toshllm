@@ -10,7 +10,7 @@ struct DonateView: View {
     var body: some View {
         VStack(spacing: 12) {
             Label(loc.t("Apoya el proyecto", "Support the project"), systemImage: "heart.fill")
-                .font(.headline).foregroundStyle(.pink)
+                .font(.headline).foregroundStyle(Color.appAccent)
             Text(loc.isSpanish ? AppInfo.donateNoteES : AppInfo.donateNoteEN)
                 .font(.callout).multilineTextAlignment(.center)
                 .frame(width: 300)
@@ -33,7 +33,7 @@ struct DonateView: View {
                 }
                 .padding(.vertical, 5).frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent).tint(.pink).controlSize(.large)
+            .buttonStyle(.borderedProminent).tint(Color.appAccent).controlSize(.large)
             .frame(width: 300)
 
             Text(loc.t("o con cripto", "or with crypto"))

@@ -103,9 +103,9 @@ struct MessageBubble: View, Equatable {
             if !isUser {
                 Image(systemName: "cpu.fill")
                     .font(.system(size: 13))
-                    .foregroundStyle(.pink)
+                    .foregroundStyle(Color.appAccent)
                     .frame(width: 26, height: 26)
-                    .background(.pink.opacity(0.15), in: Circle())
+                    .background(Color.appAccent.opacity(0.15), in: Circle())
             }
 
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
@@ -248,9 +248,9 @@ struct StreamingMessageBubble: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "cpu.fill")
                 .font(.system(size: 13))
-                .foregroundStyle(.pink)
+                .foregroundStyle(Color.appAccent)
                 .frame(width: 26, height: 26)
-                .background(.pink.opacity(0.15), in: Circle())
+                .background(Color.appAccent.opacity(0.15), in: Circle())
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
@@ -418,7 +418,7 @@ struct LiveSpeedBadge: View {
         if let speed = live.speed {
             Text(String(format: "%.1f t/s", speed))
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.pink)
+                .foregroundStyle(Color.appAccent)
         }
     }
 }

@@ -18,6 +18,7 @@ struct DashboardView: View {
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
     @AppStorage(SettingsKeys.embeddings) private var embeddings = false
+    @State private var showNotes = false
     @AppStorage(SettingsKeys.routerMode) private var routerMode = false
     @AppStorage(SettingsKeys.routerModelsMax) private var routerModelsMax = 1
 
@@ -68,10 +69,11 @@ struct DashboardView: View {
                     Text(loc.t("Actualizando…", "Updating…")).font(.caption).foregroundStyle(.secondary)
                 } else {
                     Button(loc.t("Notas", "Notes")) {
-                        if let url = updates.releaseURL { NSWorkspace.shared.open(url) }
+                        showNotes = true
                     }
-                    .help(loc.t("Abre las notas de la versión en GitHub.",
-                                "Opens the release notes on GitHub."))
+                    .popover(isPresented: $showNotes, arrowEdge: .bottom) { ReleaseNotesPopover() }
+                    .help(loc.t("Muestra las novedades desde tu versión hasta la más reciente.",
+                                "Shows what changed from your version up to the latest one."))
                     Button(loc.t("Descargar e instalar", "Download and install")) {
                         Task { await updates.downloadAndInstall() }
                     }
@@ -81,7 +83,7 @@ struct DashboardView: View {
                 }
             }
             .padding(12)
-            .background(.pink.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            .background(Color.appAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
@@ -142,8 +144,8 @@ struct DashboardView: View {
                 Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
             }
             .padding(.horizontal, 9).padding(.vertical, 4)
-            .background(.pink.opacity(0.15), in: Capsule())
-            .foregroundStyle(.pink)
+            .background(Color.appAccent.opacity(0.15), in: Capsule())
+            .foregroundStyle(Color.appAccent)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -169,7 +171,7 @@ struct DashboardView: View {
                 // Interactive glass installs its own press gesture that competes
                 // with the Button and sometimes eats the click; feedback comes from
                 // PressableButtonStyle instead.
-                .glassSurface(in: Capsule(), tint: .pink)
+                .glassSurface(in: Capsule(), tint: Color.appAccent)
                 .contentShape(Capsule())
                 .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
         }

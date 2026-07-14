@@ -61,6 +61,10 @@ enum SettingsKeys {
     /// Where to surface per-GPU VRAM in the menu bar: "off" | "icon" | "panel".
     static let menuBarGPU = "menuBarGPU"
     static let autoStart = "autoStart"
+    /// Hourly silent update check while the app stays open (default on).
+    static let updateAutoCheck = "updateAutoCheck"
+    /// Brand accent for the whole UI (AppTheme palette key).
+    static let appAccent = "appAccent"
     static let chatTemp = "chatTemp"
     static let chatMaxTokens = "chatMaxTokens"
     static let chatSystem = "chatSystem"
@@ -110,7 +114,8 @@ enum SettingsKeys {
         parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, routerMode, routerModelsMax,
         persistCache, multiGPU, multiGPUCount,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
-        menuBarIcon, menuBarGPU, autoStart, chatTemp, chatMaxTokens, chatSystem, chatThinking,
+        menuBarIcon, menuBarGPU, autoStart, updateAutoCheck, appAccent,
+        chatTemp, chatMaxTokens, chatSystem, chatThinking,
         chatAutoCompact, smoothTyping,
         imagenAspect, imagenBaseSize, imagenSteps, imagenFormat, imagenOffloadCPU, imagenGPU,
     ]

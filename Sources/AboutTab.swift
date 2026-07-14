@@ -21,6 +21,7 @@ enum AppInfo {
 struct AboutView: View {
     @EnvironmentObject var loc: Localizer
     @State private var showDonate = false
+    @State private var showNotes = false
     @State private var copied = false
 
     var body: some View {
@@ -33,8 +34,15 @@ struct AboutView: View {
                 }
                 VStack(spacing: 4) {
                     Text("ToshLLM").font(.largeTitle.weight(.bold))
-                    Text(loc.t("Versión", "Version") + " " + AppInfo.version)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Text(loc.t("Versión", "Version") + " " + AppInfo.version)
+                            .foregroundStyle(.secondary)
+                        Button(loc.t("Notas", "Notes")) { showNotes = true }
+                            .buttonStyle(.link).font(.caption)
+                            .popover(isPresented: $showNotes, arrowEdge: .bottom) { ReleaseNotesPopover() }
+                            .help(loc.t("Novedades desde tu versión hasta la más reciente; si estás al día, las de la actual.",
+                                        "What changed from your version up to the latest; when up to date, the current one's notes."))
+                    }
                 }
                 Text(loc.t("Modelos de lenguaje locales con aceleración Metal en Macs Intel con GPU AMD.",
                            "Local language models with Metal acceleration on Intel Macs with AMD GPUs."))
@@ -60,7 +68,7 @@ struct AboutView: View {
                             Label(loc.t("Donar", "Donate"), systemImage: "heart.fill")
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(.pink)
+                        .tint(Color.appAccent)
                         .popover(isPresented: $showDonate, arrowEdge: .bottom) { donatePopover }
                     }
                 }

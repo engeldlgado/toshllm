@@ -31,6 +31,7 @@ struct ChatMainView: View {
     // (canvas): it owns every generation instance and its generator, so both
     // halves of the split view drive the same runs.
     @StateObject private var imageGenPool = ImageGenPool()
+    @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
 
     var body: some View {
         // A single NavigationSplitView for both modes: only the sidebar and detail
@@ -54,6 +55,7 @@ struct ChatMainView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .animation(.easeInOut(duration: 0.2), value: mode)
+        .tint(AppTheme.accent(accentRaw))
         .environmentObject(chat)
         .navigationTitle("ToshLLM")
         .navigationSubtitle(mode == .images
@@ -119,7 +121,7 @@ struct ChatMainView: View {
                     openControl(.dashboard)
                 } label: {
                     Label(loc.t("Actualización", "Update"), systemImage: "arrow.down.app.fill")
-                        .foregroundStyle(.pink)
+                        .foregroundStyle(Color.appAccent)
                 }
                 .help(loc.t("ToshLLM \(version) disponible... instálala desde Configuración → Inicio.",
                             "ToshLLM \(version) available... install it from Configuration → Home."))
@@ -157,7 +159,7 @@ struct ChatMainView: View {
     private var setupHero: some View {
         VStack(spacing: 18) {
             Image(systemName: "cpu.fill")
-                .font(.system(size: 44)).foregroundStyle(.pink)
+                .font(.system(size: 44)).foregroundStyle(Color.appAccent)
             Text(modelPath.isEmpty
                  ? loc.t("Empieza descargando un modelo", "Start by downloading a model")
                  : loc.t("Todo listo para conversar", "Ready to chat"))
