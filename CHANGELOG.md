@@ -5,6 +5,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **The fast prefill route is now on by default for GCN/Vega cards** (#26, #29, #31; opt-in via `TOSH_W64_PREFILL=1` in 0.81.65)... validated on Vega II with identical perplexity and up to 2.8x at pp16384; `TOSH_W64_PREFILL_DISABLE=1` in Extra arguments turns it back off.
+
 ### Added
 - **Projects in the chat sidebar**... folders that group conversations, pinnable like chats, with drag and drop and a shared system prompt.
 - **System prompts per conversation and per project**... the conversation's wins, then the project's, then the global one; the parameters popover shows which applies.
@@ -18,6 +21,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Conversation titles**... smarter auto-titles and in-place renaming from the new header bar over the transcript.
 
 ### Fixed
+- **Multi-GPU hand-off hardening** (candidate fix for #31)... the layer hand-off now drains the destination GPU before writing its input, and the fallback copy no longer issues an invalid cross-device blit.
+- **Image generation no longer times out on eGPUs** (#33)... the image engine now gets the same private-VRAM buffer fix the LLM engine got in 0.81.30.
 - **Chat text no longer cuts off with "…" on indented lines** at certain window widths (#32).
 
 ## [0.81.65] - 2026-07-13
