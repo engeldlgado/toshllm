@@ -3,10 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.81.67] - 2026-07-14
 
-### Changed
+### Improved
 - **MoE prompt processing on GCN/Vega now uses the tiled matmul** (#29)... expert layers were still going through the mat-vec kernels during prefill; `TOSH_W64_MMID_PREFILL_DISABLE=1` in Extra arguments reverts to the old route.
+- **Model names and speed estimates are clearer**... local GGUFs show readable titles, capabilities and quantization, while estimates now account for quant size and active MoE parameters.
+
+### Fixed
+- **Chat projects are easier to open and reorganize**... the whole project row responds to clicks, and conversations use a dedicated drag handle so moving them no longer conflicts with opening them.
 
 ## [0.81.66] - 2026-07-14
 
