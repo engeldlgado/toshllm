@@ -4,9 +4,22 @@ struct LocalModel: Identifiable, Hashable {
     let url: URL
     let name: String
     let sizeBytes: Int64
+    let partURLs: [URL]
     var id: String { url.path }
     var sizeGB: String { String(format: "%.1f GB", Double(sizeBytes) / 1_073_741_824) }
-    var isMoE: Bool { ModelName.looksMoE(name) }
+    var isMoE: Bool {
+        if let metadata = GGUFMetadataCache.metadata(at: url.path) {
+            return (metadata.uint32(forSuffix: "expert_count") ?? 0) > 0
+        }
+        return ModelName.looksMoE(name)
+    }
+
+    init(url: URL, name: String, sizeBytes: Int64, partURLs: [URL]? = nil) {
+        self.url = url
+        self.name = name
+        self.sizeBytes = sizeBytes
+        self.partURLs = partURLs ?? [url]
+    }
 
     /// Top-level `.gguf` scan, excluding mmproj files. Shared by `ModelStore.refresh()`
     /// and the router preset generator, which has no `ModelStore` instance to call.
@@ -14,12 +27,19 @@ struct LocalModel: Identifiable, Hashable {
         let fm = FileManager.default
         try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        return files
-            .filter { $0.pathExtension.lowercased() == "gguf"
-                && !$0.lastPathComponent.lowercased().contains("mmproj") }
-            .compactMap { url in
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-                return LocalModel(url: url, name: url.lastPathComponent, sizeBytes: size)
+        let entries = files.map { url in
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+            return GGUFFileEntry(path: url.path, sizeBytes: size)
+        }
+        return GGUFFile.models(from: entries)
+            .map { group in
+                let url = URL(fileURLWithPath: group.primaryPath)
+                return LocalModel(
+                    url: url,
+                    name: url.lastPathComponent,
+                    sizeBytes: group.sizeBytes,
+                    partURLs: group.paths.map { URL(fileURLWithPath: $0) }
+                )
             }
             .sorted { $0.sizeBytes < $1.sizeBytes }
     }
@@ -276,7 +296,7 @@ final class ModelStore: ObservableObject {
     }
 
     func isDownloaded(fileName: String) -> Bool {
-        models.contains { $0.name == fileName }
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName).path)
     }
 
     func localModel(fileName: String) -> LocalModel? {
@@ -299,7 +319,8 @@ final class ModelStore: ObservableObject {
     /// under generic, collision-prone names (e.g. `mmproj-F16.gguf`, identical
     /// across repos). Saving them as `<model>.mmproj.gguf` makes the model→
     /// projector pairing deterministic and avoids cross-repo filename clashes.
-    func download(urlString: String, preferredName: String? = nil) {
+    func download(urlString: String, preferredName: String? = nil,
+                  fetchVisionProjector: Bool = true) {
         guard let remote = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
               remote.scheme?.hasPrefix("http") == true else { return }
         let fileName = preferredName ?? remote.lastPathComponent
@@ -309,7 +330,7 @@ final class ModelStore: ObservableObject {
         downloads.append(item)
         // Vision models ship a separate projector (mmproj). When downloading the
         // model, fetch its sibling mmproj too so vision works without manual steps.
-        if !fileName.lowercased().contains("mmproj") {
+        if fetchVisionProjector && !fileName.lowercased().contains("mmproj") {
             Task { await autoFetchProjector(for: remote) }
         }
     }
@@ -384,7 +405,9 @@ final class ModelStore: ObservableObject {
         if let proj = ServerSettings.mmprojPath(forModel: model.url.path) {
             try? FileManager.default.trashItem(at: URL(fileURLWithPath: proj), resultingItemURL: nil)
         }
-        try? FileManager.default.trashItem(at: model.url, resultingItemURL: nil)
+        for url in model.partURLs {
+            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        }
         refresh()
     }
 }

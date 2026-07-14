@@ -488,32 +488,9 @@ struct ServerSettings {
     /// True when the model's attention head dim exceeds 256 (Gemma 4's global
     /// layers use key_length 512). Reads the real uint32 value from
     /// the GGUF header (`<arch>.attention.key_length`), skipping the `_swa`
-    /// sibling. Cached per path+size.
+    /// sibling. Cached by the shared GGUF reader.
     nonisolated static func modelHasBigHeadDim(at path: String) -> Bool {
-        struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0)
-        if let cached = Cache.store[key] { return cached }
-
-        var big = false
-        if let handle = FileHandle(forReadingAtPath: path),
-           let head = try? handle.read(upToCount: 4 * 1024 * 1024) {
-            try? handle.close()
-            let marker = Data("attention.key_length".utf8)
-            var from = head.startIndex
-            while let r = head.range(of: marker, in: from ..< head.endIndex) {
-                from = head.index(after: r.lowerBound)
-                guard let valEnd = head.index(r.upperBound, offsetBy: 8, limitedBy: head.endIndex)
-                else { break }
-                let b = [UInt8](head[r.upperBound ..< valEnd])   // value_type (u32) + value (u32), LE
-                let vt = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
-                guard vt == 4 else { continue }   // GGUF_TYPE_UINT32; else this was key_length_swa
-                let val = UInt32(b[4]) | UInt32(b[5]) << 8 | UInt32(b[6]) << 16 | UInt32(b[7]) << 24
-                if val > 256 { big = true; break }
-            }
-        }
-        Cache.store[key] = big
-        return big
+        (GGUFMetadataCache.metadata(at: path)?.uint32(forSuffix: "attention.key_length") ?? 0) > 256
     }
 
     var kvNeedsFlashAttention: Bool {
@@ -548,181 +525,30 @@ struct ServerSettings {
     /// grep reads that as MTP and the server then aborts on the missing draft
     /// tensors). Without the key, the `.nextn.` tensor names decide, for
     /// conversions that keep the tensors but drop the metadata.
-    /// Cached per path+size.
+    /// Cached by the shared GGUF reader.
     nonisolated static func modelHasMTP(at path: String) -> Bool {
-        struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0)
-        if let cached = Cache.store[key] { return cached }
-
-        var found = false
         if let layers = ggufUInt32("nextn_predict_layers", at: path) {
-            found = layers >= 1
-        } else if let handle = FileHandle(forReadingAtPath: path),
-                  let head = try? handle.read(upToCount: 32 * 1024 * 1024) {
-            try? handle.close()
-            found = head.range(of: Data(".nextn.".utf8)) != nil
+            return layers >= 1
         }
-        Cache.store[key] = found
-        return found
+        return GGUFMetadataCache.tensorFlags(at: path).hasNextNTensor
     }
 
     /// True when the model's weights use a TurboQuant type (ggml_type 45/46). Read
     /// from the tensor types, since these GGUFs carry no usable `general.file_type`.
     /// False on an unparseable header, so we never block a model we can't read.
-    /// Cached per path+size.
+    /// Cached by the shared GGUF reader.
     nonisolated static func modelIsTurboQuantWeights(at path: String) -> Bool {
-        struct Cache { nonisolated(unsafe) static var store: [String: Bool] = [:] }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0)
-        if let cached = Cache.store[key] { return cached }
-
-        var isTQ = false
-        if let handle = FileHandle(forReadingAtPath: path),
-           let head = try? handle.read(upToCount: 32 * 1024 * 1024) {
-            try? handle.close()
-            isTQ = ggufHasTurboQuantTensors(head)
-        }
-        Cache.store[key] = isTQ
-        return isTQ
+        GGUFMetadataCache.tensorFlags(at: path).hasTurboQuantTensor
     }
 
-    /// Walks a GGUF header (header → metadata KVs → tensor infos) and returns
-    /// true as soon as a tensor declares a TurboQuant type (45/46). All reads are
-    /// bounds-checked; an overrun (truncated read) returns false.
-    private nonisolated static func ggufHasTurboQuantTensors(_ d: Data) -> Bool {
-        var o = d.startIndex
-        func byte(_ i: Int) -> UInt8? {
-            guard let idx = d.index(o, offsetBy: i, limitedBy: d.endIndex), idx < d.endIndex
-            else { return nil }
-            return d[idx]
-        }
-        func u32() -> UInt32? {
-            guard let e = d.index(o, offsetBy: 4, limitedBy: d.endIndex) else { return nil }
-            var v: UInt32 = 0
-            for i in 0..<4 { v |= UInt32(d[d.index(o, offsetBy: i)]) << (8 * i) }
-            o = e; return v
-        }
-        func u64() -> UInt64? {
-            guard let e = d.index(o, offsetBy: 8, limitedBy: d.endIndex) else { return nil }
-            var v: UInt64 = 0
-            for i in 0..<8 { v |= UInt64(d[d.index(o, offsetBy: i)]) << (8 * i) }
-            o = e; return v
-        }
-        func skip(_ n: UInt64) -> Bool {
-            guard n <= UInt64(Int.max),
-                  let e = d.index(o, offsetBy: Int(n), limitedBy: d.endIndex) else { return false }
-            o = e; return true
-        }
-        func skipString() -> Bool {
-            guard let len = u64() else { return false }
-            return skip(len)
-        }
-        // header: "GGUF" magic, version, tensor count, kv count
-        guard byte(0) == 0x47, byte(1) == 0x47, byte(2) == 0x55, byte(3) == 0x46 else { return false }
-        guard skip(4), u32() != nil, let nTensors = u64(), let nKV = u64() else { return false }
-
-        func skipValue(_ vt: UInt32) -> Bool {
-            switch vt {
-            case 0, 1, 7:    return skip(1)          // int8 / uint8 / bool
-            case 2, 3:       return skip(2)          // int16 / uint16
-            case 4, 5, 6:    return skip(4)          // int32 / uint32 / float32
-            case 10, 11, 12: return skip(8)          // uint64 / int64 / float64
-            case 8:          return skipString()     // string
-            case 9:                                  // array
-                guard let et = u32(), let n = u64() else { return false }
-                if et == 8 {
-                    for _ in 0..<n where !skipString() { return false }
-                    return true
-                }
-                let sz: UInt64
-                switch et {
-                case 0, 1, 7: sz = 1
-                case 2, 3: sz = 2
-                case 4, 5, 6: sz = 4
-                case 10, 11, 12: sz = 8
-                default: return false
-                }
-                return skip(n * sz)
-            default: return false
-            }
-        }
-        for _ in 0..<nKV {
-            guard skipString(), let vt = u32(), skipValue(vt) else { return false }
-        }
-        for _ in 0..<nTensors {
-            guard skipString(), let nd = u32(), skip(UInt64(nd) * 8), let t = u32() else { return false }
-            if t == 45 || t == 46 { return true }    // GGML_TYPE_TQ3_1S / TQ4_1S
-            guard skip(8) else { return false }      // tensor data offset
-        }
-        return false
-    }
-
-    /// First uint32 value for a GGUF metadata key ending in `keySuffix` (the header
-    /// stores `key_len, key, value_type, value`; we match the key suffix, then read
-    /// the value_type + value right after it). Cached per path+size.
+    /// First uint32 value for an exact GGUF metadata key or architecture suffix.
     nonisolated static func ggufUInt32(_ keySuffix: String, at path: String) -> UInt32? {
-        struct Cache { nonisolated(unsafe) static var store: [String: UInt32?] = [:] }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let key = path + ":" + String((attrs?[.size] as? Int64) ?? 0) + ":" + keySuffix
-        if let cached = Cache.store[key] { return cached }
-
-        var result: UInt32? = nil
-        if let handle = FileHandle(forReadingAtPath: path),
-           let head = try? handle.read(upToCount: 8 * 1024 * 1024) {
-            try? handle.close()
-            let marker = Data(keySuffix.utf8)
-            var from = head.startIndex
-            while let r = head.range(of: marker, in: from ..< head.endIndex) {
-                from = head.index(after: r.lowerBound)
-                guard let valEnd = head.index(r.upperBound, offsetBy: 8, limitedBy: head.endIndex) else { break }
-                let b = [UInt8](head[r.upperBound ..< valEnd])   // value_type (u32) + value (u32), LE
-                let vt = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
-                guard vt == 4 else { continue }   // GGUF_TYPE_UINT32
-                result = UInt32(b[4]) | UInt32(b[5]) << 8 | UInt32(b[6]) << 16 | UInt32(b[7]) << 24
-                break
-            }
-        }
-        Cache.store[key] = result
-        return result
+        GGUFMetadataCache.metadata(at: path)?.uint32(forSuffix: keySuffix)
     }
 
-    /// String value for an exact GGUF metadata key; the key's length prefix must
-    /// match so a hit inside another value is skipped. Cached per path+size.
+    /// String value for an exact GGUF metadata key.
     nonisolated static func ggufString(_ key: String, at path: String) -> String? {
-        struct Cache { nonisolated(unsafe) static var store: [String: String?] = [:] }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        let cacheKey = path + ":" + String((attrs?[.size] as? Int64) ?? 0) + ":" + key
-        if let cached = Cache.store[cacheKey] { return cached }
-
-        var result: String? = nil
-        if let handle = FileHandle(forReadingAtPath: path),
-           let head = try? handle.read(upToCount: 2 * 1024 * 1024) {
-            try? handle.close()
-            let marker = Data(key.utf8)
-            var from = head.startIndex
-            while let r = head.range(of: marker, in: from ..< head.endIndex) {
-                from = head.index(after: r.lowerBound)
-                guard head.distance(from: head.startIndex, to: r.lowerBound) >= 8 else { continue }
-                let lenStart = head.index(r.lowerBound, offsetBy: -8)
-                let lb = [UInt8](head[lenStart ..< r.lowerBound])
-                var keyLen: UInt64 = 0
-                for i in 0..<8 { keyLen |= UInt64(lb[i]) << (8 * i) }
-                guard keyLen == UInt64(marker.count) else { continue }
-                guard let valEnd = head.index(r.upperBound, offsetBy: 12, limitedBy: head.endIndex) else { break }
-                let b = [UInt8](head[r.upperBound ..< valEnd])   // value_type (u32) + string length (u64), LE
-                let vt = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
-                guard vt == 8 else { continue }   // GGUF_TYPE_STRING
-                var strLen: UInt64 = 0
-                for i in 0..<8 { strLen |= UInt64(b[4 + i]) << (8 * i) }
-                guard strLen > 0, strLen < 512,
-                      let strEnd = head.index(valEnd, offsetBy: Int(strLen), limitedBy: head.endIndex) else { break }
-                result = String(data: head[valEnd ..< strEnd], encoding: .utf8)
-                break
-            }
-        }
-        Cache.store[cacheKey] = result
-        return result
+        GGUFMetadataCache.metadata(at: path)?.string(for: key)
     }
 
     /// True when the model is a Mixture-of-Experts (GGUF `<arch>.expert_count` > 0).
@@ -759,10 +585,7 @@ struct ServerSettings {
         (UserDefaults.standard.dictionary(forKey: SettingsKeys.prefetchCliffByModel) as? [String: Int])?[path]
     }
 
-    /// Finds the multimodal projector (mmproj) paired with a model, if any. The
-    /// projector must belong to this model — its name starts with the model's stem
-    /// (`<model>.mmproj.gguf`) — so a same-family model's projector isn't mispaired on
-    /// dimension or a shared prefix alone. Enables vision automatically.
+    /// Finds the multimodal projector (mmproj) paired with a model, if any.
     private static func mmprojPairKey(_ model: String, _ projector: String) -> String {
         model + "\u{1}" + projector
     }
@@ -813,15 +636,36 @@ struct ServerSettings {
         projectors = projectors.filter { !isIncompatibleMmproj(model: modelPath, projector: $0.path) }
         guard !projectors.isEmpty else { return nil }
 
-        // Strip the "mmproj" token; what remains must equal the model stem exactly, so a
-        // same-dim projector from another model can't be mispaired (no false positives).
-        // Covers both "<model>.mmproj.gguf" and "mmproj-<model>.gguf".
+        // Managed downloads use an exact model-specific stem. Preserve this as the
+        // highest-confidence path before considering legacy projector names.
         func core(_ s: String) -> String {
             String(s.lowercased().replacingOccurrences(of: "mmproj", with: "").filter { $0.isLetter || $0.isNumber })
         }
         let mn = core(name)
         guard !mn.isEmpty else { return nil }
-        return projectors.first { core($0.deletingPathExtension().lastPathComponent) == mn }?.path
+        if let exact = projectors.first(where: {
+            core($0.deletingPathExtension().lastPathComponent) == mn
+        }) {
+            return exact.path
+        }
+
+        // Legacy/manual names often omit the quant or model size. Fall back only
+        // when the GGUF dimensions match and exactly one same-family projector
+        // remains; ambiguity deliberately returns nil instead of guessing.
+        guard let modelEmbd = ggufUInt32("embedding_length", at: modelPath) else { return nil }
+        func family(_ value: String) -> String {
+            ModelName(value).title.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        func sameFamily(_ lhs: String, _ rhs: String) -> Bool {
+            guard lhs.count >= 5, rhs.count >= 5 else { return false }
+            return lhs == rhs || lhs.hasPrefix(rhs) || rhs.hasPrefix(lhs)
+        }
+        let modelFamily = family(name)
+        let matches = projectors.filter { projector in
+            guard ggufUInt32("projection_dim", at: projector.path) == modelEmbd else { return false }
+            return sameFamily(modelFamily, family(projector.lastPathComponent))
+        }
+        return matches.count == 1 ? matches[0].path : nil
     }
 
     /// The API key the chat must send, when protection is enabled in Settings.

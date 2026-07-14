@@ -311,17 +311,24 @@ private struct FileRow: View {
             }
             Spacer()
             Text(file.sizeGB).font(.caption2).foregroundStyle(.secondary)
-            let fileName = URL(fileURLWithPath: file.path).lastPathComponent
-            if models.isDownloaded(fileName: fileName) {
+            let fileNames = file.paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+            if fileNames.allSatisfy({ models.isDownloaded(fileName: $0) }) {
                 Label(loc.t("Descargado", "Downloaded"), systemImage: "checkmark.circle.fill")
                     .labelStyle(.iconOnly).foregroundStyle(.green)
-            } else if let item = models.downloadItem(fileName: fileName) {
+            } else if let item = fileNames.compactMap({ models.downloadItem(fileName: $0) }).first {
                 InlineDownloadProgress(item: item)
             } else if est.level == .no {
                 Text(loc.t("No cabe", "Won't fit")).font(.caption2).foregroundStyle(.red)
             } else {
                 Button {
-                    models.download(urlString: search.downloadURL(repo: repo, file: file.path))
+                    for path in file.paths where !models.isDownloaded(
+                        fileName: URL(fileURLWithPath: path).lastPathComponent
+                    ) {
+                        models.download(
+                            urlString: search.downloadURL(repo: repo, file: path),
+                            fetchVisionProjector: path == file.path
+                        )
+                    }
                 } label: { Image(systemName: "arrow.down.circle") }
                     .buttonStyle(.borderless)
                     .help(loc.t("Descargar", "Download"))

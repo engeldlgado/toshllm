@@ -7,6 +7,7 @@ struct ModelName {
     let title: String
     let quant: String
     let badges: [String]
+    private let sizeToken: String
 
     var display: String {
         var s = title
@@ -46,10 +47,11 @@ struct ModelName {
         s.range(of: "(?i)(^|\(sep))\(token)($|\(sep))", options: .regularExpression) != nil
     }
 
-    private init(title: String, quant: String, badges: [String]) {
+    private init(title: String, quant: String, badges: [String], sizeToken: String) {
         self.title = title
         self.quant = quant
         self.badges = badges
+        self.sizeToken = sizeToken
     }
 
     init(_ rawName: String) {
@@ -119,6 +121,7 @@ struct ModelName {
 
         self.quant = quantToken
         self.badges = badges
+        self.sizeToken = sizeToken
     }
 
     /// Active parameters in billions from an A<n>B tag (e.g. "35B-A3B" → 3.0).
@@ -134,7 +137,7 @@ struct ModelName {
     /// NxM expert count, or an explicit moe/oss marker.
     static func looksMoE(_ name: String) -> Bool {
         let l = name.lowercased()
-        return l.range(of: "(?i)(^|[-_.])a\\d+b($|[-_.])", options: .regularExpression) != nil
+        return l.range(of: "(?i)(^|[-_.])a\\d+(?:\\.\\d+)?b($|[-_.])", options: .regularExpression) != nil
             || l.range(of: "(?i)(^|[-_.])\\d+x\\d", options: .regularExpression) != nil
             || l.contains("moe") || l.contains("-oss") || l.contains("gpt-oss")
     }
@@ -146,11 +149,21 @@ struct ModelName {
               let meta = ServerSettings.ggufString("general.name", at: path)?
                   .trimmingCharacters(in: .whitespaces),
               !meta.isEmpty else { return byFile }
-        let byMeta = ModelName(meta)
+        // Some converters preserve the Hugging Face repository as owner/model.
+        // Only the model component belongs in the title.
+        let metadataName = meta.split(separator: "/").last.map(String.init) ?? meta
+        let byMeta = ModelName(metadataName)
         guard !byMeta.title.isEmpty else { return byFile }
-        return ModelName(title: byMeta.title,
+        let title = byMeta.sizeToken.isEmpty && !byFile.sizeToken.isEmpty
+            ? "\(byMeta.title) \(byFile.sizeToken)" : byMeta.title
+        var badges: [String] = []
+        for badge in byFile.badges + byMeta.badges where !badges.contains(badge) {
+            badges.append(badge)
+        }
+        return ModelName(title: title,
                          quant: byFile.quant.isEmpty ? byMeta.quant : byFile.quant,
-                         badges: byFile.badges.isEmpty ? byMeta.badges : byFile.badges)
+                         badges: badges,
+                         sizeToken: byMeta.sizeToken.isEmpty ? byFile.sizeToken : byMeta.sizeToken)
     }
 }
 

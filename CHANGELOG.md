@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **Model detection now uses GGUF metadata safely**... renamed MoE models keep correct VRAM estimates, split GGUFs act as one model, and legacy vision projectors pair only when unambiguous.
+
 ## [0.81.67] - 2026-07-14
 
 ### Improved

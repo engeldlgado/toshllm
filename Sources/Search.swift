@@ -9,6 +9,7 @@ struct HFRepo: Identifiable, Decodable {
 struct HFFile: Identifiable {
     let path: String
     let sizeBytes: Int64
+    let paths: [String]
     var id: String { path }
     var sizeGB: String { String(format: "%.1f GB", Double(sizeBytes) / 1_073_741_824) }
     var isMoE: Bool { ModelName.looksMoE(path) }
@@ -84,10 +85,13 @@ final class SearchStore: ObservableObject {
               let (data, _) = try? await URLSession.shared.data(from: url),
               let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
 
-        files[repo] = entries.compactMap { entry in
+        let ggufEntries = entries.compactMap { entry -> GGUFFileEntry? in
             guard let path = entry["path"] as? String, path.lowercased().hasSuffix(".gguf") else { return nil }
             let size = (entry["size"] as? NSNumber)?.int64Value ?? 0
-            return HFFile(path: path, sizeBytes: size)
+            return GGUFFileEntry(path: path, sizeBytes: size)
+        }
+        files[repo] = GGUFFile.models(from: ggufEntries).map {
+            HFFile(path: $0.primaryPath, sizeBytes: $0.sizeBytes, paths: $0.paths)
         }
         .sorted { $0.sizeBytes < $1.sizeBytes }
     }
