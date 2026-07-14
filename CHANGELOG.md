@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.81.66] - 2026-07-14
 
 ### Changed
 - **The fast prefill route is now on by default for GCN/Vega cards** (#26, #29, #31; opt-in via `TOSH_W64_PREFILL=1` in 0.81.65)... validated on Vega II with identical perplexity and up to 2.8x at pp16384; `TOSH_W64_PREFILL_DISABLE=1` in Extra arguments turns it back off.
