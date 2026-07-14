@@ -312,9 +312,11 @@ private struct MDBlockView: View, Equatable {
                             Image(systemName: done ? "checkmark.square" : "square")
                                 .font(.callout).foregroundStyle(.secondary)
                             Text(RichText.inline(String(item.dropFirst(4)))).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
                         } else {
                             Text("•").foregroundStyle(.secondary)
                             Text(RichText.inline(item)).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
@@ -326,6 +328,7 @@ private struct MDBlockView: View, Equatable {
                         Text("\(i + 1).").foregroundStyle(.secondary)
                             .font(.system(.body, design: .monospaced))
                         Text(RichText.inline(item)).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -335,6 +338,7 @@ private struct MDBlockView: View, Equatable {
             HStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 2).fill(.tertiary).frame(width: 3)
                 Text(RichText.inline(s)).foregroundStyle(.secondary).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         case .table(let headers, let rows):
             MDTable(headers: headers, rows: rows)
