@@ -151,6 +151,10 @@ jobs:
             p && /^## \[/ { exit }
             p { print }
           ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section; stamp the Unreleased header before tagging (scripts/release.sh does it)"
+            exit 1
+          fi
           echo "----- release body -----"; cat release-notes.md
 
       - name: Publish release
