@@ -275,7 +275,7 @@ index abf4b06ed..d4872b19b 100644
  
  const char * ggml_metal_get_name(ggml_metal_t ctx);
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..c03c020d8 100644
+index 32d97cd5d..ec4afbc66 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -18,6 +18,7 @@
@@ -471,7 +471,7 @@ index 32d97cd5d..c03c020d8 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -349,50 +451,133 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -349,50 +451,136 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  }
  
  void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -608,7 +608,10 @@ index 32d97cd5d..c03c020d8 100644
 +        if (getenv("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
 +            return false;
 +        }
-+        ggml_metal_synchronize(ctx_src); // finish the source GPU's work before reading it
++        // drain both GPUs: the source before reading it, the destination before
++        // overwriting an input its in-flight graph may still be consuming
++        ggml_metal_synchronize(ctx_src);
++        ggml_metal_synchronize(ctx_dst);
 +
 +        ggml_backend_buffer_t bsrc = src->view_src ? src->view_src->buffer : src->buffer;
 +        ggml_backend_buffer_t bdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
@@ -629,7 +632,7 @@ index 32d97cd5d..c03c020d8 100644
      @autoreleasepool {
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
-@@ -403,7 +588,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
+@@ -403,7 +591,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
  
          // queue the copy operation into the Metal context
          // this will be queued at the end, after any currently ongoing GPU operations
@@ -638,7 +641,7 @@ index 32d97cd5d..c03c020d8 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -504,7 +689,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -504,7 +692,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
          }
  
          // short-hand
@@ -647,7 +650,7 @@ index 32d97cd5d..c03c020d8 100644
  
          // the main thread commits the first few commands immediately
          // cmd_buf[n_cb]
-@@ -626,7 +811,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+@@ -626,7 +814,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
  
  void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -656,7 +659,7 @@ index 32d97cd5d..c03c020d8 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
  
          ggml_metal_event_encode_signal(ev, cmd_buf);
-@@ -642,7 +827,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
+@@ -642,7 +830,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
  
  void ggml_metal_event_wait(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -964,7 +967,7 @@ index d465f31c0..538b337bb 100644
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..08a533fb2 100644
+index a7cbc60eb..b7c5dfe84 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1784,6 +1787,18 @@ index a7cbc60eb..08a533fb2 100644
      }
  }
  
+@@ -1820,6 +2426,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
+         return true;
+     }
+ 
++    // a blit can't reference a buffer owned by another device
++    if (buf_src->dev != buf_dst->dev) {
++        return false;
++    }
++
+     // for private buffers, we need to use Metal blit commands
+     @autoreleasepool {
+         struct ggml_metal_buffer_id bid_src = ggml_metal_buffer_get_id(buf_src, src);
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
 index ff74cafb5..2dd44573a 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
@@ -3523,7 +3538,7 @@ index 25e78e100..2b4693165 100644
          device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
          device float4 * D4 = (device float4 *) D;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 4c86e43c1..d0dbaede2 100644
+index 4c86e43c1..388bbc584 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -2395,7 +2395,36 @@ ggml_tensor * llm_graph_context::build_attn_mha(
@@ -3555,9 +3570,9 @@ index 4c86e43c1..d0dbaede2 100644
 +        getenv("TOSH_FA_AMD_PREFILL_DECOMPOSED_DISABLE") == nullptr &&
 +        getenv("TOSH_FA_AMD_HEAD64_PREFILL_DISABLE") == nullptr &&
 +        metal_simd_width != nullptr &&
-+        // wave64 opt-in for tester A/B; thresholds were measured on RDNA only
++        // wave64 validated on GCN/Vega (parity + long-prompt wins); hatch opts out
 +        (strcmp(metal_simd_width, "32") == 0 ||
-+         (strcmp(metal_simd_width, "64") == 0 && getenv("TOSH_W64_PREFILL") != nullptr)) &&
++         (strcmp(metal_simd_width, "64") == 0 && getenv("TOSH_W64_PREFILL_DISABLE") == nullptr)) &&
 +        n_tokens > decomposed_min_tokens && measured_head_size &&
 +        decomposed_kv_ok;
 +    const bool use_flash_attn = cparams.flash_attn && kq_b == nullptr && !amd_prefill_decomposed;
