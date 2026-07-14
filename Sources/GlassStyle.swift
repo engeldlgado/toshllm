@@ -52,10 +52,26 @@ enum AppTheme {
     static let palette: [(key: String, color: Color)] = [
         ("pink", .pink), ("blue", .blue), ("purple", .purple), ("indigo", .indigo),
         ("teal", .teal), ("green", .green), ("orange", .orange), ("red", .red),
+        ("system", Color(nsColor: .controlAccentColor)),
     ]
 
     static func accent(_ raw: String) -> Color {
         palette.first { $0.key == raw }?.color ?? .pink
+    }
+
+    /// Contrast partner for two-series charts: warm accents pair with blue,
+    /// cool ones with orange, so both bars stay apart under any theme.
+    static func chartSecondary(_ raw: String) -> Color {
+        switch raw {
+        case "pink", "red", "orange": return .blue
+        case "system":
+            var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            NSColor.controlAccentColor.usingColorSpace(.deviceRGB)?
+                .getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+            let warm = h < 0.17 || h > 0.83
+            return (warm || s < 0.2) ? .blue : .orange
+        default: return .orange
+        }
     }
 
     /// Menu-safe color dot: NSMenu templates SF symbols and drops their
@@ -80,6 +96,7 @@ enum AppTheme {
         case "green": return loc.t("Verde", "Green")
         case "orange": return loc.t("Naranja", "Orange")
         case "red": return loc.t("Rojo", "Red")
+        case "system": return loc.t("Sistema", "System")
         default: return raw
         }
     }
@@ -90,6 +107,11 @@ extension Color {
     /// keeps every read fresh when the setting changes.
     static var appAccent: Color {
         AppTheme.accent(UserDefaults.standard.string(forKey: SettingsKeys.appAccent) ?? AppTheme.defaultKey)
+    }
+
+    /// Second chart series, always distinguishable from the accent.
+    static var chartSecondary: Color {
+        AppTheme.chartSecondary(UserDefaults.standard.string(forKey: SettingsKeys.appAccent) ?? AppTheme.defaultKey)
     }
 }
 
@@ -125,11 +147,13 @@ struct GlassIconButtonStyle: ButtonStyle {
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
 
     func makeBody(configuration: Configuration) -> some View {
+        let accent = AppTheme.accent(accentRaw)
         configuration.label
             .font(.system(size: 13, weight: .medium))
             .frame(width: 28, height: 28)
-            .foregroundStyle(active ? AnyShapeStyle(AppTheme.accent(accentRaw)) : AnyShapeStyle(.secondary))
-            .glassSurface(in: Circle(), tint: active ? AppTheme.accent(accentRaw) : nil, interactive: true)
+            .foregroundStyle(active ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+            .background(active ? AnyShapeStyle(accent.opacity(0.88)) : AnyShapeStyle(.clear), in: Circle())
+            .glassSurface(in: Circle(), tint: active ? accent : nil, interactive: true)
             .overlay(Circle().strokeBorder(.primary.opacity(0.07)))
             .contentShape(Circle())
             .opacity(configuration.isPressed ? 0.65 : 1)

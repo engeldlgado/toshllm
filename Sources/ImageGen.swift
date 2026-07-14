@@ -567,13 +567,21 @@ final class ImageGenerator: ObservableObject {
         // Pin the chosen GPU (slot maps to MTLCopyAllDevices order, as in the picker).
         // Index 0 must also be exported: without it Metal falls back to the system
         // default, which on multi-GPU Macs may be a different card than picked.
+        let devices = MTLCopyAllDevices()
         if split {
             // Two Metal slots: 0 = diffusion GPU, 1 = encoder/VAE GPU. The list
             // replaces DEVICE_INDEX (which would offset both slots).
             env["GGML_METAL_DEVICES"] = "2"
             env["GGML_METAL_DEVICE_LIST"] = "\(gpuIndex),\(auxGPUIndex)"
-        } else if gpuIndex >= 0 && MTLCopyAllDevices().count > 1 {
+        } else if gpuIndex >= 0 && devices.count > 1 {
             env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex)
+        }
+        // Metal defaults eGPUs to shared buffers; force private VRAM like the LLM engine.
+        let picked = split ? [gpuIndex, auxGPUIndex] : [gpuIndex]
+        let anyExternal = picked.contains { $0 >= 0 && $0 < devices.count && devices[$0].location == .external }
+            || (gpuIndex < 0 && MTLCreateSystemDefaultDevice()?.location == .external)
+        if UserDefaults.standard.bool(forKey: SettingsKeys.forcePrivateBuffers) || anyExternal {
+            env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
 
         let p = Process()

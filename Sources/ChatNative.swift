@@ -1236,12 +1236,21 @@ struct NativeChatView: View {
                     }
                     Button(loc.t("Prompt del proyecto…", "Project prompt…")) { promptProject = p }
                 } label: {
-                    Label(p.name, systemImage: "folder")
-                        .font(.caption.weight(.medium)).lineLimit(1)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 9).padding(.vertical, 4)
+                    HStack(spacing: 5) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 10, weight: .medium))
+                        Text(p.name).lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .semibold)).opacity(0.7)
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .contentShape(Capsule())
                 }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                // .plain so the menu draws no bezel over the capsule glass
+                .menuStyle(.button).buttonStyle(.plain)
+                .menuIndicator(.hidden).fixedSize()
                 .tint(.secondary)
                 .glassSurface(in: Capsule(), interactive: true)
                 .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
@@ -1469,7 +1478,8 @@ struct NativeChatView: View {
                     Button(action: send) {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 26))
-                            .foregroundStyle(canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
                     }
                     .buttonStyle(.borderless)
                     .padding(.bottom, 2)
@@ -2250,6 +2260,7 @@ struct ConversationListView: View {
             Image(systemName: "folder.fill")
                 .font(.system(size: 12))
                 .foregroundStyle(AppTheme.accent(accentRaw).opacity(0.85))
+                .padding(.leading, 4)
             Text(p.name)
                 .font(.callout.weight(.medium)).lineLimit(1)
             if p.pinned ?? false {
@@ -2269,6 +2280,7 @@ struct ConversationListView: View {
                 .background(.quaternary.opacity(0.6), in: Capsule())
         }
         .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .dropDestination(for: String.self) { ids, _ in
             let moved = ids.compactMap { UUID(uuidString: $0) }

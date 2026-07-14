@@ -36,7 +36,7 @@ hand.
 |---|---|---|
 | Spanish (Español) | `es` | Built-in (100%) |
 | English (English) | `en` | Built-in (100%) |
-| Italian (Italiano) | `it` | 24% (132/545) |
+| Italian (Italiano) | `it` | 24% (132/546) |
 | German (Deutsch) | `de` | not started |
 | French (Français) | `fr` | not started |
 | Portuguese (Português) | `pt` | not started |

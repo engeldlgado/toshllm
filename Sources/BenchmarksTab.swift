@@ -385,7 +385,7 @@ struct BenchmarksView: View {
             }
             if let best = bench.history.max(by: { $0.pp < $1.pp }) {
                 bestCard(title: loc.t("Mejor prompt", "Best prompt"),
-                         icon: "text.alignleft", value: best.pp, color: Color.blue.opacity(0.85), result: best)
+                         icon: "text.alignleft", value: best.pp, color: Color.chartSecondary.opacity(0.85), result: best)
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -487,7 +487,7 @@ struct BenchmarksView: View {
                                 Spacer(minLength: 0)
                             }
                             metricBar(loc.t("Gen", "Gen"), value: r.tg, max: maxTG, color: Color.appAccent)
-                            metricBar("Prompt", value: r.pp, max: maxPP, color: Color.blue.opacity(0.8))
+                            metricBar("Prompt", value: r.pp, max: maxPP, color: Color.chartSecondary.opacity(0.8))
                         }
                         if r.profile != nil {
                             VStack(spacing: 6) {
@@ -507,7 +507,7 @@ struct BenchmarksView: View {
                 }
                 HStack(spacing: 16) {
                     legendDot(Color.appAccent, loc.t("Generación", "Generation"))
-                    legendDot(Color.blue.opacity(0.8), "Prompt")
+                    legendDot(Color.chartSecondary.opacity(0.8), "Prompt")
                     Spacer()
                     Text(loc.t("t/s · barras normalizadas por métrica",
                                "t/s · bars normalized per metric"))
