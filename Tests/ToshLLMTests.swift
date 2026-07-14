@@ -36,6 +36,18 @@ final class EstimatorTests: XCTestCase {
         XCTAssertLessThan(est.ramGB, referenceHW.ramGB * 0.72)
     }
 
+    func testNcmoeOverrideDrivesEstimate() {
+        // A user-set offload must be mirrored in the estimate: more layers on CPU
+        // means a lower suggested ncmoe reflected back and a slower expected speed.
+        let spec = ModelSpec(fileGB: 19.5, paramsB: 35.4, layers: 40, isMoE: true)
+        let auto = Estimator.estimate(spec: spec, hw: referenceHW)
+        let forced = Estimator.estimate(spec: spec, hw: referenceHW, ncmoeOverride: 36)
+        XCTAssertEqual(forced.suggestedNcmoe, 36)
+        XCTAssertGreaterThan(forced.suggestedNcmoe, auto.suggestedNcmoe)
+        XCTAssertGreaterThan(forced.ramGB, auto.ramGB, "more CPU offload needs more RAM")
+        XCTAssertNotEqual(forced.expectedSpeed, auto.expectedSpeed)
+    }
+
     func testMoETooBigForRAMIsRejected() {
         let smallRAM = HardwareInfo(
             cpuBrand: "Test", physicalCores: 4, logicalCores: 8,

@@ -459,7 +459,9 @@ private struct LocalModelCard: View {
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
 
     var body: some View {
-        let est = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: model), hw: hardware)
+        let savedNcmoe = ServerSettings.recalledNcmoe(forModel: model.url.path)
+        let est = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: model), hw: hardware,
+                                            ncmoeOverride: savedNcmoe)
         let active = modelPath == model.url.path
         // A local model is vision-capable if a projector is paired in the folder.
         // If not paired but it's a known catalog vision model, offer to fetch it.
@@ -468,7 +470,18 @@ private struct LocalModelCard: View {
             ? nil : Catalog.models.first { $0.fileName == model.name && $0.isVision }
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                if model.isMoE { MoEBadge() }
+                if model.isMoE {
+                    MoEBadge()
+                    if est.suggestedNcmoe > 0 {
+                        Text("ncmoe \(est.suggestedNcmoe)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(.quaternary.opacity(0.6), in: Capsule())
+                            .foregroundStyle(.secondary)
+                            .help(loc.t("Capas de expertos que se descargan a CPU/RAM para este modelo (tu valor guardado, o el recomendado).",
+                                        "Expert layers offloaded to CPU/RAM for this model (your saved value, or the recommendation)."))
+                    }
+                }
                 if hasProjector { TagBadge(text: loc.t("Visión", "Vision"), color: .purple) }
                 Spacer(minLength: 0)
                 let parsed = ModelName.forPath(model.url.path)

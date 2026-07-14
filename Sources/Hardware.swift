@@ -127,13 +127,16 @@ enum Estimator {
     }
 
     /// Estimate using the user's current context size and KV quantization.
-    static func estimateCurrent(spec: ModelSpec, hw: HardwareInfo) -> MemoryEstimate {
+    /// `ncmoeOverride` reflects a user-set expert-offload for a MoE model, so the
+    /// shown speed/fit match what will actually run instead of the recommendation.
+    static func estimateCurrent(spec: ModelSpec, hw: HardwareInfo,
+                                ncmoeOverride: Int? = nil) -> MemoryEstimate {
         let d = UserDefaults.standard
         let ctx = d.object(forKey: SettingsKeys.ctx) == nil ? 16384 : d.integer(forKey: SettingsKeys.ctx)
         let scale = (kvTypeScale(d.string(forKey: SettingsKeys.cacheTypeK) ?? "f16")
                    + kvTypeScale(d.string(forKey: SettingsKeys.cacheTypeV) ?? "f16")) / 2
         return estimate(spec: spec, hw: hw, ctx: ctx, kvScale: scale,
-                        multiGPU: d.bool(forKey: SettingsKeys.multiGPU))
+                        multiGPU: d.bool(forKey: SettingsKeys.multiGPU), ncmoeOverride: ncmoeOverride)
     }
 
     /// KV cache size of a quantization type relative to f16.
@@ -150,7 +153,7 @@ enum Estimator {
 
     /// Estimates required VRAM/RAM and suggested configuration for a model on this machine.
     static func estimate(spec: ModelSpec, hw: HardwareInfo, ctx: Int = 16384, kvScale: Double = 1.0,
-                         multiGPU: Bool = false) -> MemoryEstimate {
+                         multiGPU: Bool = false, ncmoeOverride: Int? = nil) -> MemoryEstimate {
         // A layer split is sequential (pipeline): combined VRAM raises capacity,
         // not per-token speed. Use summed VRAM (driver reserve per device) when
         // the user enabled the split and there are 2+ GPUs; otherwise one card.
@@ -190,9 +193,14 @@ enum Estimator {
                                   level: .no, expectedSpeed: "—")
         }
 
-        let ncmoe = expertsGB > 0
+        let autoNcmoe = expertsGB > 0
             ? min(spec.layers, Int((Double(spec.layers) * (cpuExpertsGB / expertsGB)).rounded(.up)))
             : 0
+        // A user-set offload wins over the recommendation; experts split by that fraction.
+        let ncmoe = ncmoeOverride.map { max(0, min(spec.layers, $0)) } ?? autoNcmoe
+        let fracRAM = min(1, Double(ncmoe) / Double(max(1, spec.layers)))
+        let cpuExperts = expertsGB * fracRAM
+        let gpuExperts = expertsGB - cpuExperts
 
         // Only the active experts are read per token; a fraction sits in RAM
         // (slow) and the rest in VRAM, so more offload means fewer t/s. The quant
@@ -200,7 +208,6 @@ enum Estimator {
         let active = spec.activeParamsB > 0 ? spec.activeParamsB : spec.paramsB * 0.11
         let bytesPerParam = spec.fileGB / max(1, spec.paramsB)
         let activeGB = active * bytesPerParam
-        let fracRAM = min(1, Double(ncmoe) / Double(max(1, spec.layers)))
         let perToken = activeGB * ((1 - fracRAM) / bwVRAM + fracRAM / bwRAM)
         let tg = clampSpeed(moeEff / max(0.0001, perToken))
 
@@ -208,8 +215,8 @@ enum Estimator {
             return MemoryEstimate(vramGB: spec.fileGB + overheadGB, ramGB: 0.7, suggestedNcmoe: 0,
                                   level: .ideal, expectedSpeed: speedRange(tg))
         }
-        let level: FitLevel = cpuExpertsGB / expertsGB > 0.85 ? .slow : .good
-        return MemoryEstimate(vramGB: overheadGB + gpuExpertsGB, ramGB: ramNeed,
+        let level: FitLevel = fracRAM > 0.85 ? .slow : .good
+        return MemoryEstimate(vramGB: overheadGB + gpuExperts, ramGB: cpuExperts + 1.0,
                               suggestedNcmoe: ncmoe, level: level, expectedSpeed: speedRange(tg))
     }
 

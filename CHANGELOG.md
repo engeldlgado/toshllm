@@ -7,6 +7,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 - **Model detection now uses GGUF metadata safely**... renamed MoE models keep correct VRAM estimates, split GGUFs act as one model, and legacy vision projectors pair only when unambiguous.
+- **The Models tab now reflects your per-model expert offload**... its speed/fit estimate honors the saved ncmoe and shows it as a chip, matching what the server will run.
 
 ## [0.81.67] - 2026-07-14
 
