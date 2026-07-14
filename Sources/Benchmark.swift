@@ -23,12 +23,7 @@ struct BenchResult: Codable, Identifiable {
     var ppN: Int?
     var tgN: Int?
 
-    var shortModel: String {
-        model.replacingOccurrences(of: ".gguf", with: "")
-            .replacingOccurrences(of: "-Instruct", with: "")
-            .replacingOccurrences(of: "-2507", with: "")
-            .replacingOccurrences(of: "-UD", with: "")
-    }
+    var shortModel: String { ModelName(model).title }
 
     var configLabel: String {
         var parts: [String] = []

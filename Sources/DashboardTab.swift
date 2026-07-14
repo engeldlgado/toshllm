@@ -200,7 +200,7 @@ struct DashboardView: View {
                         ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
                     })) {
                         Text(loc.t("Sin modelo", "No model")).tag("")
-                        ForEach(models.models) { Text($0.name).tag($0.url.path) }
+                        ForEach(models.models) { Text(ModelName.forPath($0.url.path).display).tag($0.url.path) }
                     }
                     .labelsHidden()
                     .disabled(server.state == .running || server.state == .starting)
@@ -371,7 +371,7 @@ struct DashboardView: View {
                         .background(style.color.opacity(0.18), in: Capsule())
                         .foregroundStyle(style.color)
                         .fixedSize()
-                    Text(rec.model.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(ModelName(rec.model.name).title).font(.subheadline.weight(.semibold)).lineLimit(1)
                     Text(String(format: "%.1f GB", rec.model.spec.fileGB))
                         .font(.caption2).foregroundStyle(.secondary)
                     if rec.model.spec.isMoE { MoEBadge() }
@@ -509,7 +509,7 @@ struct AddedServerCard: View {
                         manager.persist()
                     })) {
                         Text(loc.t("Sin modelo", "No model")).tag("")
-                        ForEach(models.models) { Text($0.name).tag($0.url.path) }
+                        ForEach(models.models) { Text(ModelName.forPath($0.url.path).display).tag($0.url.path) }
                     }
                     .labelsHidden().disabled(busy)
                 }

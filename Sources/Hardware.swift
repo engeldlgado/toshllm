@@ -85,13 +85,17 @@ struct ModelSpec {
     let paramsB: Double
     let layers: Int
     let isMoE: Bool
+    /// MoE active parameters (billions); 0 = derive from total.
+    var activeParamsB: Double = 0
 
     /// For local models without catalog metadata
-    static func estimated(fileBytes: Int64, isMoE: Bool) -> ModelSpec {
+    static func estimated(fileBytes: Int64, isMoE: Bool, name: String = "") -> ModelSpec {
         let gb = Double(fileBytes) / 1_073_741_824
         // Q4 is roughly 0.57 GB per billion parameters
         let params = gb / 0.57
-        return ModelSpec(fileGB: gb, paramsB: params, layers: isMoE ? 48 : 40, isMoE: isMoE)
+        let active = isMoE ? (ModelName.activeParamsB(name) ?? params * 0.11) : 0
+        return ModelSpec(fileGB: gb, paramsB: params, layers: isMoE ? 48 : 40,
+                         isMoE: isMoE, activeParamsB: active)
     }
 }
 
@@ -159,10 +163,11 @@ enum Estimator {
         if !spec.isMoE {
             let need = spec.fileGB * 1.03 + kvGB + computeGB
             if need <= vramBudget {
-                let speed = max(8, 240 / spec.paramsB)
+                // Decode is bandwidth-bound: t/s ≈ VRAM bandwidth / bytes read per
+                // token, and a full-GPU dense model reads its whole file each token.
+                let tg = clampSpeed(bwVRAM * denseEff / max(0.5, spec.fileGB))
                 return MemoryEstimate(vramGB: need, ramGB: 0.7, suggestedNcmoe: 0,
-                                      level: .ideal,
-                                      expectedSpeed: String(format: "~%.0f t/s", speed))
+                                      level: .ideal, expectedSpeed: speedRange(tg))
             }
             // Dense model that does not fit: partial CPU layers are very slow
             if spec.fileGB * 0.5 <= vramBudget && spec.fileGB < hw.ramGB * 0.6 {
@@ -188,14 +193,38 @@ enum Estimator {
         let ncmoe = expertsGB > 0
             ? min(spec.layers, Int((Double(spec.layers) * (cpuExpertsGB / expertsGB)).rounded(.up)))
             : 0
+
+        // Only the active experts are read per token; a fraction sits in RAM
+        // (slow) and the rest in VRAM, so more offload means fewer t/s. The quant
+        // shows up as bytes-per-param = fileGB / total params.
+        let active = spec.activeParamsB > 0 ? spec.activeParamsB : spec.paramsB * 0.11
+        let bytesPerParam = spec.fileGB / max(1, spec.paramsB)
+        let activeGB = active * bytesPerParam
+        let fracRAM = min(1, Double(ncmoe) / Double(max(1, spec.layers)))
+        let perToken = activeGB * ((1 - fracRAM) / bwVRAM + fracRAM / bwRAM)
+        let tg = clampSpeed(moeEff / max(0.0001, perToken))
+
         if ncmoe == 0 {
             return MemoryEstimate(vramGB: spec.fileGB + overheadGB, ramGB: 0.7, suggestedNcmoe: 0,
-                                  level: .ideal, expectedSpeed: "~40-60 t/s")
+                                  level: .ideal, expectedSpeed: speedRange(tg))
         }
         let level: FitLevel = cpuExpertsGB / expertsGB > 0.85 ? .slow : .good
-        let speed = level == .good ? "~18-25 t/s" : "~8-12 t/s"
         return MemoryEstimate(vramGB: overheadGB + gpuExpertsGB, ramGB: ramNeed,
-                              suggestedNcmoe: ncmoe, level: level, expectedSpeed: speed)
+                              suggestedNcmoe: ncmoe, level: level, expectedSpeed: speedRange(tg))
+    }
+
+    // Decode-speed model constants, calibrated to measured truths (Qwen3-8B Q4
+    // ≈ 58 tg full-GPU; Qwen3.6-35B-A3B ≈ 24.5 tg at ncmoe 24). GB/s.
+    private static let bwVRAM = 380.0
+    private static let bwRAM = 48.0
+    private static let denseEff = 0.72
+    private static let moeEff = 0.48
+
+    private static func clampSpeed(_ tg: Double) -> Double { min(60, max(4, tg)) }
+
+    /// "~lo-hi t/s" band; the estimate is deliberately approximate.
+    private static func speedRange(_ tg: Double) -> String {
+        "~\(Int((tg * 0.8).rounded()))-\(Int(tg.rounded())) t/s"
     }
 
     private static func kvCache(spec: ModelSpec, ctx: Int) -> Double {

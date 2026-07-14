@@ -11,10 +11,7 @@ struct HFFile: Identifiable {
     let sizeBytes: Int64
     var id: String { path }
     var sizeGB: String { String(format: "%.1f GB", Double(sizeBytes) / 1_073_741_824) }
-    var isMoE: Bool {
-        let p = path.lowercased()
-        return p.contains("a3b") || p.contains("a22b") || p.contains("moe") || p.contains("oss")
-    }
+    var isMoE: Bool { ModelName.looksMoE(path) }
 }
 
 @MainActor

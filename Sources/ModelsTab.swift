@@ -302,10 +302,11 @@ private struct FileRow: View {
 
     var body: some View {
         let est = Estimator.estimateCurrent(
-            spec: .estimated(fileBytes: file.sizeBytes, isMoE: file.isMoE), hw: hardware)
+            spec: .estimated(fileBytes: file.sizeBytes, isMoE: file.isMoE,
+                             name: URL(fileURLWithPath: file.path).lastPathComponent), hw: hardware)
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(URL(fileURLWithPath: file.path).lastPathComponent).font(.caption)
+                ModelTitleLabel(ModelName.forPath(file.path), titleFont: .caption)
                 EstimateLine(est: est)
             }
             Spacer()
@@ -427,7 +428,7 @@ private struct CatalogCard: View {
                 Text(String(format: "%.1f GB", model.spec.fileGB))
                     .font(.caption2).foregroundStyle(.secondary)
             }
-            Text(model.name).font(.headline)
+            Text(ModelName(model.name).title).font(.headline)
             Text(model.detail(loc.isSpanish))
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -463,9 +464,16 @@ private struct LocalModelCard: View {
                 if model.isMoE { MoEBadge() }
                 if hasProjector { TagBadge(text: loc.t("Visión", "Vision"), color: .purple) }
                 Spacer(minLength: 0)
+                let parsed = ModelName.forPath(model.url.path)
+                if !parsed.quant.isEmpty {
+                    Text(parsed.quant).font(.system(size: 9, design: .monospaced))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(.quaternary.opacity(0.6), in: Capsule())
+                        .foregroundStyle(.secondary)
+                }
                 Text(model.sizeGB).font(.caption2).foregroundStyle(.secondary)
             }
-            Text(model.name).font(.subheadline.weight(active ? .semibold : .medium)).lineLimit(2)
+            Text(ModelName.forPath(model.url.path).title).font(.subheadline.weight(active ? .semibold : .medium)).lineLimit(2)
             EstimateLine(est: est)
             if let visionCat,
                !models.downloads.contains(where: { $0.fileName.lowercased().contains("mmproj") && $0.error == nil }) {

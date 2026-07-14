@@ -983,3 +983,106 @@ final class SmartTitleTests: XCTestCase {
         XCTAssertEqual(ChatStore.smartTitle(from: "hola"), "hola")
     }
 }
+
+final class SpeedEstimateTests: XCTestCase {
+    // 12 GB VRAM / 32 GB RAM, like the dev machine.
+    private let hw = HardwareInfo(
+        cpuBrand: "Test CPU", physicalCores: 6, logicalCores: 12,
+        ramGB: 32, arch: "x86_64", model: "", osVersion: "",
+        gpus: [GPUDevice(index: 0, name: "RX 6700 XT", vramMB: 12868)])
+
+    private func tgHi(_ s: String) -> Int {
+        Int(s.replacingOccurrences(of: "~", with: "").replacingOccurrences(of: " t/s", with: "")
+            .split(separator: "-").last.map(String.init) ?? "0") ?? 0
+    }
+
+    func testSmallerQuantEstimatesFaster() {
+        let big = ModelSpec(fileGB: 19.5, paramsB: 35, layers: 48, isMoE: true, activeParamsB: 3)
+        let small = ModelSpec(fileGB: 10.0, paramsB: 35, layers: 48, isMoE: true, activeParamsB: 3)
+        let sBig = Estimator.estimate(spec: big, hw: hw).expectedSpeed
+        let sSmall = Estimator.estimate(spec: small, hw: hw).expectedSpeed
+        XCTAssertGreaterThan(tgHi(sSmall), tgHi(sBig))
+    }
+
+    func testMoreActiveParamsEstimatesSlower() {
+        let a3 = ModelSpec(fileGB: 17.0, paramsB: 30, layers: 48, isMoE: true, activeParamsB: 3)
+        let a4 = ModelSpec(fileGB: 17.0, paramsB: 30, layers: 48, isMoE: true, activeParamsB: 4)
+        XCTAssertGreaterThan(tgHi(Estimator.estimate(spec: a3, hw: hw).expectedSpeed),
+                             tgHi(Estimator.estimate(spec: a4, hw: hw).expectedSpeed))
+    }
+}
+
+final class ModelNameTests: XCTestCase {
+    func testDenseWithFinetune() {
+        let m = ModelName("Qwen3-8B-Q4_K_M.gguf")
+        XCTAssertEqual(m.title, "Qwen3 8B")
+        XCTAssertEqual(m.quant, "Q4_K_M")
+        XCTAssertTrue(m.badges.isEmpty)
+    }
+
+    func testMoEActiveParams() {
+        let m = ModelName("Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf")
+        XCTAssertEqual(m.title, "Qwen3 Coder 30B-A3B")
+        XCTAssertEqual(m.quant, "Q4_K_M")
+        XCTAssertTrue(m.badges.contains("MoE"))
+        XCTAssertTrue(m.badges.contains("Instruct"))
+        XCTAssertFalse(m.badges.contains("Coder"))   // stays in the title
+    }
+
+    func testAttributeBeforeSize() {
+        let m = ModelName("GLM-4.7-Flash-REAP-23B-A3B-Q4_K_M.gguf")
+        XCTAssertEqual(m.title, "GLM 4.7 Flash 23B-A3B")
+        XCTAssertTrue(m.badges.contains("REAP"))
+        XCTAssertTrue(m.badges.contains("MoE"))
+    }
+
+    func testUncensoredWithNickname() {
+        let m = ModelName("Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf")
+        XCTAssertEqual(m.title, "Qwen3.5 9B")
+        XCTAssertEqual(m.quant, "Q4_K_M")
+        XCTAssertEqual(m.badges, ["Uncensored"])
+    }
+
+    func testVisionAndVersionAndDotQuant() {
+        XCTAssertEqual(ModelName("Qwen3-VL-2B-Instruct-Q8_0.gguf").badges.contains("Vision") ||
+                       ModelName("Qwen3-VL-2B-Instruct-Q8_0.gguf").title.contains("VL"), true)
+        let m = ModelName("Llama-3.2-1B-Instruct-RLHF-v0.1.Q4_K_M.gguf")
+        XCTAssertEqual(m.title, "Llama 3.2 1B")
+        XCTAssertEqual(m.quant, "Q4_K_M")
+        XCTAssertTrue(m.badges.contains("Instruct"))
+    }
+
+    func testGemmaEffectiveSizeAndIt() {
+        let m = ModelName("gemma-4-E2B-it-Q4_K_M.gguf")
+        XCTAssertEqual(m.title, "Gemma 4 E2B")
+        XCTAssertEqual(m.quant, "Q4_K_M")
+        XCTAssertTrue(m.badges.contains("Instruct"))
+    }
+
+    func testAcronymCapitalization() {
+        XCTAssertEqual(ModelName("gpt-oss-20B-Q4_K_M.gguf").title, "GPT OSS 20B")
+        XCTAssertEqual(ModelName("gemma-4-27b-it.gguf").title, "Gemma 4 27B")
+    }
+
+    func testMetadataNameWithSpaces() {
+        let m = ModelName("Gemma 4 E2B it")
+        XCTAssertEqual(m.title, "Gemma 4 E2B")
+        XCTAssertTrue(m.badges.contains("Instruct"))
+    }
+
+    func testLooksMoEAcrossActiveParamCounts() {
+        XCTAssertTrue(ModelName.looksMoE("Gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"))
+        XCTAssertTrue(ModelName.looksMoE("Qwen3.5-122B-A10B-UD-Q8_K_XL.gguf"))
+        XCTAssertTrue(ModelName.looksMoE("Qwen3-Coder-30B-A3B-Q4_K_M.gguf"))
+        XCTAssertTrue(ModelName.looksMoE("Mixtral-8x7B-Q4_K_M.gguf"))
+        XCTAssertTrue(ModelName.looksMoE("gpt-oss-20B-Q4_K_M.gguf"))
+        XCTAssertFalse(ModelName.looksMoE("Qwen3-8B-Q4_K_M.gguf"))
+        XCTAssertFalse(ModelName.looksMoE("Llama-3.1-8B-Q4_K_M.gguf"))
+    }
+
+    func testBF16AndUnslothDynamic() {
+        XCTAssertEqual(ModelName("Qwen3-0.6B-BF16.gguf").quant, "BF16")
+        XCTAssertEqual(ModelName("Qwen3.5-122B-A10B-UD-Q8_K_XL-00001-of-00005.gguf").quant, "UD-Q8_K_XL")
+        XCTAssertEqual(ModelName("Qwen3.5-122B-A10B-UD-Q8_K_XL-00001-of-00005.gguf").title, "Qwen3.5 122B-A10B")
+    }
+}

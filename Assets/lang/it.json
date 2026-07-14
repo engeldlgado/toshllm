@@ -133,6 +133,7 @@
   "Downloaded": "",
   "Downloads": "Download",
   "Downloads the DMG, verifies its checksum, installs the new version into Applications and relaunches the app.": "",
+  "Drag onto a project to move it.": "",
   "Each prompt (with its seed) is rendered by the next free instance, one run per GPU. Results accumulate below, each with a unique name.": "",
   "Earlier messages summarized to free context": "",
   "Edit and resend": "Modifica e reinvia",

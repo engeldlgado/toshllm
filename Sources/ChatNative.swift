@@ -1236,6 +1236,7 @@ struct NativeChatView: View {
                     }
                     Button(loc.t("Prompt del proyecto…", "Project prompt…")) { promptProject = p }
                 } label: {
+                    // Chrome lives inside the label so the menu's hit area is the whole chip.
                     HStack(spacing: 5) {
                         Image(systemName: "folder")
                             .font(.system(size: 10, weight: .medium))
@@ -1246,14 +1247,13 @@ struct NativeChatView: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12).padding(.vertical, 5)
+                    .glassSurface(in: Capsule(), interactive: true)
+                    .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
                     .contentShape(Capsule())
                 }
-                // .plain so the menu draws no bezel over the capsule glass
                 .menuStyle(.button).buttonStyle(.plain)
                 .menuIndicator(.hidden).fixedSize()
                 .tint(.secondary)
-                .glassSurface(in: Capsule(), interactive: true)
-                .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
                 .help(loc.t("Proyecto de esta conversación.", "This conversation's project."))
             }
             TextField(loc.t("Título de la conversación", "Conversation title"),
@@ -1525,7 +1525,7 @@ struct NativeChatView: View {
             if routerMode {
                 Picker(selection: $chatSelectedModel) {
                     ForEach(models.models) { m in
-                        Text(m.name).tag(ServerSettings.routerAlias(for: m.url.path))
+                        Text(ModelName.forPath(m.url.path).display).tag(ServerSettings.routerAlias(for: m.url.path))
                     }
                 } label: {
                     Label(loc.t("Modelo", "Model"), systemImage: "shippingbox")
@@ -2282,6 +2282,8 @@ struct ConversationListView: View {
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        // The disclosure only toggles from its chevron; open from the whole row.
+        .onTapGesture { withAnimation { expandBinding(p).wrappedValue.toggle() } }
         .dropDestination(for: String.self) { ids, _ in
             let moved = ids.compactMap { UUID(uuidString: $0) }
                 .compactMap { id in chat.conversations.first { $0.id == id } }
@@ -2329,13 +2331,26 @@ struct ConversationListView: View {
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
+            Spacer(minLength: 4)
             if !(c.systemPrompt ?? "").isEmpty {
-                Spacer(minLength: 2)
                 Image(systemName: "text.bubble")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .help(loc.t("Esta conversación tiene prompt propio.",
                                 "This conversation has its own prompt."))
             }
+            // Separate hit target so the drag starts here, not under the row's tap.
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 11))
+                .foregroundStyle(.quaternary)
+                .draggable(c.id.uuidString) {
+                    Label(chat.displayTitle(c), systemImage: "bubble.left.fill")
+                        .font(.callout).lineLimit(1)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Color.appAccent.opacity(0.9), in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .help(loc.t("Arrastra a un proyecto para moverla.",
+                            "Drag onto a project to move it."))
         }
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2346,7 +2361,6 @@ struct ConversationListView: View {
                 .fill(chat.currentID == c.id
                       ? AppTheme.accent(accentRaw).opacity(0.26) : Color.clear)
                 .padding(.horizontal, 4))
-        .draggable(c.id.uuidString)
         .contextMenu {
             Button((c.pinned ?? false) ? loc.t("Desfijar", "Unpin") : loc.t("Fijar", "Pin")) {
                 chat.togglePin(c)

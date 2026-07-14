@@ -6,7 +6,7 @@ struct LocalModel: Identifiable, Hashable {
     let sizeBytes: Int64
     var id: String { url.path }
     var sizeGB: String { String(format: "%.1f GB", Double(sizeBytes) / 1_073_741_824) }
-    var isMoE: Bool { name.localizedCaseInsensitiveContains("a3b") || name.localizedCaseInsensitiveContains("moe") }
+    var isMoE: Bool { ModelName.looksMoE(name) }
 
     /// Top-level `.gguf` scan, excluding mmproj files. Shared by `ModelStore.refresh()`
     /// and the router preset generator, which has no `ModelStore` instance to call.

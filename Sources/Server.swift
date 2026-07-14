@@ -687,6 +687,44 @@ struct ServerSettings {
         return result
     }
 
+    /// String value for an exact GGUF metadata key; the key's length prefix must
+    /// match so a hit inside another value is skipped. Cached per path+size.
+    nonisolated static func ggufString(_ key: String, at path: String) -> String? {
+        struct Cache { nonisolated(unsafe) static var store: [String: String?] = [:] }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let cacheKey = path + ":" + String((attrs?[.size] as? Int64) ?? 0) + ":" + key
+        if let cached = Cache.store[cacheKey] { return cached }
+
+        var result: String? = nil
+        if let handle = FileHandle(forReadingAtPath: path),
+           let head = try? handle.read(upToCount: 2 * 1024 * 1024) {
+            try? handle.close()
+            let marker = Data(key.utf8)
+            var from = head.startIndex
+            while let r = head.range(of: marker, in: from ..< head.endIndex) {
+                from = head.index(after: r.lowerBound)
+                guard head.distance(from: head.startIndex, to: r.lowerBound) >= 8 else { continue }
+                let lenStart = head.index(r.lowerBound, offsetBy: -8)
+                let lb = [UInt8](head[lenStart ..< r.lowerBound])
+                var keyLen: UInt64 = 0
+                for i in 0..<8 { keyLen |= UInt64(lb[i]) << (8 * i) }
+                guard keyLen == UInt64(marker.count) else { continue }
+                guard let valEnd = head.index(r.upperBound, offsetBy: 12, limitedBy: head.endIndex) else { break }
+                let b = [UInt8](head[r.upperBound ..< valEnd])   // value_type (u32) + string length (u64), LE
+                let vt = UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24
+                guard vt == 8 else { continue }   // GGUF_TYPE_STRING
+                var strLen: UInt64 = 0
+                for i in 0..<8 { strLen |= UInt64(b[4 + i]) << (8 * i) }
+                guard strLen > 0, strLen < 512,
+                      let strEnd = head.index(valEnd, offsetBy: Int(strLen), limitedBy: head.endIndex) else { break }
+                result = String(data: head[valEnd ..< strEnd], encoding: .utf8)
+                break
+            }
+        }
+        Cache.store[cacheKey] = result
+        return result
+    }
+
     /// True when the model is a Mixture-of-Experts (GGUF `<arch>.expert_count` > 0).
     /// Gates the `--n-cpu-moe` control, which a dense model ignores.
     nonisolated static func modelIsMoE(at path: String) -> Bool {
