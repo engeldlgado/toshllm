@@ -50,7 +50,7 @@ It opens, detects your hardware, and recommends models that will actually run we
 - **Model manager** — a curated catalog with **per-model VRAM/RAM estimates for *your* hardware**, plus Hugging Face search, downloads with live progress, and one-click delete
 - **MoE-aware** — automatic `--n-cpu-moe` calculation so 35B-class Mixture-of-Experts models run well on 12 GB GPUs
 - **MTP speculative decoding** — +34% generation speed with compatible models, zero quality loss
-- **Dual engines** — official llama.cpp + experimental **TurboQuant** engine (KV cache down to ~16%, 100k+ token contexts on 12 GB VRAM), both with the **AMD Flash Attention kernel** on by default so attention runs on the GPU (see the [research note](#research-amd-gpus-on-metal))
+- **Bundled engine** — official llama.cpp with the **AMD Flash Attention kernel** on by default, so attention runs on the GPU instead of falling back to the CPU (see the [research note](#research-amd-gpus-on-metal))
 - **Benchmarks** — measure prompt/generation speed per configuration, with history and side-by-side comparison charts
 - **OpenAI-compatible API** — use it at `http://127.0.0.1:8080`, with optional local-network access and Bonjour discovery; can also serve embeddings for local RAG clients
 - **Multiple servers** — run several independent engine instances at once from the Dashboard, each with its own model, GPU, port and profile; serve different models side by side or pin one model per GPU
@@ -160,42 +160,38 @@ The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for 
 
 ### Flash Attention (decode)
 
-A recurring limitation on discrete AMD GPUs under Metal is that **Flash Attention** is gated on hardware features these GPUs report as unavailable (`simdgroup matrix multiply`), and the upstream "vec" decode kernel miscompiles on RDNA 2 (it produces garbage even though each SIMD primitive is correct in isolation). The practical consequence: any quantized or `turbo*` KV cache **requires** Flash Attention, so on AMD that attention silently falls back to the CPU and generation collapses at longer contexts.
+A recurring limitation on discrete AMD GPUs under Metal is that **Flash Attention** is gated on hardware features these GPUs report as unavailable (`simdgroup matrix multiply`), and the upstream "vec" decode kernel miscompiles on RDNA 2 (it produces garbage even though each SIMD primitive is correct in isolation). The practical consequence: any quantized KV cache **requires** Flash Attention, so on AMD that attention silently falls back to the CPU and generation collapses at longer contexts.
 
-ToshLLM ships a from-scratch **AMD decode attention kernel** (Metal) as a toggle on **both engines**, sitting right next to the standard Flash Attention setting. It keeps a deliberately simple structure (one `float4` slice of the head per SIMD lane, simdgroups splitting the KV stream, online-softmax merge) that was validated bit-for-bit against a CPU reference. It supports head dims **128, 256 and 512** and KV types **f16, q8_0, q4_0** in **any keys/values combination** (so you can compress keys while keeping values at full precision, all on the GPU); the experimental engine adds the **turbo2/3/4** KV types on top. The distinction the toggle makes explicit: standard Flash Attention runs on the CPU on AMD GPUs, this kernel runs on the GPU.
+ToshLLM ships a from-scratch **AMD attention kernel** (Metal) as a toggle next to the standard Flash Attention setting. It keeps a deliberately simple structure (one `float4` slice of the head per SIMD lane, simdgroups splitting the KV stream, online-softmax merge) that was validated bit-for-bit against a CPU reference. It supports head dims **64, 72, 128, 256 and 512** (72 covers the vision encoders, which are bidirectional and carry no mask) and KV types **f16, q8_0, q4_0** in **any keys/values combination**, so you can compress keys while keeping values at full precision, all on the GPU. The distinction the toggle makes explicit: standard Flash Attention runs on the CPU on AMD GPUs, this kernel runs on the GPU.
 
-The kernel splits the KV stream across as many simdgroups as the threadgroup-memory budget allows (32 for head dim 128, 16 for 256, 8 for 512 — the head dim Gemma 4's global layers use), turning the long serial decode loop into short parallel ones — a win that grows with context depth. On an RX 6700 XT with a turbo KV cache, generation at 4096 tokens of context improves from 19 → 33 t/s on an 8B (+75%) and 26 → 31 t/s on the 9B coder (+17%); at 2048 tokens, +42% and +11%. Prompt processing stays within ~3% and output is bit-for-bit unchanged.
+The kernel splits the KV stream across as many simdgroups as the threadgroup-memory budget allows (32 for head dim 128, 16 for 256, 8 for 512 — the head dim Gemma 4's global layers use), turning the long serial decode loop into short parallel ones — a win that grows with context depth. On an RX 6700 XT with a quantized KV cache, generation at 4096 tokens of context improves from 19 → 33 t/s on an 8B (+75%) and 26 → 31 t/s on the 9B coder (+17%); at 2048 tokens, +42% and +11%. Prompt processing stays within ~3% and output is bit-for-bit unchanged.
 
 Measured on an RX 6700 XT (decode, `tg`, llama-bench), GPU kernel vs the CPU fallback that quantized KV would otherwise force:
 
 | Model / KV | context | CPU fallback | AMD kernel |
 |---|---:|---:|---:|
 | Qwen3-8B, f16 (head 128) | 1k | 7.1 t/s | **43.4 t/s** |
-| Qwen3-8B, turbo3 (head 128) | 1k | 3.9 t/s | **30.3 t/s** |
-| 9B coder, turbo3 (head 256) | 1k | 13.6 t/s | **30.8 t/s** |
+| Qwen3-8B, q8_0 (head 128) | 1k | 3.9 t/s | **30.3 t/s** |
+| 9B coder, q8_0 (head 256) | 1k | 13.6 t/s | **30.8 t/s** |
 
 The same kernel handles **prompt processing** too: although it is the "vec" decode kernel rather than the matrix-unit "mm" kernel a fully-equipped GPU would use for prefill, running it on the GPU still crushes the CPU fallback that quantized KV would otherwise force — and, unlike the CPU path, it stays flat with depth:
 
 | KV (8B), prompt processing | pp2048 CPU | pp2048 AMD kernel |
 |---|---:|---:|
 | q8_0 | 40 t/s | **100 t/s** |
-| turbo3 | 6 t/s | **97 t/s** |
 
-It is on by default on both engines (a toggle in Settings turns it off). Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
+It is on by default (a toggle in Settings turns it off). Vulkan/MoltenVK was also evaluated as an alternative backend and did not justify shipping (Metal wins on prompt throughput and matches generation).
 
 ### Quantized KV cache: memory vs speed
 
-With the AMD attention kernel running on the GPU, quantizing the KV cache stops being a trap on these cards (it no longer forces attention to the CPU), so it becomes a real lever for fitting long context into limited VRAM. The experimental engine adds `q8_0` plus three `turbo2/3/4` types on top of `f16`. Measured on an RX 6700 XT with **Qwen3-8B (Q4_K_M)**, the hard case — prompt processing *and* generation on top of a 2048-token context (`pp2048 @ d2048`, `tg128 @ d2048`, llama-bench, cooled runs):
+With the AMD attention kernel running on the GPU, quantizing the KV cache stops being a trap on these cards (it no longer forces attention to the CPU), so it becomes a real lever for fitting long context into limited VRAM. Measured on an RX 6700 XT with **Qwen3-8B (Q4_K_M)**, the hard case — prompt processing *and* generation on top of a 2048-token context (`pp2048 @ d2048`, `tg128 @ d2048`, llama-bench, cooled runs):
 
 | KV type | pp @ depth (t/s) | tg @ depth (t/s) | KV at 32k ctx |
 |---|---:|---:|---:|
 | f16    | 120 | **54** | ~4.6 GiB |
 | q8_0   | **195** | 53 | ~2.4 GiB |
-| turbo4 | 184 | 38 | ~1.3 GiB |
-| turbo3 | 166 | 36 | ~1.0 GiB |
-| turbo2 | 188 | 41 | ~0.7 GiB |
 
-Two things stand out. Prompt processing at depth is *faster* with a quantized cache than with `f16`, because attention reads a smaller KV (less bandwidth). And `q8_0` matches `f16` generation speed while halving the KV footprint — a free win for long context, and you can now quantize both keys and values, not just keys. The `turbo2/3/4` types trade ~25–30% generation speed for a far smaller cache (down to ~⅙ of `f16`); they earn their keep only when you are VRAM-bound and need a context that would not otherwise fit. *Quality at the lowest bit widths is not characterized yet.*
+Two things stand out. Prompt processing at depth is *faster* with a quantized cache than with `f16`, because attention reads a smaller KV (less bandwidth). And `q8_0` matches `f16` generation speed while halving the KV footprint — a free win for long context, and you can quantize both keys and values, not just keys.
 
 ### ToshGEMM: tiled prefill matmul on AMD
 
@@ -203,14 +199,13 @@ Prompt processing on AMD was stuck on the slow matrix-vector path, because Metal
 
 Prompt processing on an RX 6700 XT (Qwen3-8B Q4, pp512, t/s, before → ToshGEMM):
 
-| Engine | with Flash Attention | without FA (raw matmul) |
+| | with Flash Attention | without FA (raw matmul) |
 |---|---|---|
-| Official | 93 → **228** (2.4×) | 99 → **342** (3.4×) |
-| Turbo    | 105 → **309** (2.9×) | 99 → **322** (3.2×) |
+| pp512 | 93 → **228** (2.4×) | 99 → **342** (3.4×) |
 
-For a 1000-token prompt that cuts time-to-first-token from ~10 s to ~4 s (official) and ~9 s to ~3 s (turbo).
+For a 1000-token prompt that cuts time-to-first-token from ~10 s to ~4 s.
 
-Two later upgrades pushed it further. The kernel now does its math in **packed half precision**, which AMD cards execute at twice the rate, and the AMD attention kernel prefills in blocks of 16 tokens that share the stored context instead of each token re-reading all of it. Measured today on the same card, **pp512 on the 8B reaches ~470 t/s on both engines** (from the ~310 above — 5× the pre-ToshGEMM baseline), and prompt processing deep into a conversation (4k of context) goes from 103 to ~290 t/s, so long chats stop feeling slower to respond over time. That 1000-token prompt now takes ~2 s to first token.
+Two later upgrades pushed it further. The kernel now does its math in **packed half precision**, which AMD cards execute at twice the rate, and the AMD attention kernel prefills in blocks of 16 tokens that share the stored context instead of each token re-reading all of it. Measured today on the same card, **pp512 on the 8B reaches ~470 t/s** (from the ~310 above — 5× the pre-ToshGEMM baseline), and prompt processing deep into a conversation (4k of context) goes from 103 to ~290 t/s, so long chats stop feeling slower to respond over time. That 1000-token prompt now takes ~2 s to first token.
 
 ToshGEMM now also covers **Mixture-of-Experts** prefill: the per-expert matmul (`mul_mm_id`) uses the same tiled kernel, so MoE models get the speedup on whatever experts are GPU-resident, not just their dense/attention layers. On a Qwen3-Coder-30B-A3B (Q4_K_M, pp512, RX 6700 XT, `--n-cpu-moe 20`):
 
@@ -261,8 +256,7 @@ Running the **Qwen3-4B (Q4_K_M)** benchmark and sharing your numbers (GPU + syst
 ToshLLM.app
 ├── SwiftUI app (this repo) — UI, server lifecycle, downloads, estimator, benchmarks
 └── Resources/
-    ├── bin/        llama-server + llama-bench  (official, AMD-patched, static)
-    ├── bin-turbo/  experimental TurboQuant engine (optional)
+    ├── bin/        llama-server + llama-bench + llama-perplexity (AMD-patched, static)
     └── test-ui/    minimal web chat served by llama-server
 ```
 
@@ -323,7 +317,7 @@ Casi todas las herramientas de LLM locales en macOS apuntan a Apple Silicon; los
 - **Gestor de modelos** — catálogo curado con **estimaciones de VRAM/RAM para *tu* equipo**, búsqueda en Hugging Face, descargas con progreso y borrado en un clic
 - **Soporte MoE** — cálculo automático de `--n-cpu-moe` para que modelos de 35B corran bien en GPUs de 12 GB
 - **Decodificación especulativa MTP** — +34% de velocidad de generación sin pérdida de calidad
-- **Motores duales** — llama.cpp oficial + motor experimental **TurboQuant** (caché KV hasta ~16%, contextos de 100k+ tokens), ambos con el kernel de **Flash Attention para AMD** activo por defecto
+- **Motor integrado** — llama.cpp oficial con el kernel de **Flash Attention para AMD** activo por defecto, para que la atención corra en la GPU en vez de caer a CPU
 - **Benchmarks** — mide velocidad de prompt y generación por configuración, con historial y gráficas comparativas
 - **API compatible con OpenAI** en `http://127.0.0.1:8080`, con acceso opcional por red local y descubrimiento Bonjour; también puede servir embeddings para clientes RAG locales
 - **Varios servidores y multi-GPU** — varios motores independientes a la vez, cada uno con su modelo, GPU (o conjunto exacto de GPUs), puerto y perfil; las eGPU corren a velocidad completa con pesos residentes en VRAM
