@@ -134,6 +134,36 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertTrue(ModelName.looksMoE("Model-30B-A3.5B-Q4_K_M.gguf"))
     }
 
+    /// A range request only covers the header, so parsing works off a Data slice.
+    func testParsesHeaderFromDataAndRejectsTruncated() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("remote.gguf")
+        try writeGGUF(to: url, strings: ["general.architecture": "gemma4"],
+                      uint32: ["gemma4.expert_count": 128])
+        let full = try Data(contentsOf: url)
+
+        let parsed = try XCTUnwrap(GGUFMetadataCache.parse(from: full))
+        XCTAssertEqual(parsed.uint32(forSuffix: "expert_count"), 128)
+        XCTAssertEqual(parsed.string(for: "general.architecture"), "gemma4")
+
+        XCTAssertNil(GGUFMetadataCache.parse(from: full.prefix(12)),
+                     "a truncated header must fall back, not guess")
+        XCTAssertNil(GGUFMetadataCache.parse(from: Data("not a gguf".utf8)))
+    }
+
+    /// The whole point of the remote probe: a MoE whose filename hides it.
+    func testHeaderBeatsFilenameForRenamedMoE() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("totally-dense-looking.gguf")
+        try writeGGUF(to: url, uint32: ["gemma4.expert_count": 128])
+
+        XCTAssertFalse(ModelName.looksMoE(url.lastPathComponent))
+        let header = try XCTUnwrap(GGUFMetadataCache.parse(from: try Data(contentsOf: url)))
+        XCTAssertTrue((header.uint32(forSuffix: "expert_count") ?? 0) > 0)
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("toshllm-detection-\(UUID().uuidString)")

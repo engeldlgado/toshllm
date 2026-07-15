@@ -12,6 +12,7 @@ struct HFFile: Identifiable {
     let paths: [String]
     var id: String { path }
     var sizeGB: String { String(format: "%.1f GB", Double(sizeBytes) / 1_073_741_824) }
+    /// Name-based guess; the UI should ask `SearchStore.isMoE(repo:file:)`.
     var isMoE: Bool { ModelName.looksMoE(path) }
 }
 
@@ -26,6 +27,15 @@ final class SearchStore: ObservableObject {
 
     @Published var trending: [HFRepo] = []
     @Published var loadingTrending = false
+
+    /// expert_count from each candidate's GGUF header, keyed by download URL.
+    @Published var headerMoE: [String: Bool] = [:]
+
+    /// A renamed MoE is invisible to the filename guess, and calling it dense sizes
+    /// the fit estimate against full VRAM instead of expert offload.
+    func isMoE(repo: String, file: HFFile) -> Bool {
+        headerMoE[downloadURL(repo: repo, file: file.path)] ?? file.isMoE
+    }
 
     /// The GGUF models trending on Hugging Face right now — the "discovery"
     /// half of the hybrid Browse tab (curated recommendations are computed
@@ -90,11 +100,44 @@ final class SearchStore: ObservableObject {
             let size = (entry["size"] as? NSNumber)?.int64Value ?? 0
             return GGUFFileEntry(path: path, sizeBytes: size)
         }
-        files[repo] = GGUFFile.models(from: ggufEntries).map {
+        let list = GGUFFile.models(from: ggufEntries).map {
             HFFile(path: $0.primaryPath, sizeBytes: $0.sizeBytes, paths: $0.paths)
         }
         .sorted { $0.sizeBytes < $1.sizeBytes }
+        files[repo] = list
+        // Detached so the list renders now; estimates refine as headers land.
+        Task { await probeHeaders(repo: repo, files: list) }
     }
+
+    /// The metadata block sits in the first few KB, so one small range request per
+    /// file is enough, and they share a single HTTP/2 connection to the host.
+    private func probeHeaders(repo: String, files: [HFFile]) async {
+        let pending = files.map { downloadURL(repo: repo, file: $0.path) }
+            .filter { headerMoE[$0] == nil }
+        guard !pending.isEmpty else { return }
+
+        await withTaskGroup(of: (String, Bool?).self) { group in
+            for url in pending {
+                group.addTask { (url, await Self.probeMoE(urlString: url)) }
+            }
+            for await (url, moe) in group {
+                if let moe { headerMoE[url] = moe }
+            }
+        }
+    }
+
+    /// nil when unreadable (offline, non-GGUF, truncated): caller keeps the guess.
+    nonisolated private static func probeMoE(urlString: String) async -> Bool? {
+        guard let url = URL(string: urlString) else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("bytes=0-\(headerProbeBytes - 1)", forHTTPHeaderField: "Range")
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+              let metadata = GGUFMetadataCache.parse(from: data) else { return nil }
+        return (metadata.uint32(forSuffix: "expert_count") ?? 0) > 0
+    }
+
+    /// Generous: measured GGUFs put expert_count ~1.5 KB in.
+    nonisolated private static let headerProbeBytes = 64 * 1024
 
     func downloadURL(repo: String, file: String) -> String {
         "https://huggingface.co/\(repo)/resolve/main/\(file)"

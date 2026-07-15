@@ -6,6 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Improved
+- **Browse now reads each candidate's GGUF header** (#36)... the fit estimate sizes a MoE against expert offload even when its filename hides it, from one small range request per file.
 - **The engine now stamps the ToshLLM version in its startup log**... a log pasted from a bug report identifies the build, which llama.cpp's own build number cannot do (it only tracks the upstream commit).
 
 ### Fixed

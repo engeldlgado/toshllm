@@ -302,7 +302,7 @@ private struct FileRow: View {
 
     var body: some View {
         let est = Estimator.estimateCurrent(
-            spec: .estimated(fileBytes: file.sizeBytes, isMoE: file.isMoE,
+            spec: .estimated(fileBytes: file.sizeBytes, isMoE: search.isMoE(repo: repo, file: file),
                              name: URL(fileURLWithPath: file.path).lastPathComponent), hw: hardware)
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {

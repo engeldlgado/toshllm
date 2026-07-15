@@ -97,6 +97,11 @@ enum GGUFMetadataCache {
 
     private static func parseMetadata(at path: String) -> GGUFMetadata? {
         guard let data = readPrefix(at: path, limit: 8 * 1024 * 1024) else { return nil }
+        return parse(from: data)
+    }
+
+    /// `data` only needs to span the header, so a range request can stand in for the file.
+    static func parse(from data: Data) -> GGUFMetadata? {
         var cursor = GGUFDataCursor(data: data)
         guard cursor.readBytes(count: 4) == Data([0x47, 0x47, 0x55, 0x46]),
               let version = cursor.readUInt32(), version >= 2,
