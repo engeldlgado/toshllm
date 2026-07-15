@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.82.0] - 2026-07-15
 
 ### Removed
 - **The experimental TurboQuant engine is gone**... the bundled engine matches it on a dense Qwen3-8B (474 vs 475 t/s prompt).
