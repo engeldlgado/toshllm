@@ -6,20 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Removed
-- **The experimental TurboQuant engine is gone** ... the bundled engine matches it (dense Qwen3-8B: 474 vs 475 pp, 60.3 vs 60.4 tg), and conversation persistence, previously exclusive to it, now works there.
-
-### Fixed
-- **The engine picker no longer flips to "External" on its own** ... it stored the engine's path, which differs between two installs sharing one settings domain.
-- **Gemma 4 vision no longer crashes the server** ... forcing Flash Attention on used to split the projector graph and bind a null buffer; the projector now runs Flash Attention natively.
+- **The experimental TurboQuant engine is gone**... the bundled engine matches it on a dense Qwen3-8B (474 vs 475 t/s prompt).
+- **The `turbo2/3/4` KV cache types go with it**... a saved one falls back to a standard type.
 
 ### Improved
-- **Vision models now keep Flash Attention on the GPU**... describing an image costs 248-358 MB of VRAM instead of 3.4-4.7 GB, and the spike on the first image is gone.
-- **Browse now reads each candidate's GGUF header** (#36)... the fit estimate sizes a MoE against expert offload even when its filename hides it, from one small range request per file.
-- **The engine now stamps the ToshLLM version in its startup log**... a log pasted from a bug report identifies the build, which llama.cpp's own build number cannot do (it only tracks the upstream commit).
+- **Conversation persistence now works on the bundled engine**, where it was limited to the experimental one... reopening an 8.6k-token prompt after an engine restart takes 0.9 s instead of 24.8 s.
+- **Vision models keep Flash Attention on the GPU**... describing an image costs 248-358 MB of VRAM instead of 3.4-4.7 GB.
+- **Browse reads each candidate's GGUF header** (#36)... a Mixture-of-Experts model whose filename hides it is no longer sized against full VRAM.
+- **The engine stamps the ToshLLM version in its startup log**... llama.cpp's own build number only identifies the upstream commit.
 
 ### Fixed
-- **Model detection now uses GGUF metadata safely**... renamed MoE models keep correct VRAM estimates, split GGUFs act as one model, and legacy vision projectors pair only when unambiguous.
-- **The Models tab now reflects your per-model expert offload**... its speed/fit estimate honors the saved ncmoe and shows it as a chip, matching what the server will run.
+- **Gemma 4 vision no longer crashes the server**... forcing Flash Attention on used to split the projector graph and bind a null buffer.
+- **The engine picker no longer switches itself to "External"**... it stored a path, which differs between two installs that share one settings domain.
+- **Model detection reads the GGUF header instead of the filename**... a renamed MoE keeps its VRAM estimate, and a split GGUF counts as one model.
+- **The Models tab reflects your per-model expert offload**... the fit estimate follows the saved ncmoe and shows it as a chip.
 
 ## [0.81.67] - 2026-07-14
 
