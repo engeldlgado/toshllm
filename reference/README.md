@@ -7,7 +7,7 @@ them live in this directory.
 ## `turboquant-kv-upstream.patch`
 
 The TurboQuant KV cache implementation (llama.cpp PR 23962), extracted from the
-fork before the engine was retired in 0.83.0. It adds the `turbo2/3/4` KV cache
+fork before the engine was retired in 0.82.0. It adds the `turbo2/3/4` KV cache
 types: Walsh-Hadamard transform + PolarQuant at 2/3/4 bits, which cut the KV
 cache to roughly a sixth of `f16`.
 
