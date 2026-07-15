@@ -5,8 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **Gemma 4 vision no longer crashes the server** ... forcing Flash Attention on used to split the projector graph and bind a null buffer; the projector now runs Flash Attention natively.
+
 ### Improved
-- **Vision models now keep Flash Attention on the GPU**... describing an image costs 358 MB of VRAM instead of 3.4 GB, and the 5.8 GB spike on the first image is gone.
+- **Vision models now keep Flash Attention on the GPU**... describing an image costs 248-358 MB of VRAM instead of 3.4-4.7 GB, and the spike on the first image is gone.
 - **Browse now reads each candidate's GGUF header** (#36)... the fit estimate sizes a MoE against expert offload even when its filename hides it, from one small range request per file.
 - **The engine now stamps the ToshLLM version in its startup log**... a log pasted from a bug report identifies the build, which llama.cpp's own build number cannot do (it only tracks the upstream commit).
 
