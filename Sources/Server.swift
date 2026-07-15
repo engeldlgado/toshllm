@@ -75,10 +75,8 @@ struct ServerSettings {
     var routerModelsMax: Int = 1
     /// Persist each conversation's KV cache to disk (`--slot-save-path`) so
     /// reopening a chat — or restarting the app/engine — skips re-processing the
-    /// prompt. Only effective on the turbo engine with the AMD FA kernel: without
-    /// FA, llama.cpp stores the V cache transposed and slot save/restore copies it
-    /// row-by-row, which on AMD's staging path is unusably slow (~13 s vs ~0.1 s).
-    /// Gated to the turbo engine in Settings.
+    /// prompt. Needs the AMD FA kernel: without FA the V cache is stored transposed
+    /// and save/restore copies it row-by-row, unusably slow on AMD (~13 s vs ~0.1 s).
     var persistCache: Bool = false
     /// EXPERIMENTAL, needs more testing. Split one model's layers across all
     /// detected GPUs (`--split-mode layer`) instead of pinning to one. The modern
@@ -99,7 +97,7 @@ struct ServerSettings {
     /// Reuse shifted KV chunks across mid-prompt divergences (agent edits, a
     /// stripped <think> block). Fast but approximate — the KV shift is not a
     /// bit-exact reconstruction — so the user can turn it off for exact results.
-    /// Force-disabled for turbo2/3/4 KV (crashes on a shift). On by default.
+    /// On by default.
     var cacheReuse: Bool = true
     /// Load the multimodal projector (mmproj) for vision-capable models. Off skips it
     /// so a vision model runs text-only and frees the VRAM the image encoder would use.
@@ -109,11 +107,6 @@ struct ServerSettings {
     var benchPP: Int = 512
     var benchTG: Int = 128
 
-    /// True when the selected binary is the bundled or dev turbo engine.
-    static func isTurbo(_ binary: String) -> Bool {
-        binary.contains("bin-turbo") || binary == turboBinary
-    }
-    var isTurboEngine: Bool { Self.isTurbo(serverBinary) }
     var isMultimodal: Bool { Self.mmprojPath(forModel: modelPath) != nil }
 
     /// Directory where one server's per-conversation KV slot files live. Namespaced
@@ -128,6 +121,12 @@ struct ServerSettings {
 
     /// Slot directory of the primary server (the one the native chat talks to).
     static var primarySlotCacheDir: URL { slotCacheDir(port: fromDefaults().port) }
+
+    /// Drops a KV type left over from the retired turbo engine.
+    static func sanitizedKV(_ value: String?, default def: String) -> String {
+        guard let v = value, kvCacheTypes.contains(v) else { return def }
+        return v
+    }
 
     static let defaultFaAmd = true
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl"]
@@ -184,10 +183,10 @@ struct ServerSettings {
         // done through the env vars below.
         if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
         if embeddings { args.append("--embeddings") }
-        // Persist KV slots to disk so reopening a chat skips re-prefill. Only on
-        // the turbo engine, where the AMD FA kernel keeps the V cache contiguous
-        // (the official engine's transposed-V save/restore is unusably slow on AMD).
-        if persistCache && isTurboEngine {
+        // Persist KV slots to disk so reopening a chat skips re-prefill. Needs the
+        // AMD FA kernel, which keeps the V cache contiguous; the transposed-V
+        // save/restore it replaces is unusably slow on AMD.
+        if persistCache && effectiveFaAmd {
             args += ["--slot-save-path", Self.slotCacheDir(port: port).path]
         }
         if reasoningInline { args += ["--reasoning-format", "none"] }
@@ -268,7 +267,7 @@ struct ServerSettings {
             if parallelSlots > 0 { lines.append("parallel = \(parallelSlots)") }
             if parallelSlots > 1 { lines.append("kv-unified = true") }
             if multiGPU || gpuList.count >= 2 { lines.append("split-mode = layer") }
-            if persistCache && isTurboEngine {
+            if persistCache && effectiveFaAmd {
                 lines.append("slot-save-path = \(Self.slotCacheDir(port: port).appendingPathComponent(alias).path)")
             }
             if reasoningInline { lines.append("reasoning-format = none") }
@@ -427,15 +426,27 @@ struct ServerSettings {
         return NSString(string: "~/dev/repositorios/llama.cpp/build/bin/llama-server").expandingTildeInPath
     }
 
-    /// Experimental TurboQuant engine (repaired llama.cpp PR 23962), when bundled.
-    static var turboBinary: String? {
-        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin-turbo/llama-server").path,
-           FileManager.default.fileExists(atPath: bundled) {
-            return bundled
+    /// The engine to launch. "bundled" resolves against the running bundle, so two
+    /// installs sharing this defaults domain each use their own binary.
+    static var engineKind: String {
+        let d = UserDefaults.standard
+        if let kind = d.string(forKey: SettingsKeys.engineKind) { return kind }
+        // Migration: the kind used to be implied by a stored absolute path. A path
+        // into any bundle (including the retired turbo engine) becomes "bundled".
+        let legacy = d.string(forKey: SettingsKeys.serverBinary) ?? ""
+        let kind = legacy.isEmpty || legacy.contains("/Contents/Resources/bin") ? "bundled" : "custom"
+        d.set(kind, forKey: SettingsKeys.engineKind)
+        if kind == "bundled" { d.removeObject(forKey: SettingsKeys.serverBinary) }
+        return kind
+    }
+
+    /// Path of the engine to launch, resolved from the kind at read time.
+    static func resolvedBinary() -> String {
+        if engineKind == "custom" {
+            let custom = UserDefaults.standard.string(forKey: SettingsKeys.serverBinary) ?? ""
+            if !custom.isEmpty { return custom }
         }
-        let dev = NSString(string: "~/dev/repositorios/llama.cpp-turboquant/build-static/bin/llama-server")
-            .expandingTildeInPath
-        return FileManager.default.fileExists(atPath: dev) ? dev : nil
+        return defaultBinary
     }
 
     /// gpuList is persisted as a comma-separated string so @AppStorage can bind it.
@@ -449,7 +460,7 @@ struct ServerSettings {
         func int(_ key: String, _ def: Int) -> Int { d.object(forKey: key) == nil ? def : d.integer(forKey: key) }
         func bool(_ key: String, _ def: Bool) -> Bool { d.object(forKey: key) == nil ? def : d.bool(forKey: key) }
         return ServerSettings(
-            serverBinary: d.string(forKey: SettingsKeys.serverBinary) ?? defaultBinary,
+            serverBinary: resolvedBinary(),
             modelPath: d.string(forKey: SettingsKeys.modelPath) ?? "",
             port: int(SettingsKeys.port, 8080),
             ngl: int(SettingsKeys.ngl, 99),
@@ -465,8 +476,8 @@ struct ServerSettings {
             gpuList: gpuList(fromCSV: d.string(forKey: SettingsKeys.gpuList)),
             extraArgs: d.string(forKey: SettingsKeys.extraArgs) ?? "",
             embeddings: bool(SettingsKeys.embeddings, false),
-            cacheTypeK: d.string(forKey: SettingsKeys.cacheTypeK) ?? "f16",
-            cacheTypeV: d.string(forKey: SettingsKeys.cacheTypeV) ?? "f16",
+            cacheTypeK: Self.sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeK), default: "f16"),
+            cacheTypeV: Self.sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeV), default: "f16"),
             mlock: bool(SettingsKeys.mlock, false),
             cacheRAM: int(SettingsKeys.cacheRAM, 2048),
             reasoningInline: bool(SettingsKeys.reasoningInline, false),
@@ -924,11 +935,7 @@ final class ServerController: ObservableObject {
             return out
         }
         let engine: String
-        switch settings.serverBinary {
-        case ServerSettings.defaultBinary: engine = "bundled (official)"
-        case ServerSettings.turboBinary:   engine = "turbo (experimental)"
-        default:                           engine = "external"
-        }
+        engine = settings.serverBinary == ServerSettings.defaultBinary ? "bundled (official)" : "external"
         let gpus = availableGPUs().map {
             "    [\($0.index)] \($0.name) · \($0.vramMB / 1024) GB\($0.isExternal ? " · EXTERNAL/eGPU" : "")\($0.isIntegrated ? " · iGPU (not auto-selected)" : "")"
         }.joined(separator: "\n")
@@ -968,7 +975,7 @@ final class ServerController: ObservableObject {
             try? ini.write(to: ServerSettings.routerPresetPath(port: settings.port), atomically: true, encoding: .utf8)
         }
 
-        prewarmActive = !settings.routerMode && settings.persistCache && settings.isTurboEngine
+        prewarmActive = !settings.routerMode && settings.persistCache && settings.effectiveFaAmd
             && !settings.isMultimodal && !ServerSettings.modelHasMTP(at: settings.modelPath)
 
         let p = Process()

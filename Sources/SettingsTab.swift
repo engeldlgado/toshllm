@@ -10,7 +10,8 @@ struct SettingsView: View {
     @EnvironmentObject var control: ControlPanelState
     @EnvironmentObject var models: ModelStore
 
-    @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ServerSettings.defaultBinary
+    @AppStorage(SettingsKeys.engineKind) private var engineKind = ServerSettings.engineKind
+    @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ""
     @AppStorage(SettingsKeys.faAmd) private var faAmd = ServerSettings.defaultFaAmd
     @AppStorage(SettingsKeys.prefetchExperts) private var prefetchExperts = true
     @AppStorage(SettingsKeys.persistCache) private var persistCache = false
@@ -52,17 +53,8 @@ struct SettingsView: View {
     @State private var profileName = ""
     @State private var showResetConfirm = false
 
-    // TurboQuant KV types only exist in the experimental engine (llama.cpp PR 23962) or external builds
     private var availableKVTypes: [String] {
-        let base = serverBinary == ServerSettings.defaultBinary
-            ? ServerSettings.kvCacheTypes
-            : ServerSettings.kvCacheTypes + ["turbo4", "turbo3", "turbo2"]
-        // cache-reuse crashes with turbo KV (no f32->turbo requantize kernel),
-        // so the turbo types aren't offered while cache-reuse is on.
-        return cacheReuse ? base.filter { !$0.hasPrefix("turbo") } : base
-    }
-    private var turboKVAvailable: Bool {
-        serverBinary != ServerSettings.defaultBinary
+        return ServerSettings.kvCacheTypes
     }
     private var serverIsStopped: Bool {
         if case .stopped = server.state { return true }
@@ -88,20 +80,14 @@ struct SettingsView: View {
 
     private var engineSelection: Binding<String> {
         Binding(
-            get: {
-                if serverBinary == ServerSettings.defaultBinary { return "bundled" }
-                if serverBinary == ServerSettings.turboBinary { return "turbo" }
-                return "custom"
-            },
+            get: { engineKind },
             set: { kind in
-                switch kind {
-                case "turbo":
-                    serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary
+                engineKind = kind
+                if kind == "bundled" {
+                    serverBinary = ""
                     faAmd = ServerSettings.defaultFaAmd
-                case "bundled":
-                    serverBinary = ServerSettings.defaultBinary
-                    faAmd = ServerSettings.defaultFaAmd
-                default: serverBinary = ""; faAmd = false
+                } else {
+                    faAmd = false
                 }
             })
     }
@@ -410,8 +396,8 @@ struct SettingsView: View {
                 .infoTip(amdFlashActive
                     ? loc.t("Cuantización de las claves del KV cache. Con el kernel Flash Attention AMD, cualquier combinación estándar (f16/q8_0/q4_0 en claves y valores) corre en GPU a velocidad plena, incluida la ruta rápida de prompts largos. Para máximo ahorro de memoria: q8_0/q8_0 (mitad, recomendado) o q4_0/q4_0 (un cuarto); para comprimir solo las claves manteniendo los valores en precisión completa: q8_0/f16 o q4_0/f16.",
                             "Quantization for KV cache keys. With the AMD Flash Attention kernel, any standard combination (f16/q8_0/q4_0 for keys and values) runs on the GPU at full speed, including the fast long-prompt route. For maximum memory savings: q8_0/q8_0 (half, recommended) or q4_0/q4_0 (a quarter); to compress only the keys while keeping values at full precision: q8_0/f16 or q4_0/f16.")
-                    : loc.t("Cuantización de las claves del KV cache. En GPU AMD (sin el kernel Flash Attention AMD): q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado), dejando los valores en f16; q4_0 a un cuarto. Los tipos turbo* (TurboQuant) requieren el motor experimental.",
-                            "Quantization for KV cache keys. On AMD GPUs (without the AMD Flash Attention kernel): q8_0 halves key memory at almost no speed cost (recommended), keeping values at f16; q4_0 quarters it. turbo* types (TurboQuant) require the experimental engine."))
+                    : loc.t("Cuantización de las claves del KV cache. En GPU AMD (sin el kernel Flash Attention AMD): q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado), dejando los valores en f16; q4_0 a un cuarto.",
+                            "Quantization for KV cache keys. On AMD GPUs (without the AMD Flash Attention kernel): q8_0 halves key memory at almost no speed cost (recommended), keeping values at f16; q4_0 quarters it."))
                 Picker(loc.t("KV cache: valores (-ctv)", "KV cache: values (-ctv)"), selection: $cacheTypeV) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }
@@ -421,23 +407,8 @@ struct SettingsView: View {
                     : loc.t("Cuantización de los valores del KV cache. ⚠️ En GPU AMD (sin el kernel Flash Attention AMD) esto fuerza Flash Attention en CPU: la generación baja ~3× (de ~50 a ~15-19 t/s en un 8B). Úsalo solo cuando necesites contexto enorme; si no, déjalo en f16 y cuantiza solo las claves.",
                             "Quantization for KV cache values. ⚠️ On AMD GPUs (without the AMD Flash Attention kernel) this forces Flash Attention onto the CPU: generation drops ~3× (from ~50 to ~15-19 t/s on an 8B). Use only when you need huge context; otherwise keep f16 and quantize keys only."))
                 Toggle(loc.t("Reuso de caché de prompt (rápido)", "Prompt cache reuse (fast)"), isOn: $cacheReuse)
-                    .onChange(of: cacheReuse) { _, on in
-                        // Turbo KV is incompatible with cache-reuse; snap a stale
-                        // turbo selection back to safe types when it's turned on.
-                        if on {
-                            if cacheTypeK.hasPrefix("turbo") { cacheTypeK = "q8_0" }
-                            if cacheTypeV.hasPrefix("turbo") { cacheTypeV = "f16" }
-                        }
-                    }
-                    .infoTip(loc.t("Cuando reescribes/editas el prompt (asistentes de código) o se recorta el razonamiento entre turnos, reutiliza la caché desplazándola en vez de reprocesar — mucho más rápido. Es una aproximación: la salida sigue coherente pero puede variar levemente frente a un cálculo exacto. Desactívalo si quieres resultados idénticos y reproducibles. Incompatible con los tipos KV turbo2/3/4.",
-                                "When the prompt is rewritten/edited (coding assistants) or the reasoning is trimmed between turns, it reuses the cache by shifting it instead of reprocessing — much faster. It's an approximation: output stays coherent but can differ slightly from an exact recompute. Turn it off for identical, reproducible results. Incompatible with the turbo2/3/4 KV types."))
-                if cacheReuse && turboKVAvailable {
-                    Label(loc.t("Los tipos KV turbo2/3/4 no aparecen mientras el reuso de caché está activo (son incompatibles). Desactívalo para usarlos.",
-                                "The turbo2/3/4 KV types are hidden while cache reuse is on (incompatible). Turn it off to use them."),
-                          systemImage: "info.circle")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                    .infoTip(loc.t("Cuando reescribes/editas el prompt (asistentes de código) o se recorta el razonamiento entre turnos, reutiliza la caché desplazándola en vez de reprocesar — mucho más rápido. Es una aproximación: la salida sigue coherente pero puede variar levemente frente a un cálculo exacto. Desactívalo si quieres resultados idénticos y reproducibles.",
+                                "When the prompt is rewritten/edited (coding assistants) or the reasoning is trimmed between turns, it reuses the cache by shifting it instead of reprocessing — much faster. It's an approximation: output stays coherent but can differ slightly from an exact recompute. Turn it off for identical, reproducible results."))
                 Stepper(loc.t("Hilos de CPU: \(threads)", "CPU threads: \(threads)"),
                         value: $threads, in: 1...max(1, hardware.logicalCores))
                     .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Tu equipo tiene \(hardware.logicalCores) hilos; los núcleos físicos (\(hardware.physicalCores)) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
@@ -507,18 +478,11 @@ struct SettingsView: View {
                                 "Local server port (OpenAI-compatible API and web chat)."))
                 Picker(loc.t("Motor de inferencia", "Inference engine"), selection: engineSelection) {
                     Text(loc.t("Integrado (oficial)", "Bundled (official)")).tag("bundled")
-                    if ServerSettings.turboBinary != nil {
-                        Text(loc.t("Experimental (TurboQuant) · en retirada", "Experimental (TurboQuant) · being retired")).tag("turbo")
-                    }
                     Text(loc.t("Externo…", "External…")).tag("custom")
                 }
-                .infoTip(loc.t("Integrado: llama.cpp oficial, recomendado. Experimental (TurboQuant): motor experimental con KV cache turbo2/3/4; será retirado en una versión futura y se estudiará integrar TurboQuant en el motor oficial. Externo: cualquier llama-server tuyo.",
-                            "Bundled: official llama.cpp, recommended. Experimental (TurboQuant): experimental engine with turbo2/3/4 KV cache; it will be retired in a future version, with TurboQuant studied for integration into the official engine. External: any llama-server of yours."))
-                if engineSelection.wrappedValue == "turbo" {
-                    Label(loc.t("Este motor será retirado: las mejoras nuevas van al oficial. TurboQuant se estudiará para integrarse allí.",
-                                "This engine will be retired: new improvements go to the official one. TurboQuant will be studied for integration there."),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
+                .infoTip(loc.t("Integrado: llama.cpp oficial con los kernels Metal para AMD, recomendado. Externo: cualquier llama-server tuyo.",
+                            "Bundled: official llama.cpp with the Metal kernels for AMD, recommended. External: any llama-server of yours."))
+                if engineSelection.wrappedValue != "custom" {
                     Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
                         .disabled(!amdFlashActive || currentModelIsVision)
                         .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",

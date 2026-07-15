@@ -9,6 +9,9 @@ import os
 /// error instead of a silent bug.
 enum SettingsKeys {
     static let language = "lang"
+    /// "bundled" or "custom". Not a path: two installs share this domain.
+    static let engineKind = "engineKind"
+    /// Only read when engineKind is "custom".
     static let serverBinary = "serverBinary"
     static let modelPath = "modelPath"
     static let modelsDir = "modelsDir"

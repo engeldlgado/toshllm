@@ -752,7 +752,7 @@ final class ChatStore: ObservableObject {
         save()
     }
 
-    // MARK: KV slot persistence (turbo engine)
+    // MARK: KV slot persistence
 
     /// On when the disk-cache setting is enabled and the turbo engine is selected
     /// (the only engine where slot save/restore is fast on AMD). Read live from
@@ -760,7 +760,7 @@ final class ChatStore: ObservableObject {
     nonisolated var slotPersistEnabled: Bool {
         let d = UserDefaults.standard
         guard d.bool(forKey: SettingsKeys.persistCache) else { return false }
-        guard ServerSettings.isTurbo(d.string(forKey: SettingsKeys.serverBinary) ?? "") else { return false }
+        guard d.object(forKey: SettingsKeys.faAmd) as? Bool ?? ServerSettings.defaultFaAmd else { return false }
         return ServerSettings.mmprojPath(forModel: d.string(forKey: SettingsKeys.modelPath) ?? "") == nil
     }
 

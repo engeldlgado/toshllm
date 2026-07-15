@@ -79,7 +79,6 @@ struct BenchmarksView: View {
     // MARK: run card
 
     private var engineName: String {
-        if ServerSettings.isTurbo(cfg.serverBinary) { return "TurboQuant" }
         if cfg.serverBinary == ServerSettings.defaultBinary { return loc.t("Integrado", "Bundled") }
         return loc.t("Externo", "External")
     }

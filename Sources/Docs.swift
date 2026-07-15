@@ -120,9 +120,9 @@ La app incluye **dos motores** y admite externos (Ajustes → Avanzado):
 
 **Integrado (oficial)** — llama.cpp oficial con parches AMD. Recomendado para todo uso. Soporta las arquitecturas más recientes (Qwen 3.6, MTP).
 
-**Experimental (TurboQuant)** — Motor con cuantización extrema del KV cache (tipos `turbo2/3/4`, basados en investigación de compresión presentada en ICLR 2026). Reduce la memoria de contexto hasta ~6×, permitiendo contextos de 100k+ tokens en GPUs de 12 GB. Costo: la generación baja algo frente al mismo modelo sin cuantizar el KV. La mejor combinación medida: claves `turbo4` + valores `turbo3`.
 
-Al elegir este motor aparece el interruptor **Kernel Flash Attention AMD**. Ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD mediante un kernel Metal propio (cabezas de 128, 256 y 512 —cubre Gemma 4—; tipos de KV f16, q8_0, q4_0 en cualquier combinación claves/valores, y turbo2/3/4). Es clave con KV cuantizado o turbo: como esos tipos **obligan** a Flash Attention, sin el kernel la atención cae a CPU y se desploma con la profundidad; con el kernel todo se queda en GPU y la generación aguanta la profundidad (ej. ~33 t/s a 4k de contexto en un 8B).
+
+El interruptor **Kernel Flash Attention AMD** ejecuta la atención —tanto el procesamiento del prompt como la generación— en la GPU AMD mediante un kernel Metal propio (cabezas de 64, 72, 128, 256 y 512 —cubre Gemma 4 y los encoders de visión—; tipos de KV f16, q8_0, q4_0 en cualquier combinación claves/valores). Es clave con KV cuantizado: como esos tipos **obligan** a Flash Attention, sin el kernel la atención cae a CPU y se desploma con la profundidad; con el kernel todo se queda en GPU y la generación aguanta la profundidad (ej. ~33 t/s a 4k de contexto en un 8B).
 
 **Externo** — Cualquier binario `llama-server` tuyo, para probar builds propias.
 
@@ -135,7 +135,6 @@ Un perfil guarda **toda** la configuración: modelo, motor, parámetros de memor
 
 Perfiles típicos:
 - **Diario (MTP)**: modelo MTP + `--spec-type draft-mtp` en argumentos extra → máxima velocidad de chat
-- **Contexto XL**: motor TurboQuant + claves `turbo4`/valores `turbo3` + contexto 64k → documentos largos
 
 Al aplicar un perfil, reinicia el servidor para que tome efecto.
 """),
@@ -248,7 +247,6 @@ Números medidos en el equipo de desarrollo (RX 6700 XT 12 GB, DDR4, macOS):
 - Normal: ~197 t/s prompt, ~25 t/s generación
 - Con Prefetch de expertos MoE: ~470 t/s prompt (2.4×), generación sin cambio
 - Con MTP: cifra sin remedir tras las mejoras de ToshGEMM/staging; la última medición (+34%, 19.3→25.7 t/s) es de antes de esos cambios y ya no es comparable contra el "Normal" de arriba
-- Con TurboQuant (contexto XL): cifras de una versión anterior a ToshGEMM y al fix de staging persistente, pendientes de remedir
 
 La generación de modelos MoE híbridos está limitada por el ancho de banda de la RAM: una GPU más potente no la mejora, pero RAM DDR5 sí (hasta ~2×).
 """),
@@ -364,9 +362,9 @@ The app ships **two engines** and supports external ones (Settings → Advanced)
 
 **Bundled (official)** — Official llama.cpp with AMD patches. Recommended for everything. Supports the newest architectures (Qwen 3.6, MTP).
 
-**Experimental (TurboQuant)** — Engine with extreme KV cache quantization (`turbo2/3/4` types, based on compression research presented at ICLR 2026). Cuts context memory up to ~6×, enabling 100k+ token contexts on 12 GB GPUs. Cost: generation drops somewhat versus the same model with unquantized KV. Best measured combo: keys `turbo4` + values `turbo3`.
 
-Selecting this engine reveals the **AMD Flash Attention kernel** toggle. It runs attention — both prompt processing and generation — on the AMD GPU via a custom Metal kernel (head dims 128, 256 and 512 — covers Gemma 4; KV types f16, q8_0, q4_0 in any keys/values combination, and turbo2/3/4). It matters most with quantized or turbo KV: those types **require** Flash Attention, so without the kernel attention falls back to the CPU and collapses with depth; with it everything stays on the GPU and generation holds up with depth (e.g. ~33 t/s at 4k context on an 8B).
+
+The **AMD Flash Attention kernel** toggle runs attention — both prompt processing and generation — on the AMD GPU via a custom Metal kernel (head dims 64, 72, 128, 256 and 512 — covers Gemma 4 and the vision encoders; KV types f16, q8_0, q4_0 in any keys/values combination). It matters most with quantized KV: those types **require** Flash Attention, so without the kernel attention falls back to the CPU and collapses with depth; with it everything stays on the GPU and generation holds up with depth (e.g. ~33 t/s at 4k context on an 8B).
 
 **External** — Any `llama-server` binary of yours, for testing custom builds.
 
@@ -379,7 +377,6 @@ A profile saves **everything**: model, engine, memory and context parameters. Cr
 
 Typical profiles:
 - **Daily (MTP)**: MTP model + `--spec-type draft-mtp` in extra arguments → fastest chat
-- **Context XL**: TurboQuant engine + `turbo4` keys/`turbo3` values + 64k context → long documents
 
 After applying a profile, restart the server for it to take effect.
 """),
@@ -496,7 +493,6 @@ Numbers measured on the development machine (RX 6700 XT 12 GB, DDR4, macOS):
 - Normal: ~197 t/s prompt, ~25 t/s generation
 - With MoE expert prefetch: ~470 t/s prompt (2.4×), generation unchanged
 - With MTP: not re-measured since the ToshGEMM/staging fixes; the last measurement (+34%, 19.3→25.7 t/s) predates those and isn't comparable to the "Normal" line above anymore
-- With TurboQuant (XL context): figures predate ToshGEMM and the persistent-staging fix, pending re-measurement
 
 Hybrid MoE generation is RAM-bandwidth-bound: a faster GPU won't improve it, but DDR5 RAM will (up to ~2×).
 """),

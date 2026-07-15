@@ -80,15 +80,6 @@ fi
 # Binance Pay QR (cropped) for the donations popup
 [ -f Assets/binance-qr.png ] && cp Assets/binance-qr.png "$APP/Contents/Resources/binance-qr.png"
 
-# Experimental TurboQuant engine (optional)
-TURBO_STATIC="vendor/llama.cpp-turbo/build-static/bin"
-[ -x "$TURBO_STATIC/llama-server" ] || TURBO_STATIC="$HOME/dev/repositorios/llama.cpp-turboquant/build-static/bin"
-if [ -x "$TURBO_STATIC/llama-server" ]; then
-    mkdir -p "$APP/Contents/Resources/bin-turbo"
-    cp "$TURBO_STATIC/llama-server" "$TURBO_STATIC/llama-bench" "$APP/Contents/Resources/bin-turbo/"
-    [ -f "$TURBO_STATIC/default.metallib" ] && cp "$TURBO_STATIC/default.metallib" "$APP/Contents/Resources/bin-turbo/"
-    echo "bundled TurboQuant engine (experimental)"
-fi
 
 # Image generation engine (stable-diffusion.cpp; optional)
 IMAGE_STATIC="vendor/stable-diffusion.cpp/build-static/bin"
@@ -153,7 +144,6 @@ if [ -d AppIcon.icon ] && [ -n "$ACTOOL" ]; then
 fi
 
 [ -x "$APP/Contents/Resources/bin/llama-server" ] && codesign --force -s - "$APP/Contents/Resources/bin/"*
-[ -x "$APP/Contents/Resources/bin-turbo/llama-server" ] && codesign --force -s - "$APP/Contents/Resources/bin-turbo/"*
 [ -x "$APP/Contents/Resources/bin-image/sd-cli" ] && codesign --force -s - "$APP/Contents/Resources/bin-image/"*
 codesign --force -s - "$APP"
 echo "Done: $APP"

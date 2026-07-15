@@ -5,7 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Removed
+- **The experimental TurboQuant engine is gone** ... the bundled engine matches it (dense Qwen3-8B: 474 vs 475 pp, 60.3 vs 60.4 tg), and conversation persistence, previously exclusive to it, now works there.
+
 ### Fixed
+- **The engine picker no longer flips to "External" on its own** ... it stored the engine's path, which differs between two installs sharing one settings domain.
 - **Gemma 4 vision no longer crashes the server** ... forcing Flash Attention on used to split the projector graph and bind a null buffer; the projector now runs Flash Attention natively.
 
 ### Improved

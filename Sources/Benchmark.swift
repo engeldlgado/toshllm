@@ -165,14 +165,7 @@ final class BenchmarkController: ObservableObject {
         let tgTest = "tg\(settings.benchTGClamped)"
         if let pp = speed(ppTest), let tg = speed(tgTest) {
             let name = URL(fileURLWithPath: settings.modelPath).lastPathComponent
-            let engine: String
-            if settings.serverBinary == ServerSettings.defaultBinary {
-                engine = "bundled"
-            } else if settings.serverBinary == ServerSettings.turboBinary {
-                engine = "turbo"
-            } else {
-                engine = "externo"
-            }
+            let engine = settings.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
             history.insert(BenchResult(date: .now, model: name, ncmoe: settings.ncmoe, pp: pp, tg: tg,
                                        ctk: settings.cacheTypeK, ctv: settings.cacheTypeV, engine: engine,
                                        fa: settings.benchmarkFlashAttentionRoute,
@@ -376,8 +369,7 @@ final class BenchmarkController: ObservableObject {
 
             var finalSettings = fast
             finalSettings.ncmoe = recommended
-            let engine = finalSettings.serverBinary == ServerSettings.defaultBinary ? "bundled"
-                : finalSettings.serverBinary == ServerSettings.turboBinary ? "turbo" : "externo"
+            let engine = finalSettings.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
             history.insert(BenchResult(date: .now, model: name, ncmoe: recommended,
                                        pp: finalPp, tg: finalTg,
                                        ctk: finalSettings.cacheTypeK, ctv: finalSettings.cacheTypeV,

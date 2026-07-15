@@ -1,34 +1,30 @@
 #!/bin/zsh
 # Builds the inference engines reproducibly:
 #   1. Official llama.cpp + AMD patches  -> vendor/llama.cpp/build-static/bin
-#   2. TurboQuant engine (llama.cpp PR 23962 + repair patches, optional)
-#                                        -> vendor/llama.cpp-turbo/build-static/bin
 #
 # Usage:
-#   ./scripts/build-engines.sh                  # host architecture, both engines
+#   ./scripts/build-engines.sh                  # host architecture
 #   ARCH=x86_64 ./scripts/build-engines.sh      # cross-compile (CI on arm64 runners)
 #   ARCH=universal ./scripts/build-engines.sh   # x86_64 + arm64 fat binaries (experimental)
-#   SKIP_TURBO=1 ./scripts/build-engines.sh     # official engine only
 set -e
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 LLAMA_COMMIT="${LLAMA_COMMIT:-4fc4ec5}"   # llama.cpp commit validated against the patches
-TURBO_COMMIT="${TURBO_COMMIT:-a3e3638}"   # head of llama.cpp PR 23962 (TurboQuant KV cache)
 SD_COMMIT="${SD_COMMIT:-3590aa8}"         # stable-diffusion.cpp commit validated for image gen
 ARCH="${ARCH:-$(uname -m)}"
 if [ "$ARCH" = "universal" ]; then
     # Build each slice separately (ggml has per-arch sources) and lipo them.
     for slice in x86_64 arm64; do
-        ARCH="$slice" SKIP_TURBO="$SKIP_TURBO" "$0"
-        for dir in vendor/llama.cpp vendor/llama.cpp-turbo; do
+        ARCH="$slice" "$0"
+        for dir in vendor/llama.cpp; do
             [ -d "$dir/build-static/bin" ] || continue
             for tool in llama-server llama-bench llama-perplexity; do
                 mv "$dir/build-static/bin/$tool" "$dir/build-static/bin/$tool.$slice" 2>/dev/null || true
             done
         done
     done
-    for dir in vendor/llama.cpp vendor/llama.cpp-turbo; do
+    for dir in vendor/llama.cpp; do
         [ -d "$dir/build-static/bin" ] || continue
         for tool in llama-server llama-bench llama-perplexity; do
             if [ -f "$dir/build-static/bin/$tool.x86_64" ] && [ -f "$dir/build-static/bin/$tool.arm64" ]; then
@@ -46,7 +42,7 @@ fi
 # the embedded source is the universal fallback that compiles at runtime). On
 # top of that we ALSO ship a precompiled default.metallib next to the binary:
 # embedding alone means every shader is compiled at runtime on each launch —
-# tens of seconds for the large turbo kernel set (measured ~46 s for a 4B),
+# tens of seconds for the large kernel set (measured ~46 s for a 4B),
 # which makes the app look stuck on startup. The patched ggml-metal-device.m
 # loads that precompiled library in ~2 s on GPUs whose features match how it was
 # built (no bfloat/tensor, i.e. Intel + AMD), and falls back to compiling the
@@ -204,11 +200,6 @@ build_image_engine() {
 build_engine vendor/llama.cpp "$LLAMA_COMMIT" "$LLAMA_COMMIT" \
     0001-metal-amd-staging-transfers.patch
 
-# 2. TurboQuant engine (from the upstream PR ref; skip with SKIP_TURBO=1)
-if [ -z "$SKIP_TURBO" ]; then
-    build_engine vendor/llama.cpp-turbo "$TURBO_COMMIT" "refs/pull/23962/head" \
-        0002-turboquant-pr-fixes.patch
-fi
 
 # 3. Image engine (stable-diffusion.cpp; skip with SKIP_IMAGE=1)
 if [ -z "$SKIP_IMAGE" ]; then

@@ -140,9 +140,10 @@ final class ProfileStore: ObservableObject {
         if let v = p.routerMode { d.set(v, forKey: SettingsKeys.routerMode) }
         if let v = p.routerModelsMax { d.set(v, forKey: SettingsKeys.routerModelsMax) }
         switch p.engine {
-        case "bundled": d.set(ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
-        case "turbo": d.set(ServerSettings.turboBinary ?? ServerSettings.defaultBinary, forKey: SettingsKeys.serverBinary)
-        case let .some(path) where !path.isEmpty: d.set(path, forKey: SettingsKeys.serverBinary)
+        case "bundled", "turbo": d.set("bundled", forKey: SettingsKeys.engineKind)
+        case let .some(path) where !path.isEmpty:
+            d.set("custom", forKey: SettingsKeys.engineKind)
+            d.set(path, forKey: SettingsKeys.serverBinary)
         default: break
         }
     }
@@ -173,12 +174,9 @@ final class ProfileStore: ObservableObject {
 }
 
 extension ServerSettings {
-    /// "bundled" | "turbo" | absolute path, matching Profile.engine. Uses isTurbo
-    /// so the bundled bin-turbo path is recognized, not shown as a raw path.
+    /// "bundled" or an absolute path, matching Profile.engine.
     var engineTag: String {
-        if ServerSettings.isTurbo(serverBinary) { return "turbo" }
-        if serverBinary == ServerSettings.defaultBinary { return "bundled" }
-        return serverBinary
+        serverBinary == ServerSettings.defaultBinary ? "bundled" : serverBinary
     }
 
     /// Snapshot the full runtime config into a named profile.
@@ -221,8 +219,7 @@ extension ServerSettings {
         if let v = p.routerMode { routerMode = v }
         if let v = p.routerModelsMax { routerModelsMax = v }
         switch p.engine {
-        case "bundled": serverBinary = ServerSettings.defaultBinary
-        case "turbo": serverBinary = ServerSettings.turboBinary ?? ServerSettings.defaultBinary
+        case "bundled", "turbo": serverBinary = ServerSettings.defaultBinary
         case let .some(path) where !path.isEmpty: serverBinary = path
         default: break
         }
