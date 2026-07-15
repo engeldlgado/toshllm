@@ -351,6 +351,9 @@ struct ServerSettings {
 
     var environment: [String: String] {
         var env = ProcessInfo.processInfo.environment
+        // The engine logs this, so a log pasted from a bug report identifies the
+        // app build even when the engine binary is older than the app.
+        env["TOSH_APP_VERSION"] = AppInfo.version
         env["GGML_METAL_CONCURRENCY_DISABLE"] = concurrencyDisable ? "1" : nil
         env["GGML_METAL_VRAM_RESERVE_MB"] = String(vramReserveMB)
         // Physical GPU selection (consumed by the patched Metal backend, which maps

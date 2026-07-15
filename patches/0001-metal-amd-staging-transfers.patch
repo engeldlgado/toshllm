@@ -1,3 +1,37 @@
+diff --git a/common/common.cpp b/common/common.cpp
+index 0dd9ede5e..07b760a5f 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -373,6 +373,14 @@ void common_init() {
+     llama_log_set(common_log_default_callback, NULL);
+ }
+ 
++// Stamped by build-engines.sh from VERSION. Passed unquoted so the value needs no
++// escaping through cmake, hence the stringify.
++#ifndef TOSH_VERSION
++#define TOSH_VERSION unknown
++#endif
++#define TOSH_STRINGIFY2(x) #x
++#define TOSH_STRINGIFY(x) TOSH_STRINGIFY2(x)
++
+ void common_params_print_info(const common_params & params, bool print_devices) {
+ #ifdef NDEBUG
+     const char * build_type = "";
+@@ -381,6 +389,14 @@ void common_params_print_info(const common_params & params, bool print_devices)
+ #endif
+     COM_TRC("%s: build %d (%s) with %s for %s%s\n", __func__, llama_build_number(), llama_commit(), llama_compiler(), llama_build_target(), build_type);
+ 
++    // The build number above only tracks the upstream commit, unchanged across
++    // releases that only touch the patch. No env var means a direct CLI run.
++    {
++        const char * app_version = std::getenv("TOSH_APP_VERSION");
++        COM_INF("%s: ToshLLM engine %s (app %s)\n", __func__, TOSH_STRINGIFY(TOSH_VERSION),
++                app_version ? app_version : "standalone");
++    }
++
+     COM_INF("%s: verbosity = %d (adjust with the `-lv N` CLI arg)\n", __func__, common_log_get_verbosity_thold());
+ 
+     // device enumeration creates a primary context on CUDA backends, skip it when the caller does not own any device
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
 index 87615921c..39562cbe3 100644
 --- a/ggml/src/ggml-backend.cpp

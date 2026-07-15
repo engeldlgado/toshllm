@@ -68,6 +68,10 @@ else
     echo "Metal compiler unavailable — embedded source only (slower first load)"
 fi
 
+# Stamped into the binaries so a log identifies the ToshLLM build, not just the
+# upstream commit (which is unchanged across releases that only touch the patch).
+TOSH_VERSION="$(tr -d '[:space:]' < "$(dirname "$0")/../VERSION")"
+
 CMAKE_FLAGS=(
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_SHARED_LIBS=OFF
@@ -75,6 +79,7 @@ CMAKE_FLAGS=(
     -DGGML_METAL_EMBED_LIBRARY=ON
     -DGGML_NATIVE=OFF
     -DCMAKE_OSX_ARCHITECTURES="$ARCH"
+    -DCMAKE_CXX_FLAGS="-DTOSH_VERSION=$TOSH_VERSION"
     # The server binds to localhost only; skip OpenSSL so static cross-builds
     # don't pick up host-arch Homebrew libraries on CI runners.
     -DLLAMA_OPENSSL=OFF

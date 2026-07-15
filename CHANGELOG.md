@@ -5,6 +5,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Improved
+- **The engine now stamps the ToshLLM version in its startup log**... a log pasted from a bug report identifies the build, which llama.cpp's own build number cannot do (it only tracks the upstream commit).
+
 ### Fixed
 - **Model detection now uses GGUF metadata safely**... renamed MoE models keep correct VRAM estimates, split GGUFs act as one model, and legacy vision projectors pair only when unambiguous.
 - **The Models tab now reflects your per-model expert offload**... its speed/fit estimate honors the saved ncmoe and shows it as a chip, matching what the server will run.
