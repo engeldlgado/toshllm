@@ -484,12 +484,12 @@ struct SettingsView: View {
                             "Bundled: official llama.cpp with the Metal kernels for AMD, recommended. External: any llama-server of yours."))
                 if engineSelection.wrappedValue != "custom" {
                     Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
-                        .disabled(!amdFlashActive || currentModelIsVision)
+                        .disabled(!amdFlashActive)
                         .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
                                     "Saves each conversation's KV cache to disk, so reopening a chat or restarting the app skips re-processing the prompt (saves several seconds per turn on long prompts). Requires the AMD Flash Attention kernel; with quantized KV (q8_0/q4_0) the file is smaller and restore is faster. Files live in Application Support and are removed when you delete the conversation."))
                     if currentModelIsVision {
-                        Label(loc.t("No disponible con modelos de visión: llama.cpp no permite guardar/restaurar slots cuando hay mmproj.",
-                                    "Not available with vision models: llama.cpp cannot save/restore slots when mmproj is loaded."),
+                        Label(loc.t("Con la visión activada (ojo) se omite en silencio: llama.cpp no permite guardar/restaurar slots con mmproj cargado. Con el ojo desactivado funciona normal.",
+                                    "Silently skipped while vision is on (the eye): llama.cpp cannot save/restore slots with mmproj loaded. With the eye off it works normally."),
                               systemImage: "info.circle")
                             .font(.caption).foregroundStyle(.secondary)
                     } else if !amdFlashActive {

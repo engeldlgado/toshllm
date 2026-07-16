@@ -770,6 +770,9 @@ final class ChatStore: ObservableObject {
         let d = UserDefaults.standard
         guard d.bool(forKey: SettingsKeys.persistCache) else { return false }
         guard d.object(forKey: SettingsKeys.faAmd) as? Bool ?? ServerSettings.defaultFaAmd else { return false }
+        // Only an actually loaded projector blocks slot save/restore; with the
+        // vision eye off the model runs text-only and persistence works.
+        guard d.object(forKey: SettingsKeys.loadVision) as? Bool ?? true else { return true }
         return ServerSettings.mmprojPath(forModel: d.string(forKey: SettingsKeys.modelPath) ?? "") == nil
     }
 

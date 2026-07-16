@@ -96,6 +96,9 @@ struct ServerSettings {
     var benchDepth: Int = 0
 
     var isMultimodal: Bool { Self.mmprojPath(forModel: modelPath) != nil }
+    /// Vision actually loaded (projector available AND the eye is on); slot
+    /// persistence gates on this, not on mere availability.
+    var visionLoaded: Bool { loadVision && isMultimodal }
 
     /// Directory where one server's per-conversation KV slot files live. Namespaced
     /// by port so independent servers don't overwrite each other's slot 0 / prefix
@@ -157,7 +160,9 @@ struct ServerSettings {
         // Which devices to split across is decided by the env vars below.
         if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
         if embeddings { args.append("--embeddings") }
-        if persistCache && effectiveFaAmd {
+        // Silently skipped with a loaded projector: llama.cpp cannot save/restore
+        // slots with mmproj. Turning the vision eye off re-enables it.
+        if persistCache && effectiveFaAmd && mmproj == nil {
             args += ["--slot-save-path", Self.slotCacheDir(port: port).path]
         }
         if reasoningInline { args += ["--reasoning-format", "none"] }
@@ -238,7 +243,7 @@ struct ServerSettings {
             if parallelSlots > 0 { lines.append("parallel = \(parallelSlots)") }
             if parallelSlots > 1 { lines.append("kv-unified = true") }
             if multiGPU || gpuList.count >= 2 { lines.append("split-mode = layer") }
-            if persistCache && effectiveFaAmd {
+            if persistCache && effectiveFaAmd && mmproj == nil {
                 lines.append("slot-save-path = \(Self.slotCacheDir(port: port).appendingPathComponent(alias).path)")
             }
             if reasoningInline { lines.append("reasoning-format = none") }
@@ -921,7 +926,7 @@ final class ServerController: ObservableObject {
         }
 
         prewarmActive = !settings.routerMode && settings.persistCache && settings.effectiveFaAmd
-            && !settings.isMultimodal && !ServerSettings.modelHasMTP(at: settings.modelPath)
+            && !settings.visionLoaded && !ServerSettings.modelHasMTP(at: settings.modelPath)
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: settings.serverBinary)

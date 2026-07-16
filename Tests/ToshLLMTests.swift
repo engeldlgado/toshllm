@@ -269,6 +269,20 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.benchTGClamped, 8192)
     }
 
+    func testSlotSavePathFollowsLoadedVision() {
+        var s = makeSettings()
+        s.persistCache = true
+        s.faAmd = true
+        // No projector on disk for this model path: persistence stays on
+        // regardless of the vision toggle.
+        s.loadVision = true
+        XCTAssertTrue(s.arguments.contains("--slot-save-path"))
+        s.loadVision = false
+        XCTAssertTrue(s.arguments.contains("--slot-save-path"))
+        s.persistCache = false
+        XCTAssertFalse(s.arguments.contains("--slot-save-path"))
+    }
+
     func testBenchmarkDepthArgument() {
         var s = makeSettings()
         // Depth 0 (default) must not emit -d.
