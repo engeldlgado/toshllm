@@ -1087,7 +1087,7 @@ index d465f31c0..ea9d0f1da 100644
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..7d59df724 100644
+index a7cbc60eb..310ad0fd5 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1634,7 +1634,7 @@ index a7cbc60eb..7d59df724 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2129,319 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2129,326 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1838,12 +1838,19 @@ index a7cbc60eb..7d59df724 100644
 +}
 +
 +void ggml_metal_device_read_batch_begin(ggml_metal_device_t dev) {
++    // shared-buffer devices never take the stage path; skip the empty batch
++    if (dev->props.use_shared_buffers) {
++        return;
++    }
 +    [dev->stage_lock lock];   // held until read_batch_end
 +    dev->stage_batch_cmd = [dev->mtl_queue commandBufferWithUnretainedReferences];
 +    dev->stage_batch_enc = [dev->stage_batch_cmd blitCommandEncoder];
 +}
 +
 +void ggml_metal_device_read_batch_end(ggml_metal_device_t dev) {
++    if (dev->props.use_shared_buffers) {
++        return;
++    }
 +    if (dev->stage_batch_cmd != nil) {
 +        if (dev->stage_batch_n > 0) {
 +            ggml_metal_device_stage_batch_flush(dev);
@@ -1954,7 +1961,7 @@ index a7cbc60eb..7d59df724 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2449,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2456,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -2016,7 +2023,7 @@ index a7cbc60eb..7d59df724 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1768,44 +2533,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1768,44 +2540,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
          dispatch_release(completion_semaphore);
  
          //[cmd_buf waitUntilCompleted];
@@ -2140,7 +2147,7 @@ index a7cbc60eb..7d59df724 100644
      }
  }
  
-@@ -1820,6 +2652,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
+@@ -1820,6 +2659,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
          return true;
      }
  
