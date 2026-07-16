@@ -754,9 +754,7 @@ final class ChatStore: ObservableObject {
 
     // MARK: KV slot persistence
 
-    /// On when the disk-cache setting is enabled and the turbo engine is selected
-    /// (the only engine where slot save/restore is fast on AMD). Read live from
-    /// defaults so toggling it in Settings takes effect on the next turn.
+    /// Read live from defaults so toggling it in Settings takes effect next turn.
     nonisolated var slotPersistEnabled: Bool {
         let d = UserDefaults.standard
         guard d.bool(forKey: SettingsKeys.persistCache) else { return false }

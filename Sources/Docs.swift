@@ -106,8 +106,8 @@ El interruptor **Chat / Imágenes** en la parte superior de la ventana cambia al
 **Contexto** — Tamaño máximo de la conversación en tokens. Más contexto = más memoria de KV cache.
 
 **KV cache claves/valores (-ctk / -ctv)** — Cuantización de la memoria de atención. La mejor combinación depende de si usas el kernel **Flash Attention AMD**:
-- **Sin el kernel** (motor oficial): cuantiza solo las claves — `q8_0` (mitad de memoria, costo casi nulo, recomendado) o `q4_0` (un cuarto), dejando los valores en `f16`. Cuantizar también los valores obligaría a Flash Attention en CPU (~3× más lento).
-- **Con el kernel** (Experimental + Flash Attention AMD): cualquier combinación estándar (`f16`/`q8_0`/`q4_0` en claves y valores) corre en GPU a velocidad plena. Máximo ahorro: `q8_0/q8_0` o `q4_0/q4_0`; comprimir solo las claves y mantener calidad en los valores: `q8_0/f16` o `q4_0/f16`.
+- **Con el kernel** (así viene por defecto): cualquier combinación estándar (`f16`/`q8_0`/`q4_0` en claves y valores) corre en GPU a velocidad plena. Máximo ahorro: `q8_0/q8_0` o `q4_0/q4_0`; comprimir solo las claves y mantener calidad en los valores: `q8_0/f16` o `q4_0/f16`.
+- **Sin el kernel** (si lo apagas): cuantiza solo las claves — `q8_0` (mitad de memoria, costo casi nulo) o `q4_0` (un cuarto), dejando los valores en `f16`. Cuantizar también los valores obligaría a Flash Attention en CPU (~3× más lento).
 
 **Flash Attention** — Atención eficiente en memoria. `auto` es lo correcto en GPU AMD.
 
@@ -126,15 +126,15 @@ El interruptor **Kernel Flash Attention AMD** ejecuta la atención —tanto el p
 
 **Externo** — Cualquier binario `llama-server` tuyo, para probar builds propias.
 
-**ToshGEMM**, activo por defecto en ambos motores, es un kernel de multiplicación de matrices en mosaico (tiled) escrito a medida para el procesamiento de prompt en GPUs AMD, que en esta GPU llevó el prompt de un 8B de ~101 a ~312 t/s (~3×). No es un interruptor: corre siempre que el modelo procesa el prompt en GPU.
+**ToshGEMM**, activo por defecto, es un kernel de multiplicación de matrices en mosaico (tiled) escrito a medida para el procesamiento de prompt en GPUs AMD, que en esta GPU llevó el prompt de un 8B de ~101 a ~470 t/s (~5×). No es un interruptor: corre siempre que el modelo procesa el prompt en GPU.
 
-Para modelos MoE con expertos en RAM (ncmoe > 0), el interruptor **Prefetch de expertos MoE** (Ajustes → Inferencia y contexto, activado por defecto) sube el procesamiento del prompt de 1.8× a 4.4× adicional sobre ToshGEMM, sin costo en la generación, solapando la subida de pesos a la GPU con el cómputo. Disponible en ambos motores.
+Para modelos MoE con expertos en RAM (ncmoe > 0), el interruptor **Prefetch de expertos MoE** (Ajustes → Inferencia y contexto, activado por defecto) sube el procesamiento del prompt de 1.8× a 4.4× adicional sobre ToshGEMM, sin costo en la generación, solapando la subida de pesos a la GPU con el cómputo.
 """),
         DocSection(title: "Perfiles", icon: "person.2", body: """
 Un perfil guarda **toda** la configuración: modelo, motor, parámetros de memoria y contexto. Se crean en Ajustes → Perfiles escribiendo un nombre y pulsando "Guardar actual".
 
 Perfiles típicos:
-- **Diario (MTP)**: modelo MTP + `--spec-type draft-mtp` en argumentos extra → máxima velocidad de chat
+- **Diario**: tu modelo de cabecera con su contexto y expertos ya afinados → máxima velocidad de chat
 
 Al aplicar un perfil, reinicia el servidor para que tome efecto.
 """),
@@ -145,14 +145,14 @@ Cómo funciona: el servidor carga el modelo la primera vez que se pide (por su n
 
 Dentro de la app, el chat muestra un selector de modelo (icono de caja) junto al campo de mensaje cuando el router está activo. Desde un cliente externo (VS Code, Continue…), simplemente indica el nombre del modelo en el campo `model` de la petición; la app deriva ese nombre del nombre del archivo .gguf (ej. `Qwen3.6-14B-A3B.gguf` → `qwen3-6-14b-a3b`), consultable en `GET /v1/models`.
 
-Cada modelo conserva su propia configuración de expertos MoE y visión. MTP se decide automáticamente. Disponible en ambos motores.
+Cada modelo conserva su propia configuración de expertos MoE y visión. MTP se decide automáticamente.
 """),
         DocSection(title: "MTP: generación acelerada", icon: "hare", body: """
 **MTP (Multi-Token Prediction)** es una técnica donde el modelo predice varios tokens por pasada y luego los verifica — sin ninguna pérdida de calidad (solo acepta lo que habría generado de todas formas).
 
 Última medición en este equipo: **+34% de velocidad de generación** (19.3 → 25.7 t/s en Qwen3.6-35B) con 82% de aceptación. Esa cifra es previa al fix de staging persistente, que ya subió el "sin MTP" de ~19 a ~25 t/s por sí solo. Falta remedir la ganancia real de MTP sobre el motor actual.
 
-MTP se activa automáticamente cuando el GGUF trae el cabezal y hay expertos MoE en CPU (`ncmoe > 0`). Se omite en densos y modelos completamente en GPU, donde la sincronización extra puede hacerlo más lento. Funciona en ambos motores. `llama-bench` no puede medirlo: compara siempre con generación real desde el chat o el servidor.
+MTP se activa automáticamente cuando el GGUF trae el cabezal y hay expertos MoE en CPU (`ncmoe > 0`). Se omite en densos y modelos completamente en GPU, donde la sincronización extra puede hacerlo más lento. `llama-bench` no puede medirlo: compara siempre con generación real desde el chat o el servidor.
 """),
         DocSection(title: "API para desarrolladores", icon: "terminal", body: """
 Con el servidor activo, tienes una **API compatible con OpenAI** en `http://127.0.0.1:8080` (puerto configurable). Funciona con cualquier librería o app que hable ese protocolo.
@@ -241,7 +241,7 @@ Agentes de terminal y SDKs basados en el formato Anthropic, no solo OpenAI. El m
         DocSection(title: "Rendimiento de referencia", icon: "gauge.high", body: """
 Números medidos en el equipo de desarrollo (RX 6700 XT 12 GB, DDR4, macOS):
 
-**Qwen3-8B Q4** (todo en VRAM, con ToshGEMM): ~312 t/s prompt, ~58 t/s generación
+**Qwen3-8B Q4** (todo en VRAM, con ToshGEMM): ~476 t/s prompt, ~60 t/s generación
 
 **Qwen3.6-35B-A3B Q4** (MoE híbrido, ncmoe 24):
 - Normal: ~197 t/s prompt, ~25 t/s generación
@@ -348,8 +348,8 @@ The **Chat / Images** toggle at the top of the window switches to the image stud
 **Context** — Maximum conversation size in tokens. More context = more KV cache memory.
 
 **KV cache keys/values (-ctk / -ctv)** — Quantization of attention memory. The best combo depends on whether you use the **AMD Flash Attention kernel**:
-- **Without the kernel** (official engine): quantize keys only — `q8_0` (half the memory at near-zero cost, recommended) or `q4_0` (a quarter), keeping values at `f16`. Quantizing values too would force Flash Attention onto the CPU (~3× slower).
-- **With the kernel** (Experimental + AMD Flash Attention): any standard combination (`f16`/`q8_0`/`q4_0` for keys and values) runs on the GPU at full speed. Maximum savings: `q8_0/q8_0` or `q4_0/q4_0`; compress only the keys while keeping value quality: `q8_0/f16` or `q4_0/f16`.
+- **With the kernel** (how it ships): any standard combination (`f16`/`q8_0`/`q4_0` for keys and values) runs on the GPU at full speed. Maximum savings: `q8_0/q8_0` or `q4_0/q4_0`; compress only the keys while keeping value quality: `q8_0/f16` or `q4_0/f16`.
+- **Without the kernel** (if you turn it off): quantize keys only — `q8_0` (half the memory at near-zero cost) or `q4_0` (a quarter), keeping values at `f16`. Quantizing values too would force Flash Attention onto the CPU (~3× slower).
 
 **Flash Attention** — Memory-efficient attention. `auto` is right on AMD GPUs.
 
@@ -368,15 +368,15 @@ The **AMD Flash Attention kernel** toggle runs attention — both prompt process
 
 **External** — Any `llama-server` binary of yours, for testing custom builds.
 
-**ToshGEMM**, on by default on both engines, is a custom tiled matrix-multiply kernel for prompt processing on AMD GPUs; on this GPU it took an 8B's prompt speed from ~101 to ~312 t/s (~3×). It's not a toggle: it always runs when a model processes its prompt on the GPU.
+**ToshGEMM**, on by default, is a custom tiled matrix-multiply kernel for prompt processing on AMD GPUs; on this GPU it took an 8B's prompt speed from ~101 to ~470 t/s (~5×). It's not a toggle: it always runs when a model processes its prompt on the GPU.
 
-For MoE models with experts in RAM (ncmoe > 0), the **MoE expert prefetch** toggle (Settings → Inference & context, on by default) raises prompt processing an additional 1.8×-4.4× on top of ToshGEMM, at no generation cost, by overlapping weight uploads to the GPU with compute. Available on both engines.
+For MoE models with experts in RAM (ncmoe > 0), the **MoE expert prefetch** toggle (Settings → Inference & context, on by default) raises prompt processing an additional 1.8×-4.4× on top of ToshGEMM, at no generation cost, by overlapping weight uploads to the GPU with compute.
 """),
         DocSection(title: "Profiles", icon: "person.2", body: """
 A profile saves **everything**: model, engine, memory and context parameters. Create them in Settings → Profiles by typing a name and pressing "Save current".
 
 Typical profiles:
-- **Daily (MTP)**: MTP model + `--spec-type draft-mtp` in extra arguments → fastest chat
+- **Daily**: your go-to model with its context and experts already tuned → fastest chat
 
 After applying a profile, restart the server for it to take effect.
 """),
@@ -387,18 +387,16 @@ How it works: the server loads a model the first time it's requested (by name) a
 
 Inside the app, chat shows a model picker (box icon) next to the message field when the router is on. From an external client (VS Code, Continue…), just put the model's name in the request's `model` field; the app derives that name from the .gguf filename (e.g. `Qwen3.6-14B-A3B.gguf` → `qwen3-6-14b-a3b`), which you can check via `GET /v1/models`.
 
-Each model keeps its own MoE experts, vision and MTP config, computed automatically. Available on both engines.
+Each model keeps its own MoE experts, vision and MTP config, computed automatically.
 """),
         DocSection(title: "MTP: faster generation", icon: "hare", body: """
 **MTP (Multi-Token Prediction)** is a technique where the model predicts several tokens per pass and then verifies them — with zero quality loss (it only accepts what it would have generated anyway).
 
 Last measurement on this machine: **+34% generation speed** (19.3 → 25.7 t/s on Qwen3.6-35B) with 82% acceptance. That figure predates the persistent-staging fix, which alone already raised the "without MTP" baseline from ~19 to ~25 t/s. MTP's real gain over the current engine still needs re-measuring.
 
-You need two things:
-1. A GGUF with the MTP head (look for repos with "MTP" in the name, e.g. unsloth's `Qwen3.6-35B-A3B-MTP-GGUF` — regular GGUFs don't include it)
-2. Add `--spec-type draft-mtp` in Settings → Advanced → Extra arguments
+You need a GGUF with the MTP head: look for repos with "MTP" in the name, e.g. unsloth's `Qwen3.6-35B-A3B-MTP-GGUF`, since regular GGUFs don't include it.
 
-Works on both engines (Bundled and Experimental). The "Daily (MTP)" profile configures everything. The gain depends heavily on the model and what it's generating: some cases see no speedup at all, or even a slight slowdown. `llama-bench` can't measure it (the flag isn't supported there): always compare using real generation from chat or the server.
+There is nothing to switch on. MTP engages by itself when the GGUF ships the head and there are MoE experts on the CPU (`ncmoe > 0`). It stays out of dense and fully-GPU models, where the extra synchronization can make it slower. `llama-bench` can't measure it: always compare using real generation from chat or the server.
 """),
         DocSection(title: "API for developers", icon: "terminal", body: """
 With the server running, you get an **OpenAI-compatible API** at `http://127.0.0.1:8080` (configurable port). Works with any library or app that speaks the protocol.
@@ -487,7 +485,7 @@ Terminal agents and SDKs built on the Anthropic format, not just OpenAI's. The e
         DocSection(title: "Reference performance", icon: "gauge.high", body: """
 Numbers measured on the development machine (RX 6700 XT 12 GB, DDR4, macOS):
 
-**Qwen3-8B Q4** (fully in VRAM, with ToshGEMM): ~312 t/s prompt, ~58 t/s generation
+**Qwen3-8B Q4** (fully in VRAM, with ToshGEMM): ~476 t/s prompt, ~60 t/s generation
 
 **Qwen3.6-35B-A3B Q4** (hybrid MoE, ncmoe 24):
 - Normal: ~197 t/s prompt, ~25 t/s generation

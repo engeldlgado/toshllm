@@ -39,65 +39,51 @@ struct ServerSettings {
     var cacheTypeK: String     // f16 | q8_0 | q5_x | q4_x | iq4_nl
     var cacheTypeV: String
     var mlock: Bool
-    /// Host-RAM prompt cache cap in MiB (0 disables). llama-server defaults to
-    /// 8192 MiB, which next to a large model pushes 32 GB machines into swap
-    /// and progressively degrades generation speed.
+    /// Host-RAM prompt cache cap in MiB (0 disables). The engine's own 8192 default
+    /// grows with use and pushes a big model into swap, degrading speed per session.
     var cacheRAM: Int = 2048
     /// Emit reasoning inline in `content` (<think>…) instead of the separate
     /// `reasoning_content` field, for external clients that ignore the latter.
     var reasoningInline: Bool = false
-    /// Server slots (0 = engine auto, currently 4). With 1, requests queue
-    /// instead of competing for the GPU, and a prefill aborted by a client
-    /// timeout stays in the slot so the retry resumes where it left off —
-    /// crucial for coding assistants that send huge prompts.
+    /// Server slots (0 = engine auto). With 1, requests queue instead of competing
+    /// for the GPU, and a prefill aborted by a client timeout stays in the slot so
+    /// the retry resumes where it left off.
     var parallelSlots: Int = 1
     var apiKeyEnabled: Bool = false
-    /// Expose the HTTP server beyond loopback and advertise it with Bonjour.
-    /// Off by default: when enabled, any device on the local network can reach
-    /// the OpenAI-compatible API, so pairing it with `apiKeyEnabled` is strongly
-    /// recommended.
+    /// Serve beyond loopback and advertise with Bonjour. Off by default: it opens
+    /// the API to the whole local network, so it wants `apiKeyEnabled` alongside.
     var localNetworkDiscovery: Bool = false
     /// Legacy profile field kept for decoding older saved settings. MTP is now
     /// selected automatically from model capability and expert offload.
     var specMTP: Bool = false
-    /// Experimental: route attention through the dedicated AMD Metal
-    /// Flash-Attention kernel (gated by the TOSH_FA_AMD env var in the engine).
-    /// Forces `-fa 1`, but the patched engine routes supported AMD cases to TOSH_FA_AMD.
+    /// Route attention through the AMD Metal Flash-Attention kernel (TOSH_FA_AMD).
     var faAmd: Bool = true
-    /// MoE-offload prefill boost: upload expert weights through a second Metal
-    /// queue overlapping compute (GGML_SCHED_PREFETCH_EXPERTS) and keep CPU
-    /// experts unpacked so their matmuls can offload (GGML_CPU_NO_REPACK).
+    /// MoE-offload prefill boost: overlap expert uploads with compute
+    /// (GGML_SCHED_PREFETCH_EXPERTS) and keep CPU experts unpacked so their
+    /// matmuls can offload (GGML_CPU_NO_REPACK).
     var prefetchExperts: Bool = true
     /// Router mode (`--models-preset`): one process auto-loads/unloads whichever
     /// model a request's "model" field names, instead of the fixed `modelPath`.
     var routerMode: Bool = false
     /// Models the router keeps loaded at once (LRU); 1 is safest on a single GPU.
     var routerModelsMax: Int = 1
-    /// Persist each conversation's KV cache to disk (`--slot-save-path`) so
-    /// reopening a chat — or restarting the app/engine — skips re-processing the
-    /// prompt. Needs the AMD FA kernel: without FA the V cache is stored transposed
-    /// and save/restore copies it row-by-row, unusably slow on AMD (~13 s vs ~0.1 s).
+    /// Persist each conversation's KV cache to disk (`--slot-save-path`). Needs the
+    /// AMD FA kernel: without it the V cache is transposed and save/restore copies
+    /// it row-by-row, unusably slow.
     var persistCache: Bool = false
-    /// EXPERIMENTAL, needs more testing. Split one model's layers across all
-    /// detected GPUs (`--split-mode layer`) instead of pinning to one. The modern
-    /// Metal backend registers each AMD GPU as a separate device (MTL0, MTL1…), so
-    /// this is possible in principle, but it is UNVALIDATED on AMD/Metal: cross-GPU
-    /// copies are a different path than the host↔device staging the patch covers and
-    /// could corrupt or deadlock. Works the same on both engines. Off by default.
+    /// EXPERIMENTAL: split one model's layers across all detected GPUs
+    /// (`--split-mode layer`). Unvalidated on AMD/Metal: cross-GPU copies take a
+    /// different path than the staging the patch covers and could corrupt or hang.
     var multiGPU: Bool = false
     /// How many GPUs to split across when `multiGPU` is on. 0 = all detected.
-    /// Fewer GPUs can generate faster (less cross-card sync) at the cost of prompt
-    /// speed, which the #16 tester asked to control per workload.
+    /// Fewer GPUs trade prompt speed for generation speed (less cross-card sync).
     var multiGPUCount: Int = 0
-    /// Force VRAM-resident (private) Metal buffers. The backend forces shared
-    /// (system-memory) buffers for external GPUs, which streams weights over
-    /// Thunderbolt every op (~0.8 t/s); this overrides that for the default-GPU
-    /// case where the app can't tell macOS picked an eGPU. Off by default.
+    /// Force VRAM-resident (private) Metal buffers. The backend forces shared ones
+    /// for external GPUs, which streams weights over Thunderbolt every op; this
+    /// covers the default-GPU case, where the app can't tell macOS picked an eGPU.
     var forcePrivateBuffers: Bool = false
     /// Reuse shifted KV chunks across mid-prompt divergences (agent edits, a
-    /// stripped <think> block). Fast but approximate — the KV shift is not a
-    /// bit-exact reconstruction — so the user can turn it off for exact results.
-    /// On by default.
+    /// stripped <think>). Fast but approximate, hence user-toggleable.
     var cacheReuse: Bool = true
     /// Load the multimodal projector (mmproj) for vision-capable models. Off skips it
     /// so a vision model runs text-only and frees the VRAM the image encoder would use.
@@ -133,10 +119,8 @@ struct ServerSettings {
 
     var arguments: [String] {
         if routerMode { return routerArguments }
-        // Quantized KV requires FA, so it stays forced. The AMD kernel rides on
-        // "auto": the engine keeps FA on GPU where the kernel covers the model
-        // (head 128/256/512) and disables it elsewhere, never the CPU fallback
-        // that an explicit "1" causes on uncovered models.
+        // Quantized KV requires FA, so it stays forced. Elsewhere the AMD kernel rides
+        // on "auto": an explicit "1" would drop uncovered models to the CPU fallback.
         let faValue = kvNeedsFlashAttention ? "1" : (effectiveFaAmd ? "auto" : flashAttn)
         var args = [
             "-m", modelPath,
@@ -149,9 +133,7 @@ struct ServerSettings {
         ]
         if ncmoe > 0 { args += ["--n-cpu-moe", String(ncmoe)] }
         if noMmap { args.append("--no-mmap") }
-        // Vision: if the model has a sibling multimodal projector, load it so the
-        // model can read attached images. Requires the chat template (--jinja).
-        // Skipped when the user wants text-only, to free the image encoder's VRAM.
+        // A sibling projector lets the model read images, and needs --jinja.
         let mmproj = loadVision ? Self.mmprojPath(forModel: modelPath) : nil
         if let mmproj { args += ["--mmproj", mmproj] }
         if jinja || mmproj != nil { args.append("--jinja") }
@@ -159,33 +141,20 @@ struct ServerSettings {
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if mlock { args.append("--mlock") }
         args += ["--cache-ram", String(cacheRAM)]
-        // Reuse shifted KV chunks when a prompt diverges mid-way: agent clients
-        // edit their prompts between turns, and a reasoning turn's <think> is
-        // stripped from the resent history (a removed middle chunk) — KV shifting
-        // skips re-prefilling it. Fast but approximate (the shifted KV isn't a
-        // bit-exact reconstruction), so it's user-toggleable. Safe with f16 and
-        // standard quantized KV (q8_0/q4_0), including the AMD FA kernel; the
-        // TurboQuant rotation types (turbo2/3/4) still crash on a shift (no
-        // f32->turbo requantize kernel), so it's force-disabled for those.
+        // A turbo KV type left in an old profile crashes on a shift (no requantize
+        // kernel), so cache-reuse stays off for those.
         let turboKV = cacheTypeK.hasPrefix("turbo") || cacheTypeV.hasPrefix("turbo")
         if cacheReuse && !turboKV && mmproj == nil {
             args += ["--cache-reuse", "256"]
         }
         if parallelSlots > 0 { args += ["--parallel", String(parallelSlots)] }
-        // With an explicit --parallel N (N>1), llama-server splits the context
-        // pool across slots (e.g. 16384 → 8192 each) instead of sharing it; only
-        // --parallel "auto" auto-enables unified KV. Pass --kv-unified ourselves so
-        // the N slots share one pool: the main chat keeps the full context window
-        // and concurrent API requests don't multiply KV memory.
+        // An explicit --parallel N splits the context pool across slots instead of
+        // sharing it (only "auto" unifies), so ask for one pool ourselves: the chat
+        // keeps its full window and API requests don't multiply KV memory.
         if parallelSlots > 1 { args.append("--kv-unified") }
-        // EXPERIMENTAL multi-GPU: split layers across the detected Metal devices
-        // (all/N via multiGPU, or the explicit gpuList set). Device selection is
-        // done through the env vars below.
+        // Which devices to split across is decided by the env vars below.
         if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
         if embeddings { args.append("--embeddings") }
-        // Persist KV slots to disk so reopening a chat skips re-prefill. Needs the
-        // AMD FA kernel, which keeps the V cache contiguous; the transposed-V
-        // save/restore it replaces is unusably slow on AMD.
         if persistCache && effectiveFaAmd {
             args += ["--slot-save-path", Self.slotCacheDir(port: port).path]
         }
@@ -279,13 +248,9 @@ struct ServerSettings {
         return sections.joined(separator: "\n\n") + "\n"
     }
 
-    /// Splits the Extra arguments field: a token shaped like `KEY=VALUE` whose name
-    /// is an UPPERCASE env-style identifier (`[A-Z_][A-Z0-9_]*`) becomes an environment
-    /// variable — so an advanced user can flip an engine env knob (e.g.
-    /// `GGML_METAL_WAVE64_SAFEMODE=1` for GCN/Vega cards) without a dedicated UI field.
-    /// Everything else stays a llama-server CLI argument, including lowercase flag
-    /// values that contain `=` (e.g. `--override-kv key=str:foo`), which is why the
-    /// name must be uppercase to qualify as env.
+    /// Splits the Extra arguments field: `KEY=VALUE` with an UPPERCASE name becomes an
+    /// env var, everything else a CLI argument. The uppercase rule is what keeps
+    /// lowercase flag values containing `=` (`--override-kv key=str:foo`) out of the env.
     var extraArgTokens: (env: [String: String], cli: [String]) {
         func isEnvName(_ s: Substring) -> Bool {
             guard let first = s.first, first == "_" || (first.isLetter && first.isUppercase) else { return false }
@@ -303,10 +268,8 @@ struct ServerSettings {
         return (env, cli)
     }
 
-    /// Arguments for `llama-bench`. Kept separate from `llama-server` arguments
-    /// because server-only flags (`--host`, `--port`, chat UI, slot cache, etc.)
-    /// are not valid for the benchmark tool, but benchmark must still honor the
-    /// GPU/memory options that affect performance.
+    /// Arguments for `llama-bench`: separate from the server's because server-only
+    /// flags are invalid here, but every option affecting speed must carry over.
     var benchmarkArguments: [String] {
         var args = ["-m", modelPath, "-ngl", String(ngl), "--mmap", "0", "-r", "2",
                     "-p", String(benchPPClamped), "-n", String(benchTGClamped)]
@@ -373,10 +336,9 @@ struct ServerSettings {
             // Pin the engine to one physical GPU by index.
             env["GGML_METAL_DEVICE_INDEX"] = String(gpuIndex)
         }
-        // eGPU fix: the Metal backend forces system-memory (shared) buffers for external
-        // GPUs, so weights stream over Thunderbolt every op (~0.8 t/s). Forcing private
-        // VRAM-resident buffers restores normal speed. Auto-enable it when the selected
-        // card is external; the manual override covers the default case (macOS picks).
+        // The backend forces shared buffers for external GPUs, which streams weights
+        // over Thunderbolt every op. Auto-override when a selected card is external;
+        // the manual toggle covers the case where macOS picked the GPU.
         let splittingList = gpuList.count >= 2
         let selectedExternal = !multiGPU && !splittingList && gpuIndex >= 0
             && gpus.first { $0.index == gpuIndex }?.isExternal == true
@@ -386,12 +348,11 @@ struct ServerSettings {
             env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
-        // Router mode has no single ncmoe (it's per-model, in the preset INI);
-        // the envs are harmless no-ops for dense models, gated per-op internally.
+        // Router mode has no single ncmoe (it's per-model, in the INI); the envs are
+        // no-ops for dense models anyway.
         if prefetchExperts && (ncmoe > 0 || routerMode) {
-            // At/above the measured per-model cliff the prefetch overlap collapses and
-            // the GPU stalls (slower than plain repack), so only enable it below the
-            // cliff. Router mode carries per-model ncmoe in the INI, so keep it on there.
+            // At/above the measured cliff the prefetch overlap collapses and stalls the
+            // GPU, so stay below it. Router mode has no single ncmoe to compare.
             let cliff = Self.recalledPrefetchCliff(forModel: modelPath)
             if routerMode || cliff == nil || ncmoe < cliff! {
                 env["GGML_SCHED_PREFETCH_EXPERTS"] = "1"
@@ -499,10 +460,8 @@ struct ServerSettings {
             benchTG: int(SettingsKeys.benchTG, 128))
     }
 
-    /// True when the model's attention head dim exceeds 256 (Gemma 4's global
-    /// layers use key_length 512). Reads the real uint32 value from
-    /// the GGUF header (`<arch>.attention.key_length`), skipping the `_swa`
-    /// sibling. Cached by the shared GGUF reader.
+    /// True when the model's attention head dim exceeds 256 (Gemma 4's global layers
+    /// use key_length 512).
     nonisolated static func modelHasBigHeadDim(at path: String) -> Bool {
         (GGUFMetadataCache.metadata(at: path)?.uint32(forSuffix: "attention.key_length") ?? 0) > 256
     }
@@ -533,13 +492,9 @@ struct ServerSettings {
         }
     }
 
-    /// Whether a GGUF ships the MTP (multi-token prediction) head. The
-    /// `<arch>.nextn_predict_layers` metadata key decides when present:
-    /// quantizers often strip the head but keep the key at 0 (a bare "nextn"
-    /// grep reads that as MTP and the server then aborts on the missing draft
-    /// tensors). Without the key, the `.nextn.` tensor names decide, for
-    /// conversions that keep the tensors but drop the metadata.
-    /// Cached by the shared GGUF reader.
+    /// Whether a GGUF ships the MTP (multi-token prediction) head. Quantizers often
+    /// strip it but leave the key at 0, and the server aborts on the missing tensors,
+    /// so trust the value and fall back to the tensor names.
     nonisolated static func modelHasMTP(at path: String) -> Bool {
         if let layers = ggufUInt32("nextn_predict_layers", at: path) {
             return layers >= 1
@@ -547,10 +502,9 @@ struct ServerSettings {
         return GGUFMetadataCache.tensorFlags(at: path).hasNextNTensor
     }
 
-    /// True when the model's weights use a TurboQuant type (ggml_type 45/46). Read
-    /// from the tensor types, since these GGUFs carry no usable `general.file_type`.
-    /// False on an unparseable header, so we never block a model we can't read.
-    /// Cached by the shared GGUF reader.
+    /// True when the model's weights use a TurboQuant type (ggml_type 45/46). Read from
+    /// the tensor types: these GGUFs carry no usable `general.file_type`. False on an
+    /// unreadable header, so a model we can't parse is never blocked.
     nonisolated static func modelIsTurboQuantWeights(at path: String) -> Bool {
         GGUFMetadataCache.tensorFlags(at: path).hasTurboQuantTensor
     }
@@ -584,10 +538,8 @@ struct ServerSettings {
         (UserDefaults.standard.dictionary(forKey: SettingsKeys.ncmoeByModel) as? [String: Int])?[path]
     }
 
-    /// Remembers the ncmoe at which prompt processing collapses for a MoE model: at and
-    /// above it the expert-prefetch overlap stalls the GPU (slower than plain repack), so
-    /// prefetch is only enabled below this value. Passing nil clears it (e.g. before a
-    /// sweep re-measures, so every candidate runs with prefetch on).
+    /// Remembers the ncmoe at which the expert-prefetch overlap stalls the GPU; prefetch
+    /// only runs below it. nil clears it, so a re-measuring sweep starts prefetch on.
     nonisolated static func rememberPrefetchCliff(_ value: Int?, forModel path: String) {
         guard !path.isEmpty else { return }
         var map = UserDefaults.standard.dictionary(forKey: SettingsKeys.prefetchCliffByModel) as? [String: Int] ?? [:]
@@ -632,10 +584,8 @@ struct ServerSettings {
         }
         guard !projectors.isEmpty else { return nil }
 
-        // Embedding-dim compatibility: keep only projectors whose projection_dim
-        // matches the model's embedding_length. Projectors we can't read are kept
-        // (don't punish unreadable headers); if the model's dim is known and NO
-        // projector matches it, the model has no compatible projector.
+        // Keep only projectors whose projection_dim matches the model's
+        // embedding_length; unreadable ones are kept rather than punished.
         if let modelEmbd = ggufUInt32("embedding_length", at: modelPath) {
             let compatible = projectors.filter { p in
                 guard let proj = ggufUInt32("projection_dim", at: p.path) else { return true }
@@ -650,8 +600,8 @@ struct ServerSettings {
         projectors = projectors.filter { !isIncompatibleMmproj(model: modelPath, projector: $0.path) }
         guard !projectors.isEmpty else { return nil }
 
-        // Managed downloads use an exact model-specific stem. Preserve this as the
-        // highest-confidence path before considering legacy projector names.
+        // Managed downloads use an exact model-specific stem: highest confidence,
+        // so try it before the legacy names below.
         func core(_ s: String) -> String {
             String(s.lowercased().replacingOccurrences(of: "mmproj", with: "").filter { $0.isLetter || $0.isNumber })
         }
@@ -700,8 +650,7 @@ struct ServerSettings {
     }
 }
 
-/// Owns the running engine instance(s). For now there is exactly one, so behavior
-/// matches the previous singleton; the multi-server UI is built on top of this.
+/// Owns the running engine instances.
 @MainActor
 final class ServerManager: ObservableObject {
     static let shared = ServerManager()
@@ -784,8 +733,7 @@ final class ServerManager: ObservableObject {
 final class ServerController: ObservableObject {
     let id = UUID()
     @Published var name: String = "Servidor 1"
-    /// Per-server config. nil = the default server, which uses the global settings
-    /// (the Settings/Dashboard bindings), so today's single-server behavior is unchanged.
+    /// Per-server config. nil = the default server, which follows the global settings.
     @Published var profile: Profile?
 
     /// Config this server launches with: its own profile, or the global defaults.
@@ -815,12 +763,9 @@ final class ServerController: ObservableObject {
     private var discoveryService: NetService?
     private var discoveryEnabled = false
     private let fileLog = RotatingFileLog(name: "server.log")
-    /// Whether to pre-warm slot 0 across restarts for external clients (VS Code /
-    /// Cline send a fixed 15-19k-token prefix every request; restoring it makes
-    /// the first request instant instead of a multi-minute prefill). Set per launch:
-    /// needs disk-cache persistence, the turbo engine, and a non-MTP model (MTP's
-    /// extra KV breaks slot restore). The native chat manages its own per-conversation
-    /// slots and simply overrides slot 0 on its first turn, so there's no conflict.
+    /// Pre-warm slot 0 across restarts for external clients (VS Code/Cline resend a
+    /// fixed 15-19k-token prefix every request). Off for MTP models: the extra KV
+    /// breaks slot restore.
     private var prewarmActive = false
     /// Single fixed file for the external-client prefix (not a conversation UUID,
     /// so the chat's orphan-prune leaves it alone).
@@ -829,15 +774,13 @@ final class ServerController: ObservableObject {
     }
 
     var logFileURL: URL { fileLog.fileURL }
-    /// The folder holding all per-session log files (kept ~3 days). Revealed in
-    /// Finder so the user can find — or share — past sessions, not just the live one.
+    /// Folder with every per-session log file (kept ~3 days), for sharing past runs.
     var logsDirectory: URL { fileLog.directory }
 
     var serverURL: URL { URL(string: "http://127.0.0.1:\(currentPort)/")! }
 
-    /// Web chat URL with the app's language and the real Metal device name
-    /// passed through, so the bundled console matches the language picked in
-    /// Settings and shows the GPU actually in use (instead of guessing).
+    /// Web chat URL carrying the app's language and the real device names, so the
+    /// bundled console reports what's in use instead of guessing.
     var webChatURL: URL {
         let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en"
         var comps = URLComponents(string: "http://127.0.0.1:\(currentPort)/")!
@@ -887,9 +830,8 @@ final class ServerController: ObservableObject {
                 state = .failed("Selecciona un modelo en la pestaña Modelos")
                 return
             }
-            // TurboQuant weight quants (tq3_1s/tq4_1s) decode to garbage on this
-            // engine; block the launch instead of serving it. KV-cache TurboQuant
-            // and standard quants are unaffected.
+            // TurboQuant weight quants (tq3_1s/tq4_1s) decode to garbage, so refuse
+            // rather than serve it.
             if ServerSettings.modelIsTurboQuantWeights(at: settings.modelPath) {
                 let lang = UserDefaults.standard.string(forKey: SettingsKeys.language) ?? "en"
                 state = .failed(lang == "es"
@@ -910,9 +852,8 @@ final class ServerController: ObservableObject {
         stopDiscovery()
         state = .starting
 
-        // A stopped engine can take seconds to die (SIGTERM mid-generation)
-        // and meanwhile still holds the port; launching too early fails with
-        // a bind error. Wait for the previous PID to actually exit first.
+        // A stopped engine can take seconds to die (SIGTERM mid-generation) and still
+        // holds the port meanwhile, so wait for the previous PID before binding.
         let previousPID = lastStoppedPID
         lastStoppedPID = nil
         Task { [weak self] in
@@ -925,9 +866,8 @@ final class ServerController: ObservableObject {
         }
     }
 
-    /// A self-contained header written to the top of the server log: app version,
-    /// engine, model, detected GPUs and the resolved settings/env/args. Makes a log
-    /// a tester pastes enough to debug without round-trips. The API key is redacted.
+    /// Header at the top of the server log: version, engine, model, GPUs and the
+    /// resolved settings, so a pasted log is debuggable without round-trips.
     nonisolated static func startupBanner(settings: ServerSettings) -> String {
         func redact(_ items: [String]) -> [String] {
             var out = items
@@ -1089,8 +1029,8 @@ final class ServerController: ObservableObject {
             EngineLock.remove(pid: pid)
             let prewarm = prewarmActive
             let port = currentPort
-            // SIGKILL fallback fires regardless of pid in case the (deferred)
-            // terminate stalls — the engine's multi-GB working set must be freed.
+            // SIGKILL fallback in case the deferred terminate stalls: the engine's
+            // working set has to be freed.
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6) {
                 if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
             }

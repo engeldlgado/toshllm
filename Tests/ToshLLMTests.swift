@@ -519,7 +519,7 @@ final class ServerSettingsTests: XCTestCase {
 
     func testAmdFlashAttentionIsOnlyUserToggle() {
         var s = makeSettings()
-        s.serverBinary = "/tmp/bin-turbo/llama-server"
+        s.serverBinary = "/tmp/custom/llama-server"
         s.faAmd = false
         s.cacheTypeK = "q8_0"
 
