@@ -404,14 +404,10 @@ final class BenchmarkController: ObservableObject {
         return max(lowestSafe, min(preferred, cliff - 1))
     }
 
-    /// Finds the best `--n-cpu-moe` and the prefetch cliff automatically. Walks down
-    /// from the configured ncmoe (more experts on the GPU) until prompt processing jumps
-    /// up abruptly (crossed the per-model cliff into the fast regime where the expert
-    /// prefetch overlaps), then steps back up by one to pin the exact edge. Records the
-    /// cliff so the server enables prefetch only below it (at/above it the overlap stalls
-    /// the GPU and plain repack is faster). Uses the standard pp512/tg128 workload and
-    /// tracks VRAM occupancy so it never recommends or
-    /// descends into a saturated setting. Only the final recommendation is persisted.
+    /// Finds the best `--n-cpu-moe` and the prefetch cliff: walks ncmoe down until
+    /// prompt speed jumps (the cliff), records it so the server keeps prefetch below
+    /// it, and tracks VRAM so it never recommends a saturated setting. Only the
+    /// final recommendation is persisted.
     func sweep(settings base: ServerSettings) {
         guard !running, !sweeping, base.ncmoe > 0 else { return }
         sweeping = true

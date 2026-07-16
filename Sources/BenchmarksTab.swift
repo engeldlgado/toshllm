@@ -492,10 +492,8 @@ struct BenchmarksView: View {
 
     private var chartCard: some View {
         let recent = Array(bench.history.prefix(8))
-        // Generation (~15–60) and prompt (~50–130) live on very different
-        // scales; sharing one axis squashes the generation bars to slivers.
-        // Normalize each metric to its own max so both stay readable and the
-        // comparison across runs is meaningful.
+        // Generation and prompt live on very different scales; one shared axis
+        // would squash the generation bars, so each metric normalizes to its own max.
         let maxTG = recent.map(\.tg).max() ?? 1
         let maxPP = recent.map(\.pp).max() ?? 1
         return Card(title: loc.t("Comparativa (últimas \(recent.count) corridas)",
