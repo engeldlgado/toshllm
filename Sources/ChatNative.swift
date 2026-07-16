@@ -24,6 +24,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var content: String
     var date = Date()
     var genSpeed: Double?     // t/s for this response
+    var mtpAccept: Double?    // MTP acceptance 0-1, when speculation ran
     // Optional keeps pre-attachment JSON decodable.
     var attachments: [ChatAttachment]? = nil
     // Attached images as data URIs (data:image/jpeg;base64,…) for vision models.
@@ -531,6 +532,7 @@ final class ChatStore: ObservableObject {
             var visible = ""
             var lastFlush = Date.distantPast
             var usage: (prompt: Int, completion: Int)?
+            var mtpAccept: Double?
             var finishReason: String?
             var cancelled = false
             var reportedError = false
@@ -640,6 +642,13 @@ final class ChatStore: ObservableObject {
                         usage = (p, c)
                     }
 
+                    // The final chunk's timings carry the draft counters when MTP ran.
+                    if let t = obj["timings"] as? [String: Any],
+                       let dn = t["draft_n"] as? Int, dn > 0,
+                       let da = t["draft_n_accepted"] as? Int {
+                        mtpAccept = Double(da) / Double(dn)
+                    }
+
                     // {total, cache, processed, time_ms} → processed/total bar.
                     if let pp = obj["prompt_progress"] as? [String: Any],
                        let processed = pp["processed"] as? Int,
@@ -703,6 +712,7 @@ final class ChatStore: ObservableObject {
             let hasVisibleAnswer = !visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let finalText = hasVisibleAnswer ? composed() : ""
             let finalUsage = usage
+            let finalAccept = mtpAccept
             let finalFinishReason = finishReason
             let wasCancelled = cancelled
             let didReportError = reportedError
@@ -713,7 +723,7 @@ final class ChatStore: ObservableObject {
                     store?.lastError = Self.emptyResponseMessage(finishReason: finalFinishReason)
                 }
                 if let finalUsage { store?.contextUsed = finalUsage.prompt + finalUsage.completion }
-                store?.finish(conversation: convID, text: finalText, speed: finalSpeed)
+                store?.finish(conversation: convID, text: finalText, speed: finalSpeed, mtpAccept: finalAccept)
                 store?.compactIfNeeded(conversation: convID, port: port)
             }
             // Persist the conversation's KV after a real answer, so reopening it
@@ -728,7 +738,7 @@ final class ChatStore: ObservableObject {
     /// Writes the completed response into its conversation and clears the
     /// live-streaming state. The conversation may no longer be the current
     /// one, or may have been deleted, hence the lookup by id.
-    private func finish(conversation id: UUID, text: String, speed: Double?) {
+    private func finish(conversation id: UUID, text: String, speed: Double?, mtpAccept: Double? = nil) {
         if let i = conversations.firstIndex(where: { $0.id == id }) {
             if let j = conversations[i].messages.indices.last,
                conversations[i].messages[j].role == "assistant" {
@@ -737,6 +747,7 @@ final class ChatStore: ObservableObject {
                 } else {
                     conversations[i].messages[j].content = text
                     conversations[i].messages[j].genSpeed = speed
+                    conversations[i].messages[j].mtpAccept = mtpAccept
                 }
             }
             conversations[i].updated = Date()

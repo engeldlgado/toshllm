@@ -18,16 +18,21 @@ struct BenchResult: Codable, Identifiable {
     /// lets any past run be saved as a profile, not just the most recent.
     var gpu: String?
     var profile: Profile?
-    /// Workload sizes of this run (llama-bench -p / -n). Nil on older results,
-    /// which always ran the pp512/tg128 defaults.
+    /// Workload sizes (-p / -n / -d). Nil on older results (pp512/tg128, depth 0).
     var ppN: Int?
     var tgN: Int?
+    var depth: Int?
+    var kind: String?      // "real" = server generation; nil = raw llama-bench
+    var accept: Double?    // MTP acceptance 0-1, real runs only
 
     var shortModel: String { ModelName(model).title }
 
     var configLabel: String {
         var parts: [String] = []
+        if kind == "real" { parts.append("gen real") }
         if let ppN, let tgN, ppN != 512 || tgN != 128 { parts.append("pp\(ppN)/tg\(tgN)") }
+        if let depth, depth > 0 { parts.append("d\(depth)") }
+        if let accept { parts.append("MTP \(Int((accept * 100).rounded()))%") }
         if ncmoe > 0 { parts.append("ncmoe \(ncmoe)") }
         if let ctk, ctk != "f16" { parts.append("K:\(ctk)") }
         if let ctv, ctv != "f16" { parts.append("V:\(ctv)") }
@@ -148,6 +153,143 @@ final class BenchmarkController: ObservableObject {
         running = false
     }
 
+    // MARK: real-generation benchmark
+
+    /// Fixed prompt so runs are comparable across models and sessions.
+    static let realPrompt = "Write a complete Python implementation of a thread-safe LRU cache with get, put and eviction. Include docstrings and a short usage example."
+    private static let realPort = 18123
+
+    /// Measures against a real llama-server (the path the chat uses, MTP included,
+    /// unlike llama-bench): one discarded warm-up, then 3 reps, median. Warm runs
+    /// gain ~6% by themselves, so single-shot numbers overstate any change.
+    func runReal(settings base: ServerSettings) {
+        guard !running, !sweeping else { return }
+        guard FileManager.default.fileExists(atPath: base.serverBinary) else {
+            output = "llama-server no encontrado / not found: \(base.serverBinary)"
+            return
+        }
+        guard FileManager.default.fileExists(atPath: base.modelPath) else {
+            output = "Modelo no encontrado / model not found"
+            return
+        }
+
+        var s = base
+        s.port = Self.realPort
+        s.routerMode = false
+        s.localNetworkDiscovery = false
+
+        let head = header(for: s).replacingOccurrences(of: "args:", with: "mode:   real generation (llama-server)\nargs:")
+        output = head
+        fileLog.append(head)
+        running = true
+
+        Task {
+            defer { running = false; process?.terminate(); process = nil }
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: s.serverBinary)
+            p.arguments = s.arguments
+            p.environment = s.environment
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch {
+                emit("→ \(error.localizedDescription)\n")
+                return
+            }
+            process = p
+
+            emit("… cargando modelo / loading model\n")
+            guard await waitForHealth(port: s.port, process: p) else {
+                emit("→ el servidor no arrancó / server did not start\n")
+                return
+            }
+
+            emit("… calentamiento (descartado) / warm-up (discarded)\n")
+            guard await completeOnce(port: s.port, nPredict: 64) != nil else {
+                emit("→ la generación falló / generation failed\n")
+                return
+            }
+
+            var reps: [(tg: Double, pp: Double, accept: Double?)] = []
+            for i in 1...3 {
+                guard running, let r = await completeOnce(port: s.port, nPredict: s.benchTGClamped) else { break }
+                reps.append(r)
+                let acc = r.accept.map { String(format: " · MTP %.0f%%", $0 * 100) } ?? ""
+                emit(String(format: "rep %d: %.2f t/s gen · %.1f t/s prompt%@\n", i, r.tg, r.pp, acc))
+            }
+            guard reps.count == 3 else {
+                fileLog.append("→ result: real-generation run incomplete\n\n")
+                fileLog.prune()
+                return
+            }
+
+            let tg = median(reps.map(\.tg))
+            let pp = median(reps.map(\.pp))
+            let accept = reps.compactMap(\.accept).last
+            let name = URL(fileURLWithPath: s.modelPath).lastPathComponent
+            let engine = s.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
+            history.insert(BenchResult(date: .now, model: name, ncmoe: s.ncmoe, pp: pp, tg: tg,
+                                       ctk: s.cacheTypeK, ctv: s.cacheTypeV, engine: engine,
+                                       fa: s.benchmarkFlashAttentionRoute,
+                                       gpu: s.gpuLabel, profile: base.makeProfile(name: name),
+                                       ppN: nil, tgN: s.benchTGClamped,
+                                       kind: "real", accept: accept),
+                           at: 0)
+            save()
+            let accLine = accept.map { String(format: " · MTP %.0f%%", $0 * 100) } ?? ""
+            emit(String(format: "→ mediana / median: %.2f t/s gen · %.1f t/s prompt%@\n\n", tg, pp, accLine))
+            fileLog.prune()
+        }
+    }
+
+    private func emit(_ text: String) {
+        output += text
+        fileLog.append(text)
+    }
+
+    private func median(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
+    }
+
+    /// Polls /health until the model is loaded (large MoE loads take minutes).
+    private func waitForHealth(port: Int, process: Process) async -> Bool {
+        for _ in 0..<240 {
+            guard running, process.isRunning else { return false }
+            if let url = URL(string: "http://127.0.0.1:\(port)/health"),
+               let (data, _) = try? await URLSession.shared.data(from: url),
+               String(data: data, encoding: .utf8)?.contains("ok") == true {
+                return true
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
+        return false
+    }
+
+    /// One /completion request; greedy and seeded so reps within a run only
+    /// differ by machine state, never by sampling.
+    private func completeOnce(port: Int, nPredict: Int) async -> (tg: Double, pp: Double, accept: Double?)? {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/completion") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 600
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "prompt": Self.realPrompt, "n_predict": nPredict,
+            "temperature": 0, "seed": 42, "cache_prompt": false,
+        ])
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let t = obj["timings"] as? [String: Any],
+              let tg = t["predicted_per_second"] as? Double,
+              let pp = t["prompt_per_second"] as? Double else { return nil }
+        var accept: Double?
+        if let dn = t["draft_n"] as? Int, dn > 0, let da = t["draft_n_accepted"] as? Int {
+            accept = Double(da) / Double(dn)
+        }
+        return (tg, pp, accept)
+    }
+
     private func finish(settings: ServerSettings) {
         running = false
         process = nil
@@ -170,7 +312,8 @@ final class BenchmarkController: ObservableObject {
                                        ctk: settings.cacheTypeK, ctv: settings.cacheTypeV, engine: engine,
                                        fa: settings.benchmarkFlashAttentionRoute,
                                        gpu: settings.gpuLabel, profile: settings.makeProfile(name: name),
-                                       ppN: settings.benchPPClamped, tgN: settings.benchTGClamped),
+                                       ppN: settings.benchPPClamped, tgN: settings.benchTGClamped,
+                                       depth: settings.benchDepthClamped),
                            at: 0)
             save()
             fileLog.append(String(format: "→ result: %@ = %.1f t/s · %@ = %.1f t/s\n\n", ppTest, pp, tgTest, tg))
@@ -286,6 +429,7 @@ final class BenchmarkController: ObservableObject {
             var fast = base
             fast.benchPP = 512
             fast.benchTG = 128
+            fast.benchDepth = 0
 
             var pp: [Int: Double] = [:]
             var tg: [Int: Double] = [:]

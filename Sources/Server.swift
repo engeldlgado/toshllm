@@ -88,10 +88,12 @@ struct ServerSettings {
     /// Load the multimodal projector (mmproj) for vision-capable models. Off skips it
     /// so a vision model runs text-only and frees the VRAM the image encoder would use.
     var loadVision: Bool = true
-    /// llama-bench workload sizes: prompt tokens (-p → ppN) and generated tokens
-    /// (-n → tgN). Benchmark-only; llama-server ignores them.
+    /// llama-bench workload sizes: prompt tokens (-p → ppN), generated tokens
+    /// (-n → tgN) and context depth (-d, tokens already in the KV cache before
+    /// measuring). Benchmark-only; llama-server ignores them.
     var benchPP: Int = 512
     var benchTG: Int = 128
+    var benchDepth: Int = 0
 
     var isMultimodal: Bool { Self.mmprojPath(forModel: modelPath) != nil }
 
@@ -273,6 +275,7 @@ struct ServerSettings {
     var benchmarkArguments: [String] {
         var args = ["-m", modelPath, "-ngl", String(ngl), "--mmap", "0", "-r", "2",
                     "-p", String(benchPPClamped), "-n", String(benchTGClamped)]
+        if benchDepthClamped > 0 { args += ["-d", String(benchDepthClamped)] }
         if ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
@@ -288,6 +291,7 @@ struct ServerSettings {
     /// Workload sizes kept within what llama-bench accepts and a Mac can finish.
     var benchPPClamped: Int { min(max(benchPP, 16), 32768) }
     var benchTGClamped: Int { min(max(benchTG, 16), 8192) }
+    var benchDepthClamped: Int { min(max(benchDepth, 0), 32768) }
 
     /// Human-readable name of the GPU a run actually used, for the benchmark
     /// record. Resolves the macOS-picked default to its real device name.
@@ -457,7 +461,8 @@ struct ServerSettings {
             cacheReuse: bool(SettingsKeys.cacheReuse, true),
             loadVision: bool(SettingsKeys.loadVision, true),
             benchPP: int(SettingsKeys.benchPP, 512),
-            benchTG: int(SettingsKeys.benchTG, 128))
+            benchTG: int(SettingsKeys.benchTG, 128),
+            benchDepth: int(SettingsKeys.benchDepth, 0))
     }
 
     /// True when the model's attention head dim exceeds 256 (Gemma 4's global layers

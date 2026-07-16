@@ -219,6 +219,19 @@ struct DashboardView: View {
                 row("cpu", loc.t("Expertos MoE en CPU: \(ncmoe) capas",
                                  "MoE experts on CPU: \(ncmoe) layers"))
             }
+            if !modelPath.isEmpty && !routerMode {
+                if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
+                    row("gauge.with.needle", loc.t("Límite: ancho de banda de RAM",
+                                                   "Limit: RAM bandwidth"))
+                        .help(loc.t("Los expertos en CPU se leen desde la RAM en cada token, y eso marca la velocidad de generación: una GPU más potente no la mejora, RAM más rápida (DDR5) sí. La aceleración MTP y bajar ncmoe reducen esas lecturas.",
+                                    "CPU experts are read from RAM on every token, and that sets generation speed: a stronger GPU won't raise it, faster RAM (DDR5) will. MTP acceleration and a lower ncmoe reduce those reads."))
+                } else {
+                    row("gauge.with.needle", loc.t("Límite: ancho de banda de VRAM",
+                                                   "Limit: VRAM bandwidth"))
+                        .help(loc.t("Con el modelo completo en la GPU, cada token relee los pesos desde la VRAM: la velocidad de generación depende del ancho de banda de la tarjeta y del tamaño del archivo (una cuantización menor genera más rápido).",
+                                    "With the whole model on the GPU, every token re-reads the weights from VRAM: generation speed depends on the card's bandwidth and the file size (a smaller quantization generates faster)."))
+                }
+            }
             row("number", loc.t("Peticiones: \(server.requestCount)", "Requests: \(server.requestCount)"))
 
             // Quick access to the two settings most often changed when sharing the

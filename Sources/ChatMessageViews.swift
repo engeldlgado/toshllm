@@ -120,6 +120,13 @@ struct MessageBubble: View, Equatable {
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
+                    if let accept = message.mtpAccept {
+                        Text("MTP \(Int((accept * 100).rounded()))%")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .help(loc.t("Aceptación de la predicción multi-token: qué fracción de los tokens que el cabezal MTP adelantó resultó correcta. Más alta = más aceleración, sin cambio de calidad.",
+                                        "Multi-token prediction acceptance: the fraction of tokens the MTP head drafted that turned out right. Higher = more speedup, no quality change."))
+                    }
                 }
 
                 // body

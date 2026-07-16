@@ -269,6 +269,36 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.benchTGClamped, 8192)
     }
 
+    func testBenchmarkDepthArgument() {
+        var s = makeSettings()
+        // Depth 0 (default) must not emit -d.
+        XCTAssertNil(s.benchmarkArguments.firstIndex(of: "-d"))
+        s.benchDepth = 4096
+        let args = s.benchmarkArguments
+        XCTAssertEqual(args[args.firstIndex(of: "-d")! + 1], "4096")
+        s.benchDepth = -5
+        XCTAssertEqual(s.benchDepthClamped, 0)
+    }
+
+    func testBenchResultLabels() {
+        var r = BenchResult(date: .now, model: "m.gguf", ncmoe: 0, pp: 100, tg: 30)
+        XCTAssertEqual(r.configLabel, "base")
+        r.depth = 4096
+        r.kind = "real"
+        r.accept = 0.784
+        XCTAssertTrue(r.configLabel.contains("d4096"))
+        XCTAssertTrue(r.configLabel.contains("gen real"))
+        XCTAssertTrue(r.configLabel.contains("MTP 78%"))
+    }
+
+    func testChatMessageDecodesWithoutMtpAccept() throws {
+        // Pre-MTP-badge JSON (no mtpAccept key) must keep decoding.
+        let json = #"{"id":"\#(UUID().uuidString)","role":"assistant","content":"hi","date":700000000}"#
+        let msg = try JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
+        XCTAssertNil(msg.mtpAccept)
+        XCTAssertEqual(msg.content, "hi")
+    }
+
     func testPromptCacheAndReasoningArguments() {
         var s = makeSettings()
         s.cacheRAM = 0

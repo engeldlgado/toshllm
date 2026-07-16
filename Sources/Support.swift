@@ -82,6 +82,8 @@ enum SettingsKeys {
     // Benchmark workload sizes (llama-bench -p / -n)
     static let benchPP = "benchPP"
     static let benchTG = "benchTG"
+    static let benchDepth = "benchDepth"
+    static let benchAdvanced = "benchAdvanced"
 
     // Image generation (text-to-image)
     static let imagenPrompt = "imagenPrompt"
