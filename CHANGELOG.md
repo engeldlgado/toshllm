@@ -3,6 +3,21 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.82.1] - 2026-07-16
+
+### Added
+- **Real-generation benchmark**... measures against a real llama-server the way the chat runs, MTP included (the raw benchmark under-reports MoE MTP models by 25-47%): one discarded warm-up, three repetitions, median.
+- **Context depth in Benchmarks (-d)**... measures speed deep into a conversation instead of only at an empty context; the workload fields (-p/-n/-d) now sit behind an "Advanced" check.
+- **MTP acceptance in the chat**... each response shows the fraction of drafted tokens that were right, next to its speed.
+- **The Server card names the current bottleneck**... VRAM bandwidth (full-GPU) or RAM bandwidth (MoE experts on CPU), so it's clear what upgrade would actually help.
+- **`TOSH_MOE_PROFILE=1` in Extra arguments**... logs the engine's host↔GPU traffic every 5 s in the server log, for diagnostics.
+
+### Improved
+- **MoE generation with offloaded experts is 3-5% faster**... the engine batches each CPU layer's reads from the GPU into one round-trip; output is byte-identical, validated across six MoE models.
+
+### Fixed
+- **"Remember conversations" is no longer blocked by vision-capable models**... it engages whenever possible and only skips (silently) while the projector is actually loaded; turning the vision eye off re-enables it.
+
 ## [0.82.0] - 2026-07-15
 
 ### Removed
