@@ -309,7 +309,7 @@ index abf4b06ed..d4872b19b 100644
  
  const char * ggml_metal_get_name(ggml_metal_t ctx);
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..ec4afbc66 100644
+index 32d97cd5d..7401d9c6f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -18,6 +18,7 @@
@@ -409,11 +409,12 @@ index 32d97cd5d..ec4afbc66 100644
  }
  
  static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_tensor * t) {
-@@ -306,13 +343,7 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
+@@ -306,13 +343,8 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
  
  void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
      @autoreleasepool {
 -        // wrap the source data into a Metal buffer
++        ggml_metal_prof_note(tensor->name, size, false);
          id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
 -        id<MTLBuffer> buf_src = [device newBufferWithBytes:data
 -                                                    length:size
@@ -423,7 +424,7 @@ index 32d97cd5d..ec4afbc66 100644
  
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(tensor);
          if (bid_dst.metal == nil) {
-@@ -321,9 +352,80 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -321,9 +353,80 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  
          bid_dst.offs += offset;
  
@@ -505,7 +506,7 @@ index 32d97cd5d..ec4afbc66 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -349,50 +451,136 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -349,50 +452,137 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  }
  
  void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -514,6 +515,7 @@ index 32d97cd5d..ec4afbc66 100644
 +    }
 +
      @autoreleasepool {
++        ggml_metal_prof_note(tensor->name, size, true);
          id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
 +
 +        struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(tensor);
@@ -666,7 +668,7 @@ index 32d97cd5d..ec4afbc66 100644
      @autoreleasepool {
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
-@@ -403,7 +591,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
+@@ -403,7 +593,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
  
          // queue the copy operation into the Metal context
          // this will be queued at the end, after any currently ongoing GPU operations
@@ -675,7 +677,7 @@ index 32d97cd5d..ec4afbc66 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -504,7 +692,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -504,7 +694,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
          }
  
          // short-hand
@@ -684,7 +686,7 @@ index 32d97cd5d..ec4afbc66 100644
  
          // the main thread commits the first few commands immediately
          // cmd_buf[n_cb]
-@@ -626,7 +814,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+@@ -626,7 +816,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
  
  void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -693,7 +695,7 @@ index 32d97cd5d..ec4afbc66 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
  
          ggml_metal_event_encode_signal(ev, cmd_buf);
-@@ -642,7 +830,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
+@@ -642,7 +832,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
  
  void ggml_metal_event_wait(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -943,7 +945,7 @@ index 0e1f1de45..526931cc7 100644
      return res;
  }
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index d465f31c0..538b337bb 100644
+index d465f31c0..a184f6cdf 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -125,6 +125,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_cumsum_ad
@@ -988,7 +990,7 @@ index d465f31c0..538b337bb 100644
  ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev);
  
  void ggml_metal_device_rsets_add(ggml_metal_device_t dev, ggml_metal_rset_t rset);
-@@ -309,6 +329,11 @@ bool   ggml_metal_buffer_is_shared(ggml_metal_buffer_t buf);
+@@ -309,6 +329,14 @@ bool   ggml_metal_buffer_is_shared(ggml_metal_buffer_t buf);
  void   ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size);
  void   ggml_metal_buffer_set_tensor   (ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
  void   ggml_metal_buffer_get_tensor   (ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size);
@@ -997,11 +999,14 @@ index d465f31c0..538b337bb 100644
 +// (synchronous); false when the size exceeds the stage, so callers fall back
 +bool   ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_dst, const void * data, size_t size);
 +bool   ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_src, void * data, size_t size);
++
++// TOSH_MOE_PROFILE: per-tensor-name transfer accounting; no-op when disabled
++void   ggml_metal_prof_note(const char * name, size_t size, bool d2h);
  bool   ggml_metal_buffer_cpy_tensor   (ggml_metal_buffer_t buf, const struct ggml_tensor * src, struct ggml_tensor * dst);
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..dfde03fdb 100644
+index a7cbc60eb..0af74d970 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1542,7 +1547,7 @@ index a7cbc60eb..dfde03fdb 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2123,191 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2123,236 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1570,6 +1575,49 @@ index a7cbc60eb..dfde03fdb 100644
 +        atomic_store_explicit(&g_tosh_prof.state, s, memory_order_relaxed);
 +    }
 +    return s == 2;
++}
++
++// name-class buckets, filled by the callers that know the tensor
++enum { TOSH_CLS_MOE, TOSH_CLS_LOGITS, TOSH_CLS_OTHER, TOSH_CLS_N };
++static _Atomic uint64_t g_tosh_cls_calls[2][TOSH_CLS_N]; // [d2h][cls]
++static _Atomic uint64_t g_tosh_cls_bytes[2][TOSH_CLS_N];
++
++void ggml_metal_prof_note(const char * name, size_t size, bool d2h) {
++    if (!tosh_prof_on()) {
++        return;
++    }
++    int cls = TOSH_CLS_OTHER;
++    if (name) {
++        if (strstr(name, "moe") || strstr(name, "exps")) {
++            cls = TOSH_CLS_MOE;
++        } else if (strstr(name, "result_output")) {
++            cls = TOSH_CLS_LOGITS;
++        }
++    }
++    atomic_fetch_add_explicit(&g_tosh_cls_calls[d2h][cls], 1,    memory_order_relaxed);
++    atomic_fetch_add_explicit(&g_tosh_cls_bytes[d2h][cls], size, memory_order_relaxed);
++}
++
++static void tosh_prof_cls_flush(void) {
++    static const char * dirs[2] = { "H2D", "D2H" };
++    static const char * clss[TOSH_CLS_N] = { "moe", "logits", "other" };
++    char line[256];
++    int n = 0;
++    for (int d = 0; d < 2; d++) {
++        for (int c = 0; c < TOSH_CLS_N; c++) {
++            const uint64_t calls = atomic_exchange(&g_tosh_cls_calls[d][c], 0);
++            const uint64_t bytes = atomic_exchange(&g_tosh_cls_bytes[d][c], 0);
++            if (calls == 0) {
++                continue;
++            }
++            n += snprintf(line + n, sizeof(line) - n, "%s%s-%s %llux %.1fMB",
++                          n > 0 ? " | " : "", dirs[d], clss[c],
++                          (unsigned long long) calls, bytes / 1e6);
++        }
++    }
++    if (n > 0) {
++        fprintf(stderr, "ggml_metal: moe-profile:   %s\n", line);
++    }
 +}
 +
 +static void tosh_prof_add(int idx, size_t size, uint64_t t0) {
@@ -1602,6 +1650,7 @@ index a7cbc60eb..dfde03fdb 100644
 +        // at default verbosity, and this is opt-in diagnostics
 +        fprintf(stderr, "ggml_metal: moe-profile: %s\n", line);
 +    }
++    tosh_prof_cls_flush();
 +}
 +
 +// caller must hold dev->stage_lock; nil on allocation failure
@@ -1716,6 +1765,7 @@ index a7cbc60eb..dfde03fdb 100644
      }
  
      @autoreleasepool {
++        ggml_metal_prof_note(tensor->name, size, false);
 +        // Small transfers (the per-token copies of MoE-offload and multi-GPU
 +        // runs) go through the reused staging buffer: wrapping the caller's
 +        // pointer below allocates a kernel resource per call, and on AMD those
@@ -1734,7 +1784,7 @@ index a7cbc60eb..dfde03fdb 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2315,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2360,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -1796,7 +1846,7 @@ index a7cbc60eb..dfde03fdb 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1768,10 +2399,18 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1768,44 +2444,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
          dispatch_release(completion_semaphore);
  
          //[cmd_buf waitUntilCompleted];
@@ -1815,7 +1865,11 @@ index a7cbc60eb..dfde03fdb 100644
      if (buf->is_shared) {
          memcpy(data, (const char *) tensor->data + offset, size);
          return;
-@@ -1782,30 +2421,88 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+     }
+ 
+     @autoreleasepool {
++        ggml_metal_prof_note(tensor->name, size, true);
+         // src
          struct ggml_metal_buffer_id bid_src = ggml_metal_buffer_get_id(buf, tensor);
          bid_src.offs += offset;
  
@@ -1916,7 +1970,7 @@ index a7cbc60eb..dfde03fdb 100644
      }
  }
  
-@@ -1820,6 +2517,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
+@@ -1820,6 +2563,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
          return true;
      }
  

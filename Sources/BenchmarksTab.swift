@@ -137,9 +137,11 @@ struct BenchmarksView: View {
                         field(loc.t("Perfil", "Profile")) {
                             Picker("", selection: $selectedProfile) {
                                 Text(loc.t("Ajustes actuales", "Current settings")).tag(UUID?.none)
-                                ForEach(profileStore.profiles) { p in Text(p.name).tag(Optional(p.id)) }
+                                ForEach(profileStore.profiles) { p in
+                                    Text(p.name.count > 28 ? p.name.prefix(28) + "…" : p.name).tag(Optional(p.id))
+                                }
                             }
-                            .labelsHidden().frame(maxWidth: 260, alignment: .leading)
+                            .labelsHidden().fixedSize()
                             .onChange(of: selectedProfile) { _, id in
                                 if let id, let p = profileStore.profiles.first(where: { $0.id == id }) { cfg.apply(p) }
                                 else { cfg = .fromDefaults() }
