@@ -155,8 +155,10 @@ final class BenchmarkController: ObservableObject {
 
     // MARK: real-generation benchmark
 
-    /// Fixed prompt so runs are comparable across models and sessions.
-    static let realPrompt = "Write a complete Python implementation of a thread-safe LRU cache with get, put and eviction. Include docstrings and a short usage example."
+    /// Fixed ~512-token prompt: a short one reads absurdly low prompt speed.
+    static let realPrompt = String(repeating:
+        "A hash table stores key-value pairs in an array of buckets, using a hash function to map each key to a bucket index. Collisions are handled by chaining or open addressing, and the table resizes when the load factor grows. ", count: 10)
+        + "Given the data structure described above, write a complete Python implementation of a thread-safe LRU cache with get, put and eviction. Include docstrings and a short usage example."
     private static let realPort = 18123
 
     /// Measures against a real llama-server (the path the chat uses, MTP included,
