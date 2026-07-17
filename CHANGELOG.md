@@ -3,6 +3,17 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.82.2] - 2026-07-17
+
+### Improved
+- **MoE generation with offloaded experts is faster again**... staged expert uploads now ride the compute queue instead of waiting on each one; +2% to +14% depending on how many layers are on the CPU (35B at ncmoe 24: 23.8 → 27.0 t/s), output byte-identical, validated across five MoE models.
+
+### Added
+- **Experimental multi-GPU hand-off over shared events** (`TOSH_MGPU_EVENTS=1` in Extra arguments)... the layer hand-off between cards stops draining both GPUs and round-tripping the CPU on every token; off by default, for multi-GPU testers.
+
+### Fixed
+- **The real-generation benchmark's prompt speed is meaningful again**... its prompt was too short to be a real prefill, so it read far below the true number; it now uses a ~512-token prompt.
+
 ## [0.82.1] - 2026-07-16
 
 ### Added
