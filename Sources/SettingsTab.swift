@@ -5,6 +5,7 @@ import Charts
 
 struct SettingsView: View {
     @EnvironmentObject var server: ServerController
+    @EnvironmentObject var manager: ServerManager
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var profileStore: ProfileStore
     @EnvironmentObject var control: ControlPanelState
@@ -109,6 +110,12 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
+                if manager.servers.count > 1 {
+                    Label(loc.t("Los servidores añadidos heredan estos ajustes, salvo lo que cambies en su tarjeta del Dashboard.",
+                                "Added servers inherit these settings, except what you change on their Dashboard card."),
+                          systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button(role: .destructive) { showResetConfirm = true } label: {
                     Label(loc.t("Restablecer opciones por defecto", "Reset options to defaults"),

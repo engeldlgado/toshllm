@@ -38,6 +38,19 @@ struct Profile: Codable, Identifiable {
     var embeddings: Bool? = nil
     var routerMode: Bool? = nil
     var routerModelsMax: Int? = nil
+    /// Added servers inherit the global settings except these fields. nil (any
+    /// profile saved before this existed) means every field applies, as before.
+    var pinned: [String]? = nil
+
+    enum Pin {
+        static let model      = "model"
+        static let ctx        = "ctx"
+        static let gpu        = "gpu"
+        static let discovery  = "discovery"
+        static let vision     = "vision"
+        static let embeddings = "embeddings"
+        static let router     = "router"
+    }
 }
 
 @MainActor
@@ -222,6 +235,22 @@ extension ServerSettings {
         case "bundled", "turbo": serverBinary = ServerSettings.defaultBinary
         case let .some(path) where !path.isEmpty: serverBinary = path
         default: break
+        }
+    }
+
+    /// Overlay only the profile fields the user pinned on that server's card;
+    /// everything else keeps the global value. The port can never be shared.
+    mutating func applyPinned(_ p: Profile, _ pinned: Set<String>) {
+        port = p.port
+        if pinned.contains(Profile.Pin.model) { modelPath = p.modelPath; ncmoe = p.ncmoe }
+        if pinned.contains(Profile.Pin.ctx) { ctx = p.ctx }
+        if pinned.contains(Profile.Pin.gpu) { gpuIndex = p.gpuIndex; gpuList = p.gpuList ?? [] }
+        if pinned.contains(Profile.Pin.discovery), let v = p.localNetworkDiscovery { localNetworkDiscovery = v }
+        if pinned.contains(Profile.Pin.vision), let v = p.loadVision { loadVision = v }
+        if pinned.contains(Profile.Pin.embeddings), let v = p.embeddings { embeddings = v }
+        if pinned.contains(Profile.Pin.router) {
+            if let v = p.routerMode { routerMode = v }
+            if let v = p.routerModelsMax { routerModelsMax = v }
         }
     }
 }

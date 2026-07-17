@@ -824,6 +824,31 @@ final class BenchAndProfileTests: XCTestCase {
         XCTAssertEqual(back.engine, "bundled")
         XCTAssertEqual(back.extraArgs, "--spec-type draft-mtp")
     }
+
+    func testLegacyProfileDecodesWithNilPinned() throws {
+        // servers saved before the pinned field existed keep full-snapshot behavior
+        let legacy = #"{"id":"00000000-0000-0000-0000-000000000000","name":"S2","modelPath":"/m.gguf","ngl":99,"ncmoe":0,"ctx":16384,"threads":6,"flashAttn":"auto","noMmap":true,"jinja":true,"concurrencyDisable":true,"vramReserve":1024,"gpuIndex":-1,"extraArgs":"","cacheTypeK":"f16","cacheTypeV":"f16","mlock":false,"port":8081}"#
+        let p = try JSONDecoder().decode(Profile.self, from: Data(legacy.utf8))
+        XCTAssertNil(p.pinned)
+    }
+
+    func testApplyPinnedOnlyOverlaysPinnedFields() {
+        var s = ServerSettings.fromDefaults()
+        s.ctx = 32768
+        s.modelPath = "/global.gguf"
+        var p = s.makeProfile(name: "S2")
+        p.ctx = 4096
+        p.modelPath = "/pinned.gguf"
+        p.port = 9090
+
+        s.applyPinned(p, [Profile.Pin.ctx])
+        XCTAssertEqual(s.ctx, 4096)
+        XCTAssertEqual(s.modelPath, "/global.gguf", "unpinned fields keep the global value")
+        XCTAssertEqual(s.port, 9090, "the port always comes from the server's profile")
+
+        s.applyPinned(p, [])
+        XCTAssertEqual(s.modelPath, "/global.gguf")
+    }
 }
 
 // MARK: - Documentation and localization

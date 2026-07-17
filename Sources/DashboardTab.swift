@@ -499,11 +499,22 @@ struct AddedServerCard: View {
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var profileStore: ProfileStore
+    // Live global values, shown (and launched with) wherever this server has not
+    // pinned its own; observing them keeps the card in sync with Settings edits.
+    @AppStorage(SettingsKeys.modelPath) private var gModelPath = ""
+    @AppStorage(SettingsKeys.ctx) private var gCtx = 16384
+    @AppStorage(SettingsKeys.gpuIndex) private var gGpuIndex = -1
+    @AppStorage(SettingsKeys.gpuList) private var gGpuListCSV = ""
+    @AppStorage(SettingsKeys.localNetworkDiscovery) private var gDiscovery = false
+    @AppStorage(SettingsKeys.loadVision) private var gLoadVision = true
+    @AppStorage(SettingsKeys.embeddings) private var gEmbeddings = false
+    @AppStorage(SettingsKeys.routerMode) private var gRouterMode = false
+    @AppStorage(SettingsKeys.routerModelsMax) private var gRouterModelsMax = 1
 
     var body: some View {
         let busy = c.state == .running || c.state == .starting
-        let modelPath = c.profile?.modelPath ?? ""
-        let routerMode = c.profile?.routerMode ?? false
+        let modelPath = isPinned(Profile.Pin.model) ? (c.profile?.modelPath ?? "") : gModelPath
+        let routerMode = isPinned(Profile.Pin.router) ? (c.profile?.routerMode ?? false) : gRouterMode
         Card(title: c.name, icon: "server.rack", fill: true, trailing: AnyView(accessory)) {
             if routerMode {
                 HStack(spacing: 8) {
@@ -516,9 +527,10 @@ struct AddedServerCard: View {
                 HStack(spacing: 8) {
                     Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
                     // Same ncmoe seeding as the primary server's picker.
-                    Picker("", selection: Binding(get: { c.profile?.modelPath ?? "" }, set: { p in
+                    Picker("", selection: Binding(get: { modelPath }, set: { p in
                         c.profile?.modelPath = p
                         c.profile?.ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
+                        pin(Profile.Pin.model)
                         manager.persist()
                     })) {
                         Text(loc.t("Sin modelo", "No model")).tag("")
@@ -529,9 +541,19 @@ struct AddedServerCard: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
-                GPUSelectionMenu(gpuIndex: bind(\.gpuIndex, -1), gpuList: Binding(
-                    get: { c.profile?.gpuList ?? [] },
-                    set: { c.profile?.gpuList = $0; manager.persist() }))
+                // Pinning one GPU field seeds the sibling from the shown (global)
+                // value, so the pin captures exactly what the user was looking at.
+                GPUSelectionMenu(gpuIndex: Binding(
+                    get: { isPinned(Profile.Pin.gpu) ? (c.profile?.gpuIndex ?? -1) : gGpuIndex },
+                    set: {
+                        if !isPinned(Profile.Pin.gpu) { c.profile?.gpuList = ServerSettings.gpuList(fromCSV: gGpuListCSV) }
+                        c.profile?.gpuIndex = $0; pin(Profile.Pin.gpu); manager.persist()
+                    }), gpuList: Binding(
+                    get: { isPinned(Profile.Pin.gpu) ? (c.profile?.gpuList ?? []) : ServerSettings.gpuList(fromCSV: gGpuListCSV) },
+                    set: {
+                        if !isPinned(Profile.Pin.gpu) { c.profile?.gpuIndex = gGpuIndex }
+                        c.profile?.gpuList = $0; pin(Profile.Pin.gpu); manager.persist()
+                    }))
                     .disabled(busy)
             }
             HStack(spacing: 8) {
@@ -543,10 +565,27 @@ struct AddedServerCard: View {
                     .textFieldStyle(.roundedBorder).disabled(busy)
             }
             HStack(spacing: 8) {
+                Image(systemName: "doc.plaintext").frame(width: 18).foregroundStyle(.secondary)
+                Text(loc.t("Contexto", "Context")).font(.callout)
+                Spacer(minLength: 8)
+                Picker("", selection: Binding(
+                    get: { isPinned(Profile.Pin.ctx) ? (c.profile?.ctx ?? gCtx) : gCtx },
+                    set: { c.profile?.ctx = $0; pin(Profile.Pin.ctx); manager.persist() })) {
+                    ForEach([4096, 8192, 16384, 32768, 65536, 131072, 262144], id: \.self) { n in
+                        Text("\(n / 1024)k").tag(n)
+                    }
+                }
+                .labelsHidden().fixedSize().disabled(busy)
+            }
+            .help(loc.t("Contexto máximo de este servidor. Hereda el de Ajustes hasta que lo cambies aquí.",
+                        "This server's maximum context. Follows Settings until you change it here."))
+            HStack(spacing: 8) {
                 Image(systemName: "wifi").frame(width: 18).foregroundStyle(.secondary)
                 Text(loc.t("Descubrible en red local", "Discoverable on local network")).font(.callout)
                 Spacer(minLength: 8)
-                Toggle("", isOn: boolBind(\.localNetworkDiscovery, false))
+                Toggle("", isOn: Binding(
+                    get: { isPinned(Profile.Pin.discovery) ? (c.profile?.localNetworkDiscovery ?? false) : gDiscovery },
+                    set: { c.profile?.localNetworkDiscovery = $0; pin(Profile.Pin.discovery); manager.persist() }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
             }
             if ServerSettings.mmprojPath(forModel: modelPath) != nil {
@@ -554,8 +593,12 @@ struct AddedServerCard: View {
                     Image(systemName: "photo").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Visión", "Vision")).font(.callout)
                     Spacer(minLength: 8)
-                    let on = c.profile?.loadVision ?? true
-                    Button { boolBind(\.loadVision, true).wrappedValue.toggle() } label: {
+                    let on = isPinned(Profile.Pin.vision) ? (c.profile?.loadVision ?? true) : gLoadVision
+                    Button {
+                        c.profile?.loadVision = !on
+                        pin(Profile.Pin.vision)
+                        manager.persist()
+                    } label: {
                         Image(systemName: on ? "eye.fill" : "eye.slash")
                             .imageScale(.large).foregroundStyle(on ? Color.accentColor : .secondary)
                     }
@@ -568,7 +611,9 @@ struct AddedServerCard: View {
                         .frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Servidor de embeddings", "Embeddings server")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: boolBind(\.embeddings, false))
+                    Toggle("", isOn: Binding(
+                        get: { isPinned(Profile.Pin.embeddings) ? (c.profile?.embeddings ?? false) : gEmbeddings },
+                        set: { c.profile?.embeddings = $0; pin(Profile.Pin.embeddings); manager.persist() }))
                         .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
                 }
                 .help(loc.t("Sirve /v1/embeddings con --embeddings para clientes RAG (p. ej. Obsidian Copilot). El servidor queda dedicado a embeddings: úsalo con un modelo de embeddings, no para chatear.",
@@ -578,18 +623,29 @@ struct AddedServerCard: View {
                     Image(systemName: "arrow.triangle.2.circlepath").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Router (multi-modelo)", "Router (multi-model)")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: boolBind(\.routerMode, false))
+                    Toggle("", isOn: Binding(
+                        get: { routerMode },
+                        set: {
+                            if !isPinned(Profile.Pin.router) { c.profile?.routerModelsMax = gRouterModelsMax }
+                            c.profile?.routerMode = $0; pin(Profile.Pin.router); manager.persist()
+                        }))
                         .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
                 }
                 .help(loc.t("Un solo servidor sirve todos los modelos descargados: el modelo se elige por petición y se carga solo, sin reiniciar.",
                             "One server serves every downloaded model: the model is picked per request and loads on demand, no restart."))
                 .padding(.top, 4)
                 if routerMode {
+                    let routerMax = isPinned(Profile.Pin.router) ? (c.profile?.routerModelsMax ?? 1) : gRouterModelsMax
                     HStack(spacing: 8) {
                         Image(systemName: "square.stack.3d.up").frame(width: 18).foregroundStyle(.secondary)
                         Text(loc.t("Modelos simultáneos", "Models loaded at once")).font(.callout)
                         Spacer(minLength: 8)
-                        Stepper("\(c.profile?.routerModelsMax ?? 1)", value: intBind(\.routerModelsMax, 1), in: 1...4)
+                        Stepper("\(routerMax)", value: Binding(
+                            get: { routerMax },
+                            set: {
+                                if !isPinned(Profile.Pin.router) { c.profile?.routerMode = gRouterMode }
+                                c.profile?.routerModelsMax = $0; pin(Profile.Pin.router); manager.persist()
+                            }), in: 1...4)
                             .fixedSize().disabled(busy)
                     }
                     .padding(.top, 4)
@@ -629,6 +685,14 @@ struct AddedServerCard: View {
                 .help(loc.t("Carga un perfil guardado en este servidor.",
                             "Loads a saved profile into this server."))
             }
+            if c.profile?.pinned?.isEmpty != true {
+                Button { c.profile?.pinned = []; manager.persist() } label: {
+                    Image(systemName: "pin.slash").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(loc.t("Vuelve a heredar todos los ajustes globales (conserva nombre y puerto).",
+                            "Inherits every global setting again (keeps name and port)."))
+            }
             Button { manager.removeServer(c.id) } label: {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
             }
@@ -651,14 +715,16 @@ struct AddedServerCard: View {
                 set: { c.profile?[keyPath: kp] = $0; manager.persist() })
     }
 
-    private func boolBind(_ kp: WritableKeyPath<Profile, Bool?>, _ fallback: Bool) -> Binding<Bool> {
-        Binding(get: { c.profile?[keyPath: kp] ?? fallback },
-                set: { c.profile?[keyPath: kp] = $0; manager.persist() })
+    /// nil pinned = pre-0.83 server: full snapshot, every field its own.
+    private func isPinned(_ key: String) -> Bool {
+        guard let pinned = c.profile?.pinned else { return true }
+        return pinned.contains(key)
     }
 
-    private func intBind(_ kp: WritableKeyPath<Profile, Int?>, _ fallback: Int) -> Binding<Int> {
-        Binding(get: { c.profile?[keyPath: kp] ?? fallback },
-                set: { c.profile?[keyPath: kp] = $0; manager.persist() })
+    private func pin(_ key: String) {
+        guard var pinned = c.profile?.pinned, !pinned.contains(key) else { return }
+        pinned.append(key)
+        c.profile?.pinned = pinned
     }
 }
 

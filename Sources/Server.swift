@@ -709,6 +709,8 @@ final class ServerManager: ObservableObject {
         var p = base ?? ServerSettings.fromDefaults().makeProfile(name: name)
         p.name = name
         p.port = freePort()
+        // New servers inherit the globals; a base profile keeps its full snapshot.
+        if base == nil { p.pinned = [] }
         let c = ServerController()
         c.name = name
         c.profile = p
@@ -746,11 +748,16 @@ final class ServerController: ObservableObject {
     /// Per-server config. nil = the default server, which follows the global settings.
     @Published var profile: Profile?
 
-    /// Config this server launches with: its own profile, or the global defaults.
+    /// Config this server launches with: the global defaults plus its pinned
+    /// fields. A nil pinned list is a pre-0.83 server: full snapshot, as before.
     func effectiveSettings() -> ServerSettings {
         guard let profile else { return .fromDefaults() }
         var s = ServerSettings.fromDefaults()
-        s.apply(profile)
+        if let pinned = profile.pinned {
+            s.applyPinned(profile, Set(pinned))
+        } else {
+            s.apply(profile)
+        }
         return s
     }
 

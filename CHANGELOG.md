@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **Added servers now follow the global Settings** (#40)... they used to freeze a snapshot at creation, so changing e.g. Context never reached them; now they inherit everything except the fields you change on their own card (a pin-slash button restores full inheritance), and the card gained a Context row.
+
 ## [0.82.2] - 2026-07-17
 
 ### Improved
