@@ -374,7 +374,7 @@ index abf4b06ed..d063f95e4 100644
  
  enum ggml_status ggml_metal_graph_compute (ggml_metal_t ctx, struct ggml_cgraph * gf);
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..1d77e17ea 100644
+index 32d97cd5d..6bea21ba6 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -18,6 +18,7 @@
@@ -616,7 +616,7 @@ index 32d97cd5d..1d77e17ea 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -349,50 +486,240 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -349,50 +486,239 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  }
  
  void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -803,8 +803,7 @@ index 32d97cd5d..1d77e17ea 100644
 +    const uint64_t seq = ++link->seq;
 +
 +    @autoreleasepool {
-+        // source queue: reuse the host block only after the destination consumed
-+        // the previous hand-off, then publish this one
++        // reuse the host block only after the destination consumed the last hand-off
 +        id<MTLCommandBuffer> cmd_src = [ctx_src->queue commandBuffer];
 +        if (seq > 1) {
 +            [cmd_src encodeWaitForEvent:link->ev_done value:seq - 1];
@@ -843,7 +842,7 @@ index 32d97cd5d..1d77e17ea 100644
 +            return false;
 +        }
 +
-+        // opt-in experiment; both buffers must be private for the blits
++        // both buffers must be private for the cross-device blits
 +        static int use_events = -1;
 +        if (use_events < 0) {
 +            const char * v = getenv("TOSH_MGPU_EVENTS");
@@ -881,7 +880,7 @@ index 32d97cd5d..1d77e17ea 100644
      @autoreleasepool {
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
-@@ -403,7 +730,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
+@@ -403,7 +729,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
  
          // queue the copy operation into the Metal context
          // this will be queued at the end, after any currently ongoing GPU operations
@@ -890,7 +889,7 @@ index 32d97cd5d..1d77e17ea 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -504,7 +831,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -504,7 +830,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
          }
  
          // short-hand
@@ -899,7 +898,7 @@ index 32d97cd5d..1d77e17ea 100644
  
          // the main thread commits the first few commands immediately
          // cmd_buf[n_cb]
-@@ -626,7 +953,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+@@ -626,7 +952,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
  
  void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -908,7 +907,7 @@ index 32d97cd5d..1d77e17ea 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
  
          ggml_metal_event_encode_signal(ev, cmd_buf);
-@@ -642,7 +969,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
+@@ -642,7 +968,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
  
  void ggml_metal_event_wait(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -1226,7 +1225,7 @@ index d465f31c0..8b3bd28f6 100644
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..4ecc958f9 100644
+index a7cbc60eb..05ad8e5d1 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1783,7 +1782,7 @@ index a7cbc60eb..4ecc958f9 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2139,376 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2139,374 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1959,7 +1958,6 @@ index a7cbc60eb..4ecc958f9 100644
 +    const int slot = dev->stage_set_cur;
 +    dev->stage_set_cur = (slot + 1) % 4;
 +
-+    // four uploads later the blit is long done, so this almost never blocks
 +    if (dev->stage_set_cmds[slot]) {
 +        [dev->stage_set_cmds[slot] waitUntilCompleted];
 +        [dev->stage_set_cmds[slot] release];
@@ -2109,8 +2107,7 @@ index a7cbc60eb..4ecc958f9 100644
 +    [cmd_buf commit];
 +    [cmd_buf waitUntilCompleted];
 +
-+    // dependency vs transfer split for the logits-class reads: time before the
-+    // blit ran = GPU busy with queued compute, not readback overhead
++    // split the big-read wait: time before the blit ran is GPU compute, not readback
 +    if (t0 && size >= (size_t) 256*1024) {
 +        atomic_fetch_add_explicit(&g_tosh_prof.big_calls, 1, memory_order_relaxed);
 +        atomic_fetch_add_explicit(&g_tosh_prof.big_dep_ns,
@@ -2160,7 +2157,7 @@ index a7cbc60eb..4ecc958f9 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2516,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2514,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -2222,7 +2219,7 @@ index a7cbc60eb..4ecc958f9 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1768,44 +2600,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1768,44 +2598,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
          dispatch_release(completion_semaphore);
  
          //[cmd_buf waitUntilCompleted];
@@ -2346,7 +2343,7 @@ index a7cbc60eb..4ecc958f9 100644
      }
  }
  
-@@ -1820,6 +2719,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
+@@ -1820,6 +2717,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
          return true;
      }
  
