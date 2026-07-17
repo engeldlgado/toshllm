@@ -50,7 +50,7 @@ index 9c56ec30c..f889412d3 100644
  
      struct ggml_backend {
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index 87615921c..edec1d655 100644
+index 87615921c..83003fb98 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -761,6 +761,10 @@ static bool ggml_is_view_op(enum ggml_op op) {
@@ -185,7 +185,7 @@ index 87615921c..edec1d655 100644
  static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
      GGML_ASSERT(sched);
      struct ggml_backend_sched_split * splits = sched->splits;
-@@ -1551,6 +1662,44 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1551,6 +1662,41 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
          int split_backend_id = split->backend_id;
          ggml_backend_t split_backend = sched->backends[split_backend_id];
  
@@ -213,11 +213,8 @@ index 87615921c..edec1d655 100644
 +        void * prefetch_saved_data = NULL;
 +
 +        // batch this split's source-side reads into one device round-trip:
-+        // a CPU MoE split pulls 2+ small tensors from the same GPU, and each
-+        // separate read pays a full command-buffer wait
-+        // CPU splits only: their inputs are plain sync copies consumed after the
-+        // loop; GPU splits can read tensors mid-loop (expert ids), which a
-+        // deferred read would corrupt
++        // batch a CPU split's source reads into one device round-trip. CPU splits
++        // only: a GPU split can consume reads mid-loop (expert ids).
 +        ggml_backend_t read_batch_backend = NULL;
 +        if (split->n_inputs > 1 && split_backend_id == sched->n_backends - 1) {
 +            ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, split->inputs[0]);
@@ -230,7 +227,7 @@ index 87615921c..edec1d655 100644
          // copy the input tensors to the split backend
          for (int input_id = 0; input_id < split->n_inputs; input_id++) {
              ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
-@@ -1566,6 +1715,41 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1566,6 +1712,41 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                  }
                  ggml_backend_tensor_copy(input, input_cpy);
              } else {
@@ -272,7 +269,7 @@ index 87615921c..edec1d655 100644
                  // wait for the split backend to finish using the input before overwriting it
                  if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                      ggml_backend_event_wait(split_backend, sched->events[split_backend_id][sched->cur_copy]);
-@@ -1674,8 +1858,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1674,8 +1855,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              }
          }
  
@@ -292,7 +289,7 @@ index 87615921c..edec1d655 100644
              if (ec != GGML_STATUS_SUCCESS) {
                  return ec;
              }
-@@ -1788,6 +1983,15 @@ ggml_backend_sched_t ggml_backend_sched_new(
+@@ -1788,6 +1980,15 @@ ggml_backend_sched_t ggml_backend_sched_new(
      sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
      sched->op_offload = op_offload;
  
@@ -308,7 +305,7 @@ index 87615921c..edec1d655 100644
      ggml_backend_sched_reset(sched);
  
      return sched;
-@@ -1802,6 +2006,16 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
+@@ -1802,6 +2003,16 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
              ggml_backend_event_free(sched->events[b][c]);
          }
      }
@@ -325,7 +322,7 @@ index 87615921c..edec1d655 100644
      ggml_gallocr_free(sched->galloc);
      ggml_free(sched->ctx);
      ggml_hash_set_free(&sched->hash_set);
-@@ -1906,6 +2120,9 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
+@@ -1906,6 +2117,9 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
      for (int i = 0; i < sched->n_backends; i++) {
          ggml_backend_synchronize(sched->backends[i]);
      }
@@ -1101,7 +1098,7 @@ index d465f31c0..8b3bd28f6 100644
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..7950f7e5f 100644
+index a7cbc60eb..3d313a6fb 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1150,7 +1147,7 @@ index a7cbc60eb..7950f7e5f 100644
  struct ggml_metal_device {
      id<MTLDevice> mtl_device;
  
-@@ -533,6 +558,34 @@ struct ggml_metal_device {
+@@ -533,6 +558,33 @@ struct ggml_metal_device {
  
      // virtual address for GPU memory allocations
      atomic_uintptr_t addr_virt;
@@ -1160,8 +1157,7 @@ index a7cbc60eb..7950f7e5f 100644
 +    // which on AMD accumulates across long runs until transfers crawl
 +    id<MTLBuffer> stage_buf;
 +    NSRecursiveLock * stage_lock;   // recursive: a read batch holds it across stage_get calls
-+    // upload ring: stage_set defers its wait to the next reuse of a slot, since
-+    // the blit shares the compute queue and needs no wait for ordering
++    // upload ring: the blit shares the compute queue, so the only wait is slot reuse
 +    id<MTLBuffer>        stage_set_bufs[4];
 +    id<MTLCommandBuffer> stage_set_cmds[4];
 +    int                  stage_set_cur;
@@ -1185,7 +1181,7 @@ index a7cbc60eb..7950f7e5f 100644
  };
  
  //
-@@ -676,13 +729,87 @@ static enum ggml_metal_device_id ggml_metal_device_id_parse(const char * name) {
+@@ -676,13 +728,87 @@ static enum ggml_metal_device_id ggml_metal_device_id_parse(const char * name) {
      return GGML_METAL_DEVICE_GENERIC;
  }
  
@@ -1274,7 +1270,7 @@ index a7cbc60eb..7950f7e5f 100644
  
          if (dev->mtl_device) {
              dev->mtl_queue = [dev->mtl_device newCommandQueue];
-@@ -690,13 +817,92 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -690,13 +816,92 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
                  GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
              }
  
@@ -1367,7 +1363,7 @@ index a7cbc60eb..7950f7e5f 100644
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
              dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
-@@ -925,6 +1131,33 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
+@@ -925,6 +1130,33 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
      ggml_metal_library_free(dev->library);
      dev->library = NULL;
  
@@ -1401,7 +1397,7 @@ index a7cbc60eb..7950f7e5f 100644
      if (dev->mtl_queue) {
          [dev->mtl_queue release];
          dev->mtl_queue = nil;
-@@ -946,6 +1179,97 @@ void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
+@@ -946,6 +1178,97 @@ void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
      return dev->mtl_queue;
  }
  
@@ -1499,7 +1495,7 @@ index a7cbc60eb..7950f7e5f 100644
  ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev) {
      return dev->library;
  }
-@@ -1051,6 +1375,8 @@ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t
+@@ -1051,6 +1374,8 @@ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t
  bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_tensor * op) {
      const bool has_simdgroup_mm        = dev->props.has_simdgroup_mm;
      const bool has_simdgroup_reduction = dev->props.has_simdgroup_reduction;
@@ -1508,7 +1504,7 @@ index a7cbc60eb..7950f7e5f 100644
      const bool has_bfloat              = dev->props.has_bfloat;
  
      if (!has_bfloat) {
-@@ -1166,13 +1492,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1166,13 +1491,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              return has_simdgroup_reduction && ggml_is_contiguous(op->src[0]);
          case GGML_OP_TRI:
              return ggml_is_contiguous_rows(op->src[0]);
@@ -1527,7 +1523,7 @@ index a7cbc60eb..7950f7e5f 100644
          case GGML_OP_COUNT_EQUAL:
              return has_simdgroup_reduction &&
                  op->src[0]->type == GGML_TYPE_I32 &&
-@@ -1182,7 +1511,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1182,7 +1510,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              return has_simdgroup_reduction;
          case GGML_OP_NORM:
          case GGML_OP_RMS_NORM:
@@ -1538,7 +1534,7 @@ index a7cbc60eb..7950f7e5f 100644
          case GGML_OP_ROPE:
          case GGML_OP_ROPE_BACK:
              return true;
-@@ -1234,6 +1565,46 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1234,6 +1564,46 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  op->src[0]->ne[0] != 576) {
                  return false;
              }
@@ -1585,7 +1581,7 @@ index a7cbc60eb..7950f7e5f 100644
              if (op->src[1]->type != op->src[2]->type) {
                  return false;
              }
-@@ -1256,17 +1627,69 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1256,17 +1626,69 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              }
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
@@ -1659,7 +1655,7 @@ index a7cbc60eb..7950f7e5f 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2140,362 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2139,357 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1709,8 +1705,7 @@ index a7cbc60eb..7950f7e5f 100644
 +    atomic_fetch_add_explicit(&g_tosh_cls_calls[d2h][cls], 1,    memory_order_relaxed);
 +    atomic_fetch_add_explicit(&g_tosh_cls_bytes[d2h][cls], size, memory_order_relaxed);
 +
-+    // record the first distinct D2H "other" names, to identify unexplained traffic;
-+    // H2D only after the first summary flush (model load would burn the slots)
++    // first distinct "other" names, to identify unexplained traffic
 +    if (cls == TOSH_CLS_OTHER && name &&
 +        (d2h || atomic_load_explicit(&g_tosh_prof.t_last, memory_order_relaxed) != 0)) {
 +        static char seen[16][48];
@@ -1780,8 +1775,7 @@ index a7cbc60eb..7950f7e5f 100644
 +                      (unsigned long long) c, b / 1e6, w / 1e6);
 +    }
 +    if (n > 0) {
-+        // raw stderr like the SIMD probe: llama-server filters backend INFO logs
-+        // at default verbosity, and this is opt-in diagnostics
++        // raw stderr: llama-server filters backend INFO logs at default verbosity
 +        fprintf(stderr, "ggml_metal: moe-profile: %s\n", line);
 +    }
 +    tosh_prof_cls_flush();
@@ -1828,8 +1822,7 @@ index a7cbc60eb..7950f7e5f 100644
 +    const int slot = dev->stage_set_cur;
 +    dev->stage_set_cur = (slot + 1) % 4;
 +
-+    // reusing a slot is the only wait left; four uploads later the blit is
-+    // long done, so this almost never blocks
++    // four uploads later the blit is long done, so this almost never blocks
 +    if (dev->stage_set_cmds[slot]) {
 +        [dev->stage_set_cmds[slot] waitUntilCompleted];
 +        [dev->stage_set_cmds[slot] release];
@@ -1865,8 +1858,7 @@ index a7cbc60eb..7950f7e5f 100644
 +    }
 +
 +    [cmd_buf commit];
-+    // no wait: the blit shares the compute queue, so every consumer that could
-+    // observe the destination is queued behind it
++    // no wait: every consumer is queued behind the blit on the same queue
 +    dev->stage_set_cmds[slot] = [cmd_buf retain];
 +
 +    [dev->stage_lock unlock];
@@ -1878,8 +1870,7 @@ index a7cbc60eb..7950f7e5f 100644
 +    return true;
 +}
 +
-+// flushes the open read batch: one commit + wait covers every queued blit,
-+// then every destination gets its memcpy. Caller must hold stage_lock.
++// one commit + wait covers every queued blit; caller must hold stage_lock
 +static void ggml_metal_device_stage_batch_flush(ggml_metal_device_t dev) {
 +    if (dev->stage_batch_n == 0) {
 +        return;
@@ -2022,7 +2013,7 @@ index a7cbc60eb..7950f7e5f 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2503,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2497,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -2084,7 +2075,7 @@ index a7cbc60eb..7950f7e5f 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1768,44 +2587,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1768,44 +2581,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
          dispatch_release(completion_semaphore);
  
          //[cmd_buf waitUntilCompleted];
@@ -2208,7 +2199,7 @@ index a7cbc60eb..7950f7e5f 100644
      }
  }
  
-@@ -1820,6 +2706,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
+@@ -1820,6 +2700,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
          return true;
      }
  
