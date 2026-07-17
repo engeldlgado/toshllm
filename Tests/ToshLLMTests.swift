@@ -832,6 +832,26 @@ final class BenchAndProfileTests: XCTestCase {
         XCTAssertNil(p.pinned)
     }
 
+    func testBenchmarkBase64URLIsUnpadded() {
+        // "+/" bytes must map to "-_" with no "=" padding (RFC 4648 base64url).
+        let data = Data([0xfb, 0xff, 0xbf])   // base64 "+/+/" territory
+        let encoded = BenchmarkSharing.base64URL(data)
+        XCTAssertFalse(encoded.contains("+"))
+        XCTAssertFalse(encoded.contains("/"))
+        XCTAssertFalse(encoded.contains("="))
+    }
+
+    func testBenchmarkSignatureMessageFormat() {
+        // Exact framing: five lines, lowercase hex of the payload, no trailing newline.
+        let payload = Data("hello".utf8)
+        let msg = BenchmarkSharing.signatureMessage(
+            purpose: "benchmark", challengeId: "CID", nonce: "NONCE", payload: payload)
+        let text = String(data: msg, encoding: .utf8)!
+        let expectedHash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        XCTAssertEqual(text, "toshllm-benchmark-v2\nbenchmark\nCID\nNONCE\n\(expectedHash)")
+        XCTAssertFalse(text.hasSuffix("\n"))
+    }
+
     func testApplyPinnedOnlyOverlaysPinnedFields() {
         var s = ServerSettings.fromDefaults()
         s.ctx = 32768

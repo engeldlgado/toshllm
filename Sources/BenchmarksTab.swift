@@ -33,6 +33,7 @@ struct BenchmarksView: View {
                     chartCard
                     historyCard
                 }
+                BenchmarkShareCard()
             }
             .padding()
         }

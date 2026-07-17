@@ -85,6 +85,11 @@ enum SettingsKeys {
     static let benchDepth = "benchDepth"
     static let benchAdvanced = "benchAdvanced"
 
+    // Signed benchmark sharing (public identity from the server; the private key
+    // lives in the Keychain, never here). Deliberately outside resettableOptionKeys.
+    static let benchmarkInstallationId = "benchmarkInstallationId"
+    static let benchmarkKeyFingerprint = "benchmarkKeyFingerprint"
+
     // Image generation (text-to-image)
     static let imagenPrompt = "imagenPrompt"
     static let imagenAspect = "imagenAspect"
@@ -428,6 +433,14 @@ enum Keychain {
         var add = base
         add[kSecValueData as String] = Data(value.utf8)
         SecItemAdd(add as CFDictionary, nil)
+    }
+
+    static func delete(_ account: String) {
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ] as CFDictionary)
     }
 
     /// Returns the stored API key, generating one on first use.
