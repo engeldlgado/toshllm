@@ -50,7 +50,7 @@ index 9c56ec30c..f889412d3 100644
  
      struct ggml_backend {
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index 87615921c..83003fb98 100644
+index 87615921c..e6643e6ad 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -761,6 +761,10 @@ static bool ggml_is_view_op(enum ggml_op op) {
@@ -185,7 +185,7 @@ index 87615921c..83003fb98 100644
  static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
      GGML_ASSERT(sched);
      struct ggml_backend_sched_split * splits = sched->splits;
-@@ -1551,6 +1662,41 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1551,6 +1662,44 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
          int split_backend_id = split->backend_id;
          ggml_backend_t split_backend = sched->backends[split_backend_id];
  
@@ -217,17 +217,20 @@ index 87615921c..83003fb98 100644
 +        // only: a GPU split can consume reads mid-loop (expert ids).
 +        ggml_backend_t read_batch_backend = NULL;
 +        if (split->n_inputs > 1 && split_backend_id == sched->n_backends - 1) {
-+            ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, split->inputs[0]);
-+            if (b != split_backend && b->iface.read_batch_begin) {
-+                read_batch_backend = b;
-+                b->iface.read_batch_begin(b);
++            for (int i = 0; i < split->n_inputs; i++) {
++                ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, split->inputs[i]);
++                if (b != split_backend && b->iface.read_batch_begin) {
++                    read_batch_backend = b;
++                    b->iface.read_batch_begin(b);
++                    break;
++                }
 +            }
 +        }
 +
          // copy the input tensors to the split backend
          for (int input_id = 0; input_id < split->n_inputs; input_id++) {
              ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
-@@ -1566,6 +1712,41 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1566,6 +1715,41 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                  }
                  ggml_backend_tensor_copy(input, input_cpy);
              } else {
@@ -269,7 +272,7 @@ index 87615921c..83003fb98 100644
                  // wait for the split backend to finish using the input before overwriting it
                  if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                      ggml_backend_event_wait(split_backend, sched->events[split_backend_id][sched->cur_copy]);
-@@ -1674,8 +1855,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1674,8 +1858,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              }
          }
  
@@ -289,7 +292,7 @@ index 87615921c..83003fb98 100644
              if (ec != GGML_STATUS_SUCCESS) {
                  return ec;
              }
-@@ -1788,6 +1980,15 @@ ggml_backend_sched_t ggml_backend_sched_new(
+@@ -1788,6 +1983,15 @@ ggml_backend_sched_t ggml_backend_sched_new(
      sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
      sched->op_offload = op_offload;
  
@@ -305,7 +308,7 @@ index 87615921c..83003fb98 100644
      ggml_backend_sched_reset(sched);
  
      return sched;
-@@ -1802,6 +2003,16 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
+@@ -1802,6 +2006,16 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
              ggml_backend_event_free(sched->events[b][c]);
          }
      }
@@ -322,7 +325,7 @@ index 87615921c..83003fb98 100644
      ggml_gallocr_free(sched->galloc);
      ggml_free(sched->ctx);
      ggml_hash_set_free(&sched->hash_set);
-@@ -1906,6 +2117,9 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
+@@ -1906,6 +2120,9 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
      for (int i = 0; i < sched->n_backends; i++) {
          ggml_backend_synchronize(sched->backends[i]);
      }
@@ -374,7 +377,7 @@ index abf4b06ed..d063f95e4 100644
  
  enum ggml_status ggml_metal_graph_compute (ggml_metal_t ctx, struct ggml_cgraph * gf);
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..6bea21ba6 100644
+index 32d97cd5d..e7439e0c6 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -18,6 +18,7 @@
@@ -779,8 +782,8 @@ index 32d97cd5d..6bea21ba6 100644
 +
 +    if (link->cap < size) {
 +        // resizing frees pages a queued blit may still read; wait out the link first
-+        if (link->seq > 0) {
-+            [link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000];
++        if (link->seq > 0 && ![link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000]) {
++            return false;
 +        }
 +        [link->wrap_src release];
 +        [link->wrap_dst release];
