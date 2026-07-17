@@ -3,10 +3,8 @@ import CryptoKit
 
 // MARK: - Signed benchmark sharing (v2 protocol)
 //
-// Client for the toshllm.com signed benchmark contract. Everything here runs
-// only inside an explicit user share: the P-256 key and the registration call
-// are created on the first share, never at launch, so an install that never
-// shares makes no network call at all.
+// The key and every network call happen only inside an explicit user share, so
+// an install that never shares makes no request at all.
 
 @MainActor
 final class BenchmarkSharing: ObservableObject {
@@ -17,8 +15,7 @@ final class BenchmarkSharing: ObservableObject {
     private static let bundleID = "dev.engel.toshllm"
     private static let keyAccount = "benchmark-signing-key.v1"
 
-    /// Public, non-secret identity assigned by the server. Shown in the identity
-    /// panel; the private key stays in the Keychain.
+    // Public identity from the server; the private key never leaves the Keychain.
     @Published private(set) var installationId: String?
     @Published private(set) var keyFingerprint: String?
     @Published var busy = false
@@ -28,12 +25,12 @@ final class BenchmarkSharing: ObservableObject {
         keyFingerprint = UserDefaults.standard.string(forKey: SettingsKeys.benchmarkKeyFingerprint)
     }
 
-    /// True once this install has generated a signing key (i.e. shared at least once).
-    var hasIdentity: Bool { Keychain.get(Self.keyAccount) != nil }
+    var hasIdentity: Bool { installationId != nil && keyFingerprint != nil }
 
-    /// Drops the Keychain key and the public identity so the next share starts a
-    /// fresh, unlinkable installation. Past public submissions keep the old one.
+    /// The next share starts a fresh, unlinkable installation; past public
+    /// submissions keep the old identity.
     func resetIdentity() {
+        guard !busy else { return }
         Keychain.delete(Self.keyAccount)
         installationId = nil
         keyFingerprint = nil
@@ -62,10 +59,8 @@ final class BenchmarkSharing: ObservableObject {
         }
     }
 
-    /// Loads the stored key, or mints one (Secure Enclave when the machine has it,
-    /// a software key on a Hackintosh without a T2). The stored string is tagged so
-    /// reload knows which kind it is.
-    private func loadOrCreateKey() -> SigningKey {
+    // The stored string is tagged ("se:"/"sw:") so reload picks the right key kind.
+    private func loadStoredKey() -> SigningKey? {
         if let stored = Keychain.get(Self.keyAccount) {
             if stored.hasPrefix("se:"), let data = Data(base64Encoded: String(stored.dropFirst(3))),
                let k = try? SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data) {
@@ -76,12 +71,23 @@ final class BenchmarkSharing: ObservableObject {
                 return .software(k)
             }
         }
+        return nil
+    }
+
+    private func loadOrCreateKey() throws -> SigningKey {
+        if let key = loadStoredKey() { return key }
         if SecureEnclave.isAvailable, let k = try? SecureEnclave.P256.Signing.PrivateKey() {
-            Keychain.set("se:" + k.dataRepresentation.base64EncodedString(), account: Self.keyAccount)
+            guard Keychain.setThisDeviceOnly("se:" + k.dataRepresentation.base64EncodedString(),
+                                             account: Self.keyAccount) else {
+                throw ShareError.keychain
+            }
             return .enclave(k)
         }
         let k = P256.Signing.PrivateKey()
-        Keychain.set("sw:" + k.rawRepresentation.base64EncodedString(), account: Self.keyAccount)
+        guard Keychain.setThisDeviceOnly("sw:" + k.rawRepresentation.base64EncodedString(),
+                                         account: Self.keyAccount) else {
+            throw ShareError.keychain
+        }
         return .software(k)
     }
 
@@ -92,6 +98,9 @@ final class BenchmarkSharing: ObservableObject {
         case badResponse
         case server(status: Int, code: String?)
         case workloadFailed(String)
+        case unsupportedConsent(String)
+        case identityChanged
+        case keychain
         case cancelled
 
         var errorDescription: String? {
@@ -100,6 +109,9 @@ final class BenchmarkSharing: ObservableObject {
             case .badResponse: return "unexpected server response"
             case .server(let status, let code): return "server \(status)\(code.map { " (\($0))" } ?? "")"
             case .workloadFailed(let m): return m
+            case .unsupportedConsent(let version): return "unsupported consent version: \(version)"
+            case .identityChanged: return "benchmark identity changed; prepare the submission again"
+            case .keychain: return "the benchmark signing key could not be stored in Keychain"
             case .cancelled: return "cancelled"
             }
         }
@@ -113,54 +125,60 @@ final class BenchmarkSharing: ObservableObject {
         let replay: Bool
     }
 
-    /// Payload built and ready to review, before anything is signed or uploaded.
-    /// Holding the exact bytes here is what lets the user inspect the final JSON
-    /// and lets submit use the identical bytes it reviewed.
+    /// Holds the exact bytes so the user inspects and submit uploads the same JSON.
     struct Prepared {
         let payload: Data
+        let installationId: String
+        let keyFingerprint: String
         var json: String { String(data: payload, encoding: .utf8) ?? "" }
     }
 
-    /// Step 1 of a share (runs only after the user accepts the consent dialog):
-    /// creates the key + registration on first use, runs the exact server workload,
-    /// and builds the payload. Nothing is uploaded yet.
+    /// Runs after consent: mints the key + registers on first use, runs the
+    /// workload, builds the payload. Nothing is uploaded yet.
     func prepareShare(model: LocalModel, settings: ServerSettings,
                       contributorAlias: String?) async throws -> Prepared {
         busy = true
         defer { busy = false }
 
-        let key = loadOrCreateKey()
+        let key = try loadOrCreateKey()
         try await ensureRegistered(key)
+
+        guard let installationId, let keyFingerprint else { throw ShareError.badResponse }
 
         let (_, _, workload) = try await benchmarkChallenge()
         let run = try await runWorkload(workload, model: model, settings: settings)
-        let payload = try buildBenchmarkPayload(model: model, settings: settings,
-                                                workload: workload, run: run,
-                                                contributorAlias: contributorAlias)
-        return Prepared(payload: payload)
+        let payload = try await buildBenchmarkPayload(model: model, settings: settings,
+                                                      workload: workload, run: run,
+                                                      contributorAlias: contributorAlias)
+        return Prepared(payload: payload, installationId: installationId,
+                        keyFingerprint: keyFingerprint)
     }
 
-    /// Step 2: the user reviewed the JSON and confirmed. Signs the exact reviewed
-    /// bytes against a fresh challenge and uploads. A fresh challenge here avoids
-    /// the expiry race during the minutes-long workload run.
+    /// A fresh challenge here avoids the expiry race during the long workload run.
     func submitPrepared(_ prepared: Prepared) async throws -> Outcome {
         busy = true
         defer { busy = false }
-        let key = loadOrCreateKey()
+        guard installationId == prepared.installationId,
+              keyFingerprint == prepared.keyFingerprint else { throw ShareError.identityChanged }
+        guard let key = loadStoredKey(),
+              Self.fingerprint(for: key) == prepared.keyFingerprint else {
+            throw ShareError.identityChanged
+        }
         let (challengeId, nonce) = try await challenge(purpose: "benchmark")
         let signature = try key.signatureDER(for: Self.signatureMessage(
             purpose: "benchmark", challengeId: challengeId, nonce: nonce, payload: prepared.payload))
-        let d = unwrap(try await postJSON("/api/v2/benchmarks", [
-            "installationId": installationId as Any,
+        let obj = try await postJSON("/api/v2/benchmarks", [
+            "installationId": prepared.installationId,
             "envelope": [
                 "challengeId": challengeId, "nonce": nonce,
                 "payload": prepared.payload.base64URLValue, "signature": signature.base64URLValue,
             ],
-        ]))
+        ])
+        let d = unwrap(obj)
         return Outcome(
             trust: d["trust"] as? String ?? "app-recorded",
             moderationStatus: d["moderationStatus"] as? String ?? "pending",
-            replay: d["idempotentReplay"] as? Bool ?? false)
+            replay: obj["idempotentReplay"] as? Bool ?? false)
     }
 
     /// This installation's own submissions (signed history call). Load only on an
@@ -179,7 +197,8 @@ final class BenchmarkSharing: ObservableObject {
         guard hasIdentity, let installationId else { return [] }
         busy = true
         defer { busy = false }
-        let key = loadOrCreateKey()
+        guard let key = loadStoredKey(),
+              Self.fingerprint(for: key) == keyFingerprint else { throw ShareError.identityChanged }
         let (challengeId, nonce) = try await challenge(purpose: "history")
         let payloadObj: [String: Any] = [
             "schemaVersion": 1, "installationId": installationId, "page": page, "limit": limit,
@@ -194,24 +213,37 @@ final class BenchmarkSharing: ObservableObject {
                 "payload": payload.base64URLValue, "signature": signature.base64URLValue,
             ],
         ])
-        let d = unwrap(obj)
-        let items = (d["items"] as? [[String: Any]]) ?? (d["benchmarks"] as? [[String: Any]]) ?? []
-        return items.map { it in
-            HistoryItem(
-                id: it["id"] as? String ?? UUID().uuidString,
-                model: it["model"] as? String ?? "—",
-                gpu: it["gpu"] as? String ?? "—",
-                pp: (it["prompt"] as? Double) ?? (it["pp"] as? Double) ?? 0,
-                tg: (it["generation"] as? Double) ?? (it["tg"] as? Double) ?? 0,
-                trust: it["trust"] as? String ?? "app-recorded",
-                moderation: it["moderationStatus"] as? String ?? "pending")
+        guard let items = obj["data"] as? [[String: Any]] else { throw ShareError.badResponse }
+        return items.compactMap { item in
+            guard let id = item["submissionId"] as? String,
+                  let model = item["model"] as? [String: Any],
+                  let modelName = model["displayName"] as? String,
+                  let hardware = item["hardware"] as? [String: Any],
+                  let gpus = hardware["gpus"] as? [[String: Any]],
+                  let performance = item["performance"] as? [String: Any],
+                  let pp = performance["promptTokensPerSecond"] as? Double,
+                  let tg = performance["generationTokensPerSecond"] as? Double else { return nil }
+            let gpuNames = gpus.compactMap { $0["name"] as? String }
+            return HistoryItem(
+                id: id,
+                model: modelName,
+                gpu: gpuNames.isEmpty ? "—" : gpuNames.joined(separator: " + "),
+                pp: pp,
+                tg: tg,
+                trust: item["trust"] as? String ?? "app-recorded",
+                moderation: item["moderationStatus"] as? String ?? "pending")
         }
     }
 
     // MARK: Registration
 
     private func ensureRegistered(_ key: SigningKey) async throws {
-        if installationId != nil { return }
+        let localFingerprint = Self.fingerprint(for: key)
+        if installationId != nil, keyFingerprint == localFingerprint { return }
+        installationId = nil
+        keyFingerprint = nil
+        UserDefaults.standard.removeObject(forKey: SettingsKeys.benchmarkInstallationId)
+        UserDefaults.standard.removeObject(forKey: SettingsKeys.benchmarkKeyFingerprint)
         let (challengeId, nonce) = try await challenge(purpose: "register")
         let payloadObj: [String: Any] = [
             "schemaVersion": 1,
@@ -227,13 +259,15 @@ final class BenchmarkSharing: ObservableObject {
             "payload": payload.base64URLValue, "signature": signature.base64URLValue,
         ])
         let d = unwrap(obj)
-        guard let iid = d["installationId"] as? String else { throw ShareError.badResponse }
-        installationId = iid
-        UserDefaults.standard.set(iid, forKey: SettingsKeys.benchmarkInstallationId)
-        if let fp = d["keyFingerprint"] as? String {
-            keyFingerprint = fp
-            UserDefaults.standard.set(fp, forKey: SettingsKeys.benchmarkKeyFingerprint)
+        guard let iid = d["installationId"] as? String,
+              let fp = d["keyFingerprint"] as? String,
+              fp == localFingerprint else {
+            throw ShareError.badResponse
         }
+        installationId = iid
+        keyFingerprint = fp
+        UserDefaults.standard.set(iid, forKey: SettingsKeys.benchmarkInstallationId)
+        UserDefaults.standard.set(fp, forKey: SettingsKeys.benchmarkKeyFingerprint)
     }
 
     // MARK: Challenges
@@ -250,6 +284,7 @@ final class BenchmarkSharing: ObservableObject {
 
     struct Workload {
         let id: String
+        let runner: String
         let promptTokens: Int
         let generatedTokens: Int
         let repetitions: Int
@@ -265,15 +300,26 @@ final class BenchmarkSharing: ObservableObject {
         guard let id = d["challengeId"] as? String, let nonce = d["nonce"] as? String else {
             throw ShareError.badResponse
         }
-        // The server drives the workload; decode it rather than hardcoding.
-        let w = (d["workload"] as? [String: Any]) ?? d
+        guard let w = d["workload"] as? [String: Any],
+              let workloadId = w["id"] as? String,
+              let runner = w["runner"] as? String,
+              let promptTokens = w["promptTokens"] as? Int,
+              let generatedTokens = w["generatedTokens"] as? Int,
+              let repetitions = w["repetitions"] as? Int,
+              let consentVersion = d["privacyConsentVersion"] as? String,
+              runner == "llama-bench",
+              promptTokens > 0, generatedTokens > 0,
+              (1...20).contains(repetitions) else { throw ShareError.badResponse }
+        guard consentVersion == Self.consentVersion else {
+            throw ShareError.unsupportedConsent(consentVersion)
+        }
         let workload = Workload(
-            id: w["id"] as? String ?? "llama-bench-pp512-tg128-r3-v1",
-            promptTokens: w["promptTokens"] as? Int ?? 512,
-            generatedTokens: w["generatedTokens"] as? Int ?? 128,
-            repetitions: w["repetitions"] as? Int ?? 3,
-            consentVersion: (d["privacyConsentVersion"] as? String)
-                ?? (w["privacyConsentVersion"] as? String) ?? Self.consentVersion)
+            id: workloadId,
+            runner: runner,
+            promptTokens: promptTokens,
+            generatedTokens: generatedTokens,
+            repetitions: repetitions,
+            consentVersion: consentVersion)
         return (id, nonce, workload)
     }
 
@@ -283,7 +329,9 @@ final class BenchmarkSharing: ObservableObject {
         let pp: [Double]
         let tg: [Double]
         let rawOutput: String
-        let engineSha256: String?
+        let engineURL: URL
+        let arguments: [String]
+        let cpuMoeExperts: Int
     }
 
     /// Runs llama-bench once per repetition (each `-r 1`, so all rows are preserved)
@@ -317,39 +365,60 @@ final class BenchmarkSharing: ObservableObject {
         guard pp.count == workload.repetitions, tg.count == workload.repetitions else {
             throw ShareError.workloadFailed("benchmark produced \(pp.count) pp / \(tg.count) tg rows, expected \(workload.repetitions)")
         }
-        let engineSha = FileHash.sha256(of: URL(fileURLWithPath: benchPath))
         return WorkloadRun(pp: pp, tg: tg, rawOutput: sanitize(raw, modelPath: model.url.path),
-                           engineSha256: engineSha)
+                           engineURL: URL(fileURLWithPath: benchPath),
+                           arguments: sanitizeArguments(args, modelPath: model.url.path),
+                           cpuMoeExperts: runConfig.ncmoe)
     }
 
     // MARK: Payload assembly
 
     private func buildBenchmarkPayload(model: LocalModel, settings: ServerSettings,
                                        workload: Workload, run: WorkloadRun,
-                                       contributorAlias: String?) throws -> Data {
+                                       contributorAlias: String?) async throws -> Data {
         let name = ModelName.forPath(model.url.path)
         let hw = HardwareInfo.detect()
 
-        let artifacts: [[String: Any]] = try model.partURLs.map { url in
-            guard let sha = FileHash.sha256(of: url) else { throw ShareError.workloadFailed("hash failed for \(url.lastPathComponent)") }
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-            return ["fileName": url.lastPathComponent, "sha256": sha, "sizeBytes": size]
+        let artifactURLs = model.partURLs
+        let engineURL = run.engineURL
+        let digests = await Task.detached(priority: .utility) {
+            artifactURLs.map { url -> (URL, String?, Int64) in
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+                return (url, FileHash.sha256(of: url), size)
+            }
+        }.value
+        let engineSHA = await Task.detached(priority: .utility) {
+            FileHash.sha256(of: engineURL)
+        }.value
+        let artifacts: [[String: Any]] = try digests.map { url, digest, size in
+            guard let digest, size >= 1024 else {
+                throw ShareError.workloadFailed("hash failed for \(url.lastPathComponent)")
+            }
+            return ["fileName": url.lastPathComponent, "sha256": digest, "sizeBytes": size]
         }
+        guard let engineSHA else { throw ShareError.workloadFailed("hash failed for llama-bench") }
 
-        var modelObj: [String: Any] = [
+        let modelObj: [String: Any] = [
             "displayName": name.title,
             "artifacts": artifacts,
             "quantization": name.quant.isEmpty ? "unknown" : name.quant,
             "family": modelFamily(model),
         ]
-        if let params = ModelName.activeParamsB(model.name) { modelObj["parameterCountB"] = params }
-
-        let gpus: [[String: Any]] = hw.gpus.filter { !$0.isIntegrated }.map { g in
-            ["name": g.name, "vramBytes": Int64(g.vramMB) * 1024 * 1024]
+        let discreteGPUs = hw.gpus.filter { !$0.isIntegrated }
+        let reportedGPUs = discreteGPUs.isEmpty ? hw.gpus : discreteGPUs
+        guard !reportedGPUs.isEmpty else { throw ShareError.workloadFailed("no GPU detected") }
+        let gpus: [[String: Any]] = reportedGPUs.map { g in
+            var value: [String: Any] = [
+                "name": g.name,
+                "vramBytes": Int64(g.vramMB) * 1024 * 1024,
+            ]
+            if let architecture = GPUArchitectureClassifier.architecture(for: g.name) {
+                value["architecture"] = architecture
+            }
+            return value
         }
 
-        var evidence: [String: Any] = ["rawOutput": run.rawOutput]
-        if let sha = run.engineSha256 { evidence["engineSha256"] = sha }
+        let evidence: [String: Any] = ["rawOutput": run.rawOutput, "engineSha256": engineSHA]
 
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -378,23 +447,24 @@ final class BenchmarkSharing: ObservableObject {
                 "repetitions": workload.repetitions,
                 "contextDepth": 0,
                 "gpuLayers": settings.ngl,
-                "cpuMoeExperts": Estimator.ncmoeForSelection(
-                    path: model.url.path,
-                    models: LocalModel.scan(in: ServerSettings.modelsDirectory)),
+                "cpuMoeExperts": run.cpuMoeExperts,
                 "cacheTypeK": settings.cacheTypeK,
                 "cacheTypeV": settings.cacheTypeV,
                 "flashAttention": settings.benchmarkFlashAttentionRoute,
                 "mmap": false,
                 "backend": "Metal",
+                "arguments": run.arguments,
             ],
             "measurements": [
                 "promptTokensPerSecond": run.pp,
                 "generationTokensPerSecond": run.tg,
             ],
+            "evidence": evidence,
             // Echo the exact version the challenge advertised, not a local constant.
             "privacyConsentVersion": workload.consentVersion,
         ]
         if let alias = contributorAlias, !alias.isEmpty {
+            guard alias.utf16.count <= 80 else { throw ShareError.workloadFailed("alias is longer than 80 characters") }
             payload["contributor"] = ["displayName": alias]
         }
         // Encode ONCE: these exact bytes are what we hash, sign, and upload.
@@ -402,10 +472,7 @@ final class BenchmarkSharing: ObservableObject {
     }
 
     private func modelFamily(_ model: LocalModel) -> String {
-        // Only claim dense/moe when the GGUF metadata says so; never guess from name.
-        guard let metadata = GGUFMetadataCache.metadata(at: model.url.path),
-              let experts = metadata.uint32(forSuffix: "expert_count") else { return "unknown" }
-        return experts > 0 ? "moe" : "dense"
+        BenchmarkModelFamilyClassifier.family(for: model)
     }
 
     // MARK: Networking
@@ -433,9 +500,7 @@ final class BenchmarkSharing: ObservableObject {
 
     // MARK: Signing helpers
 
-    /// Internal + static so the protocol contract (exact bytes, no trailing
-    /// newline, lowercase hex) can be unit-tested without a server. Pure, so
-    /// nonisolated to run off the main actor.
+    // static + nonisolated so the exact-bytes contract is unit-testable without a server.
     nonisolated static func signatureMessage(purpose: String, challengeId: String,
                                              nonce: String, payload: Data) -> Data {
         let hash = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
@@ -449,6 +514,10 @@ final class BenchmarkSharing: ObservableObject {
             .replacingOccurrences(of: "=", with: "")
     }
 
+    private nonisolated static func fingerprint(for key: SigningKey) -> String {
+        SHA256.hash(data: key.publicX963).map { String(format: "%02x", $0) }.joined()
+    }
+
     private static var buildNumber: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String)
             ?? AppInfo.version.replacingOccurrences(of: ".", with: "")
@@ -457,20 +526,38 @@ final class BenchmarkSharing: ObservableObject {
     // MARK: Process + parsing
 
     private func runProcess(_ path: String, _ args: [String], env: [String: String]) async throws -> String {
-        try await withCheckedThrowingContinuation { cont in
+        let outputURL = URL.temporaryDirectory.appending(path: "toshllm-benchmark-\(UUID().uuidString).log")
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
+            throw ShareError.workloadFailed("could not create temporary benchmark log")
+        }
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let outputHandle = try FileHandle(forWritingTo: outputURL)
+        defer { try? outputHandle.close() }
+
+        let status: Int32 = try await withCheckedThrowingContinuation { cont in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: path)
             p.arguments = args
             p.environment = env
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = pipe
-            p.terminationHandler = { _ in
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                cont.resume(returning: String(data: data, encoding: .utf8) ?? "")
+            p.standardOutput = outputHandle
+            p.standardError = outputHandle
+            p.terminationHandler = { process in
+                cont.resume(returning: process.terminationStatus)
             }
-            do { try p.run() } catch { cont.resume(throwing: error) }
+            do {
+                try p.run()
+            } catch {
+                p.terminationHandler = nil
+                cont.resume(throwing: error)
+            }
         }
+        try outputHandle.synchronize()
+        let data = try Data(contentsOf: outputURL)
+        let output = String(data: data, encoding: .utf8) ?? ""
+        guard status == 0 else {
+            throw ShareError.workloadFailed("llama-bench exited with status \(status): \(output.suffix(500))")
+        }
+        return output
     }
 
     private func parseSpeed(_ output: String, test: String) -> Double? {
@@ -497,6 +584,12 @@ final class BenchmarkSharing: ObservableObject {
         var out = text.replacingOccurrences(of: modelPath, with: "[MODEL]")
         out = out.replacingOccurrences(of: NSHomeDirectory(), with: "[HOME]")
         return out
+    }
+
+    private func sanitizeArguments(_ arguments: [String], modelPath: String) -> [String] {
+        arguments.map { argument in
+            sanitize(argument, modelPath: modelPath)
+        }
     }
 }
 

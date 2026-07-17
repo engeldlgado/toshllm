@@ -435,6 +435,23 @@ enum Keychain {
         SecItemAdd(add as CFDictionary, nil)
     }
 
+    /// Stores private local material without iCloud sync or device migration.
+    /// No access-control flags requiring biometrics or user presence are used,
+    /// so background signing after explicit in-app consent stays prompt-free.
+    @discardableResult
+    static func setThisDeviceOnly(_ value: String, account: String) -> Bool {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(base as CFDictionary)
+        var add = base
+        add[kSecValueData as String] = Data(value.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+
     static func delete(_ account: String) {
         SecItemDelete([
             kSecClass as String: kSecClassGenericPassword,

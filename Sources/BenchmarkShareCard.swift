@@ -2,9 +2,8 @@ import SwiftUI
 
 // MARK: - Share a benchmark with the community
 //
-// Opt-in card: no key is created and no request is made until the user picks a
-// model, accepts the consent dialog, and reviews the exact JSON. History and any
-// remote read happen only on an explicit tap, never on appear.
+// No key or request until the user consents and reviews; history and any remote
+// read happen only on an explicit tap, never on appear.
 
 struct BenchmarkShareCard: View {
     @EnvironmentObject var models: ModelStore
@@ -40,8 +39,8 @@ struct BenchmarkShareCard: View {
         Card(title: loc.t("Compartir con la comunidad", "Share with the community"),
              icon: "square.and.arrow.up") {
             VStack(alignment: .leading, spacing: 14) {
-                Text(loc.t("Publica el rendimiento de tu equipo en toshllm.com. Nada se envía hasta que eliges un modelo, aceptas y revisas el JSON exacto. No se mandan rutas, nombres de cuenta, ni el contenido de tus chats.",
-                           "Publish your machine's performance on toshllm.com. Nothing is sent until you pick a model, accept, and review the exact JSON. No local paths, account names, or chat content are sent."))
+                Text(loc.t("Publica el rendimiento de tu equipo en toshllm.com. Nada se envía hasta que revisas un resumen claro y confirmas. El JSON técnico exacto también está disponible. No se mandan rutas, nombres de cuenta ni contenido de tus chats.",
+                           "Publish your machine's performance on toshllm.com. Nothing is sent until you review a clear summary and confirm. The exact technical JSON remains available. No local paths, account names, or chat content are sent."))
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -81,10 +80,14 @@ struct BenchmarkShareCard: View {
         } message: {
             Text(consentMessage)
         }
-        .sheet(isPresented: $showReview) { reviewSheet }
+        .sheet(isPresented: $showReview) {
+            if let prepared {
+                BenchmarkShareReviewSheet(prepared: prepared, onCancel: cancelReview, onSubmit: submit)
+            }
+        }
         .alert(loc.t("Restablecer identidad de benchmark", "Reset benchmark identity"),
                isPresented: $showResetConfirm) {
-            Button(loc.t("Restablecer", "Reset"), role: .destructive) { sharing.resetIdentity() }
+            Button(loc.t("Restablecer", "Reset"), role: .destructive, action: resetIdentity)
             Button(loc.t("Cancelar", "Cancel"), role: .cancel) {}
         } message: {
             Text(loc.t("Se borra la clave de firma de este equipo. Los envíos futuros usarán una identidad nueva, no enlazable a los anteriores. Los benchmarks ya publicados conservan su identidad.",
@@ -106,16 +109,17 @@ struct BenchmarkShareCard: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         } else {
-            Button { showConsent = true } label: {
-                Label(loc.t("Compartir", "Share"), systemImage: "square.and.arrow.up")
+            Button(action: beginOrRetryShare) {
+                Label(prepared == nil ? loc.t("Compartir", "Share") : loc.t("Reintentar envío", "Retry upload"),
+                      systemImage: prepared == nil ? "square.and.arrow.up" : "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent)
             .disabled(selectedModel.isEmpty || serverBusy)
             .help(serverBusy
                   ? loc.t("Detén el servidor antes de medir: comparten la VRAM.",
                           "Stop the server before benchmarking: they share VRAM.")
-                  : loc.t("Ejecuta el workload estándar y te deja revisar el JSON antes de enviarlo.",
-                          "Runs the standard workload and lets you review the JSON before sending it."))
+                  : loc.t("Ejecuta la medición estándar y muestra un resumen completo antes de enviarlo.",
+                          "Runs the standard measurement and shows a complete summary before sending it."))
         }
     }
 
@@ -147,7 +151,11 @@ struct BenchmarkShareCard: View {
                         Button {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(fp, forType: .string)
-                        } label: { Image(systemName: "doc.on.doc") }
+                        } label: {
+                            Label(loc.t("Copiar la huella pública", "Copy the public fingerprint"),
+                                  systemImage: "doc.on.doc")
+                                .labelStyle(.iconOnly)
+                        }
                         .buttonStyle(.borderless)
                         .help(loc.t("Copiar la huella pública", "Copy the public fingerprint"))
                         Spacer()
@@ -155,6 +163,7 @@ struct BenchmarkShareCard: View {
                             Label(loc.t("Restablecer", "Reset"), systemImage: "pin.slash")
                         }
                         .buttonStyle(.borderless).font(.caption)
+                        .disabled(sharing.busy || prepared != nil)
                     }
                     .padding(.top, 4)
                 } else {
@@ -224,42 +233,24 @@ struct BenchmarkShareCard: View {
         }
     }
 
-    // MARK: review sheet
-
-    private var reviewSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(loc.t("Revisa lo que se enviará", "Review what will be sent"))
-                .font(.headline)
-            Text(loc.t("Estos son los bytes exactos que se firmarán y subirán. Nada más sale de tu equipo.",
-                       "These are the exact bytes that will be signed and uploaded. Nothing else leaves your machine."))
-                .font(.caption).foregroundStyle(.secondary)
-            ScrollView {
-                Text(prepared?.json ?? "")
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            .frame(minWidth: 460, minHeight: 300)
-            .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))
-            HStack {
-                Spacer()
-                Button(loc.t("Cancelar", "Cancel"), role: .cancel) {
-                    showReview = false; phase = .idle; prepared = nil
-                }
-                Button(loc.t("Enviar", "Send")) { submit() }
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(18)
-    }
-
     // MARK: actions
+
+    private func cancelReview() {
+        showReview = false
+        phase = .idle
+        prepared = nil
+    }
 
     private func startPrepare() {
         guard let model = models.models.first(where: { $0.url.path == selectedModel }) else { return }
+        guard alias.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count <= 80 else {
+            phase = .failed(loc.t("El alias no puede superar 80 caracteres.",
+                                  "The alias cannot exceed 80 characters."))
+            return
+        }
         phase = .running
         let settings = ServerSettings.fromDefaults()
-        let aliasValue = alias.trimmingCharacters(in: .whitespaces)
+        let aliasValue = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             do {
                 let p = try await sharing.prepareShare(model: model, settings: settings,
@@ -283,8 +274,11 @@ struct BenchmarkShareCard: View {
                 let trust = outcome.trust == "lab-signed"
                     ? loc.t("verificado (Lab)", "verified (Lab)")
                     : loc.t("registrado por la app", "app-recorded")
-                phase = .done(loc.t("Enviado · \(trust) · en revisión",
-                                    "Sent · \(trust) · in review"))
+                let state = outcome.moderationStatus == "pending"
+                    ? loc.t("en revisión", "in review")
+                    : loc.t("aprobado", "approved")
+                phase = .done(loc.t("Enviado · \(trust) · \(state)",
+                                    "Sent · \(trust) · \(state)"))
                 prepared = nil
             } catch {
                 phase = .failed(error.localizedDescription)
@@ -302,5 +296,22 @@ struct BenchmarkShareCard: View {
                 historyError = error.localizedDescription
             }
         }
+    }
+
+    private func beginOrRetryShare() {
+        if prepared != nil {
+            submit()
+        } else {
+            showConsent = true
+        }
+    }
+
+    private func resetIdentity() {
+        sharing.resetIdentity()
+        prepared = nil
+        history = []
+        historyLoaded = false
+        historyError = nil
+        phase = .idle
     }
 }

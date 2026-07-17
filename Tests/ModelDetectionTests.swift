@@ -25,6 +25,48 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertTrue(fallback.isMoE, "Filename detection remains a fallback for unreadable files")
     }
 
+    func testBenchmarkFamilyTreatsValidArchitectureWithoutExpertsAsDense() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let denseURL = dir.appendingPathComponent("qwen-dense.gguf")
+        try writeGGUF(to: denseURL, strings: ["general.architecture": "qwen35"])
+        let dense = LocalModel(url: denseURL, name: denseURL.lastPathComponent,
+                               sizeBytes: Int64(try fileSize(denseURL)))
+        XCTAssertEqual(BenchmarkModelFamilyClassifier.family(for: dense), "dense")
+
+        let moeURL = dir.appendingPathComponent("renamed.gguf")
+        try writeGGUF(to: moeURL, strings: ["general.architecture": "qwen35moe"],
+                      uint32: ["qwen35moe.expert_count": 256])
+        let moe = LocalModel(url: moeURL, name: moeURL.lastPathComponent,
+                             sizeBytes: Int64(try fileSize(moeURL)))
+        XCTAssertEqual(BenchmarkModelFamilyClassifier.family(for: moe), "moe")
+    }
+
+    func testBenchmarkGPUArchitectureUsesTheReportedDeviceName() {
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon RX 9070 XT"), "RDNA 4")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon RX 6700 XT"), "RDNA 2")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon RX 5700 XT"), "RDNA 1")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon RX 580"), "GCN / Vega")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon Pro W6800X"), "RDNA 2")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon VII"), "GCN / Vega")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Instinct MI325X"), "CDNA 3")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Instinct MI355X"), "CDNA 4")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon 890M"), "RDNA 3.5")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "NVIDIA GeForce RTX 5090"), "Blackwell")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "NVIDIA GeForce RTX 4090"), "Ada Lovelace")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "NVIDIA RTX 6000 Ada Generation"), "Ada Lovelace")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "NVIDIA RTX A6000"), "Ampere")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "NVIDIA Quadro RTX 6000"), "Turing")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "NVIDIA A100-SXM4-80GB"), "Ampere")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "Intel Arc B580"), "Xe2 / Battlemage")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "Intel Arc A770"), "Xe HPG / Alchemist")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "Apple M4 Max GPU"), "Apple Silicon")
+        XCTAssertNil(GPUArchitectureClassifier.architecture(for: "AMD Radeon Graphics"))
+        XCTAssertNil(GPUArchitectureClassifier.architecture(for: "NVIDIA RTX 6000"))
+        XCTAssertNil(GPUArchitectureClassifier.architecture(for: "Virtual GPU"))
+    }
+
     func testMetadataCacheInvalidatesWhenFileChanges() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
