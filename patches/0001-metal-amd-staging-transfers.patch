@@ -374,7 +374,7 @@ index abf4b06ed..d063f95e4 100644
  
  enum ggml_status ggml_metal_graph_compute (ggml_metal_t ctx, struct ggml_cgraph * gf);
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..342814042 100644
+index 32d97cd5d..1d77e17ea 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -18,6 +18,7 @@
@@ -385,7 +385,7 @@ index 32d97cd5d..342814042 100644
  
  struct ggml_metal_command_buffer {
      id<MTLCommandBuffer> obj;
-@@ -29,6 +30,19 @@ struct ggml_metal {
+@@ -29,8 +30,33 @@ struct ggml_metal {
      ggml_metal_device_t  dev;
      ggml_metal_library_t lib;
  
@@ -404,8 +404,22 @@ index 32d97cd5d..342814042 100644
 +
      ggml_metal_event_t ev_cpy; // for async copies
  
++    // event-chained cross-device links (TOSH_MGPU_EVENTS=1): the hand-off rides
++    // both queues through one host block, no CPU wait
++    struct ggml_metal_xdev_link {
++        ggml_metal_device_t  src_dev;
++        void *               host;
++        size_t               cap;
++        id<MTLBuffer>        wrap_src, wrap_dst;
++        id<MTLSharedEvent>   ev_ready, ev_done;
++        uint64_t             seq;
++    } xlinks[4];
++    int n_xlinks;
++
      dispatch_queue_t d_queue;
-@@ -81,7 +95,7 @@ struct ggml_metal {
+ 
+     // additional, inference-time compiled pipelines
+@@ -81,7 +107,7 @@ struct ggml_metal {
      bool has_error;
  };
  
@@ -414,7 +428,7 @@ index 32d97cd5d..342814042 100644
      GGML_LOG_INFO("%s: allocating\n", __func__);
  
  #if TARGET_OS_OSX && !GGML_METAL_NDEBUG
-@@ -103,11 +117,19 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
+@@ -103,11 +129,19 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
      // TODO: would it be better to have one queue for the backend and one queue for the device?
      //       the graph encoders and async ops would use the backend queue while the sync ops would use the device queue?
      //res->queue = [device newCommandQueue]; [TAG_QUEUE_PER_BACKEND]
@@ -436,7 +450,7 @@ index 32d97cd5d..342814042 100644
  
      res->dev = dev;
      res->lib = ggml_metal_device_get_library(dev);
-@@ -189,6 +211,14 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
+@@ -189,6 +223,25 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
  void ggml_metal_free(ggml_metal_t ctx) {
      GGML_LOG_INFO("%s: deallocating\n", __func__);
  
@@ -448,10 +462,21 @@ index 32d97cd5d..342814042 100644
 +        [ctx->prefetch_stages[i] release];
 +    }
 +
++    for (int i = 0; i < ctx->n_xlinks; ++i) {
++        if (ctx->xlinks[i].seq > 0) {
++            [ctx->xlinks[i].ev_done waitUntilSignaledValue:ctx->xlinks[i].seq timeoutMS:10000];
++        }
++        [ctx->xlinks[i].wrap_src release];
++        [ctx->xlinks[i].wrap_dst release];
++        [ctx->xlinks[i].ev_ready release];
++        [ctx->xlinks[i].ev_done release];
++        free(ctx->xlinks[i].host);
++    }
++
      for (int i = 0; i < GGML_METAL_MAX_COMMAND_BUFFERS; ++i) {
          if (ctx->cmd_bufs[i].obj) {
              [ctx->cmd_bufs[i].obj release];
-@@ -223,7 +253,7 @@ void ggml_metal_free(ggml_metal_t ctx) {
+@@ -223,7 +276,7 @@ void ggml_metal_free(ggml_metal_t ctx) {
  
      Block_release(ctx->encode_async);
  
@@ -460,7 +485,7 @@ index 32d97cd5d..342814042 100644
  
      dispatch_release(ctx->d_queue);
  
-@@ -243,6 +273,9 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -243,6 +296,9 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
          ctx->cmd_buf_last = nil;
      }
  
@@ -470,7 +495,7 @@ index 32d97cd5d..342814042 100644
      // check status of all command buffers
      {
          const int n_cb = ctx->n_cb;
-@@ -292,6 +325,13 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -292,6 +348,13 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
  
          [ctx->cmd_bufs_ext removeAllObjects];
      }
@@ -484,7 +509,7 @@ index 32d97cd5d..342814042 100644
  }
  
  static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_tensor * t) {
-@@ -304,15 +344,18 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
+@@ -304,15 +367,18 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
      return ggml_metal_buffer_get_id(buffer->context, t);
  }
  
@@ -509,7 +534,7 @@ index 32d97cd5d..342814042 100644
  
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(tensor);
          if (bid_dst.metal == nil) {
-@@ -321,9 +364,80 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -321,9 +387,80 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  
          bid_dst.offs += offset;
  
@@ -591,7 +616,7 @@ index 32d97cd5d..342814042 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -349,50 +463,137 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -349,50 +486,240 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  }
  
  void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -722,12 +747,115 @@ index 32d97cd5d..342814042 100644
      }
  }
  
++// event-chained hand-off: both blits share one host block and order through
++// MTLSharedEvents, so neither GPU drains and the CPU never blocks
++static bool ggml_metal_cpy_xdev_events(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
++                                       const struct ggml_tensor * src, struct ggml_tensor * dst) {
++    struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
++    struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
++    if (bid_src.metal == nil || bid_dst.metal == nil) {
++        return false;
++    }
++
++    const size_t size = ggml_nbytes(src);
++
++    struct ggml_metal_xdev_link * link = NULL;
++    for (int i = 0; i < ctx_dst->n_xlinks; i++) {
++        if (ctx_dst->xlinks[i].src_dev == ctx_src->dev) {
++            link = &ctx_dst->xlinks[i];
++            break;
++        }
++    }
++    if (link == NULL) {
++        if (ctx_dst->n_xlinks == 4) {
++            return false;
++        }
++        link = &ctx_dst->xlinks[ctx_dst->n_xlinks++];
++        link->src_dev = ctx_src->dev;
++        link->ev_ready = [ggml_metal_device_get_obj(ctx_src->dev) newSharedEvent];
++        link->ev_done  = [ggml_metal_device_get_obj(ctx_dst->dev) newSharedEvent];
++        fprintf(stderr, "ggml_metal: cross-device hand-off via shared events (TOSH_MGPU_EVENTS)\n");
++    }
++
++    if (link->cap < size) {
++        // resizing frees pages a queued blit may still read; wait out the link first
++        if (link->seq > 0) {
++            [link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000];
++        }
++        [link->wrap_src release];
++        [link->wrap_dst release];
++        free(link->host);
++        link->cap = MAX(size, (size_t) 1*1024*1024);
++        if (posix_memalign(&link->host, (size_t) sysconf(_SC_PAGESIZE), link->cap) != 0) {
++            link->host = NULL;
++            link->cap  = 0;
++            return false;
++        }
++        link->wrap_src = [ggml_metal_device_get_obj(ctx_src->dev) newBufferWithBytesNoCopy:link->host
++                              length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
++        link->wrap_dst = [ggml_metal_device_get_obj(ctx_dst->dev) newBufferWithBytesNoCopy:link->host
++                              length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
++        if (link->wrap_src == nil || link->wrap_dst == nil) {
++            return false;
++        }
++    }
++
++    const uint64_t seq = ++link->seq;
++
++    @autoreleasepool {
++        // source queue: reuse the host block only after the destination consumed
++        // the previous hand-off, then publish this one
++        id<MTLCommandBuffer> cmd_src = [ctx_src->queue commandBuffer];
++        if (seq > 1) {
++            [cmd_src encodeWaitForEvent:link->ev_done value:seq - 1];
++        }
++        id<MTLBlitCommandEncoder> enc_src = [cmd_src blitCommandEncoder];
++        [enc_src copyFromBuffer:bid_src.metal sourceOffset:bid_src.offs
++                       toBuffer:link->wrap_src destinationOffset:0 size:size];
++        [enc_src endEncoding];
++        [cmd_src encodeSignalEvent:link->ev_ready value:seq];
++        [cmd_src commit];
++        [ctx_src->cmd_bufs_ext addObject:cmd_src];
++        ctx_src->cmd_buf_last = cmd_src;
++        [cmd_src retain];
++
++        id<MTLCommandBuffer> cmd_dst = [ctx_dst->queue commandBuffer];
++        [cmd_dst encodeWaitForEvent:link->ev_ready value:seq];
++        id<MTLBlitCommandEncoder> enc_dst = [cmd_dst blitCommandEncoder];
++        [enc_dst copyFromBuffer:link->wrap_dst sourceOffset:0
++                       toBuffer:bid_dst.metal destinationOffset:bid_dst.offs size:size];
++        [enc_dst endEncoding];
++        [cmd_dst encodeSignalEvent:link->ev_done value:seq];
++        [cmd_dst commit];
++        [ctx_dst->cmd_bufs_ext addObject:cmd_dst];
++        ctx_dst->cmd_buf_last = cmd_dst;
++        [cmd_dst retain];
++    }
++
++    return true;
++}
++
  bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst) {
 +    // A Metal blit can't reach a buffer owned by another device, so a multi-GPU layer
 +    // hand-off goes through host memory (GGML_METAL_CROSS_STAGING_DISABLE uses the generic copy).
 +    if (ctx_src->dev != ctx_dst->dev) {
 +        if (getenv("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
 +            return false;
++        }
++
++        // opt-in experiment; both buffers must be private for the blits
++        static int use_events = -1;
++        if (use_events < 0) {
++            const char * v = getenv("TOSH_MGPU_EVENTS");
++            use_events = (v && v[0] == '1') ? 1 : 0;
++        }
++        ggml_backend_buffer_t ebsrc = src->view_src ? src->view_src->buffer : src->buffer;
++        ggml_backend_buffer_t ebdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
++        if (use_events &&
++            !ggml_metal_buffer_is_shared(ebsrc->context) &&
++            !ggml_metal_buffer_is_shared(ebdst->context) &&
++            ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst)) {
++            return true;
 +        }
 +        // drain both GPUs: the source before reading it, the destination before
 +        // overwriting an input its in-flight graph may still be consuming
@@ -753,7 +881,7 @@ index 32d97cd5d..342814042 100644
      @autoreleasepool {
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
-@@ -403,7 +604,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
+@@ -403,7 +730,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
  
          // queue the copy operation into the Metal context
          // this will be queued at the end, after any currently ongoing GPU operations
@@ -762,7 +890,7 @@ index 32d97cd5d..342814042 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -504,7 +705,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -504,7 +831,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
          }
  
          // short-hand
@@ -771,7 +899,7 @@ index 32d97cd5d..342814042 100644
  
          // the main thread commits the first few commands immediately
          // cmd_buf[n_cb]
-@@ -626,7 +827,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+@@ -626,7 +953,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
  
  void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -780,7 +908,7 @@ index 32d97cd5d..342814042 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
  
          ggml_metal_event_encode_signal(ev, cmd_buf);
-@@ -642,7 +843,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
+@@ -642,7 +969,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
  
  void ggml_metal_event_wait(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
