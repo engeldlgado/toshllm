@@ -377,7 +377,7 @@ index abf4b06ed..d063f95e4 100644
  
  enum ggml_status ggml_metal_graph_compute (ggml_metal_t ctx, struct ggml_cgraph * gf);
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..8e28054d2 100644
+index 32d97cd5d..342814042 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -18,6 +18,7 @@
@@ -463,7 +463,17 @@ index 32d97cd5d..8e28054d2 100644
  
      dispatch_release(ctx->d_queue);
  
-@@ -292,6 +322,13 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -243,6 +273,9 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+         ctx->cmd_buf_last = nil;
+     }
+ 
++    // in-flight staged uploads count as pending backend operations
++    ggml_metal_device_upload_drain(ctx->dev);
++
+     // check status of all command buffers
+     {
+         const int n_cb = ctx->n_cb;
+@@ -292,6 +325,13 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
  
          [ctx->cmd_bufs_ext removeAllObjects];
      }
@@ -477,7 +487,7 @@ index 32d97cd5d..8e28054d2 100644
  }
  
  static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_tensor * t) {
-@@ -304,15 +341,18 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
+@@ -304,15 +344,18 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
      return ggml_metal_buffer_get_id(buffer->context, t);
  }
  
@@ -502,7 +512,7 @@ index 32d97cd5d..8e28054d2 100644
  
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(tensor);
          if (bid_dst.metal == nil) {
-@@ -321,9 +361,80 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -321,9 +364,80 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  
          bid_dst.offs += offset;
  
@@ -584,7 +594,7 @@ index 32d97cd5d..8e28054d2 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -349,50 +460,137 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -349,50 +463,137 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
  }
  
  void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -746,7 +756,7 @@ index 32d97cd5d..8e28054d2 100644
      @autoreleasepool {
          struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
          struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
-@@ -403,7 +601,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
+@@ -403,7 +604,7 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
  
          // queue the copy operation into the Metal context
          // this will be queued at the end, after any currently ongoing GPU operations
@@ -755,7 +765,7 @@ index 32d97cd5d..8e28054d2 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
          id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
  
-@@ -504,7 +702,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -504,7 +705,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
          }
  
          // short-hand
@@ -764,7 +774,7 @@ index 32d97cd5d..8e28054d2 100644
  
          // the main thread commits the first few commands immediately
          // cmd_buf[n_cb]
-@@ -626,7 +824,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+@@ -626,7 +827,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
  
  void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -773,7 +783,7 @@ index 32d97cd5d..8e28054d2 100644
          id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
  
          ggml_metal_event_encode_signal(ev, cmd_buf);
-@@ -642,7 +840,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
+@@ -642,7 +843,7 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
  
  void ggml_metal_event_wait(ggml_metal_t ctx, ggml_metal_event_t ev) {
      @autoreleasepool {
@@ -1023,7 +1033,7 @@ index 0e1f1de45..526931cc7 100644
      return res;
  }
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index d465f31c0..ea9d0f1da 100644
+index d465f31c0..8b3bd28f6 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -125,6 +125,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_cumsum_ad
@@ -1068,7 +1078,7 @@ index d465f31c0..ea9d0f1da 100644
  ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev);
  
  void ggml_metal_device_rsets_add(ggml_metal_device_t dev, ggml_metal_rset_t rset);
-@@ -309,6 +329,18 @@ bool   ggml_metal_buffer_is_shared(ggml_metal_buffer_t buf);
+@@ -309,6 +329,21 @@ bool   ggml_metal_buffer_is_shared(ggml_metal_buffer_t buf);
  void   ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size);
  void   ggml_metal_buffer_set_tensor   (ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
  void   ggml_metal_buffer_get_tensor   (ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size);
@@ -1084,11 +1094,14 @@ index d465f31c0..ea9d0f1da 100644
 +// batch small synchronous reads into one device round-trip
 +void   ggml_metal_device_read_batch_begin(ggml_metal_device_t dev);
 +void   ggml_metal_device_read_batch_end  (ggml_metal_device_t dev);
++
++// wait out the in-flight staged uploads (stage_set defers its waits)
++void   ggml_metal_device_upload_drain(ggml_metal_device_t dev);
  bool   ggml_metal_buffer_cpy_tensor   (ggml_metal_buffer_t buf, const struct ggml_tensor * src, struct ggml_tensor * dst);
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..310ad0fd5 100644
+index a7cbc60eb..7950f7e5f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1137,7 +1150,7 @@ index a7cbc60eb..310ad0fd5 100644
  struct ggml_metal_device {
      id<MTLDevice> mtl_device;
  
-@@ -533,6 +558,29 @@ struct ggml_metal_device {
+@@ -533,6 +558,34 @@ struct ggml_metal_device {
  
      // virtual address for GPU memory allocations
      atomic_uintptr_t addr_virt;
@@ -1147,6 +1160,11 @@ index a7cbc60eb..310ad0fd5 100644
 +    // which on AMD accumulates across long runs until transfers crawl
 +    id<MTLBuffer> stage_buf;
 +    NSRecursiveLock * stage_lock;   // recursive: a read batch holds it across stage_get calls
++    // upload ring: stage_set defers its wait to the next reuse of a slot, since
++    // the blit shares the compute queue and needs no wait for ordering
++    id<MTLBuffer>        stage_set_bufs[4];
++    id<MTLCommandBuffer> stage_set_cmds[4];
++    int                  stage_set_cur;
 +    // open read batch: blits accumulate into one command buffer, one wait at end
 +    id<MTLCommandBuffer>       stage_batch_cmd;
 +    id<MTLBlitCommandEncoder>  stage_batch_enc;
@@ -1167,7 +1185,7 @@ index a7cbc60eb..310ad0fd5 100644
  };
  
  //
-@@ -676,13 +724,87 @@ static enum ggml_metal_device_id ggml_metal_device_id_parse(const char * name) {
+@@ -676,13 +729,87 @@ static enum ggml_metal_device_id ggml_metal_device_id_parse(const char * name) {
      return GGML_METAL_DEVICE_GENERIC;
  }
  
@@ -1256,7 +1274,7 @@ index a7cbc60eb..310ad0fd5 100644
  
          if (dev->mtl_device) {
              dev->mtl_queue = [dev->mtl_device newCommandQueue];
-@@ -690,13 +812,92 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+@@ -690,13 +817,92 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
                  GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
              }
  
@@ -1349,13 +1367,19 @@ index a7cbc60eb..310ad0fd5 100644
              dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
              dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
-@@ -925,6 +1126,27 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
+@@ -925,6 +1131,33 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
      ggml_metal_library_free(dev->library);
      dev->library = NULL;
  
 +    if (dev->stage_buf) {
 +        [dev->stage_buf release];
 +        dev->stage_buf = nil;
++    }
++
++    ggml_metal_device_upload_drain(dev);
++    for (int i = 0; i < 4; i++) {
++        [dev->stage_set_bufs[i] release];
++        dev->stage_set_bufs[i] = nil;
 +    }
 +
 +    if (dev->stage_lock) {
@@ -1377,7 +1401,7 @@ index a7cbc60eb..310ad0fd5 100644
      if (dev->mtl_queue) {
          [dev->mtl_queue release];
          dev->mtl_queue = nil;
-@@ -946,6 +1168,97 @@ void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
+@@ -946,6 +1179,97 @@ void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
      return dev->mtl_queue;
  }
  
@@ -1475,7 +1499,7 @@ index a7cbc60eb..310ad0fd5 100644
  ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev) {
      return dev->library;
  }
-@@ -1051,6 +1364,8 @@ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t
+@@ -1051,6 +1375,8 @@ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t
  bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_tensor * op) {
      const bool has_simdgroup_mm        = dev->props.has_simdgroup_mm;
      const bool has_simdgroup_reduction = dev->props.has_simdgroup_reduction;
@@ -1484,7 +1508,7 @@ index a7cbc60eb..310ad0fd5 100644
      const bool has_bfloat              = dev->props.has_bfloat;
  
      if (!has_bfloat) {
-@@ -1166,13 +1481,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1166,13 +1492,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              return has_simdgroup_reduction && ggml_is_contiguous(op->src[0]);
          case GGML_OP_TRI:
              return ggml_is_contiguous_rows(op->src[0]);
@@ -1503,7 +1527,7 @@ index a7cbc60eb..310ad0fd5 100644
          case GGML_OP_COUNT_EQUAL:
              return has_simdgroup_reduction &&
                  op->src[0]->type == GGML_TYPE_I32 &&
-@@ -1182,7 +1500,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1182,7 +1511,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              return has_simdgroup_reduction;
          case GGML_OP_NORM:
          case GGML_OP_RMS_NORM:
@@ -1514,7 +1538,7 @@ index a7cbc60eb..310ad0fd5 100644
          case GGML_OP_ROPE:
          case GGML_OP_ROPE_BACK:
              return true;
-@@ -1234,6 +1554,46 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1234,6 +1565,46 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  op->src[0]->ne[0] != 576) {
                  return false;
              }
@@ -1561,7 +1585,7 @@ index a7cbc60eb..310ad0fd5 100644
              if (op->src[1]->type != op->src[2]->type) {
                  return false;
              }
-@@ -1256,17 +1616,69 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1256,17 +1627,69 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
              }
              return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
          case GGML_OP_SSM_CONV:
@@ -1635,7 +1659,7 @@ index a7cbc60eb..310ad0fd5 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2129,326 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2140,362 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1772,6 +1796,23 @@ index a7cbc60eb..310ad0fd5 100644
 +    return dev->stage_buf;
 +}
 +
++// waits out and releases every in-flight upload; caller must hold stage_lock
++static void ggml_metal_device_stage_set_drain(ggml_metal_device_t dev) {
++    for (int i = 0; i < 4; i++) {
++        if (dev->stage_set_cmds[i]) {
++            [dev->stage_set_cmds[i] waitUntilCompleted];
++            [dev->stage_set_cmds[i] release];
++            dev->stage_set_cmds[i] = nil;
++        }
++    }
++}
++
++void ggml_metal_device_upload_drain(ggml_metal_device_t dev) {
++    [dev->stage_lock lock];
++    ggml_metal_device_stage_set_drain(dev);
++    [dev->stage_lock unlock];
++}
++
 +bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_dst, const void * data, size_t size) {
 +    if (size == 0) {
 +        return true;
@@ -1784,7 +1825,24 @@ index a7cbc60eb..310ad0fd5 100644
 +
 +    [dev->stage_lock lock];
 +
-+    id<MTLBuffer> stage = ggml_metal_device_stage_buf(dev);
++    const int slot = dev->stage_set_cur;
++    dev->stage_set_cur = (slot + 1) % 4;
++
++    // reusing a slot is the only wait left; four uploads later the blit is
++    // long done, so this almost never blocks
++    if (dev->stage_set_cmds[slot]) {
++        [dev->stage_set_cmds[slot] waitUntilCompleted];
++        [dev->stage_set_cmds[slot] release];
++        dev->stage_set_cmds[slot] = nil;
++    }
++
++    id<MTLBuffer> stage = dev->stage_set_bufs[slot];
++    if (stage == nil || stage.length < size) {
++        [stage release];
++        stage = [dev->mtl_device newBufferWithLength:MAX(size, (size_t) 256*1024)
++                                             options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
++        dev->stage_set_bufs[slot] = stage;
++    }
 +    if (stage == nil) {
 +        [dev->stage_lock unlock];
 +        return false;
@@ -1792,7 +1850,7 @@ index a7cbc60eb..310ad0fd5 100644
 +
 +    memcpy(stage.contents, data, size);
 +
-+    id<MTLCommandBuffer> cmd_buf = [dev->mtl_queue commandBufferWithUnretainedReferences];
++    id<MTLCommandBuffer> cmd_buf = [dev->mtl_queue commandBuffer];
 +
 +    {
 +        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
@@ -1807,7 +1865,9 @@ index a7cbc60eb..310ad0fd5 100644
 +    }
 +
 +    [cmd_buf commit];
-+    [cmd_buf waitUntilCompleted];
++    // no wait: the blit shares the compute queue, so every consumer that could
++    // observe the destination is queued behind it
++    dev->stage_set_cmds[slot] = [cmd_buf retain];
 +
 +    [dev->stage_lock unlock];
 +
@@ -1962,7 +2022,7 @@ index a7cbc60eb..310ad0fd5 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2456,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2503,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -2024,7 +2084,7 @@ index a7cbc60eb..310ad0fd5 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1768,44 +2540,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1768,44 +2587,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
          dispatch_release(completion_semaphore);
  
          //[cmd_buf waitUntilCompleted];
@@ -2148,7 +2208,7 @@ index a7cbc60eb..310ad0fd5 100644
      }
  }
  
-@@ -1820,6 +2659,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
+@@ -1820,6 +2706,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
          return true;
      }
  
