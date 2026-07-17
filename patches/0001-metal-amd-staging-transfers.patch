@@ -1098,7 +1098,7 @@ index d465f31c0..8b3bd28f6 100644
  void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a7cbc60eb..3d313a6fb 100644
+index a7cbc60eb..4ecc958f9 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -8,6 +8,7 @@
@@ -1655,7 +1655,7 @@ index a7cbc60eb..3d313a6fb 100644
          case GGML_OP_SET:
          case GGML_OP_CPY:
          case GGML_OP_DUP:
-@@ -1717,13 +2139,357 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
+@@ -1717,13 +2139,376 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
      }
  }
  
@@ -1673,6 +1673,8 @@ index a7cbc60eb..3d313a6fb 100644
 +    _Atomic uint64_t bytes  [TOSH_PROF_N];
 +    _Atomic uint64_t wait_ns[TOSH_PROF_N];
 +    _Atomic uint64_t t_last;
++    // big D2H reads (logits class) split into GPU-busy time vs the blit itself
++    _Atomic uint64_t big_calls, big_dep_ns, big_xfer_ns;
 +} g_tosh_prof;
 +
 +static bool tosh_prof_on(void) {
@@ -1777,6 +1779,13 @@ index a7cbc60eb..3d313a6fb 100644
 +    if (n > 0) {
 +        // raw stderr: llama-server filters backend INFO logs at default verbosity
 +        fprintf(stderr, "ggml_metal: moe-profile: %s\n", line);
++    }
++    const uint64_t bc = atomic_exchange(&g_tosh_prof.big_calls, 0);
++    if (bc > 0) {
++        const uint64_t bd = atomic_exchange(&g_tosh_prof.big_dep_ns,  0);
++        const uint64_t bx = atomic_exchange(&g_tosh_prof.big_xfer_ns, 0);
++        fprintf(stderr, "ggml_metal: moe-profile:   D2H-big %llux gpu-busy %.0fms blit %.1fms\n",
++                (unsigned long long) bc, bd / 1e6, bx / 1e6);
 +    }
 +    tosh_prof_cls_flush();
 +}
@@ -1972,6 +1981,16 @@ index a7cbc60eb..3d313a6fb 100644
 +    [cmd_buf commit];
 +    [cmd_buf waitUntilCompleted];
 +
++    // dependency vs transfer split for the logits-class reads: time before the
++    // blit ran = GPU busy with queued compute, not readback overhead
++    if (t0 && size >= (size_t) 256*1024) {
++        atomic_fetch_add_explicit(&g_tosh_prof.big_calls, 1, memory_order_relaxed);
++        atomic_fetch_add_explicit(&g_tosh_prof.big_dep_ns,
++            (uint64_t) ((cmd_buf.GPUStartTime - cmd_buf.kernelStartTime) * 1e9), memory_order_relaxed);
++        atomic_fetch_add_explicit(&g_tosh_prof.big_xfer_ns,
++            (uint64_t) ((cmd_buf.GPUEndTime - cmd_buf.GPUStartTime) * 1e9), memory_order_relaxed);
++    }
++
 +    memcpy(data, stage.contents, size);
 +
 +    [dev->stage_lock unlock];
@@ -2013,7 +2032,7 @@ index a7cbc60eb..3d313a6fb 100644
          // src
          void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-@@ -1731,12 +2497,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1731,12 +2516,59 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
  
@@ -2075,7 +2094,7 @@ index a7cbc60eb..3d313a6fb 100644
          // note: for experimentation purposes, here we use a semaphore to wait for the copy to complete
          //       this is alternative to waitUntilCompleted, which should be faster, but don't seem to make much difference
          dispatch_semaphore_t completion_semaphore = dispatch_semaphore_create(0);
-@@ -1768,44 +2581,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -1768,44 +2600,111 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
          dispatch_release(completion_semaphore);
  
          //[cmd_buf waitUntilCompleted];
@@ -2199,7 +2218,7 @@ index a7cbc60eb..3d313a6fb 100644
      }
  }
  
-@@ -1820,6 +2700,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
+@@ -1820,6 +2719,11 @@ bool ggml_metal_buffer_cpy_tensor(ggml_metal_buffer_t buf_dst, const struct ggml
          return true;
      }
  
