@@ -9,8 +9,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Share your benchmarks to [toshllm.com](https://toshllm.com) from the app**... Benchmarks → Share with the community runs the standard workload and, after you review the exact data, submits it signed per-install (no account needed); opt-in, nothing leaves your machine until you confirm.
 
 ### Fixed
-- **Image generation no longer aborts on AMD GCN/Vega (wave64) GPUs** (#39)... an op the wave64 backend has no kernel for (e.g. the VAE encode's small matmul in img2img) now falls to CPU instead of crashing the whole run.
-- **Added servers now follow the global Settings** (#40)... they used to freeze a snapshot at creation, so changing e.g. Context never reached them; now they inherit everything except the fields you change on their own card (a pin-slash button restores full inheritance), and the card gained a Context row.
+- **Image generation no longer aborts on AMD GCN/Vega (wave64) GPUs** ([#39](https://github.com/engeldlgado/toshllm/issues/39))... an op the wave64 backend has no kernel for (e.g. the VAE encode's small matmul in img2img) now falls to CPU instead of crashing the whole run.
+- **Added servers now follow the global Settings** ([#40](https://github.com/engeldlgado/toshllm/issues/40))... they used to freeze a snapshot at creation, so changing e.g. Context never reached them; now they inherit everything except the fields you change on their own card (a pin-slash button restores full inheritance), and the card gained a Context row.
 
 ## [0.82.2] - 2026-07-17
 
