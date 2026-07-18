@@ -328,6 +328,7 @@ final class ModelStore: ObservableObject {
         let item = DownloadItem(remote: remote, destination: dest)
         item.onFinish = { [weak self] in self?.refresh() }
         downloads.append(item)
+        Self.recordSource(urlString, forFile: fileName)
         // Vision models ship a separate projector (mmproj). When downloading the
         // model, fetch its sibling mmproj too so vision works without manual steps.
         if fetchVisionProjector && !fileName.lowercased().contains("mmproj") {
@@ -373,6 +374,16 @@ final class ModelStore: ObservableObject {
         downloads.removeAll { $0.finished || $0.error != nil }
     }
 
+    static func recordSource(_ urlString: String, forFile fileName: String) {
+        var map = UserDefaults.standard.dictionary(forKey: SettingsKeys.modelSource) as? [String: String] ?? [:]
+        map[fileName] = urlString
+        UserDefaults.standard.set(map, forKey: SettingsKeys.modelSource)
+    }
+
+    static func source(forFile fileName: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: SettingsKeys.modelSource) as? [String: String])?[fileName]
+    }
+
     /// For a local model that is a known catalog vision model whose multimodal
     /// projector isn't present in the folder, returns the catalog entry so the UI
     /// can offer to download the missing mmproj.
@@ -388,6 +399,15 @@ final class ModelStore: ObservableObject {
         Task { await autoFetchProjector(for: url) }
     }
 
+    /// Download a DFlash draft under a model-specific name so pairing is unambiguous.
+    func downloadDflashDraft(repo: String, file: String, modelStem: String) {
+        let name = "\(modelStem).dflash.gguf"
+        guard !FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path),
+              !downloads.contains(where: { $0.destination.lastPathComponent == name && $0.error == nil }) else { return }
+        download(urlString: "https://huggingface.co/\(repo)/resolve/main/\(file)",
+                 preferredName: name, fetchVisionProjector: false)
+    }
+
     /// Retry a failed download by replacing it with a fresh transfer (new session
     /// + re-fetched metadata), reusing the same source URL.
     func retry(_ item: DownloadItem) {
@@ -399,11 +419,12 @@ final class ModelStore: ObservableObject {
         download(urlString: item.remote.absoluteString, preferredName: preferred)
     }
 
-    /// Moves the model to the Trash (recoverable). For a vision model, its paired
-    /// multimodal projector (mmproj) is removed too, so no orphan file is left.
+    /// Moves the model to the Trash (recoverable). Its paired projector (mmproj)
+    /// and DFlash draft are removed too, so no orphan files are left.
     func delete(_ model: LocalModel) {
-        if let proj = ServerSettings.mmprojPath(forModel: model.url.path) {
-            try? FileManager.default.trashItem(at: URL(fileURLWithPath: proj), resultingItemURL: nil)
+        for sibling in [ServerSettings.mmprojPath(forModel: model.url.path),
+                        ServerSettings.dflashDraftPath(forModel: model.url.path)].compactMap({ $0 }) {
+            try? FileManager.default.trashItem(at: URL(fileURLWithPath: sibling), resultingItemURL: nil)
         }
         for url in model.partURLs {
             try? FileManager.default.trashItem(at: url, resultingItemURL: nil)

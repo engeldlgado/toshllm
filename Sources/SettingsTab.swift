@@ -55,7 +55,13 @@ struct SettingsView: View {
     @State private var showResetConfirm = false
 
     private var availableKVTypes: [String] {
-        return ServerSettings.kvCacheTypes
+        // Only f16/q8_0/q4_0 have an FA-AMD KV kernel; the other quant types fall
+        // back to a ~3.7x slower path on Intel/AMD, so don't offer them there.
+        // Keep an already-selected slow type visible so a migrated config isn't blank.
+        if ServerSettings.isAppleSilicon { return ServerSettings.kvCacheTypes }
+        var types = ["f16", "q8_0", "q4_0"]
+        for t in [cacheTypeK, cacheTypeV] where !types.contains(t) { types.append(t) }
+        return types
     }
     private var serverIsStopped: Bool {
         if case .stopped = server.state { return true }

@@ -18,6 +18,7 @@ struct BenchmarksView: View {
     @State private var hoveredRun: UUID?
     @State private var appliedToast: String?
     @State private var lastToast = UUID()
+    @State private var showShare = false
     @AppStorage(SettingsKeys.benchAdvanced) private var benchAdvanced = false
 
     private var gpus: [GPUDevice] { ServerController.availableGPUs() }
@@ -27,13 +28,13 @@ struct BenchmarksView: View {
         ScrollView {
             VStack(spacing: 16) {
                 runCard
+                shareCard
                 if bench.running || !bench.output.isEmpty { outputCard }
                 if !bench.history.isEmpty {
                     bestCards
                     chartCard
                     historyCard
                 }
-                BenchmarkShareCard()
             }
             .padding()
         }
@@ -115,6 +116,52 @@ struct BenchmarksView: View {
                             "Shows the run's workload sizes (-p, -n, -d). The defaults (pp512/tg128) are the standard comparable across machines."))
             benchLogButton
         }
+    }
+
+    private var inheritanceLabel: String {
+        if let id = selectedProfile, let p = profileStore.profiles.first(where: { $0.id == id }) {
+            return loc.t("Configuración del perfil «\(p.name)»", "Config from profile “\(p.name)”")
+        }
+        return loc.t("Configuración heredada de Ajustes", "Config inherited from Settings")
+    }
+
+    // Sharing lives at the top so a long run history never buries it; collapsed by
+    // default behind the header toggle, and it publishes the benchmark's own cfg.
+    private var shareCard: some View {
+        Card(title: loc.t("Compartir con la comunidad", "Share with the community"),
+             icon: "square.and.arrow.up",
+             trailing: AnyView(shareToggle)) {
+            if showShare {
+                BenchmarkShareCard(cfg: cfg, inheritanceLabel: inheritanceLabel)
+            } else {
+                Button {
+                    withAnimation(.snappy) { showShare = true }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(loc.t("Publica una medición verificable de tu equipo en toshllm.com",
+                                   "Publish a verifiable measurement of your machine on toshllm.com"))
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var shareToggle: some View {
+        Button {
+            withAnimation(.snappy) { showShare.toggle() }
+        } label: {
+            Label(showShare ? loc.t("Ocultar", "Hide") : loc.t("Compartir", "Share"),
+                  systemImage: showShare ? "chevron.up" : "chevron.down")
+                .font(.caption.weight(.medium))
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .tint(Color.appAccent)
     }
 
     private var runCard: some View {
@@ -651,6 +698,11 @@ private struct BenchHistoryRow: View, Equatable {
                             .help(loc.t("Mejor generación", "Best generation"))
                     }
                     Text(r.shortModel).font(.callout.weight(.medium))
+                    if r.shared == true {
+                        Image(systemName: "globe")
+                            .font(.system(size: 9)).foregroundStyle(Color.appAccent)
+                            .help(loc.t("Compartido con la comunidad", "Shared with the community"))
+                    }
                 }
                 HStack(spacing: 5) {
                     Text(r.configLabel)

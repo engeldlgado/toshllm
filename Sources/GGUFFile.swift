@@ -60,8 +60,15 @@ enum GGUFFile {
         path.lowercased().contains("mmproj")
     }
 
+    /// A speculative-decoding draft (DFlash). App-managed drafts are saved as
+    /// `<model>.dflash.gguf`; any GGUF with "dflash" in its name is a draft too.
+    static func isDraft(_ path: String) -> Bool {
+        URL(fileURLWithPath: path).lastPathComponent.lowercased().contains("dflash")
+    }
+
     private static func isModelFile(_ path: String) -> Bool {
-        URL(fileURLWithPath: path).pathExtension.lowercased() == "gguf" && !isProjector(path)
+        URL(fileURLWithPath: path).pathExtension.lowercased() == "gguf"
+            && !isProjector(path) && !isDraft(path)
     }
 
     private static func shardInfo(_ path: String) -> Shard? {

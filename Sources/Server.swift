@@ -167,7 +167,14 @@ struct ServerSettings {
         }
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
-        if ncmoe > 0 && Self.modelHasMTP(at: modelPath) {
+        // DFlash draft (user-downloaded sibling) takes precedence over MTP; both
+        // drive --spec-type. Not gated on ncmoe: the user opted in by downloading it.
+        if let draft = Self.activeDflashDraft(forModel: modelPath) {
+            // Quantize the draft's KV cache: it doubles KV pressure at high ctx, and
+            // q8_0 halves that footprint at no measurable quality cost for a draft.
+            args += ["-md", draft, "--spec-type", "draft-dflash", "-ngld", "99",
+                     "-ctkd", "q8_0", "-ctvd", "q8_0"]
+        } else if ncmoe > 0 && Self.modelHasMTP(at: modelPath) {
             args += ["--spec-type", "draft-mtp"]
         }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
@@ -247,7 +254,13 @@ struct ServerSettings {
                 lines.append("slot-save-path = \(Self.slotCacheDir(port: port).appendingPathComponent(alias).path)")
             }
             if reasoningInline { lines.append("reasoning-format = none") }
-            if (ncmoeByPath[path] ?? 0) > 0 && Self.modelHasMTP(at: path) {
+            if let draft = Self.activeDflashDraft(forModel: path) {
+                lines.append("model-draft = \(draft)")
+                lines.append("spec-type = draft-dflash")
+                lines.append("gpu-layers-draft = 99")
+                lines.append("cache-type-k-draft = q8_0")
+                lines.append("cache-type-v-draft = q8_0")
+            } else if (ncmoeByPath[path] ?? 0) > 0 && Self.modelHasMTP(at: path) {
                 lines.append("spec-type = draft-mtp")
             }
             sections.append(lines.joined(separator: "\n"))
@@ -582,11 +595,71 @@ struct ServerSettings {
             .contains(mmprojPairKey(model, projector))
     }
 
+    nonisolated static func mmprojOverride(forModel path: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: SettingsKeys.mmprojOverride) as? [String: String])?[path]
+    }
+
+    nonisolated static func setMmprojOverride(_ projector: String?, forModel path: String) {
+        var map = UserDefaults.standard.dictionary(forKey: SettingsKeys.mmprojOverride) as? [String: String] ?? [:]
+        if let projector { map[path] = projector } else { map.removeValue(forKey: path) }
+        UserDefaults.standard.set(map, forKey: SettingsKeys.mmprojOverride)
+    }
+
+    /// True only when both dims are readable and differ; unknown pairs pass.
+    nonisolated static func mmprojIncompatible(model: String, projector: String) -> Bool {
+        guard let embd = ggufUInt32("embedding_length", at: model),
+              let proj = ggufUInt32("projection_dim", at: projector) else { return false }
+        return proj != embd
+    }
+
+    /// Whether to offer the projector control for a model: it has a paired or
+    /// pinned projector, an explicit choice (incl. off), or is a catalog vision model.
+    nonisolated static func mightSupportVision(modelPath: String) -> Bool {
+        if mmprojOverride(forModel: modelPath) != nil { return true }
+        if mmprojPath(forModel: modelPath) != nil { return true }
+        let name = URL(fileURLWithPath: modelPath).lastPathComponent
+        return Catalog.models.contains { $0.fileName == name && $0.isVision }
+    }
+
+    /// The DFlash draft downloaded for a model, saved as `<model>.dflash.gguf`.
+    nonisolated static func dflashDraftPath(forModel modelPath: String) -> String? {
+        guard !modelPath.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: modelPath)
+        let stem = url.deletingPathExtension().lastPathComponent
+        let path = url.deletingLastPathComponent().appendingPathComponent("\(stem).dflash.gguf").path
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    nonisolated static func dflashEnabled(forModel modelPath: String) -> Bool {
+        let disabled = UserDefaults.standard.stringArray(forKey: SettingsKeys.dflashDisabled) ?? []
+        return !disabled.contains(modelPath)
+    }
+
+    nonisolated static func setDflashEnabled(_ on: Bool, forModel modelPath: String) {
+        var disabled = Set(UserDefaults.standard.stringArray(forKey: SettingsKeys.dflashDisabled) ?? [])
+        if on { disabled.remove(modelPath) } else { disabled.insert(modelPath) }
+        UserDefaults.standard.set(Array(disabled), forKey: SettingsKeys.dflashDisabled)
+    }
+
+    /// The active DFlash draft: present on disk and not switched off for this model.
+    nonisolated static func activeDflashDraft(forModel modelPath: String) -> String? {
+        guard dflashEnabled(forModel: modelPath) else { return nil }
+        return dflashDraftPath(forModel: modelPath)
+    }
+
     nonisolated static func mmprojPath(forModel modelPath: String) -> String? {
         guard !modelPath.isEmpty else { return nil }
         let url = URL(fileURLWithPath: modelPath)
         let name = url.deletingPathExtension().lastPathComponent
         if name.lowercased().contains("mmproj") { return nil }  // the model itself is not a projector
+
+        // A manual override wins: a path pins that projector, "" disables vision;
+        // a stale path (file moved) falls through to auto-pairing.
+        if let override = mmprojOverride(forModel: modelPath) {
+            if override.isEmpty { return nil }
+            if FileManager.default.fileExists(atPath: override) { return override }
+        }
+
         let dir = url.deletingLastPathComponent()
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return nil }
         var projectors = files.filter {
@@ -1022,6 +1095,9 @@ final class ServerController: ObservableObject {
         }
         if tail.contains("nextn") || tail.contains("draft-mtp") || tail.contains("mtp") {
             return "Este modelo no trae cabezal MTP: desactiva 'Aceleración MTP' o descarga la variante -MTP- / model has no MTP head: disable 'MTP acceleration' or download the -MTP- variant"
+        }
+        if tail.contains("invalid ggml type") || tail.contains("should be in [0,") {
+            return "Cuantización no soportada por el motor (formato de un fork, p. ej. Prism ML): usa un GGUF con quant estándar (Q4_K_M, Q8_0, Q2_0_g64…) / quantization not supported by the engine (a fork's format, e.g. Prism ML): use a GGUF with a standard quant (Q4_K_M, Q8_0, Q2_0_g64…)"
         }
         if tail.contains("invalid magic") || tail.contains("failed to load model")
             || tail.contains("error loading model") {

@@ -10,7 +10,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-LLAMA_COMMIT="${LLAMA_COMMIT:-4fc4ec5}"   # llama.cpp commit validated against the patches
+LLAMA_COMMIT="${LLAMA_COMMIT:-571d0d540}"   # llama.cpp commit validated against the patches
 SD_COMMIT="${SD_COMMIT:-3590aa8}"         # stable-diffusion.cpp commit validated for image gen
 ARCH="${ARCH:-$(uname -m)}"
 if [ "$ARCH" = "universal" ]; then

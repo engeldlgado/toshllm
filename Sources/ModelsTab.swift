@@ -202,9 +202,7 @@ private struct RepoCard: View {
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
 
-    private var isVisionRepo: Bool {
-        (search.files[repo.id] ?? []).contains { $0.path.lowercased().contains("mmproj") }
-    }
+    private var isVisionRepo: Bool { search.visionRepos.contains(repo.id) }
     private var verifiedVision: Bool {
         Catalog.models.contains { $0.isVision && $0.urlString.contains(repo.id) }
     }
@@ -258,8 +256,8 @@ private struct RepoCard: View {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                        Text(loc.t("Visión sin verificar. Se descargará el proyector (mmproj) que mejor coincida, pero no se garantiza la compatibilidad. Si la visión falla, comprueba que el mmproj corresponda a este modelo.",
-                                   "Unverified vision. The best-matching projector (mmproj) will be downloaded, but compatibility isn't guaranteed. If vision fails, check that the mmproj matches this model."))
+                        Text(loc.t("Visión sin verificar. Con el botón de visión se descarga el proyector (mmproj) que mejor coincida, pero no se garantiza la compatibilidad. Si la visión falla, comprueba que el mmproj corresponda a este modelo.",
+                                   "Unverified vision. The vision button downloads the best-matching projector (mmproj), but compatibility isn't guaranteed. If vision fails, check that the mmproj matches this model."))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(.caption)
@@ -299,6 +297,12 @@ private struct FileRow: View {
     @EnvironmentObject var search: SearchStore
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
+    @State private var visionBusy = false
+
+    private var repoHasVision: Bool { search.visionRepos.contains(repo) }
+    private var stem: String { URL(fileURLWithPath: file.path).deletingPathExtension().lastPathComponent }
+    private var projName: String { stem + ".mmproj.gguf" }
+    private var draftName: String { stem + ".dflash.gguf" }
 
     var body: some View {
         let est = Estimator.estimateCurrent(
@@ -311,29 +315,93 @@ private struct FileRow: View {
             }
             Spacer()
             Text(file.sizeGB).font(.caption2).foregroundStyle(.secondary)
-            let fileNames = file.paths.map { URL(fileURLWithPath: $0).lastPathComponent }
-            if fileNames.allSatisfy({ models.isDownloaded(fileName: $0) }) {
-                Label(loc.t("Descargado", "Downloaded"), systemImage: "checkmark.circle.fill")
-                    .labelStyle(.iconOnly).foregroundStyle(.green)
-            } else if let item = fileNames.compactMap({ models.downloadItem(fileName: $0) }).first {
-                InlineDownloadProgress(item: item)
-            } else if est.level == .no {
-                Text(loc.t("No cabe", "Won't fit")).font(.caption2).foregroundStyle(.red)
-            } else {
-                Button {
-                    for path in file.paths where !models.isDownloaded(
-                        fileName: URL(fileURLWithPath: path).lastPathComponent
-                    ) {
-                        models.download(
-                            urlString: search.downloadURL(repo: repo, file: path),
-                            fetchVisionProjector: path == file.path
-                        )
-                    }
-                } label: { Image(systemName: "arrow.down.circle") }
-                    .buttonStyle(.borderless)
-                    .help(loc.t("Descargar", "Download"))
+            HStack(spacing: 8) {
+                modelPill(est: est)
+                if repoHasVision { visionPill }
+                if let draft = search.draftRepos[repo] { dflashPill(draft) }
             }
         }
+    }
+
+    private func modelPill(est: MemoryEstimate) -> some View {
+        let names = file.paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+        return AssetDownloadButton(
+            icon: "arrow.down.circle", label: loc.t("Modelo", "Model"), tint: Color.appAccent,
+            help: loc.t("Descargar el modelo base", "Download the base model"),
+            downloaded: names.allSatisfy { models.isDownloaded(fileName: $0) },
+            item: names.compactMap { models.downloadItem(fileName: $0) }.first,
+            busy: false, disabledReason: est.level == .no ? loc.t("No cabe", "Won't fit") : nil) {
+            for path in file.paths where !models.isDownloaded(fileName: URL(fileURLWithPath: path).lastPathComponent) {
+                models.download(urlString: search.downloadURL(repo: repo, file: path), fetchVisionProjector: false)
+            }
+        }
+    }
+
+    // Vision (mmproj) is opt-in. The spinner covers the HF tree lookup before the
+    // transfer is queued (the projector lives as a sibling in the same repo).
+    private var visionPill: some View {
+        AssetDownloadButton(
+            icon: "eye.circle", label: loc.t("Visión", "Vision"), tint: .purple,
+            help: loc.t("Descargar el proyector de visión (mmproj)", "Download the vision projector (mmproj)"),
+            downloaded: models.isDownloaded(fileName: projName),
+            item: models.downloadItem(fileName: projName), busy: visionBusy, disabledReason: nil) {
+            visionBusy = true
+            Task {
+                await models.autoFetchProjector(for: URL(string: search.downloadURL(repo: repo, file: file.path))!)
+                visionBusy = false
+            }
+        }
+    }
+
+    private func dflashPill(_ draft: SearchStore.DraftInfo) -> some View {
+        AssetDownloadButton(
+            icon: "bolt.circle", label: "DFlash", tint: .orange,
+            help: loc.t("Descargar el draft DFlash para decodificación especulativa (experimental). Por ahora acelera la generación en modelos MoE con expertos en CPU (offload); en denso a GPU completa puede ser más lento.",
+                        "Download the DFlash draft for speculative decoding (experimental). For now it speeds up generation on MoE models with CPU-offloaded experts; on full-GPU dense models it can be slower."),
+            downloaded: models.isDownloaded(fileName: draftName),
+            item: models.downloadItem(fileName: draftName), busy: false, disabledReason: nil) {
+            models.downloadDflashDraft(repo: draft.repo, file: draft.file, modelStem: stem)
+        }
+    }
+}
+
+/// One download control in a consistent visual language across the base model,
+/// vision projector and DFlash draft: a tinted pill that becomes a live progress
+/// bar while transferring and a green check once present.
+private struct AssetDownloadButton: View {
+    let icon: String
+    let label: String
+    let tint: Color
+    let help: String
+    let downloaded: Bool
+    let item: DownloadItem?
+    let busy: Bool
+    let disabledReason: String?
+    let action: () -> Void
+
+    var body: some View {
+        Group {
+            if let item, !item.finished, item.error == nil {
+                InlineDownloadProgress(item: item)
+            } else if downloaded {
+                Label(label, systemImage: "checkmark.circle.fill")
+                    .labelStyle(.titleAndIcon).font(.caption.weight(.medium)).foregroundStyle(.green)
+            } else if busy {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.small)
+                    Text(label).font(.caption).foregroundStyle(.secondary)
+                }
+            } else if let reason = disabledReason {
+                Text(reason).font(.caption2).foregroundStyle(.red)
+            } else {
+                Button(action: action) {
+                    Label(label, systemImage: icon).font(.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered).controlSize(.small).tint(tint)
+            }
+        }
+        .fixedSize()
+        .help(help)
     }
 }
 
@@ -505,6 +573,12 @@ private struct LocalModelCard: View {
                 .buttonStyle(.borderless).foregroundStyle(.purple)
                 .help(loc.t("Este modelo admite imágenes pero falta su proyector (mmproj). Descárgalo para habilitar la visión.",
                             "This model supports images but its projector (mmproj) is missing. Download it to enable vision."))
+            }
+            if ServerSettings.mightSupportVision(modelPath: model.url.path) {
+                VisionProjectorControl(modelPath: model.url.path, switchLeading: true)
+            }
+            if ServerSettings.dflashDraftPath(forModel: model.url.path) != nil {
+                DflashControl(modelPath: model.url.path, switchLeading: true)
             }
             Spacer(minLength: 2)
             HStack(spacing: 8) {

@@ -126,10 +126,13 @@ final class BenchmarkSharing: ObservableObject {
     }
 
     /// Holds the exact bytes so the user inspects and submit uploads the same JSON.
+    /// pp/tg are the medians measured, so the run can be recorded in local history.
     struct Prepared {
         let payload: Data
         let installationId: String
         let keyFingerprint: String
+        let pp: Double
+        let tg: Double
         var json: String { String(data: payload, encoding: .utf8) ?? "" }
     }
 
@@ -150,8 +153,10 @@ final class BenchmarkSharing: ObservableObject {
         let payload = try await buildBenchmarkPayload(model: model, settings: settings,
                                                       workload: workload, run: run,
                                                       contributorAlias: contributorAlias)
+        let pp = run.pp.sorted()[run.pp.count / 2]
+        let tg = run.tg.sorted()[run.tg.count / 2]
         return Prepared(payload: payload, installationId: installationId,
-                        keyFingerprint: keyFingerprint)
+                        keyFingerprint: keyFingerprint, pp: pp, tg: tg)
     }
 
     /// A fresh challenge here avoids the expiry race during the long workload run.
@@ -346,8 +351,6 @@ final class BenchmarkSharing: ObservableObject {
 
         var runConfig = settings
         runConfig.modelPath = model.url.path
-        runConfig.ncmoe = Estimator.ncmoeForSelection(path: model.url.path,
-                                                      models: LocalModel.scan(in: ServerSettings.modelsDirectory))
         var args = runConfig.benchmarkArguments
         overrideArg(&args, "-p", String(workload.promptTokens))
         overrideArg(&args, "-n", String(workload.generatedTokens))

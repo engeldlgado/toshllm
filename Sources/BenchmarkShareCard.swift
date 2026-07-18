@@ -6,9 +6,13 @@ import SwiftUI
 // read happen only on an explicit tap, never on appear.
 
 struct BenchmarkShareCard: View {
+    let cfg: ServerSettings
+    let inheritanceLabel: String
+
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var server: ServerController
+    @EnvironmentObject var bench: BenchmarkController
     @ObservedObject private var sharing = BenchmarkSharing.shared
 
     enum Phase: Equatable {
@@ -20,7 +24,6 @@ struct BenchmarkShareCard: View {
         case failed(String)
     }
 
-    @State private var selectedModel = ""
     @State private var alias = ""
     @State private var phase: Phase = .idle
     @State private var prepared: BenchmarkSharing.Prepared?
@@ -36,41 +39,41 @@ struct BenchmarkShareCard: View {
     private var working: Bool { phase == .running || phase == .submitting }
 
     var body: some View {
-        Card(title: loc.t("Compartir con la comunidad", "Share with the community"),
-             icon: "square.and.arrow.up") {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(loc.t("Publica el rendimiento de tu equipo en toshllm.com. Nada se envía hasta que revisas un resumen claro y confirmas. El JSON técnico exacto también está disponible. No se mandan rutas, nombres de cuenta ni contenido de tus chats.",
-                           "Publish your machine's performance on toshllm.com. Nothing is sent until you review a clear summary and confirm. The exact technical JSON remains available. No local paths, account names, or chat content are sent."))
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 14) {
+            Text(loc.t("Publica el rendimiento de tu equipo en toshllm.com. Nada se envía hasta que revisas un resumen claro y confirmas. El JSON técnico exacto también está disponible. No se mandan rutas, nombres de cuenta ni contenido de tus chats.",
+                       "Publish your machine's performance on toshllm.com. Nothing is sent until you review a clear summary and confirm. The exact technical JSON remains available. No local paths, account names, or chat content are sent."))
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-                HStack(alignment: .bottom, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(loc.t("MODELO", "MODEL"))
-                            .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
-                        Picker("", selection: $selectedModel) {
-                            Text(loc.t("— elegir —", "— pick —")).tag("")
-                            ForEach(models.models) { m in
-                                Text(ModelName.forPath(m.url.path).display).tag(m.url.path)
-                            }
-                        }
-                        .labelsHidden().frame(maxWidth: 360, alignment: .leading).disabled(working)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(loc.t("ALIAS (OPCIONAL)", "ALIAS (OPTIONAL)"))
-                            .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
-                        TextField(loc.t("Anónimo", "Anonymous"), text: $alias)
-                            .textFieldStyle(.roundedBorder).frame(width: 150).disabled(working)
-                    }
-                    Spacer()
-                    shareButton
+            HStack(alignment: .bottom, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(loc.t("MODELO", "MODEL"))
+                        .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
+                    Text(cfg.modelPath.isEmpty
+                         ? loc.t("elige un modelo en Ejecutar benchmark", "pick a model in Run benchmark")
+                         : ModelName.forPath(cfg.modelPath).display)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(cfg.modelPath.isEmpty ? .secondary : .primary)
+                        .lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: 360, alignment: .leading)
                 }
-
-                statusLine
-                Divider().opacity(0.35)
-                identitySection
-                historySection
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(loc.t("ALIAS (OPCIONAL)", "ALIAS (OPTIONAL)"))
+                        .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
+                    TextField(loc.t("Anónimo", "Anonymous"), text: $alias)
+                        .textFieldStyle(.roundedBorder).frame(width: 150).disabled(working)
+                }
+                Spacer()
+                shareButton
             }
+
+            Label(inheritanceLabel, systemImage: "gearshape")
+                .font(.caption).foregroundStyle(.secondary)
+
+            statusLine
+            Divider().opacity(0.35)
+            identitySection
+            historySection
         }
         .sheet(isPresented: $showConsent) {
             BenchmarkShareConsentSheet(hasExistingIdentity: sharing.hasIdentity,
@@ -105,7 +108,7 @@ struct BenchmarkShareCard: View {
                       systemImage: prepared == nil ? "square.and.arrow.up" : "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(selectedModel.isEmpty || serverBusy)
+            .disabled(cfg.modelPath.isEmpty || serverBusy)
             .help(serverBusy
                   ? loc.t("Detén el servidor antes de medir: comparten la VRAM.",
                           "Stop the server before benchmarking: they share VRAM.")
@@ -233,18 +236,17 @@ struct BenchmarkShareCard: View {
     }
 
     private func startPrepare() {
-        guard let model = models.models.first(where: { $0.url.path == selectedModel }) else { return }
+        guard let model = models.models.first(where: { $0.url.path == cfg.modelPath }) else { return }
         guard alias.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count <= 80 else {
             phase = .failed(loc.t("El alias no puede superar 80 caracteres.",
                                   "The alias cannot exceed 80 characters."))
             return
         }
         phase = .running
-        let settings = ServerSettings.fromDefaults()
         let aliasValue = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             do {
-                let p = try await sharing.prepareShare(model: model, settings: settings,
+                let p = try await sharing.prepareShare(model: model, settings: cfg,
                                                        contributorAlias: aliasValue.isEmpty ? nil : aliasValue)
                 prepared = p
                 phase = .review
@@ -270,6 +272,7 @@ struct BenchmarkShareCard: View {
                     : loc.t("aprobado", "approved")
                 phase = .done(loc.t("Enviado · \(trust) · \(state)",
                                     "Sent · \(trust) · \(state)"))
+                bench.recordShared(cfg: cfg, pp: p.pp, tg: p.tg)
                 prepared = nil
             } catch {
                 phase = .failed(error.localizedDescription)

@@ -24,6 +24,7 @@ struct BenchResult: Codable, Identifiable {
     var depth: Int?
     var kind: String?      // "real" = server generation; nil = raw llama-bench
     var accept: Double?    // MTP acceptance 0-1, real runs only
+    var shared: Bool?      // published to the community from the share flow
 
     var shortModel: String { ModelName(model).title }
 
@@ -548,6 +549,18 @@ final class BenchmarkController: ObservableObject {
 
     func clearHistory() {
         history.removeAll()
+        save()
+    }
+
+    func recordShared(cfg: ServerSettings, pp: Double, tg: Double) {
+        let name = URL(fileURLWithPath: cfg.modelPath).lastPathComponent
+        let engine = cfg.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
+        history.insert(BenchResult(date: .now, model: name, ncmoe: cfg.ncmoe, pp: pp, tg: tg,
+                                   ctk: cfg.cacheTypeK, ctv: cfg.cacheTypeV, engine: engine,
+                                   fa: cfg.benchmarkFlashAttentionRoute,
+                                   gpu: cfg.gpuLabel, profile: cfg.makeProfile(name: name),
+                                   ppN: nil, tgN: nil, kind: nil, accept: nil, shared: true),
+                       at: 0)
         save()
     }
 

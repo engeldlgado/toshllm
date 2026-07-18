@@ -18,6 +18,14 @@ enum SettingsKeys {
     /// Persisted (model, projector) pairs that failed to load, so a bad mmproj
     /// isn't auto-attached again.
     static let incompatibleMmproj = "incompatibleMmproj"
+    /// Per-model manual projector override: a path pins that mmproj, "" disables
+    /// vision, absent falls back to auto-pairing.
+    static let mmprojOverride = "mmprojOverride"
+    /// Per-file source URL a model was downloaded from, for sibling downloads
+    /// (mmproj, dflash draft) and a future model-update check.
+    static let modelSource = "modelSource"
+    /// Model paths whose downloaded DFlash draft is turned off (default on).
+    static let dflashDisabled = "dflashDisabled"
     static let port = "port"
     static let ngl = "ngl"
     static let ncmoe = "ncmoe"

@@ -3,6 +3,22 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **Ternary Q2_0 models now load** (#41)... the engine picks up mainline's Q2_0 type, so Prism ML's `*-Q2_0_g64.gguf` (Ternary Bonsai) run on Metal instead of failing with "invalid ggml type 42".
+- **Manual vision projector selection** (#35)... choose a specific `mmproj` file, keep auto-pairing, or turn vision off, from each model card and the server card.
+- **DFlash speculative decoding (experimental, opt-in)**... a per-model draft downloaded from the model explorer drives block speculative decoding; up to +21% generation on MoE with predictable content on an RX 6700 XT, off by default because it needs spare VRAM and can be slower otherwise.
+
+### Changed
+- **The vision projector no longer downloads with the model**... a separate vision button fetches the `mmproj` on demand, so text-only users skip the extra file.
+- **On AMD the KV cache picker offers only the fast types** (f16/q8_0/q4_0)... the other quant types have no AMD Flash Attention kernel and ran about 3.7x slower, so they are hidden.
+- **Sharing a benchmark uses the benchmark's own config**... the share panel moved above the run history behind a toggle, publishes the settings shown in Run benchmark instead of the global ones, and records the shared run in local history.
+- **Downloaded models remember their source repo**... kept per file for on-demand sibling downloads (projector, DFlash draft) and a future update check.
+
+### Fixed
+- **An unsupported quantization gives a clear reason**... a model the engine can't read now says the quantization isn't supported instead of "model file damaged or incomplete".
+
 ## [0.82.3] - 2026-07-17
 
 ### Added

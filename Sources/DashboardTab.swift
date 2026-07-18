@@ -14,7 +14,6 @@ struct DashboardView: View {
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
     @AppStorage(SettingsKeys.apiKeyEnabled) private var apiKeyEnabled = false
-    @AppStorage(SettingsKeys.loadVision) private var loadVision = true
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
     @AppStorage(SettingsKeys.embeddings) private var embeddings = false
@@ -269,23 +268,25 @@ struct DashboardView: View {
             }
             .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour. Reinicia el servidor si está activo.",
                         "Makes the server listen on the local network and advertises it via Bonjour. Restarts the server if it's running."))
-            // Only for vision-capable models: let the user run text-only to save VRAM.
-            // The eye is colored when vision loads, dimmed when the model runs text-only.
-            if ServerSettings.mmprojPath(forModel: modelPath) != nil {
+            // Vision-capable models: the mmproj menu is the single control —
+            // pick a projector, auto-pair, or "No vision" to run text-only.
+            if ServerSettings.mightSupportVision(modelPath: modelPath) {
                 HStack(spacing: 8) {
                     Image(systemName: "photo").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Visión", "Vision")).font(.callout)
                     Spacer(minLength: 8)
-                    Button { loadVision.toggle() } label: {
-                        Image(systemName: loadVision ? "eye.fill" : "eye.slash")
-                            .imageScale(.large)
-                            .foregroundStyle(loadVision ? Color.accentColor : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(serverBusy)
+                    VisionProjectorControl(modelPath: modelPath)
                 }
-                .help(loc.t("Ojo encendido: carga el proyector para leer imágenes. Apagado: solo texto, libera la VRAM del codificador de imágenes.",
-                            "Eye on: loads the projector so the model can read images. Off: text-only, frees the image encoder's VRAM.") + restartNote)
+                .help(loc.t("Proyector de visión: elige un archivo, deja que se empareje solo, o 'Sin visión' para correr solo texto y liberar la VRAM del codificador.",
+                            "Vision projector: choose a file, let it auto-pair, or 'No vision' to run text-only and free the encoder's VRAM.") + restartNote)
+            }
+            if ServerSettings.dflashDraftPath(forModel: modelPath) != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "bolt").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Aceleración DFlash", "DFlash acceleration")).font(.callout)
+                    Spacer(minLength: 8)
+                    DflashControl(modelPath: modelPath)
+                }
             }
             DisclosureGroup {
                 HStack(spacing: 8) {
