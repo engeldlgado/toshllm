@@ -167,7 +167,9 @@ build_image_engine() {
 
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/0001-metal-amd-staging-transfers.patch"
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/0003-image-metal-ncb.patch"
-    echo "applied ggml-metal hunks of 0001 + 0003 to stable-diffusion.cpp"
+    # sd.cpp core (outside the ggml submodule): per-op CPU fallback for wave64.
+    git apply -p1 "$ROOT/patches/0004-image-cpu-fallback-sched.patch"
+    echo "applied ggml-metal hunks of 0001 + 0003 + core fallback 0004 to stable-diffusion.cpp"
 
     local isa=("${ISA_FLAGS[@]}")
     cmake -B build-static \
@@ -196,9 +198,11 @@ build_image_engine() {
     cd "$ROOT"
 }
 
-# 1. Official engine
+# 1. Official engine (skip with SKIP_LLAMA=1 when iterating on the image engine)
+if [ -z "$SKIP_LLAMA" ]; then
 build_engine vendor/llama.cpp "$LLAMA_COMMIT" "$LLAMA_COMMIT" \
     0001-metal-amd-staging-transfers.patch
+fi
 
 
 # 3. Image engine (stable-diffusion.cpp; skip with SKIP_IMAGE=1)

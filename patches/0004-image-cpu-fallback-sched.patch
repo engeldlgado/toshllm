@@ -1,0 +1,157 @@
+diff --git a/src/core/ggml_extend.hpp b/src/core/ggml_extend.hpp
+index ec9aee4..b63b8ff 100644
+--- a/src/core/ggml_extend.hpp
++++ b/src/core/ggml_extend.hpp
+@@ -1715,6 +1715,12 @@ protected:
+     ggml_context* compute_ctx    = nullptr;
+     ggml_gallocr* compute_allocr = nullptr;
+ 
++    // Per-op CPU fallback, built lazily only for graphs the runtime backend can't
++    // fully encode (wave64), so other configs keep the direct path.
++    ggml_backend_t fallback_cpu_backend  = nullptr;
++    ggml_backend_sched_t fallback_sched  = nullptr;
++    size_t fallback_sched_size           = 0;
++
+     size_t max_graph_vram_bytes           = 0;
+     bool stream_layers_enabled            = false;
+     size_t observed_max_effective_budget_ = 0;
+@@ -1986,6 +1992,48 @@ protected:
+         return true;
+     }
+ 
++    bool graph_needs_cpu_fallback(ggml_cgraph* gf) {
++        if (runtime_backend == nullptr || sd_backend_is_cpu(runtime_backend)) {
++            return false;
++        }
++        // Escape hatch for a wave64 card that miscomputes an op supports_op accepts.
++        static const bool forced = getenv("SD_TOSH_CPU_FALLBACK") != nullptr;
++        if (forced) {
++            return true;
++        }
++        const int n_nodes = ggml_graph_n_nodes(gf);
++        for (int i = 0; i < n_nodes; ++i) {
++            ggml_tensor* node = ggml_graph_node(gf, i);
++            if (node == nullptr || node->op == GGML_OP_NONE || ggml_is_empty(node)) {
++                continue;
++            }
++            if (!ggml_backend_supports_op(runtime_backend, node)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    bool ensure_fallback_sched(size_t graph_size) {
++        if (fallback_sched != nullptr && fallback_sched_size >= graph_size) {
++            return true;
++        }
++        if (fallback_sched != nullptr) {
++            ggml_backend_sched_free(fallback_sched);
++            fallback_sched = nullptr;
++        }
++        if (fallback_cpu_backend == nullptr) {
++            fallback_cpu_backend = sd_backend_cpu_init();
++        }
++        if (fallback_cpu_backend == nullptr) {
++            return false;
++        }
++        ggml_backend_t backends[2] = {runtime_backend, fallback_cpu_backend};
++        fallback_sched      = ggml_backend_sched_new(backends, nullptr, 2, graph_size, false, true);
++        fallback_sched_size = graph_size;
++        return fallback_sched != nullptr;
++    }
++
+     bool alloc_compute_buffer(ggml_cgraph* gf) {
+         if (compute_allocr != nullptr) {
+             return true;
+@@ -2440,10 +2488,9 @@ protected:
+         };
+         GraphWeightDoneGuard graph_weight_done_guard(this, &params_to_prepare);
+ 
+-        if (!alloc_compute_buffer(gf)) {
+-            LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
+-            return std::nullopt;
+-        }
++        // Unsupported ops fall to CPU via the scheduler instead of aborting.
++        const bool use_cpu_fallback = graph_needs_cpu_fallback(gf);
++
+         struct ComputeBufferGuard {
+             ComputeBufferGuard(GGMLRunner* runner, bool enabled)
+                 : runner(runner),
+@@ -2463,20 +2510,48 @@ protected:
+         };
+         ComputeBufferGuard compute_buffer_guard(this, free_compute_buffer);
+ 
+-        if (!ggml_gallocr_alloc_graph(compute_allocr, gf)) {
+-            LOG_ERROR("%s alloc compute graph failed", get_desc().c_str());
+-            return std::nullopt;
+-        }
+-
+-        copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
+-        if (sd_backend_is_cpu(runtime_backend)) {
+-            sd_backend_cpu_set_n_threads(runtime_backend, n_threads);
++        ggml_status status;
++        if (use_cpu_fallback) {
++            const size_t sched_size = 2 * static_cast<size_t>(ggml_graph_n_nodes(gf)) + 4096;
++            if (!ensure_fallback_sched(sched_size)) {
++                LOG_ERROR("%s alloc cpu-fallback scheduler failed", get_desc().c_str());
++                return std::nullopt;
++            }
++            ggml_backend_sched_reset(fallback_sched);
++            // sd.cpp flags no inputs, but the scheduler needs GGML_TENSOR_FLAG_INPUT
++            // to place them: weights carry a buffer, so a bufferless leaf is an input.
++            const int n_leafs = sd::ggml_graph_cut::leaf_count(gf);
++            for (int i = 0; i < n_leafs; ++i) {
++                ggml_tensor* leaf = sd::ggml_graph_cut::leaf_tensor(gf, i);
++                if (leaf != nullptr && leaf->buffer == nullptr && leaf->view_src == nullptr) {
++                    ggml_set_input(leaf);
++                }
++            }
++            if (!ggml_backend_sched_alloc_graph(fallback_sched, gf)) {
++                LOG_ERROR("%s alloc compute graph (cpu fallback) failed", get_desc().c_str());
++                return std::nullopt;
++            }
++            copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
++            sd_backend_cpu_set_n_threads(fallback_cpu_backend, n_threads);
++            status = ggml_backend_sched_graph_compute(fallback_sched, gf);
++        } else {
++            if (!alloc_compute_buffer(gf)) {
++                LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
++                return std::nullopt;
++            }
++            if (!ggml_gallocr_alloc_graph(compute_allocr, gf)) {
++                LOG_ERROR("%s alloc compute graph failed", get_desc().c_str());
++                return std::nullopt;
++            }
++            copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
++            if (sd_backend_is_cpu(runtime_backend)) {
++                sd_backend_cpu_set_n_threads(runtime_backend, n_threads);
++            }
++            status = sd_backend_graph_compute_with_eval_callback(runtime_backend,
++                                                                 gf,
++                                                                 sd_get_backend_eval_callback(),
++                                                                 sd_get_backend_eval_callback_data());
+         }
+-
+-        ggml_status status = sd_backend_graph_compute_with_eval_callback(runtime_backend,
+-                                                                         gf,
+-                                                                         sd_get_backend_eval_callback(),
+-                                                                         sd_get_backend_eval_callback_data());
+         if (status != GGML_STATUS_SUCCESS) {
+             LOG_ERROR("%s compute failed: %s", get_desc().c_str(), ggml_status_to_string(status));
+             return std::nullopt;
+@@ -2650,6 +2725,14 @@ public:
+ 
+     virtual ~GGMLRunner() {
+         free_compute_buffer();
++        if (fallback_sched != nullptr) {
++            ggml_backend_sched_free(fallback_sched);
++            fallback_sched = nullptr;
++        }
++        if (fallback_cpu_backend != nullptr) {
++            ggml_backend_free(fallback_cpu_backend);
++            fallback_cpu_backend = nullptr;
++        }
+         free_params_ctx();
+         free_compute_ctx();
+         free_cache_ctx_and_buffer();
