@@ -72,13 +72,9 @@ struct BenchmarkShareCard: View {
                 historySection
             }
         }
-        .confirmationDialog(loc.t("¿Compartir este benchmark con la comunidad?",
-                                  "Share this benchmark with the community?"),
-                            isPresented: $showConsent, titleVisibility: .visible) {
-            Button(loc.t("Ejecutar y revisar", "Run and review")) { startPrepare() }
-            Button(loc.t("Cancelar", "Cancel"), role: .cancel) {}
-        } message: {
-            Text(consentMessage)
+        .sheet(isPresented: $showConsent) {
+            BenchmarkShareConsentSheet(hasExistingIdentity: sharing.hasIdentity,
+                                       onContinue: startPrepare)
         }
         .sheet(isPresented: $showReview) {
             if let prepared {
@@ -93,11 +89,6 @@ struct BenchmarkShareCard: View {
             Text(loc.t("Se borra la clave de firma de este equipo. Los envíos futuros usarán una identidad nueva, no enlazable a los anteriores. Los benchmarks ya publicados conservan su identidad.",
                        "Deletes this machine's signing key. Future submissions use a new identity, not linkable to previous ones. Already published benchmarks keep their identity."))
         }
-    }
-
-    private var consentMessage: String {
-        loc.t("ToshLLM enviará: identidad del modelo, descripción del hardware, configuración, las mediciones y las versiones de app/motor. La primera vez que compartes se crea una clave privada en tu Llavero; cada envío queda enlazado a la misma identidad pública para poder agruparlos. Puedes restablecerla cuando quieras.",
-              "ToshLLM will send: model identity, hardware description, configuration, the measurements, and app/engine versions. The first time you share, a private key is created in your Keychain; every submission is linked to the same public identity so they can be grouped. You can reset it anytime.")
     }
 
     @ViewBuilder private var shareButton: some View {
