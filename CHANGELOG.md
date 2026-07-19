@@ -6,19 +6,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
-- **Ternary Q2_0 models now load** (#41)... the engine picks up mainline's Q2_0 type, so Prism ML's `*-Q2_0_g64.gguf` (Ternary Bonsai) run on Metal instead of failing with "invalid ggml type 42".
-- **Manual vision projector selection** (#35)... choose a specific `mmproj` file, keep auto-pairing, or turn vision off, from each model card and the server card.
-- **DFlash speculative decoding (experimental)**... the model explorer finds and downloads a compatible per-model draft for block speculative decoding; each installed pair has Off, Auto and Forced modes. Auto only engages for a MoE model with CPU-offloaded experts (`ncmoe > 0`), where it measured up to +21% generation on an RX 6700 XT, and stays off for full-GPU or dense models where DFlash can be slower.
-- **DFlash sizes itself to the selected GPU**... before launch, Auto budgets the target and draft weights, both KV caches, compute buffers, context length and the configured VRAM reserve, then chooses an explicit draft-layer offload or leaves DFlash off when it will not fit safely. After startup it monitors the GPU(s) actually selected by the app; sustained use above 95% opens a warning with Continue, Auto-and-restart and Disable-and-restart actions.
+- **Ternary Q2_0 models now load** (#41)... mainline's Q2_0 type runs Prism ML's Ternary Bonsai GGUFs on Metal instead of failing with "invalid ggml type 42".
+- **Manual vision projector selection** (#35)... pick a specific `mmproj`, keep auto-pairing, or turn vision off, from each model card.
+- **DFlash speculative decoding (experimental)**... a downloaded per-model draft with Off/Auto/Forced modes; Auto only engages on MoE with CPU-offloaded experts, up to +21% generation on an RX 6700 XT.
+- **DFlash sizes itself to the GPU**... Auto budgets the weights, both KV caches and the VRAM reserve before launch, then offloads draft layers or stays off, and warns if VRAM stays above 95%.
 
 ### Changed
-- **The vision projector no longer downloads with the model**... a separate vision button fetches the `mmproj` on demand, so text-only users skip the extra file.
-- **On AMD the KV cache picker offers only the fast types** (f16/q8_0/q4_0)... the other quant types have no AMD Flash Attention kernel and ran about 3.7x slower, so they are hidden.
-- **Sharing a benchmark uses the benchmark's own config**... the share panel moved above the run history behind a toggle, publishes the settings shown in Run benchmark instead of the global ones, and records the shared run in local history.
-- **Downloaded models remember their source repo**... kept per file for on-demand sibling downloads (projector, DFlash draft) and a future update check.
+- **The vision projector no longer downloads with the model**... a separate button fetches the `mmproj` on demand, so text-only users skip the file.
+- **On AMD the KV cache picker offers only the fast types** (f16/q8_0/q4_0)... the rest have no AMD Flash Attention kernel and ran ~3.7x slower.
+- **The DFlash control shows when it is actually running**... the bolt lights up with the live draft-acceptance rate only when the engine truly engaged the draft, not just when Auto is picked.
+- **Sharing a benchmark uses the benchmark's own config**... the share panel publishes the settings shown in Run benchmark, not the global ones.
+- **Downloaded models remember their source repo**... for on-demand sibling downloads (projector, DFlash draft).
 
 ### Fixed
-- **An unsupported quantization gives a clear reason**... a model the engine can't read now says the quantization isn't supported instead of "model file damaged or incomplete".
+- **An unsupported quantization gives a clear reason**... a model the engine can't read now says the quant isn't supported instead of "model file damaged or incomplete".
+- **Persisted KV caches survive a KV-type change**... slot files are kept per KV type, so switching f16↔q8_0 cold-prefills cleanly instead of logging a failed restore.
 
 ## [0.82.3] - 2026-07-17
 

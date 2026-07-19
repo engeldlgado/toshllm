@@ -105,9 +105,17 @@ struct ServerSettings {
     /// files in a shared folder.
     static func slotCacheDir(port: Int) -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ToshLLM/slots/\(port)")
+            .appendingPathComponent("ToshLLM/slots/\(port)/\(slotKVSignature())")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// A slot only restores into an identical KV layout; separate folders per type
+    /// turn a quant change into a cold prefill instead of a failed restore.
+    private static func slotKVSignature() -> String {
+        let d = UserDefaults.standard
+        return "\(sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeK), default: "f16"))"
+             + "-\(sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeV), default: "f16"))"
     }
 
     /// Slot directory of the primary server (the one the native chat talks to).
@@ -947,6 +955,9 @@ final class ServerController: ObservableObject {
     @Published var genHistory: [Double] = []
     @Published var requestCount = 0
     @Published var dflashWarning: DflashRuntimeWarning?
+    /// Model whose running engine actually has DFlash engaged, nil otherwise.
+    @Published private(set) var activeDflashModelPath: String?
+    @Published var dflashAcceptance: Double?
 
     private var process: Process?
     private var healthTask: Task<Void, Never>?
@@ -1125,6 +1136,8 @@ final class ServerController: ObservableObject {
         p.arguments = args
         p.environment = settings.environment
         launchedSettings = settings
+        activeDflashModelPath = args.contains("draft-dflash") ? settings.modelPath : nil
+        dflashAcceptance = nil
 
         let pipe = Pipe()
         p.standardOutput = pipe
@@ -1223,6 +1236,8 @@ final class ServerController: ObservableObject {
     func stop() {
         healthTask?.cancel()
         dflashMemoryTask?.cancel()
+        activeDflashModelPath = nil
+        dflashAcceptance = nil
         stopDiscovery()
         if let p = process {
             let pid = p.processIdentifier
@@ -1418,6 +1433,10 @@ final class ServerController: ObservableObject {
         fileLog.append(text)
 
         for line in text.split(separator: "\n") {
+            if line.contains("draft acceptance ="),
+               let m = line.range(of: #"draft acceptance = ([0-9]+\.[0-9]+)"#, options: .regularExpression) {
+                dflashAcceptance = Double(line[m].split(separator: "=")[1].trimmingCharacters(in: .whitespaces))
+            }
             guard line.contains("tokens per second"), line.contains("eval time") else { continue }
             guard let match = line.range(of: #"([0-9]+\.[0-9]+) tokens per second"#, options: .regularExpression) else { continue }
             let value = Double(line[match].split(separator: " ")[0]) ?? 0

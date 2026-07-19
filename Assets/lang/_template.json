@@ -160,6 +160,7 @@
   "Download vision file": "",
   "Downloads": "",
   "Downloads the DMG, verifies its checksum, installs the new version into Applications and relaunches the app.": "",
+  "Draft acceptance on the last response": "",
   "Drag onto a project to move it.": "",
   "EXISTING IDENTITY": "",
   "Each prompt (with its seed) is rendered by the next free instance, one run per GPU. Results accumulate below, each with a unique name.": "",

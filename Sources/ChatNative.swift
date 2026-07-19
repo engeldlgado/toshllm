@@ -798,6 +798,9 @@ final class ChatStore: ObservableObject {
     /// its persisted KV so only the new tokens get prefilled.
     func prepareSlot(convID: UUID, port: Int) async {
         guard slotPersistEnabled, slotConvID != convID else { return }
+        // No file yet (new conversation or KV layout change): skip the failing restore.
+        let file = ServerSettings.primarySlotCacheDir.appendingPathComponent(Self.slotFile(convID))
+        guard FileManager.default.fileExists(atPath: file.path) else { slotConvID = convID; return }
         await slotAction("restore", convID: convID, port: port)
         slotConvID = convID
     }
