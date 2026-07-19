@@ -1,14 +1,46 @@
 name: Feature request
-description: Suggest an idea or improvement
+description: Propose a focused improvement to ToshLLM
 labels: ["type: feature", "status: needs triage"]
 body:
-  - type: textarea
-    id: idea
+  - type: markdown
     attributes:
-      label: What would you like ToshLLM to do?
+      value: |
+        Explain the problem first, then the behavior you would like. Focused proposals are easier to evaluate and implement.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the current limitation or workflow, not only the requested feature.
+      placeholder: Explain who encounters the problem and when.
     validations:
       required: true
+
   - type: textarea
-    id: why
+    id: proposal
     attributes:
-      label: Why is it useful?
+      label: Proposed behavior
+      description: Describe what you would like ToshLLM to do.
+      placeholder: A concise example or mockup is welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Mention workarounds or other approaches you tried, if any.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add relevant hardware, models, screenshots, benchmarks, or links. Remove private data before posting.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and did not find the same request.
+          required: true

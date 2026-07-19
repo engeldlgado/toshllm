@@ -1,7 +1,22 @@
 name: Bug report
-description: Something doesn't work as expected
+description: Report a reproducible problem in ToshLLM
 labels: ["type: bug", "status: needs triage"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve ToshLLM. Please include enough detail to reproduce the problem.
+        You can export diagnostics from **Settings → Server log**. Remove usernames, local paths, API keys, prompts, or other private data before posting.
+
+  - type: input
+    id: version
+    attributes:
+      label: ToshLLM version
+      description: Find it in ToshLLM → About.
+      placeholder: "e.g. 0.82.4"
+    validations:
+      required: true
+
   - type: input
     id: macos
     attributes:
@@ -9,28 +24,82 @@ body:
       placeholder: "e.g. 14.5 / 26.5"
     validations:
       required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: Mac model, CPU, and RAM
+      description: For a Hackintosh, include the SMBIOS model and CPU.
+      placeholder: "e.g. MacPro7,1 / Intel Xeon W / 64 GB RAM"
+    validations:
+      required: true
+
   - type: input
     id: gpu
     attributes:
       label: GPU and VRAM
+      description: List every GPU involved if multi-GPU is enabled.
       placeholder: "e.g. RX 6700 XT 12 GB"
     validations:
       required: true
+
   - type: input
     id: model
     attributes:
       label: Model and quantization
+      description: Leave blank if the problem is not model-related.
       placeholder: "e.g. Qwen3.6-35B-A3B UD-Q4_K_S"
+
   - type: textarea
-    id: what
+    id: happened
     attributes:
       label: What happened?
-      description: What did you expect, and what happened instead?
+      description: Describe the failure and any error shown by the app.
+      placeholder: Tell us what you observed.
     validations:
       required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      placeholder: Tell us what the correct behavior should be.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest reliable sequence that triggers the problem.
+      placeholder: |
+        1. Select...
+        2. Set...
+        3. Start...
+        4. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Relevant settings
+      description: Include context size, engine, GPU selection, ncmoe, DFlash mode, KV types, Flash Attention, and Extra arguments when relevant. A screenshot is welcome.
+      placeholder: "e.g. 16K context, bundled engine, ncmoe 28, DFlash Auto, K q4_0 / V f16"
+
   - type: textarea
     id: log
     attributes:
-      label: Server log
-      description: Settings → Server log (paste the relevant part)
+      label: Diagnostics or server log
+      description: Paste the relevant section from Settings → Server log. Remove private data first. If no log was produced, explain why.
       render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and did not find the same problem.
+          required: true
+        - label: I removed usernames, local paths, API keys, prompts, and other private data from logs and screenshots.
+          required: true
