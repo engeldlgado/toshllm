@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.82.4] - 2026-07-18
 
 ### Added
 - **Ternary Q2_0 models now load** (#41)... mainline's Q2_0 type runs Prism ML's Ternary Bonsai GGUFs on Metal instead of failing with "invalid ggml type 42".
