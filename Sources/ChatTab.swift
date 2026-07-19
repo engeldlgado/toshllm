@@ -87,6 +87,13 @@ struct ChatMainView: View {
                 showOnboarding = false
             }
         }
+        .sheet(item: $server.dflashWarning) { warning in
+            DflashMemoryWarningSheet(
+                warning: warning,
+                useAutomatic: server.useAutomaticDflashAndRestart,
+                disable: server.disableDflashAndRestart,
+                continueAnyway: server.acknowledgeDflashWarning)
+        }
     }
 
     @ViewBuilder private var chatDetail: some View {

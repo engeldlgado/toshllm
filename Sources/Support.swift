@@ -24,8 +24,10 @@ enum SettingsKeys {
     /// Per-file source URL a model was downloaded from, for sibling downloads
     /// (mmproj, dflash draft) and a future model-update check.
     static let modelSource = "modelSource"
-    /// Model paths whose downloaded DFlash draft is turned off (default on).
+    /// Legacy model paths whose downloaded DFlash draft was turned off.
     static let dflashDisabled = "dflashDisabled"
+    static let dflashModes = "dflashModes"
+    static let dflashWarningAcknowledged = "dflashWarningAcknowledged"
     static let port = "port"
     static let ngl = "ngl"
     static let ncmoe = "ncmoe"

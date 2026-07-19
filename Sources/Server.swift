@@ -167,12 +167,13 @@ struct ServerSettings {
         }
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
-        // DFlash draft (user-downloaded sibling) takes precedence over MTP; both
-        // drive --spec-type. Not gated on ncmoe: the user opted in by downloading it.
-        if let draft = Self.activeDflashDraft(forModel: modelPath) {
+        // A compatible downloaded DFlash draft takes precedence over MTP when its
+        // per-model policy permits it. Auto is restricted to CPU expert offload.
+        if let selection = dflashSelection(modelPath: modelPath, ncmoe: ncmoe) {
             // Quantize the draft's KV cache: it doubles KV pressure at high ctx, and
             // q8_0 halves that footprint at no measurable quality cost for a draft.
-            args += ["-md", draft, "--spec-type", "draft-dflash", "-ngld", "99",
+            args += ["-md", selection.draft, "--spec-type", "draft-dflash",
+                     "-ngld", String(selection.ngld),
                      "-ctkd", "q8_0", "-ctvd", "q8_0"]
         } else if ncmoe > 0 && Self.modelHasMTP(at: modelPath) {
             args += ["--spec-type", "draft-mtp"]
@@ -254,10 +255,10 @@ struct ServerSettings {
                 lines.append("slot-save-path = \(Self.slotCacheDir(port: port).appendingPathComponent(alias).path)")
             }
             if reasoningInline { lines.append("reasoning-format = none") }
-            if let draft = Self.activeDflashDraft(forModel: path) {
-                lines.append("model-draft = \(draft)")
+            if let selection = dflashSelection(modelPath: path, ncmoe: ncmoeByPath[path] ?? 0) {
+                lines.append("model-draft = \(selection.draft)")
                 lines.append("spec-type = draft-dflash")
-                lines.append("gpu-layers-draft = 99")
+                lines.append("gpu-layers-draft = \(selection.ngld)")
                 lines.append("cache-type-k-draft = q8_0")
                 lines.append("cache-type-v-draft = q8_0")
             } else if (ncmoeByPath[path] ?? 0) > 0 && Self.modelHasMTP(at: path) {
@@ -499,6 +500,96 @@ struct ServerSettings {
         faAmd
     }
 
+    /// Resolves DFlash against the same physical GPU selection and memory reserve
+    /// that will be passed to the engine. A nil plan means metadata or hardware is
+    /// unavailable; a plan with nil layers means DFlash cannot fit safely.
+    var selectedGPUIndices: Set<Int> {
+        let gpus = ServerController.availableGPUs()
+        if gpuList.count >= 2 { return Set(gpuList) }
+        if multiGPU {
+            let eligible = gpus.filter { !$0.isIntegrated }
+            let pool = eligible.isEmpty ? gpus : eligible
+            let count = multiGPUCount > 0 ? min(multiGPUCount, pool.count) : pool.count
+            return Set(pool.prefix(count).map(\.index))
+        }
+        if gpuIndex >= 0 { return [gpuIndex] }
+        if let gpu = gpus.filter({ !$0.isIntegrated }).max(by: { $0.vramMB < $1.vramMB })
+            ?? gpus.max(by: { $0.vramMB < $1.vramMB }) {
+            return [gpu.index]
+        }
+        return []
+    }
+
+    func dflashMemoryPlan(modelPath: String, draftPath: String, ncmoe: Int,
+                          honorReserve: Bool = true) -> DflashMemoryPlan? {
+        let gpus = ServerController.availableGPUs()
+        let indices = selectedGPUIndices
+        let selected = gpus.filter { indices.contains($0.index) }
+        guard !selected.isEmpty else { return nil }
+
+        guard let baseBytes = (try? FileManager.default.attributesOfItem(atPath: modelPath)[.size] as? NSNumber)?.doubleValue,
+              let draftBytes = (try? FileManager.default.attributesOfItem(atPath: draftPath)[.size] as? NSNumber)?.doubleValue else {
+            return nil
+        }
+        let baseLayers = Int(Self.ggufUInt32("block_count", at: modelPath) ?? 0)
+        let repeatingDraftLayers = Int(Self.ggufUInt32("block_count", at: draftPath) ?? 0)
+        guard baseLayers > 0, repeatingDraftLayers > 0 else { return nil }
+
+        let headsKV = Double(Self.ggufUInt32("attention.head_count_kv", at: draftPath) ?? 0)
+        let keyLength = Double(Self.ggufUInt32("attention.key_length", at: draftPath) ?? 0)
+        let valueLength = Double(Self.ggufUInt32("attention.value_length", at: draftPath) ?? 0)
+        guard headsKV > 0, keyLength > 0, valueLength > 0 else { return nil }
+        // q8_0 stores 32 values plus a 16-bit scale in each 34-byte block.
+        let q8BytesPerElement = 34.0 / 32.0
+        let draftKVBytesPerToken = Double(repeatingDraftLayers) * headsKV
+            * (keyLength + valueLength) * q8BytesPerElement
+        let mainKVScale = (Estimator.kvTypeScale(cacheTypeK) + Estimator.kvTypeScale(cacheTypeV)) / 2
+        let vramGB = Double(selected.reduce(0) { $0 + $1.vramMB }) / 1024
+        let reserveGB = honorReserve ? Double(vramReserveMB * max(1, selected.count)) / 1024 : 0
+        return DflashMemoryPlanner.plan(
+            vramGB: vramGB, reserveGB: reserveGB,
+            baseFileGB: baseBytes / 1_073_741_824, baseLayers: baseLayers, ncmoe: ncmoe,
+            ctx: ctx, mainKVScale: mainKVScale,
+            draftFileGB: draftBytes / 1_073_741_824, draftLayers: repeatingDraftLayers + 1,
+            draftKVBytesPerToken: draftKVBytesPerToken)
+    }
+
+    private func dflashSelection(modelPath: String, ncmoe: Int) -> (draft: String, ngld: Int)? {
+        guard let draft = Self.dflashDraftPath(forModel: modelPath) else { return nil }
+        switch Self.dflashMode(forModel: modelPath) {
+        case .off:
+            return nil
+        case .auto:
+            guard DflashPolicy.autoEligible(isMoE: Self.modelIsMoE(at: modelPath), ncmoe: ncmoe),
+                  let layers = dflashMemoryPlan(modelPath: modelPath, draftPath: draft,
+                                                ncmoe: ncmoe)?.gpuLayers else { return nil }
+            return (draft, layers)
+        case .forced:
+            let layers = dflashMemoryPlan(modelPath: modelPath, draftPath: draft,
+                                          ncmoe: ncmoe, honorReserve: false)?.gpuLayers ?? 0
+            return (draft, layers)
+        }
+    }
+
+    var dflashPlanSummary: String {
+        guard let draft = Self.dflashDraftPath(forModel: modelPath) else { return "not installed" }
+        let mode = Self.dflashMode(forModel: modelPath)
+        guard mode != .off else { return "off by user" }
+        if mode == .auto && (ncmoe == 0 || !Self.modelIsMoE(at: modelPath)) {
+            return "off in auto mode (requires MoE with ncmoe > 0)"
+        }
+        guard let plan = dflashMemoryPlan(modelPath: modelPath, draftPath: draft, ncmoe: ncmoe,
+                                          honorReserve: mode == .auto) else {
+            return "off (metadata or GPU capacity unavailable)"
+        }
+        let need = (plan.estimatedVRAMGB * 100).rounded() / 100
+        let budget = (plan.budgetGB * 100).rounded() / 100
+        guard let layers = plan.gpuLayers else {
+            return "off by memory planner (need \(need) GiB, budget \(budget) GiB)"
+        }
+        return "\(mode.rawValue), ngld=\(layers) (estimated \(need) / \(budget) GiB budget)"
+    }
+
     var benchmarkFlashAttentionRoute: String {
         if effectiveFaAmd { return "amd-gpu" }
         if flashAttn == "on" || kvNeedsFlashAttention { return "standard-cpu" }
@@ -630,15 +721,28 @@ struct ServerSettings {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
+    nonisolated static func dflashMode(forModel modelPath: String) -> DflashMode {
+        let defaults = UserDefaults.standard
+        if let raw = (defaults.dictionary(forKey: SettingsKeys.dflashModes) as? [String: String])?[modelPath],
+           let mode = DflashMode(rawValue: raw) {
+            return mode
+        }
+        let disabled = defaults.stringArray(forKey: SettingsKeys.dflashDisabled) ?? []
+        return disabled.contains(modelPath) ? .off : .auto
+    }
+
+    nonisolated static func setDflashMode(_ mode: DflashMode, forModel modelPath: String) {
+        var modes = UserDefaults.standard.dictionary(forKey: SettingsKeys.dflashModes) as? [String: String] ?? [:]
+        modes[modelPath] = mode.rawValue
+        UserDefaults.standard.set(modes, forKey: SettingsKeys.dflashModes)
+    }
+
     nonisolated static func dflashEnabled(forModel modelPath: String) -> Bool {
-        let disabled = UserDefaults.standard.stringArray(forKey: SettingsKeys.dflashDisabled) ?? []
-        return !disabled.contains(modelPath)
+        dflashMode(forModel: modelPath) != .off
     }
 
     nonisolated static func setDflashEnabled(_ on: Bool, forModel modelPath: String) {
-        var disabled = Set(UserDefaults.standard.stringArray(forKey: SettingsKeys.dflashDisabled) ?? [])
-        if on { disabled.remove(modelPath) } else { disabled.insert(modelPath) }
-        UserDefaults.standard.set(Array(disabled), forKey: SettingsKeys.dflashDisabled)
+        setDflashMode(on ? .auto : .off, forModel: modelPath)
     }
 
     /// The active DFlash draft: present on disk and not switched off for this model.
@@ -842,9 +946,12 @@ final class ServerController: ObservableObject {
     @Published var genSpeed: Double?
     @Published var genHistory: [Double] = []
     @Published var requestCount = 0
+    @Published var dflashWarning: DflashRuntimeWarning?
 
     private var process: Process?
     private var healthTask: Task<Void, Never>?
+    private var dflashMemoryTask: Task<Void, Never>?
+    private var launchedSettings: ServerSettings?
     private var lastStoppedPID: Int32?
     /// After a projector load failure, makes the next launch drop `--mmproj`
     /// (text-only). Reset on every fresh `start()`.
@@ -985,6 +1092,7 @@ final class ServerController: ObservableObject {
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
          settings: ngl=\(settings.ngl) ncmoe=\(settings.ncmoe) ctx=\(settings.ctx) fa=\(settings.flashAttn) ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV) cacheRAM=\(settings.cacheRAM) concurrencyDisable=\(settings.concurrencyDisable)
+         dflash : \(settings.routerMode ? "per-model router plan" : settings.dflashPlanSummary)
          env: \(envLine)
          args: \(redact(settings.arguments).joined(separator: " "))
         ========================================================
@@ -1016,6 +1124,7 @@ final class ServerController: ObservableObject {
         }
         p.arguments = args
         p.environment = settings.environment
+        launchedSettings = settings
 
         let pipe = Pipe()
         p.standardOutput = pipe
@@ -1113,6 +1222,7 @@ final class ServerController: ObservableObject {
 
     func stop() {
         healthTask?.cancel()
+        dflashMemoryTask?.cancel()
         stopDiscovery()
         if let p = process {
             let pid = p.processIdentifier
@@ -1194,6 +1304,7 @@ final class ServerController: ObservableObject {
                     await MainActor.run {
                         self?.state = .running
                         self?.startDiscoveryIfNeeded(port: port)
+                        self?.startDflashMemoryCheck()
                     }
                     // Pre-warm slot 0 with the last session's prefix so an external
                     // client's first request skips the multi-minute cold prefill.
@@ -1208,6 +1319,78 @@ final class ServerController: ObservableObject {
                 self?.process?.terminate()
             }
         }
+    }
+
+    private func startDflashMemoryCheck() {
+        dflashMemoryTask?.cancel()
+        guard let settings = launchedSettings,
+              settings.arguments.contains("draft-dflash") else { return }
+        let monitoredGPUIndices = settings.selectedGPUIndices
+        dflashMemoryTask = Task { [weak self] in
+            var peak: GPUStat?
+            var fractions: [Double] = []
+            for _ in 0..<8 {
+                if Task.isCancelled { return }
+                let allStats = await Task.detached(priority: .utility) { VRAMMonitor.snapshot() }.value
+                let selectedStats = allStats.filter { monitoredGPUIndices.contains($0.id) }
+                let stats = selectedStats.isEmpty ? allStats : selectedStats
+                if let sample = stats.max(by: { $0.fraction < $1.fraction }) {
+                    fractions.append(sample.fraction)
+                    if let current = peak {
+                        if sample.fraction > current.fraction { peak = sample }
+                    } else {
+                        peak = sample
+                    }
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard let self, let peak else { return }
+            if peak.fraction >= 0.90 {
+                consume("\n[ToshLLM] DFlash runtime VRAM peak: \(Int(peak.fraction * 100))% (\(Int(peak.usedMB)) / \(Int(peak.totalMB)) MiB)\n")
+            }
+            guard DflashPolicy.shouldWarn(fractions: fractions) else { return }
+            let signature = dflashWarningSignature(settings: settings)
+            let acknowledged = UserDefaults.standard.stringArray(
+                forKey: SettingsKeys.dflashWarningAcknowledged) ?? []
+            guard !acknowledged.contains(signature) else { return }
+            dflashWarning = DflashRuntimeWarning(
+                modelPath: settings.modelPath,
+                usedGB: peak.usedMB / 1024,
+                totalGB: peak.totalMB / 1024,
+                fraction: peak.fraction)
+        }
+    }
+
+    private func dflashWarningSignature(settings: ServerSettings) -> String {
+        let ngld = settings.arguments.firstIndex(of: "-ngld").flatMap {
+            settings.arguments.indices.contains($0 + 1) ? settings.arguments[$0 + 1] : nil
+        } ?? "none"
+        let gpus = settings.selectedGPUIndices.sorted().map(String.init).joined(separator: ",")
+        return "\(settings.modelPath)|\(settings.ctx)|\(settings.ncmoe)|\(settings.cacheTypeK)|\(settings.cacheTypeV)|\(ngld)|gpus=\(gpus)"
+    }
+
+    func acknowledgeDflashWarning() {
+        guard let settings = launchedSettings else { dflashWarning = nil; return }
+        let signature = dflashWarningSignature(settings: settings)
+        var acknowledged = UserDefaults.standard.stringArray(
+            forKey: SettingsKeys.dflashWarningAcknowledged) ?? []
+        if !acknowledged.contains(signature) { acknowledged.append(signature) }
+        UserDefaults.standard.set(acknowledged, forKey: SettingsKeys.dflashWarningAcknowledged)
+        dflashWarning = nil
+    }
+
+    func useAutomaticDflashAndRestart() {
+        guard let settings = launchedSettings else { dflashWarning = nil; return }
+        ServerSettings.setDflashMode(.auto, forModel: settings.modelPath)
+        dflashWarning = nil
+        restart(effectiveSettings())
+    }
+
+    func disableDflashAndRestart() {
+        guard let settings = launchedSettings else { dflashWarning = nil; return }
+        ServerSettings.setDflashMode(.off, forModel: settings.modelPath)
+        dflashWarning = nil
+        restart(effectiveSettings())
     }
 
     private func startDiscoveryIfNeeded(port: Int) {

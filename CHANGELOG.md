@@ -8,7 +8,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - **Ternary Q2_0 models now load** (#41)... the engine picks up mainline's Q2_0 type, so Prism ML's `*-Q2_0_g64.gguf` (Ternary Bonsai) run on Metal instead of failing with "invalid ggml type 42".
 - **Manual vision projector selection** (#35)... choose a specific `mmproj` file, keep auto-pairing, or turn vision off, from each model card and the server card.
-- **DFlash speculative decoding (experimental, opt-in)**... a per-model draft downloaded from the model explorer drives block speculative decoding; up to +21% generation on MoE with predictable content on an RX 6700 XT, off by default because it needs spare VRAM and can be slower otherwise.
+- **DFlash speculative decoding (experimental)**... the model explorer finds and downloads a compatible per-model draft for block speculative decoding; each installed pair has Off, Auto and Forced modes. Auto only engages for a MoE model with CPU-offloaded experts (`ncmoe > 0`), where it measured up to +21% generation on an RX 6700 XT, and stays off for full-GPU or dense models where DFlash can be slower.
+- **DFlash sizes itself to the selected GPU**... before launch, Auto budgets the target and draft weights, both KV caches, compute buffers, context length and the configured VRAM reserve, then chooses an explicit draft-layer offload or leaves DFlash off when it will not fit safely. After startup it monitors the GPU(s) actually selected by the app; sustained use above 95% opens a warning with Continue, Auto-and-restart and Disable-and-restart actions.
 
 ### Changed
 - **The vision projector no longer downloads with the model**... a separate vision button fetches the `mmproj` on demand, so text-only users skip the extra file.

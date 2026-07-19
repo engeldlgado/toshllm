@@ -4,7 +4,7 @@ import Metal
 
 /// VRAM usage of a single GPU. `totalMB` comes from Metal (matches the figure on
 /// the hardware card); `usedMB` from the IOAccelerator registry.
-struct GPUStat: Identifiable {
+struct GPUStat: Identifiable, Sendable {
     let id: Int          // Metal device index
     let name: String
     let usedMB: Double
@@ -33,6 +33,8 @@ final class VRAMMonitor: ObservableObject {
             Task { @MainActor in self?.poll() }
         }
     }
+
+    nonisolated static func snapshot() -> [GPUStat] { readAllGPUs() }
 
     private func poll() {
         Task.detached(priority: .utility) {

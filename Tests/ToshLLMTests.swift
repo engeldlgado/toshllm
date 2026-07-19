@@ -10,6 +10,61 @@ final class EstimatorTests: XCTestCase {
         ramGB: 32, arch: "x86_64", model: "", osVersion: "",
         gpus: [GPUDevice(index: 0, name: "Test GPU", vramMB: 12868)])
 
+    private func dflashPlan(ncmoe: Int, ctx: Int) -> DflashMemoryPlan {
+        DflashMemoryPlanner.plan(
+            vramGB: 12272.0 / 1024, reserveGB: 1,
+            baseFileGB: 20_893_015_008.0 / 1_073_741_824,
+            baseLayers: 40, ncmoe: ncmoe, ctx: ctx, mainKVScale: 1,
+            draftFileGB: 421_060_800.0 / 1_073_741_824,
+            draftLayers: 7,
+            draftKVBytesPerToken: 13_056)
+    }
+
+    func testDflashPlannerUsesNcmoeToProtectVRAM() {
+        let tight = dflashPlan(ncmoe: 26, ctx: 16_384)
+        XCTAssertNil(tight.gpuLayers, "ncmoe 26 at 16K exceeds the 1 GiB reserve")
+
+        let safe = dflashPlan(ncmoe: 28, ctx: 16_384)
+        XCTAssertEqual(safe.gpuLayers, 7)
+        XCTAssertLessThanOrEqual(safe.estimatedVRAMGB, safe.budgetGB)
+    }
+
+    func testDflashPlannerRejectsContextWhoseFixedBuffersDoNotFit() {
+        let plan = dflashPlan(ncmoe: 28, ctx: 32_768)
+        XCTAssertNil(plan.gpuLayers)
+        XCTAssertGreaterThan(plan.estimatedVRAMGB, plan.budgetGB)
+    }
+
+    func testDflashPlannerAccountsForEightKContext() {
+        XCTAssertNil(dflashPlan(ncmoe: 26, ctx: 8_192).gpuLayers)
+        XCTAssertEqual(dflashPlan(ncmoe: 28, ctx: 8_192).gpuLayers, 7)
+    }
+
+    func testDflashPlannerAllowsThirtyTwoKWhenVRAMIsLargeEnough() {
+        let plan = DflashMemoryPlanner.plan(
+            vramGB: 16, reserveGB: 1,
+            baseFileGB: 20_893_015_008.0 / 1_073_741_824,
+            baseLayers: 40, ncmoe: 26,
+            ctx: 32_768, mainKVScale: 1,
+            draftFileGB: 421_060_800.0 / 1_073_741_824,
+            draftLayers: 7,
+            draftKVBytesPerToken: 13_056)
+        XCTAssertEqual(plan.gpuLayers, 7)
+        XCTAssertLessThanOrEqual(plan.estimatedVRAMGB, plan.budgetGB)
+    }
+
+    func testDflashPlannerCanSelectPartialDraftOffload() {
+        let plan = DflashMemoryPlanner.plan(
+            vramGB: 11.75, reserveGB: 1,
+            baseFileGB: 19.45, baseLayers: 40, ncmoe: 28,
+            ctx: 16_384, mainKVScale: 1,
+            draftFileGB: 0.392, draftLayers: 7,
+            draftKVBytesPerToken: 13_056)
+        guard let layers = plan.gpuLayers else { return XCTFail("expected partial DFlash offload") }
+        XCTAssertTrue((0..<7).contains(layers))
+        XCTAssertLessThanOrEqual(plan.estimatedVRAMGB, plan.budgetGB)
+    }
+
     func testDenseModelThatFitsIsIdeal() {
         // Qwen3-8B Q4: fits entirely in 12 GB
         let spec = ModelSpec(fileGB: 4.7, paramsB: 8.2, layers: 36, isMoE: false)
@@ -108,6 +163,19 @@ final class EstimatorTests: XCTestCase {
         XCTAssertLessThan(quant.vramGB, f16.vramGB)
         XCTAssertEqual(Estimator.kvTypeScale("f16"), 1.0)
         XCTAssertEqual(Estimator.kvTypeScale("q8_0"), 0.53, accuracy: 0.01)
+    }
+}
+
+final class DflashPolicyTests: XCTestCase {
+    func testAutoRequiresMoEAndCPUExpertOffload() {
+        XCTAssertTrue(DflashPolicy.autoEligible(isMoE: true, ncmoe: 1))
+        XCTAssertFalse(DflashPolicy.autoEligible(isMoE: true, ncmoe: 0))
+        XCTAssertFalse(DflashPolicy.autoEligible(isMoE: false, ncmoe: 12))
+    }
+
+    func testRuntimeWarningRequiresThreeCriticalSamples() {
+        XCTAssertFalse(DflashPolicy.shouldWarn(fractions: [0.96, 0.94, 0.97]))
+        XCTAssertTrue(DflashPolicy.shouldWarn(fractions: [0.96, 0.95, 0.94, 0.97]))
     }
 }
 

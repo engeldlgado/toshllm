@@ -116,6 +116,71 @@ struct MemoryEstimate {
     let expectedSpeed: String   // estimated t/s range
 }
 
+/// Conservative preflight for DFlash. llama.cpp cannot currently measure a
+/// DFlash context before the target context exists (`ctx_other`), so leaving
+/// `-ngld auto` alone can overcommit a discrete GPU. This planner budgets the
+/// target model, both KV caches, compute buffers and the user's VRAM reserve,
+/// then emits an explicit number of draft layers or rejects the draft.
+struct DflashMemoryPlan: Equatable {
+    let gpuLayers: Int?
+    let estimatedVRAMGB: Double
+    let budgetGB: Double
+
+    var enabled: Bool { gpuLayers != nil }
+}
+
+enum DflashMemoryPlanner {
+    /// DFlash uses a large target-linked compute graph that is not represented by
+    /// its small GGUF file. 1.9 GiB is the observed worst case on the supported
+    /// mainline engine; keeping it explicit is safer than pretending file size is
+    /// the whole draft cost.
+    private static let draftComputeGB = 1.9
+
+    static func plan(vramGB: Double, reserveGB: Double,
+                     baseFileGB: Double, baseLayers: Int, ncmoe: Int,
+                     ctx: Int, mainKVScale: Double,
+                     draftFileGB: Double, draftLayers: Int,
+                     draftKVBytesPerToken: Double) -> DflashMemoryPlan {
+        let budget = max(0, vramGB - reserveGB)
+        guard budget > 0, baseFileGB > 0, baseLayers > 0,
+              draftFileGB > 0, draftLayers > 0 else {
+            return DflashMemoryPlan(gpuLayers: nil, estimatedVRAMGB: .infinity, budgetGB: budget)
+        }
+
+        // Q4 MoE files are dominated by expert weights. Attention, embeddings and
+        // shared tensors account for roughly 1.3 GiB and always stay on the GPU;
+        // `ncmoe` moves the proportional expert-layer share to host RAM.
+        let residentBaseGB = min(baseFileGB, 1.3)
+        let expertGB = max(0, baseFileGB - residentBaseGB)
+        let cpuFraction = min(1, max(0, Double(ncmoe) / Double(baseLayers)))
+        let baseWeightsGB = residentBaseGB + expertGB * (1 - cpuFraction)
+        let paramsB = baseFileGB / 0.57
+        let baseComputeGB = 0.9 + paramsB * 0.012
+        // Hybrid Qwen KV grows much more slowly than a dense full-attention cache
+        // because most layers use a sliding window. This coefficient is calibrated
+        // against the engine's 8K/16K/32K allocations and scales with KV quantization.
+        let baseKVGB = 0.021 * Double(max(0, ctx)) / 1024 * mainKVScale
+        let baseNeedGB = baseWeightsGB + baseComputeGB + baseKVGB
+
+        let draftKVGB = draftKVBytesPerToken * Double(max(0, ctx)) / 1_073_741_824
+        let draftFixedGB = draftComputeGB + draftKVGB
+        let weightPerLayerGB = draftFileGB * 1.05 / Double(draftLayers)
+        let roomForWeightsGB = budget - baseNeedGB - draftFixedGB
+        let layers = min(draftLayers, Int(floor(max(0, roomForWeightsGB) / weightPerLayerGB)))
+
+        // CPU-only draft weights still require the target-linked GPU graph and KV.
+        // If those fixed allocations do not fit, DFlash must stay off.
+        guard roomForWeightsGB >= 0 else {
+            return DflashMemoryPlan(gpuLayers: nil,
+                                    estimatedVRAMGB: baseNeedGB + draftFixedGB,
+                                    budgetGB: budget)
+        }
+        return DflashMemoryPlan(gpuLayers: layers,
+                                estimatedVRAMGB: baseNeedGB + draftFixedGB + Double(layers) * weightPerLayerGB,
+                                budgetGB: budget)
+    }
+}
+
 enum Estimator {
     /// ncmoe to apply when a model is picked: dense → 0; MoE → the value the
     /// user last set for that file, or the hardware recommendation.
