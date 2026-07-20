@@ -26,7 +26,6 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.flashAttn) private var flashAttn = "auto"
     @AppStorage(SettingsKeys.noMmap) private var noMmap = true
     @AppStorage(SettingsKeys.jinja) private var jinja = true
-    @AppStorage(SettingsKeys.concurrencyDisable) private var concurrencyDisable = ServerSettings.defaultConcurrencyDisable
     @AppStorage(SettingsKeys.vramReserve) private var vramReserve = 1024
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
@@ -479,10 +478,6 @@ struct SettingsView: View {
                 Toggle(loc.t("Plantilla de chat (--jinja)", "Chat template (--jinja)"), isOn: $jinja)
                     .infoTip(loc.t("Usa la plantilla de chat oficial del modelo (formato de mensajes, herramientas). Déjalo activado salvo problemas con un modelo concreto.",
                                 "Uses the model's official chat template (message format, tools). Keep it on unless a specific model misbehaves."))
-                Toggle(loc.t("Estabilidad AMD dGPU (concurrencia desactivada)",
-                             "AMD dGPU stability (concurrency disabled)"), isOn: $concurrencyDisable)
-                    .infoTip(loc.t("Imprescindible en GPUs AMD discretas: sin esto la salida se corrompe (texto basura).",
-                                "Required on discrete AMD GPUs: output corrupts (garbage text) without it."))
             }
 
             Section(loc.t("Avanzado", "Advanced")) {

@@ -298,7 +298,7 @@ final class ServerSettingsTests: XCTestCase {
     private func makeSettings() -> ServerSettings {
         ServerSettings(serverBinary: "/usr/bin/true", modelPath: "/tmp/m.gguf", port: 8080,
                        ngl: 99, ncmoe: 24, ctx: 16384, threads: 6, flashAttn: "auto",
-                       noMmap: true, jinja: true, concurrencyDisable: true,
+                       noMmap: true, jinja: true,
                        vramReserveMB: 1024, gpuIndex: -1, extraArgs: "",
                        cacheTypeK: "f16", cacheTypeV: "f16", mlock: false)
     }
@@ -517,7 +517,8 @@ final class ServerSettingsTests: XCTestCase {
 
     func testStabilityEnvironment() {
         let env = makeSettings().environment
-        XCTAssertEqual(env["GGML_METAL_CONCURRENCY_DISABLE"], "1")
+        XCTAssertNil(env["GGML_METAL_CONCURRENCY_DISABLE"],
+                     "la concurrencia la decide el engine según el tipo de GPU, la app no la fija")
         XCTAssertEqual(env["GGML_METAL_VRAM_RESERVE_MB"], "1024")
         XCTAssertNil(env["GGML_METAL_DEVICE_INDEX"], "gpuIndex -1 no debe fijar índice")
     }
@@ -860,7 +861,7 @@ final class BenchAndProfileTests: XCTestCase {
     func testBenchmarkFlashAttentionRouteLabelsCPUAndGPU() {
         var s = ServerSettings(serverBinary: "/usr/bin/true", modelPath: "/tmp/m.gguf", port: 8080,
                                ngl: 99, ncmoe: 0, ctx: 16384, threads: 6, flashAttn: "off",
-                               noMmap: true, jinja: true, concurrencyDisable: true,
+                               noMmap: true, jinja: true,
                                vramReserveMB: 1024, gpuIndex: -1, extraArgs: "",
                                cacheTypeK: "q8_0", cacheTypeV: "q8_0", mlock: false)
         s.faAmd = false
@@ -884,7 +885,7 @@ final class BenchAndProfileTests: XCTestCase {
     func testProfileRoundTrip() throws {
         let p = Profile(name: "Diario", modelPath: "/m.gguf", ngl: 99, ncmoe: 24,
                         ctx: 32768, threads: 6, flashAttn: "auto", noMmap: true,
-                        jinja: true, concurrencyDisable: true, vramReserve: 1024,
+                        jinja: true, vramReserve: 1024,
                         gpuIndex: -1, extraArgs: "--spec-type draft-mtp",
                         cacheTypeK: "f16", cacheTypeV: "f16", mlock: false,
                         port: 8080, engine: "bundled")
@@ -1041,7 +1042,7 @@ final class RouterModeTests: XCTestCase {
     private func makeSettings(routerMode: Bool = true) -> ServerSettings {
         var s = ServerSettings(serverBinary: "/usr/bin/true", modelPath: "/tmp/unused.gguf", port: 8099,
                                 ngl: 99, ncmoe: 0, ctx: 8192, threads: 6, flashAttn: "auto",
-                                noMmap: true, jinja: false, concurrencyDisable: true,
+                                noMmap: true, jinja: false,
                                 vramReserveMB: 1024, gpuIndex: -1, extraArgs: "",
                                 cacheTypeK: "f16", cacheTypeV: "f16", mlock: false)
         s.routerMode = routerMode

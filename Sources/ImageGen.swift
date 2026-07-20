@@ -561,7 +561,6 @@ final class ImageGenerator: ObservableObject {
         var env = ProcessInfo.processInfo.environment
         // AMD discrete GPUs corrupt output without disabling Metal concurrency;
         // Apple Silicon keeps it on. Mirrors the LLM engine defaults.
-        if !ServerSettings.isAppleSilicon { env["GGML_METAL_CONCURRENCY_DISABLE"] = "1" }
         // Split each step into enough command buffers to clear the GPU watchdog.
         env["GGML_METAL_NCB"] = String(ImageGenLimits.nCB(width: width, height: height))
         // Pin the chosen GPU (slot maps to MTLCopyAllDevices order, as in the picker).

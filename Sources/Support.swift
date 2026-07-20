@@ -41,7 +41,6 @@ enum SettingsKeys {
     static let flashAttn = "flashAttn"
     static let noMmap = "noMmap"
     static let jinja = "jinja"
-    static let concurrencyDisable = "concurrencyDisable"
     static let vramReserve = "vramReserve"
     static let gpuIndex = "gpuIndex"
     /// Comma-separated physical GPU indices to split across (2+ entries).
@@ -129,7 +128,7 @@ enum SettingsKeys {
     /// never hides or deletes downloaded models. Profiles and the Keychain API key
     /// live outside UserDefaults and are untouched.
     static let resettableOptionKeys = [
-        serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja, concurrencyDisable,
+        serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja,
         vramReserve, gpuIndex, gpuList, extraArgs, embeddings, cacheTypeK, cacheTypeV, mlock, cacheRAM,
         parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, routerMode, routerModelsMax,
         persistCache, multiGPU, multiGPUCount,

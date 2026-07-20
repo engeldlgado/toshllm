@@ -26,7 +26,6 @@ struct ServerSettings {
     var flashAttn: String      // auto | on | off
     var noMmap: Bool
     var jinja: Bool
-    var concurrencyDisable: Bool
     var vramReserveMB: Int
     var gpuIndex: Int          // -1 = system default
     /// Explicit set of physical GPUs to split across (2+ entries). Overrides
@@ -347,7 +346,6 @@ struct ServerSettings {
         // The engine logs this, so a log pasted from a bug report identifies the
         // app build even when the engine binary is older than the app.
         env["TOSH_APP_VERSION"] = AppInfo.version
-        env["GGML_METAL_CONCURRENCY_DISABLE"] = concurrencyDisable ? "1" : nil
         env["GGML_METAL_VRAM_RESERVE_MB"] = String(vramReserveMB)
         // Physical GPU selection (consumed by the patched Metal backend, which maps
         // these to MTLCopyAllDevices() — the same order as the app's GPU picker).
@@ -405,7 +403,6 @@ struct ServerSettings {
         return value == 1
     }()
 
-    static var defaultConcurrencyDisable: Bool { !isAppleSilicon }
 
 
     /// Default engine: the one bundled with the app (portable); falls back to the dev checkout.
@@ -462,7 +459,6 @@ struct ServerSettings {
             flashAttn: d.string(forKey: SettingsKeys.flashAttn) ?? "auto",
             noMmap: bool(SettingsKeys.noMmap, true),
             jinja: bool(SettingsKeys.jinja, true),
-            concurrencyDisable: bool(SettingsKeys.concurrencyDisable, defaultConcurrencyDisable),
             vramReserveMB: int(SettingsKeys.vramReserve, 1024),
             gpuIndex: int(SettingsKeys.gpuIndex, -1),
             gpuList: gpuList(fromCSV: d.string(forKey: SettingsKeys.gpuList)),
@@ -1087,7 +1083,7 @@ final class ServerController: ObservableObject {
         let gpus = availableGPUs().map {
             "    [\($0.index)] \($0.name) · \($0.vramMB / 1024) GB\($0.isExternal ? " · EXTERNAL/eGPU" : "")\($0.isIntegrated ? " · iGPU (not auto-selected)" : "")"
         }.joined(separator: "\n")
-        let envKeys = ["GGML_METAL_CONCURRENCY_DISABLE", "GGML_METAL_VRAM_RESERVE_MB",
+        let envKeys = ["GGML_METAL_VRAM_RESERVE_MB",
                        "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES",
                        "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD",
                        "GGML_SCHED_PREFETCH_EXPERTS", "GGML_CPU_NO_REPACK"]
@@ -1102,7 +1098,7 @@ final class ServerController: ObservableObject {
          GPUs detected:
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
-         settings: ngl=\(settings.ngl) ncmoe=\(settings.ncmoe) ctx=\(settings.ctx) fa=\(settings.flashAttn) ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV) cacheRAM=\(settings.cacheRAM) concurrencyDisable=\(settings.concurrencyDisable)
+         settings: ngl=\(settings.ngl) ncmoe=\(settings.ncmoe) ctx=\(settings.ctx) fa=\(settings.flashAttn) ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV) cacheRAM=\(settings.cacheRAM)
          dflash : \(settings.routerMode ? "per-model router plan" : settings.dflashPlanSummary)
          env: \(envLine)
          args: \(redact(settings.arguments).joined(separator: " "))

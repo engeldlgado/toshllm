@@ -12,7 +12,6 @@ struct Profile: Codable, Identifiable {
     var flashAttn: String
     var noMmap: Bool
     var jinja: Bool
-    var concurrencyDisable: Bool
     var vramReserve: Int
     var gpuIndex: Int
     var extraArgs: String
@@ -131,7 +130,6 @@ final class ProfileStore: ObservableObject {
         d.set(p.flashAttn, forKey: SettingsKeys.flashAttn)
         d.set(p.noMmap, forKey: SettingsKeys.noMmap)
         d.set(p.jinja, forKey: SettingsKeys.jinja)
-        d.set(p.concurrencyDisable, forKey: SettingsKeys.concurrencyDisable)
         d.set(p.vramReserve, forKey: SettingsKeys.vramReserve)
         d.set(p.gpuIndex, forKey: SettingsKeys.gpuIndex)
         d.set(p.extraArgs, forKey: SettingsKeys.extraArgs)
@@ -196,7 +194,7 @@ extension ServerSettings {
     func makeProfile(name: String) -> Profile {
         Profile(name: name, modelPath: modelPath, ngl: ngl, ncmoe: ncmoe, ctx: ctx,
                 threads: threads, flashAttn: flashAttn, noMmap: noMmap, jinja: jinja,
-                concurrencyDisable: concurrencyDisable, vramReserve: vramReserveMB,
+                vramReserve: vramReserveMB,
                 gpuIndex: gpuIndex, extraArgs: extraArgs, cacheTypeK: cacheTypeK,
                 cacheTypeV: cacheTypeV, mlock: mlock, port: port, specMTP: specMTP,
                 engine: engineTag, cacheRAM: cacheRAM, reasoningInline: reasoningInline,
@@ -213,7 +211,7 @@ extension ServerSettings {
     mutating func apply(_ p: Profile) {
         modelPath = p.modelPath; ngl = p.ngl; ncmoe = p.ncmoe; ctx = p.ctx
         threads = p.threads; flashAttn = p.flashAttn; noMmap = p.noMmap; jinja = p.jinja
-        concurrencyDisable = p.concurrencyDisable; vramReserveMB = p.vramReserve
+        vramReserveMB = p.vramReserve
         gpuIndex = p.gpuIndex; extraArgs = p.extraArgs; cacheTypeK = p.cacheTypeK
         cacheTypeV = p.cacheTypeV; mlock = p.mlock; port = p.port
         if let v = p.specMTP { specMTP = v }
