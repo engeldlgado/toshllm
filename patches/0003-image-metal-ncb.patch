@@ -32,14 +32,14 @@ diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-met
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -10038,7 +10038,7 @@ kernel void kernel_mul_mm(
-             for (short ik = 0; ik < NK/8; ik++) {
-                 // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
-                 // scalar loop; partials flush to float every 8-deep slice for precision
--                vec<S0,2> pacc[4][4];
-+                float2 pacc[4][4]; // diffusion activations overflow half partials
-                 for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
+             // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
+             // scalar loop. Flushing to float once per NK, not every 8: the flush
+             // costs more than the products it protects.
+-            vec<S0,2> pacc[4][4];
++            float2 pacc[4][4]; // diffusion activations overflow half partials
+             for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
  
-                 FOR_UNROLL (short k = 0; k < 8; k += 2) {
+             for (short ik = 0; ik < NK/8; ik++) {
 @@ -10054,7 +10054,7 @@ kernel void kernel_mul_mm(
                      for (short rr = 0; rr < 4; rr++) {
                          for (short cc = 0; cc < 4; cc++) {

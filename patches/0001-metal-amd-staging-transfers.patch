@@ -3102,7 +3102,7 @@ index a1003b3ac..cc736d24d 100644
                  reg_ctx->devices.push_back(dev);
              }
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 969fddfa5..234bb110b 100644
+index 969fddfa5..6ba4208d2 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -704,13 +704,17 @@ void dequantize_q3_K(device const block_q3_K *xb, short il, thread type4x4 & reg
@@ -4444,7 +4444,7 @@ index 969fddfa5..234bb110b 100644
  
          if (FC_mul_mm_bc_inp) {
              for (short i = 0; i < 8; ++i) {
-@@ -10229,49 +10883,95 @@ kernel void kernel_mul_mm(
+@@ -10229,49 +10883,96 @@ kernel void kernel_mul_mm(
  
          y += NK;
  
@@ -4457,12 +4457,13 @@ index 969fddfa5..234bb110b 100644
 +        threadgroup const S1 * lsmb = (sb + 2*64*(vsg/2));
 +
 +        if (FC_mul_mm_manual) {
-+            for (short ik = 0; ik < NK/8; ik++) {
-+                // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
-+                // scalar loop; partials flush to float every 8-deep slice for precision
-+                vec<S0,2> pacc[4][4];
-+                for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
++            // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
++            // scalar loop. Flushing to float once per NK, not every 8: the flush
++            // costs more than the products it protects.
++            vec<S0,2> pacc[4][4];
++            for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
 +
++            for (short ik = 0; ik < NK/8; ik++) {
 +                FOR_UNROLL (short k = 0; k < 8; k += 2) {
 +                    vec<S0,2> av[4];
 +                    vec<S1,2> bv[4];
@@ -4483,16 +4484,16 @@ index 969fddfa5..234bb110b 100644
  
 -        FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
 -            simdgroup_barrier(mem_flags::mem_none);
-+                for (short rr = 0; rr < 4; rr++) {
-+                    for (short cc = 0; cc < 4; cc++) {
-+                        acc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
-+                    }
-+                }
++                lsma += 8*64;
++                lsmb += 4*64;
++            }
  
 -            FOR_UNROLL (short i = 0; i < 4; i++) {
 -                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
-+                lsma += 8*64;
-+                lsmb += 4*64;
++            for (short rr = 0; rr < 4; rr++) {
++                for (short cc = 0; cc < 4; cc++) {
++                    acc[rr][cc] += (float) pacc[rr][cc][0] + (float) pacc[rr][cc][1];
++                }
              }
 +        } else {
 +            FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
@@ -4561,7 +4562,7 @@ index 969fddfa5..234bb110b 100644
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
  
          for (short i = 0; i < 8; i++) {
-@@ -10422,13 +11122,21 @@ kernel void kernel_mul_mm_id(
+@@ -10422,13 +11123,21 @@ kernel void kernel_mul_mm_id(
  
      short il = il0;
  
@@ -4586,7 +4587,7 @@ index 969fddfa5..234bb110b 100644
      const short    offset1 = il0/nl;
  
      device const block_q * x = (device const block_q *)(src0 + args.nb01*(r0 + lr0) + offset0) + offset1;
-@@ -10440,17 +11148,28 @@ kernel void kernel_mul_mm_id(
+@@ -10440,17 +11149,28 @@ kernel void kernel_mul_mm_id(
          + args.nb12*i12
          + args.nb11*i11
          + args.nb10*iy);
@@ -4617,7 +4618,7 @@ index 969fddfa5..234bb110b 100644
      auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
      auto tB = tensor<threadgroup S1, dextents<int32_t, 2>, tensor_inline>(sb, dextents<int32_t, 2>(NR1, NK ));
  
-@@ -10477,11 +11196,15 @@ kernel void kernel_mul_mm_id(
+@@ -10477,11 +11197,15 @@ kernel void kernel_mul_mm_id(
                  const short lx = (tiitg/NL0)%8;
                  const short ly = i%8;
  
@@ -4634,7 +4635,7 @@ index 969fddfa5..234bb110b 100644
              S0_4x4 temp_a;
              dequantize_func(x, il, temp_a);
  
-@@ -10489,21 +11212,18 @@ kernel void kernel_mul_mm_id(
+@@ -10489,21 +11213,18 @@ kernel void kernel_mul_mm_id(
  
              FOR_UNROLL (short i = 0; i < 16; i++) {
                  const short sx = 2*il0 + i/8;
@@ -4658,7 +4659,7 @@ index 969fddfa5..234bb110b 100644
  
          if (FC_mul_mm_bc_inp) {
              for (short i = 0; i < 8; ++i) {
-@@ -10600,34 +11320,70 @@ kernel void kernel_mul_mm_id(
+@@ -10600,34 +11321,70 @@ kernel void kernel_mul_mm_id(
  
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
@@ -4745,7 +4746,7 @@ index 969fddfa5..234bb110b 100644
          auto sA = tA.slice(0, 0);
          auto sB = tB.slice(0, 0);
  
-@@ -10640,37 +11396,48 @@ kernel void kernel_mul_mm_id(
+@@ -10640,37 +11397,48 @@ kernel void kernel_mul_mm_id(
  
  #ifdef GGML_METAL_HAS_TENSOR
      auto tC = tensor<threadgroup float, dextents<int32_t, 2>, tensor_inline>(sc, dextents<int32_t, 2>(NR0, NR1));
