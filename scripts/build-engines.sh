@@ -171,6 +171,14 @@ build_image_engine() {
     git apply -p1 "$ROOT/patches/0004-image-cpu-fallback-sched.patch"
     echo "applied ggml-metal hunks of 0001 + 0003 + core fallback 0004 to stable-diffusion.cpp"
 
+    # This ggml is on a different commit, so an ambiguous hunk can land on the wrong
+    # function and still exit 0. Patch context is -U5 to avoid it; assert it anyway.
+    local metal="ggml/src/ggml-metal/ggml-metal.metal"
+    if ! awk '/^kernel void kernel_cumsum_blk\(/,/\{$/' "$metal" | grep -q 'sgptg\[\[threads_per_simdgroup\]\]'; then
+        echo "ERROR: patch 0001 landed wrong in $metal (kernel_cumsum_blk lost its sgptg parameter)" >&2
+        exit 1
+    fi
+
     local isa=("${ISA_FLAGS[@]}")
     cmake -B build-static \
         -DCMAKE_BUILD_TYPE=Release \
