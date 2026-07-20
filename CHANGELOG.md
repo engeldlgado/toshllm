@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+- **Prompt processing is much faster on AMD**... the Metal matmul now covers a 64x64 output tile per threadgroup instead of 64x32, cutting how many times each weight is re-read; Qwen3-8B Q4_K_M goes 480 → 692 t/s of prefill on an RX 6700 XT, with generation unchanged.
+- **K-quant models dequantize with far fewer loads**... Q4_K and Q5_K now read each 16-byte window with a single 128-bit load instead of eight 16-bit ones; a 9B Q5_K_M gains a further +13% prefill.
+
 ## [0.82.4] - 2026-07-18
 
 ### Added
