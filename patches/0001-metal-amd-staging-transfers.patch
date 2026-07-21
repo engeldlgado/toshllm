@@ -2700,7 +2700,7 @@ index 330278d00..9766f78b4 100644
      int32_t  nrows;
  } ggml_metal_kargs_flash_attn_ext_vec_reduce;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index c716f118f..8af335949 100644
+index c716f118f..b6a08f793 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -1035,11 +1035,12 @@ int ggml_metal_op_cumsum(ggml_metal_op_t ctx, int idx) {
@@ -2951,7 +2951,7 @@ index c716f118f..8af335949 100644
      GGML_ASSERT(ne11 == ne21);
      GGML_ASSERT(ne12 == ne22);
  
-@@ -2719,10 +2799,165 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2719,10 +2799,164 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      bid_blk.offs += ggml_metal_op_flash_attn_ext_extra_pad(op);
  
      ggml_metal_buffer_id bid_tmp = bid_blk;
@@ -3019,7 +3019,7 @@ index c716f118f..8af335949 100644
 +        };
 +
 +        // queries per threadgroup, matching the instantiation for this head size
-+        const int fa_pf_bq = ne00 == 512 ? 16 : ne00 == 256 ? 32 : 64;
++        const int fa_pf_bq = ne00 == 256 ? 32 : 64;
 +        const bool fa_pf_head_ok =
 +            ne00 == 64 || ne00 == 128 || ne00 == 256 || fa_amd_dk72;
 +        if (ne01 >= 32 && fa_pf_head_ok && getenv("TOSH_FA_PF_DISABLE") == NULL) {
@@ -3045,7 +3045,6 @@ index c716f118f..8af335949 100644
 +                ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
 +                ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
 +
-+                // 256 threads whatever the simd width
 +                ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + fa_pf_bq - 1)/fa_pf_bq, ne02, ne03,
 +                                                         props_dev->simd_width, 256/props_dev->simd_width, 1);
 +
@@ -3117,7 +3116,7 @@ index c716f118f..8af335949 100644
          const int nqptg = OP_FLASH_ATTN_EXT_NQPSG; // queries per threadgroup
          const int ncpsg = OP_FLASH_ATTN_EXT_NCPSG; // cache values per simdgroup
  
-@@ -3005,10 +3240,12 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -3005,10 +3239,12 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              /*.max_bias      =*/ max_bias,
              /*.m0            =*/ m0,
              /*.m1            =*/ m1,
@@ -3233,7 +3232,7 @@ index a1003b3ac..cc736d24d 100644
                  reg_ctx->devices.push_back(dev);
              }
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 969fddfa5..bf00d1fe1 100644
+index 969fddfa5..86f00997c 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -626,17 +626,20 @@ void dequantize_q5_1_t4(device const block_q5_1 * xb, short il, thread type4 & r
@@ -3976,7 +3975,7 @@ index 969fddfa5..bf00d1fe1 100644
      for (int i = nb*NB + sgitg*NW + tiisg; i < args.ne00; i += NW*NSG) {
          for (short row = 0; row < NR0; row++) {
              sumf[row] += ax[row][i] * y[i];
-@@ -7645,10 +7861,738 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -7645,10 +7861,737 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NSG
  #undef NS10
  #undef NS20
@@ -4438,7 +4437,7 @@ index 969fddfa5..bf00d1fe1 100644
 +    constexpr short NQR = BQ/NQG;
 +    constexpr short NKC = BK/16;
 +    constexpr short NDC = (DK + 15)/16;  // DK 72 (vision) leaves the top lanes idle
-+    constexpr short DKF = DK > 128 ? 128 : DK;  // half2 products per flush to float
++    constexpr short DKF = DK > 128 ? 128 : DK;  // cap the half2 run before flushing to float
 +    constexpr short SQS = DK + 4;
 +    constexpr short SVS = BK + 4;
 +    constexpr short SKV = BK*SQS > DK*SVS ? BK*SQS : DK*SVS;
@@ -4685,8 +4684,7 @@ index 969fddfa5..bf00d1fe1 100644
 +typedef decltype(kernel_flash_attn_ext_pf_amd<128, 64, 64, 256, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4>) flash_attn_ext_pf_amd_t;
 +
 +// BQ falls as the head grows so the O accumulators stay near 32 registers per
-+// thread. Head 512 (gemma-4's full-attention layers) is left to the tile kernel:
-+// at one query row per thread this measured no better than it.
++// thread. Head 512 would leave one query row per thread, and stays on the tile kernel.
 +#define FA_AMD_PF_INST(dk, bq, bk, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +template [[host_name("kernel_flash_attn_ext_pf_amd_dk" #dk "_" nm)]] kernel flash_attn_ext_pf_amd_t \
 +    kernel_flash_attn_ext_pf_amd<dk, bq, bk, 256, kt, nkk, dkf, vt, nkv, dvf>;
@@ -4715,7 +4713,7 @@ index 969fddfa5..bf00d1fe1 100644
  //
  #define FA_TYPES \
             half4,  \
-@@ -8305,16 +9249,19 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -8305,16 +9248,19 @@ void kernel_mul_mv_q4_K_f32_impl(
          threadgroup  char * shmem,
          uint3  tgpig,
          ushort tiisg,
@@ -4736,7 +4734,7 @@ index 969fddfa5..bf00d1fe1 100644
      const short ir = it%4;     // 0...3
  
      const int nb = args.ne00/QK_K;
-@@ -8342,11 +9289,11 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -8342,11 +9288,11 @@ void kernel_mul_mv_q4_K_f32_impl(
      device const float * y4 = y + ix * QK_K + 64 * iq + 8 * ir;
  
      uint16_t sc16[4];
@@ -4749,7 +4747,7 @@ index 969fddfa5..bf00d1fe1 100644
          for (short i = 0; i < 8; ++i) {
              yl[i+0] = y4[i+  0]; sumy[0] += yl[i+0];
              yl[i+8] = y4[i+ 32]; sumy[1] += yl[i+8];
-@@ -8389,11 +9336,11 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -8389,11 +9335,11 @@ void kernel_mul_mv_q4_K_f32_impl(
              q1 += args.nb01/2;
              sc += args.nb01/2;
              dh += args.nb01/2;
@@ -4762,7 +4760,7 @@ index 969fddfa5..bf00d1fe1 100644
      device float * dst_f32 = (device float *) dst + (int64_t)im*args.ne0*args.ne1 + (int64_t)r1*args.ne0;
  
      for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
-@@ -8452,12 +9399,15 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8452,12 +9398,15 @@ void kernel_mul_mv_q5_K_f32_impl(
  
      constexpr uint16_t kmask1 = 0x3f3f;
      constexpr uint16_t kmask2 = 0x0f0f;
@@ -4780,7 +4778,7 @@ index 969fddfa5..bf00d1fe1 100644
  
      const short l0 = 8*ir;
      const short q_offset = 32*iq + l0;
-@@ -8471,11 +9421,11 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8471,11 +9420,11 @@ void kernel_mul_mv_q5_K_f32_impl(
      uint16_t sc16[4];
      thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
  
@@ -4793,7 +4791,7 @@ index 969fddfa5..bf00d1fe1 100644
          device const half * dh = &x[i].d;
          device const uint16_t * a = (device const uint16_t *)x[i].scales + iq;
  
-@@ -8520,11 +9470,11 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8520,11 +9469,11 @@ void kernel_mul_mv_q5_K_f32_impl(
              qh += args.nb01;
              dh += args.nb01/2;
              a  += args.nb01/2;
@@ -4806,7 +4804,7 @@ index 969fddfa5..bf00d1fe1 100644
      device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
  
      for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
-@@ -8584,22 +9534,25 @@ void kernel_mul_mv_q6_K_f32_impl(
+@@ -8584,22 +9533,25 @@ void kernel_mul_mv_q6_K_f32_impl(
  
      float sumf[nr0] = { 0.f };
  
@@ -4835,7 +4833,7 @@ index 969fddfa5..bf00d1fe1 100644
          device const uint8_t * qh = x[i].qh + q_offset_h;
          device const int8_t  * sc = x[i].scales + is;
          device const half    * dh = &x[i].d;
-@@ -9957,18 +10910,19 @@ constant bool FC_mul_mm_bc_inp [[function_constant(FC_MUL_MM + 0)]];
+@@ -9957,18 +10909,19 @@ constant bool FC_mul_mm_bc_inp [[function_constant(FC_MUL_MM + 0)]];
  constant bool FC_mul_mm_bc_out [[function_constant(FC_MUL_MM + 1)]];
  constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
  constant short FC_mul_mm_ne13  [[function_constant(FC_MUL_MM + 3)]];
@@ -4856,7 +4854,7 @@ index 969fddfa5..bf00d1fe1 100644
          device const char * srcA,
          device const char * srcB,
          device       char * dst,
-@@ -10089,11 +11043,11 @@ kernel void kernel_mul_mm(
+@@ -10089,11 +11042,11 @@ kernel void kernel_mul_mm(
  
  template<
      typename S0, typename S0_4x4, typename S0_8x8,
@@ -4869,7 +4867,7 @@ index 969fddfa5..bf00d1fe1 100644
          device const char * src0,
          device const char * src1,
          device       char * dst,
-@@ -10104,11 +11058,13 @@ kernel void kernel_mul_mm(
+@@ -10104,11 +11057,13 @@ kernel void kernel_mul_mm(
  
      threadgroup S0 * sa = (threadgroup S0 *)(shmem);
      threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
@@ -4884,7 +4882,7 @@ index 969fddfa5..bf00d1fe1 100644
      constexpr int NL0 = NK/16;
      constexpr int NL1 = NK/8;
  
-@@ -10120,11 +11076,12 @@ kernel void kernel_mul_mm(
+@@ -10120,11 +11075,12 @@ kernel void kernel_mul_mm(
      const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
      const short nr1 = (args.ne1 - r1 < NR1) ? (args.ne1 - r1) : NR1;
  
@@ -4898,7 +4896,7 @@ index 969fddfa5..bf00d1fe1 100644
  
      short il = il0;
  
-@@ -10142,136 +11099,206 @@ kernel void kernel_mul_mm(
+@@ -10142,136 +11098,206 @@ kernel void kernel_mul_mm(
          + args.nb13*i13
          + args.nb12*i12
          + args.nb11*(r1 + lr1)
@@ -5161,7 +5159,7 @@ index 969fddfa5..bf00d1fe1 100644
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
  
          for (short i = 0; i < 8; i++) {
-@@ -10358,10 +11385,12 @@ kernel void kernel_mul_mm_id_map0(
+@@ -10358,10 +11384,12 @@ kernel void kernel_mul_mm_id_map0(
      tpe_u32[ide] = n_all;
  }
  
@@ -5174,7 +5172,7 @@ index 969fddfa5..bf00d1fe1 100644
  template [[host_name("kernel_mul_mm_id_map0_ne20_4" )]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<4>;
  template [[host_name("kernel_mul_mm_id_map0_ne20_5" )]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<5>;
  template [[host_name("kernel_mul_mm_id_map0_ne20_6" )]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<6>;
-@@ -10422,13 +11451,21 @@ kernel void kernel_mul_mm_id(
+@@ -10422,13 +11450,21 @@ kernel void kernel_mul_mm_id(
  
      short il = il0;
  
@@ -5199,7 +5197,7 @@ index 969fddfa5..bf00d1fe1 100644
      const short    offset1 = il0/nl;
  
      device const block_q * x = (device const block_q *)(src0 + args.nb01*(r0 + lr0) + offset0) + offset1;
-@@ -10440,17 +11477,28 @@ kernel void kernel_mul_mm_id(
+@@ -10440,17 +11476,28 @@ kernel void kernel_mul_mm_id(
          + args.nb12*i12
          + args.nb11*i11
          + args.nb10*iy);
@@ -5230,7 +5228,7 @@ index 969fddfa5..bf00d1fe1 100644
      auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
      auto tB = tensor<threadgroup S1, dextents<int32_t, 2>, tensor_inline>(sb, dextents<int32_t, 2>(NR1, NK ));
  
-@@ -10477,11 +11525,15 @@ kernel void kernel_mul_mm_id(
+@@ -10477,11 +11524,15 @@ kernel void kernel_mul_mm_id(
                  const short lx = (tiitg/NL0)%8;
                  const short ly = i%8;
  
@@ -5247,7 +5245,7 @@ index 969fddfa5..bf00d1fe1 100644
              S0_4x4 temp_a;
              dequantize_func(x, il, temp_a);
  
-@@ -10489,21 +11541,18 @@ kernel void kernel_mul_mm_id(
+@@ -10489,21 +11540,18 @@ kernel void kernel_mul_mm_id(
  
              FOR_UNROLL (short i = 0; i < 16; i++) {
                  const short sx = 2*il0 + i/8;
@@ -5271,7 +5269,7 @@ index 969fddfa5..bf00d1fe1 100644
  
          if (FC_mul_mm_bc_inp) {
              for (short i = 0; i < 8; ++i) {
-@@ -10600,34 +11649,70 @@ kernel void kernel_mul_mm_id(
+@@ -10600,34 +11648,70 @@ kernel void kernel_mul_mm_id(
  
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
@@ -5358,7 +5356,7 @@ index 969fddfa5..bf00d1fe1 100644
          auto sA = tA.slice(0, 0);
          auto sB = tB.slice(0, 0);
  
-@@ -10640,37 +11725,48 @@ kernel void kernel_mul_mm_id(
+@@ -10640,37 +11724,48 @@ kernel void kernel_mul_mm_id(
  
  #ifdef GGML_METAL_HAS_TENSOR
      auto tC = tensor<threadgroup float, dextents<int32_t, 2>, tensor_inline>(sc, dextents<int32_t, 2>(NR0, NR1));
@@ -5415,7 +5413,7 @@ index 969fddfa5..bf00d1fe1 100644
          }
      }
  }
-@@ -10679,10 +11775,19 @@ kernel void kernel_mul_mm_id(
+@@ -10679,10 +11774,19 @@ kernel void kernel_mul_mm_id(
  // matrix-matrix multiplication
  //
  
