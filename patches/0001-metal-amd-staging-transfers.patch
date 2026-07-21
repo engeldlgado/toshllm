@@ -2655,9 +2655,22 @@ index 80e47f2c2..8ed23e0a6 100644
          struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf_dst, dst);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index 330278d00..9e3490546 100644
+index 330278d00..9766f78b4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -26,11 +26,11 @@
+ 
+ #define N_R0_Q2_0 8
+ #define N_SG_Q2_0 2
+ 
+ #define N_R0_Q4_0 4
+-#define N_SG_Q4_0 2
++#define N_SG_Q4_0 1
+ 
+ #define N_R0_Q4_1 4
+ #define N_SG_Q4_1 2
+ 
+ #define N_R0_Q5_0 4
 @@ -52,12 +52,12 @@
  #define N_SG_Q3_K 2
  
