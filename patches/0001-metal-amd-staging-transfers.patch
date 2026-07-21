@@ -2655,9 +2655,24 @@ index 80e47f2c2..8ed23e0a6 100644
          struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf_dst, dst);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index 330278d00..0db082f3d 100644
+index 330278d00..9e3490546 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -52,12 +52,12 @@
+ #define N_SG_Q3_K 2
+ 
+ #define N_R0_Q4_K 2
+ #define N_SG_Q4_K 2
+ 
+-#define N_R0_Q5_K 1
+-#define N_SG_Q5_K 2
++#define N_R0_Q5_K 2
++#define N_SG_Q5_K 1
+ 
+ #define N_R0_Q6_K 2
+ #define N_SG_Q6_K 2
+ 
+ #define N_R0_IQ1_S 4
 @@ -428,10 +428,12 @@ typedef struct {
      float    max_bias;
      float    m0;
