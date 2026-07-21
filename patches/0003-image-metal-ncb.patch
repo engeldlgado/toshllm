@@ -12,10 +12,11 @@ engine: diffusion activations overflow half partials (white images), while
 the LLM engines keep the faster half accumulation. Applies on top of 0001.
 
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5..73906d0f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -661,6 +736,11 @@ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx) {
+@@ -990,10 +990,15 @@
+ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx) {
+     return ctx->ev_cpy;
  }
  
  void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
@@ -27,21 +28,29 @@ index 32d97cd5..73906d0f 100644
      if (ctx->n_cb != n_cb) {
          ctx->n_cb = MIN(n_cb, GGML_METAL_MAX_COMMAND_BUFFERS);
  
+         if (ctx->n_cb > 2) {
+             GGML_LOG_WARN("%s: n_cb = %d, using n_cb > 2 is not recommended and can degrade the performance in some cases\n", __func__, n_cb);
 
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
-@@ -10038,7 +10038,7 @@ kernel void kernel_mul_mm(
+@@ -10390,11 +10390,11 @@
+ 
+         if (FC_mul_mm_manual) {
              // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
              // scalar loop. Flushing to float once per NK, not every 8: the flush
              // costs more than the products it protects.
--            vec<S0,2> pacc[4][4];
-+            float2 pacc[4][4]; // diffusion activations overflow half partials
-             for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
+-            vec<S0,2> pacc[NLR][4];
++            float2 pacc[NLR][4]; // diffusion activations overflow half partials
+             for (short rr = 0; rr < NLR; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
  
              for (short ik = 0; ik < NK/8; ik++) {
-@@ -10054,7 +10054,7 @@ kernel void kernel_mul_mm(
-                     for (short rr = 0; rr < 4; rr++) {
+                 FOR_UNROLL (short k = 0; k < 8; k += 2) {
+                     vec<S0,2> av[NLR];
+@@ -10407,11 +10407,11 @@
+                         bv[cc] = *(threadgroup const vec<S1,2> *)(lsmb + 64*(col/8) + 8*(col%8) + k);
+                     }
+                     for (short rr = 0; rr < NLR; rr++) {
                          for (short cc = 0; cc < 4; cc++) {
                              // mul+add: no bfloat2 fma() overload; fast math contracts it anyway
 -                            pacc[rr][cc] = av[rr]*vec<S0,2>(bv[cc]) + pacc[rr][cc];
@@ -49,7 +58,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-met
                          }
                      }
                  }
-@@ -10468,7 +10468,7 @@ kernel void kernel_mul_mm_id(
+ 
+                 lsma += 8*64;
+@@ -10830,11 +10830,11 @@
+ 
+         if (FC_mul_mm_manual) {
              for (short ik = 0; ik < NK/8; ik++) {
                  // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
                  // scalar loop; partials flush to float every 8-deep slice for precision
@@ -58,7 +71,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-met
                  for (short rr = 0; rr < 4; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
  
                  FOR_UNROLL (short k = 0; k < 8; k += 2) {
-@@ -10484,7 +10484,7 @@ kernel void kernel_mul_mm_id(
+                     vec<S0,2> av[4];
+                     vec<S1,2> bv[4];
+@@ -10846,11 +10846,11 @@
+                         bv[cc] = *(threadgroup const vec<S1,2> *)(lsmb + 64*(col/8) + 8*(col%8) + k);
+                     }
                      for (short rr = 0; rr < 4; rr++) {
                          for (short cc = 0; cc < 4; cc++) {
                              // mul+add: no bfloat2 fma() overload; fast math contracts it anyway
@@ -67,3 +84,6 @@ diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-met
                          }
                      }
                  }
+ 
+                 for (short rr = 0; rr < 4; rr++) {
+
