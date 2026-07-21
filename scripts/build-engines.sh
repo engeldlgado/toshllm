@@ -165,7 +165,12 @@ build_image_engine() {
     git checkout -- . 2>/dev/null || true
     git -C ggml checkout -- . 2>/dev/null || true
 
-    git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/0001-metal-amd-staging-transfers.patch"
+    # ggml-metal-impl.h needs reduced context: its decode N_R0/N_SG block differs
+    # from llama.cpp's, so a -U5 hunk touching those constants finds no match here.
+    # Safe only because every define the patch edits in it is unique (asserted below).
+    git apply --exclude='ggml/src/ggml-metal/ggml-metal-impl.h' \
+              --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/0001-metal-amd-staging-transfers.patch"
+    git apply --include='ggml/src/ggml-metal/ggml-metal-impl.h' -C2 -p1 "$ROOT/patches/0001-metal-amd-staging-transfers.patch"
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/0003-image-metal-ncb.patch"
     # sd.cpp core (outside the ggml submodule): per-op CPU fallback for wave64.
     git apply -p1 "$ROOT/patches/0004-image-cpu-fallback-sched.patch"
@@ -176,6 +181,12 @@ build_image_engine() {
     local metal="ggml/src/ggml-metal/ggml-metal.metal"
     if ! awk '/^kernel void kernel_cumsum_blk\(/,/\{$/' "$metal" | grep -q 'sgptg\[\[threads_per_simdgroup\]\]'; then
         echo "ERROR: patch 0001 landed wrong in $metal (kernel_cumsum_blk lost its sgptg parameter)" >&2
+        exit 1
+    fi
+    # the reduced-context pass above must still land the fields the AMD kernels read
+    local impl="ggml/src/ggml-metal/ggml-metal-impl.h"
+    if ! awk '/ggml_metal_kargs_flash_attn_ext_vec;/{exit} {print}' "$impl" | grep -q 'int32_t  has_mask;'; then
+        echo "ERROR: patch 0001 landed wrong in $impl (flash_attn_ext_vec lost has_mask)" >&2
         exit 1
     fi
 
