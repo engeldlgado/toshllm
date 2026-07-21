@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.82.7] - 2026-07-21
 
 ### Improved
 - **Generation is much faster deep into a conversation on AMD**... attention was giving each query head a single threadgroup and walking the whole cache from it, which left most of the GPU idle on models with few heads; at 8k of context Gemma 4 E2B goes 36 → 95 t/s, Gemma 3 4B 56 → 78, Qwen3.5-9B 37 → 45 and Qwen3-8B 40 → 46.
