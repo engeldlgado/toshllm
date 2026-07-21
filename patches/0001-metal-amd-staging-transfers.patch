@@ -2687,7 +2687,7 @@ index 330278d00..9e3490546 100644
      int32_t  nrows;
  } ggml_metal_kargs_flash_attn_ext_vec_reduce;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index c716f118f..dc6db9e12 100644
+index c716f118f..b74eae16d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -1035,11 +1035,12 @@ int ggml_metal_op_cumsum(ggml_metal_op_t ctx, int idx) {
@@ -2781,6 +2781,19 @@ index c716f118f..dc6db9e12 100644
            (
             op->src[0]->type == GGML_TYPE_F32  || // TODO: helper function
             op->src[0]->type == GGML_TYPE_F16  ||
+@@ -2104,11 +2130,11 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+         //       nsg = pipeline.maxTotalThreadsPerThreadgroup / 32
+         //
+         //       my current hypothesis is that the work grid is not evenly divisible for different nsg
+         //       values and there can be some tail effects when nsg is high. need to confirm this
+         //
+-        const int nsg    = 2;                 // num simdgroups per threadgroup
++        const int nsg    = 1;                 // num simdgroups per threadgroup
+ 
+         // num threads along row per simdgroup
+         int16_t nxpsg = 0;
+         if (ne00 % 256 == 0 && ne11 < 3) {
+             nxpsg = 16;
 @@ -2172,11 +2198,11 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
      } else if (
          !ggml_is_transposed(op->src[0]) &&
