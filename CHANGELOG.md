@@ -3,6 +3,13 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+- **Long prompts are much faster on AMD**... attention now streams the KV cache through a blocked Metal kernel instead of writing the whole score matrix out to VRAM and reading it back three times; Qwen3-8B Q4_K_M at 8k of context goes 395 → 470 t/s of prefill, and the deeper the conversation the more it helps.
+- **Generation is faster on Q5_K and Q4_0 models**... both were splitting work across simdgroups the way other quants want it, which cost Q5_K 11.5% of its generation speed on an RX 6700 XT.
+- **Prompt processing is faster on the lighter quants**... Q4_0, Q5_0, Q8_0 and the rest of the cheap-to-dequantize types now get their own matmul kernels with a wider tile per lane, up to 16% faster depending on the type.
+
 ## [0.82.5] - 2026-07-20
 
 ### Improved
