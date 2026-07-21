@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+- **Generation is much faster deep into a conversation on AMD**... attention was giving each query head a single threadgroup and walking the whole cache from it, which left most of the GPU idle on models with few heads; at 8k of context Gemma 4 E2B goes 36 → 95 t/s, Gemma 3 4B 56 → 78, Qwen3.5-9B 37 → 45 and Qwen3-8B 40 → 46.
+- **Narrow attention heads no longer waste half of each simdgroup**... models with 64-wide heads (Llama 3.2, gpt-oss) were computing at the cost of a 128-wide one, and now run two cache rows at once for the same work.
+
 ## [0.82.6] - 2026-07-21
 
 ### Improved
