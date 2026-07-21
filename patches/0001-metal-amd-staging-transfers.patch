@@ -2700,7 +2700,7 @@ index 330278d00..9766f78b4 100644
      int32_t  nrows;
  } ggml_metal_kargs_flash_attn_ext_vec_reduce;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index c716f118f..b6a08f793 100644
+index c716f118f..b3316530c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -1035,11 +1035,12 @@ int ggml_metal_op_cumsum(ggml_metal_op_t ctx, int idx) {
@@ -3099,7 +3099,7 @@ index c716f118f..b6a08f793 100644
 +
 +        // NSG must match the kernel instantiation for this head dim: 32/32/16/8 on
 +        // wave32, halved on wave64 so the threadgroup stays at 1024 threads.
-+        int fa_amd_nsg = (ne00 <= 128) ? 32 : (ne00 == 256) ? 16 : 8;
++        int fa_amd_nsg = (ne00 <= 256) ? 32 : 16;
 +        if (props_dev->simd_width == 64) {
 +            fa_amd_nsg /= 2;
 +        }
@@ -3232,7 +3232,7 @@ index a1003b3ac..cc736d24d 100644
                  reg_ctx->devices.push_back(dev);
              }
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 969fddfa5..86f00997c 100644
+index 969fddfa5..b9ad33176 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -626,17 +626,20 @@ void dequantize_q5_1_t4(device const block_q5_1 * xb, short il, thread type4 & r
@@ -4156,8 +4156,8 @@ index 969fddfa5..86f00997c 100644
 +#define FA_AMD_PAIR(nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST( 64, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST(128, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST(256, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST(512,  8, nm, kt, nkk, dkf, vt, nkv, dvf)
++    FA_AMD_INST(256, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST(512, 16, nm, kt, nkk, dkf, vt, nkv, dvf)
 +
 +// symmetric pairs
 +FA_AMD_PAIR("kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)
