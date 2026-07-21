@@ -2458,7 +2458,7 @@ index 330278d00..9766f78b4 100644
  
  typedef struct {
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index c716f118f..43cad12d7 100644
+index c716f118f..5f242394d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -1037,7 +1037,8 @@ int ggml_metal_op_cumsum(ggml_metal_op_t ctx, int idx) {
@@ -2665,7 +2665,7 @@ index c716f118f..43cad12d7 100644
  
      //GGML_ASSERT(ggml_are_same_shape (src1, src2));
      GGML_ASSERT(ne11 == ne21);
-@@ -2721,6 +2801,201 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -2721,6 +2801,205 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      ggml_metal_buffer_id bid_tmp = bid_blk;
      bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
  
@@ -2794,11 +2794,15 @@ index c716f118f..43cad12d7 100644
 +            return 1;
 +        }
 +
-+        // must match the kernel instantiation for this head dim and key type; q4_0
-+        // keys get 24 because their dequant leaves the pipeline fewer threads
++        // must match the .metal instantiations: q4_0 dequant caps the pipeline, so those
++        // pairs drop to 24 (dk128 q4_0 keys, dk64 subw=8 with q4_0 in either K or V).
 +        int fa_amd_nsg = ne00 == 128 ? 16 : ne00 <= 128 ? 32 : 16;
-+        if (ne00 == 128 && op->src[1]->type == GGML_TYPE_Q4_0) {
-+            fa_amd_nsg = 24;
++        if (props_dev->simd_width == 32) {
++            const bool k_q4 = op->src[1]->type == GGML_TYPE_Q4_0;
++            const bool v_q4 = op->src[2]->type == GGML_TYPE_Q4_0;
++            if ((ne00 == 128 && k_q4) || (ne00 == 64 && (k_q4 || v_q4))) {
++                fa_amd_nsg = 24;
++            }
 +        }
 +        if (props_dev->simd_width == 64) {
 +            fa_amd_nsg /= 2;
@@ -2867,7 +2871,7 @@ index c716f118f..43cad12d7 100644
      if (!ggml_metal_op_flash_attn_ext_use_vec(op)) {
          // half8x8 kernel
          const int nqptg = OP_FLASH_ATTN_EXT_NQPSG; // queries per threadgroup
-@@ -3007,6 +3282,8 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -3007,6 +3286,8 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              /*.m1            =*/ m1,
              /*.n_head_log2   =*/ n_head_log2,
              /*.logit_softcap =*/ logit_softcap,
@@ -2956,7 +2960,7 @@ index a1003b3ac..cc736d24d 100644
                  devs.emplace_back(dev);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
-index 969fddfa5..3c6cb3170 100644
+index 969fddfa5..c040f1cb5 100644
 --- a/ggml/src/ggml-metal/ggml-metal.metal
 +++ b/ggml/src/ggml-metal/ggml-metal.metal
 @@ -628,13 +628,16 @@ void dequantize_q5_1_t4(device const block_q5_1 * xb, short il, thread type4 & r
@@ -3576,7 +3580,7 @@ index 969fddfa5..3c6cb3170 100644
      }
  
      for (int i = nb*NB + sgitg*NW + tiisg; i < args.ne00; i += NW*NSG) {
-@@ -7647,6 +7863,802 @@ kernel void kernel_flash_attn_ext_vec(
+@@ -7647,6 +7863,798 @@ kernel void kernel_flash_attn_ext_vec(
  #undef NS20
  }
  
@@ -3796,45 +3800,42 @@ index 969fddfa5..3c6cb3170 100644
 +
 +typedef decltype(kernel_flash_attn_ext_vec_amd<128, 32, half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4>) flash_attn_ext_vec_amd_t;
 +
-+#define FA_AMD_INST(dk, nsg, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+template [[host_name("kernel_flash_attn_ext_vec_amd_dk" #dk "_" nm)]] kernel flash_attn_ext_vec_amd_t \
-+    kernel_flash_attn_ext_vec_amd<dk, nsg, kt, nkk, dkf, vt, nkv, dvf>;
-+// narrowing subw doubles the chunks per lane; with q4_0 keys at DK=128 the extra registers
-+// drop the pipeline under the threads the host dispatches, so that pair keeps 16.
++// narrowing subw doubles the chunks per lane; the register pressure caps the pipeline,
++// so pairs with q4_0 dequant take fewer simdgroups (see the PAIR macros below).
 +#define FA_AMD_INST_S(dk, nsg, subw, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +template [[host_name("kernel_flash_attn_ext_vec_amd_dk" #dk "_" nm)]] kernel flash_attn_ext_vec_amd_t \
 +    kernel_flash_attn_ext_vec_amd<dk, nsg, kt, nkk, dkf, vt, nkv, dvf, 32, 1, subw>;
 +#define FA_AMD_INST_WG(dk, nsg, subw, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +template [[host_name("kernel_flash_attn_ext_vec_amd_dk" #dk "_" nm "_wg32")]] kernel flash_attn_ext_vec_amd_t \
 +    kernel_flash_attn_ext_vec_amd<dk, nsg, kt, nkk, dkf, vt, nkv, dvf, 32, 32, subw>;
-+// q4_0 keys: same narrow rows, but 24 simdgroups so the dispatch stays inside the 768
-+// threads their heavier dequant leaves the pipeline
++// dk64 narrows to subw=8 like dk128; clean pairs keep n64=32, q4_0 in K or V drops to 24.
++#define FA_AMD_PAIR_S(n64, s128, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_WG(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_WG(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_S( 64, n64, 8, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_S(128, 16, s128, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_S(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_S(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf)
++// q4_0 keys: dk64 and dk128 both take 24 simdgroups for the heavier key dequant
 +#define FA_AMD_PAIR_Q4(nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST_WG(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST_WG(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST( 64, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_S( 64, 24, 8, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST_S(128, 24, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST_S(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST_S(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf)
-+#define FA_AMD_PAIR_S(s128, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST_WG(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST_WG(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST( 64, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
-+    FA_AMD_INST_S(128, 16, s128, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST_S(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +    FA_AMD_INST_S(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf)
 +
 +// symmetric pairs
-+FA_AMD_PAIR_S(8,  "kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)
-+FA_AMD_PAIR_S(8,  "kq8_0_vq8_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
++FA_AMD_PAIR_S(32, 8,  "kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)
++FA_AMD_PAIR_S(32, 8,  "kq8_0_vq8_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
 +FA_AMD_PAIR_Q4("kq4_0_vq4_0",       block_q4_0,     8,  dequantize_q4_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
 +// asymmetric standard pairs (any mix of f16 / q8_0 / q4_0 for K and V), so every
 +// standard K/V combination runs on the GPU instead of falling back to the CPU.
-+FA_AMD_PAIR_S(8,  "kq8_0_vf16",        block_q8_0,     8,  dequantize_q8_0_t4,     half4,          1,  dequantize_f16_t4)
++FA_AMD_PAIR_S(32, 8,  "kq8_0_vf16",        block_q8_0,     8,  dequantize_q8_0_t4,     half4,          1,  dequantize_f16_t4)
 +FA_AMD_PAIR_Q4("kq4_0_vf16",        block_q4_0,     8,  dequantize_q4_0_t4,     half4,          1,  dequantize_f16_t4)
-+FA_AMD_PAIR_S(8,  "kf16_vq8_0",        half4,          1,  dequantize_f16_t4,      block_q8_0,     8,  dequantize_q8_0_t4)
-+FA_AMD_PAIR_S(8,  "kf16_vq4_0",        half4,          1,  dequantize_f16_t4,      block_q4_0,     8,  dequantize_q4_0_t4)
-+FA_AMD_PAIR_S(8,  "kq8_0_vq4_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
++FA_AMD_PAIR_S(32, 8,  "kf16_vq8_0",        half4,          1,  dequantize_f16_t4,      block_q8_0,     8,  dequantize_q8_0_t4)
++FA_AMD_PAIR_S(24, 8,  "kf16_vq4_0",        half4,          1,  dequantize_f16_t4,      block_q4_0,     8,  dequantize_q4_0_t4)
++FA_AMD_PAIR_S(24, 8,  "kq8_0_vq4_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
 +FA_AMD_PAIR_Q4("kq4_0_vq8_0",       block_q4_0,     8,  dequantize_q4_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
 +// wave64 (AMD GCN/Vega) variants: 64-lane simdgroups, half the simdgroups per
 +// threadgroup so the group stays within 1024 threads. Host appends "_w64".
@@ -3867,7 +3868,6 @@ index 969fddfa5..3c6cb3170 100644
 +#undef FA_AMD_PAIR_S
 +#undef FA_AMD_PAIR_Q4
 +#undef FA_AMD_INST_S
-+#undef FA_AMD_INST
 +
 +// Prefill companion of the AMD vec kernel above: NQ simdgroups (one query each)
 +// share K/V tiles staged in threadgroup memory, so the cache is streamed from
@@ -4379,7 +4379,7 @@ index 969fddfa5..3c6cb3170 100644
  // note: I think the s_t can be half instead of float, because the Q*K scaling is done before storing to shared mem
  //       in the other (non-vec) kernel, we need s_t to also be float because we scale during the soft_max
  //
-@@ -8307,12 +9319,15 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -8307,12 +9315,15 @@ void kernel_mul_mv_q4_K_f32_impl(
          ushort tiisg,
          ushort sgitg) {
      const short NSG = FC_mul_mv_nsg;
@@ -4396,7 +4396,7 @@ index 969fddfa5..3c6cb3170 100644
      const short it = tiisg%8;  // 0...7
      const short iq = it/4;     // 0 or 1
      const short ir = it%4;     // 0...3
-@@ -8344,7 +9359,7 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -8344,7 +9355,7 @@ void kernel_mul_mv_q4_K_f32_impl(
      uint16_t sc16[4];
      thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
  
@@ -4405,7 +4405,7 @@ index 969fddfa5..3c6cb3170 100644
          float4 sumy = {0.f, 0.f, 0.f, 0.f};
  
          for (short i = 0; i < 8; ++i) {
-@@ -8391,7 +9406,7 @@ void kernel_mul_mv_q4_K_f32_impl(
+@@ -8391,7 +9402,7 @@ void kernel_mul_mv_q4_K_f32_impl(
              dh += args.nb01/2;
          }
  
@@ -4414,7 +4414,7 @@ index 969fddfa5..3c6cb3170 100644
      }
  
      device float * dst_f32 = (device float *) dst + (int64_t)im*args.ne0*args.ne1 + (int64_t)r1*args.ne0;
-@@ -8417,6 +9432,21 @@ kernel void kernel_mul_mv_q4_K_f32(
+@@ -8417,6 +9428,21 @@ kernel void kernel_mul_mv_q4_K_f32(
      kernel_mul_mv_q4_K_f32_impl<N_R0_Q4_K, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
  }
  
@@ -4436,7 +4436,7 @@ index 969fddfa5..3c6cb3170 100644
  template<int nr0, typename args_t>
  void kernel_mul_mv_q5_K_f32_impl(
          args_t args,
-@@ -8454,8 +9484,11 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8454,8 +9480,11 @@ void kernel_mul_mv_q5_K_f32_impl(
      constexpr uint16_t kmask2 = 0x0f0f;
      constexpr uint16_t kmask3 = 0xc0c0;
  
@@ -4450,7 +4450,7 @@ index 969fddfa5..3c6cb3170 100644
      const short iq  = tid/4;
      const short ir  = tid%4;
  
-@@ -8473,7 +9506,7 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8473,7 +9502,7 @@ void kernel_mul_mv_q5_K_f32_impl(
  
      device const float * y1 = yy + ix*QK_K + y_offset;
  
@@ -4459,7 +4459,7 @@ index 969fddfa5..3c6cb3170 100644
          device const uint8_t * q1 = x[i].qs + q_offset;
          device const uint8_t * qh = x[i].qh + l0;
          device const half * dh = &x[i].d;
-@@ -8522,7 +9555,7 @@ void kernel_mul_mv_q5_K_f32_impl(
+@@ -8522,7 +9551,7 @@ void kernel_mul_mv_q5_K_f32_impl(
              a  += args.nb01/2;
          }
  
@@ -4468,7 +4468,7 @@ index 969fddfa5..3c6cb3170 100644
      }
  
      device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
-@@ -8586,8 +9619,11 @@ void kernel_mul_mv_q6_K_f32_impl(
+@@ -8586,8 +9615,11 @@ void kernel_mul_mv_q6_K_f32_impl(
  
      float yl[16];
  
@@ -4482,7 +4482,7 @@ index 969fddfa5..3c6cb3170 100644
      const short ip  = tid/8;         // 0 or 1
      const short il  = tid%8;
      const short l0  = 4*il;
-@@ -8597,7 +9633,7 @@ void kernel_mul_mv_q6_K_f32_impl(
+@@ -8597,7 +9629,7 @@ void kernel_mul_mv_q6_K_f32_impl(
      const short q_offset_l =  64*ip + l0;
      const short q_offset_h =  32*ip + l0;
  
@@ -4491,7 +4491,7 @@ index 969fddfa5..3c6cb3170 100644
          device const uint8_t * q1 = x[i].ql + q_offset_l;
          device const uint8_t * q2 = q1 + 32;
          device const uint8_t * qh = x[i].qh + q_offset_h;
-@@ -9959,6 +10995,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
+@@ -9959,6 +10991,7 @@ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
  constant short FC_mul_mm_ne13  [[function_constant(FC_MUL_MM + 3)]];
  constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
  constant short FC_mul_mm_r3    [[function_constant(FC_MUL_MM + 5)]];
@@ -4499,7 +4499,7 @@ index 969fddfa5..3c6cb3170 100644
  
  // each block_q contains 16*nl weights
  #ifdef GGML_METAL_HAS_TENSOR
-@@ -9966,7 +11003,7 @@ template<
+@@ -9966,7 +10999,7 @@ template<
      typename SA, typename SA_4x4, typename SA_8x8,
      typename SB, typename SB_2x4, typename SB_8x8,
      typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread SA_4x4 &),
@@ -4508,7 +4508,7 @@ index 969fddfa5..3c6cb3170 100644
  kernel void kernel_mul_mm(
          constant ggml_metal_kargs_mul_mm & args,
          device const char * srcA,
-@@ -10091,7 +11128,7 @@ template<
+@@ -10091,7 +11124,7 @@ template<
      typename S0, typename S0_4x4, typename S0_8x8,
      typename S1, typename S1_2x4, typename S1_8x8,
      typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &),
@@ -4517,7 +4517,7 @@ index 969fddfa5..3c6cb3170 100644
  kernel void kernel_mul_mm(
          constant ggml_metal_kargs_mul_mm & args,
          device const char * src0,
-@@ -10106,7 +11143,9 @@ kernel void kernel_mul_mm(
+@@ -10106,7 +11139,9 @@ kernel void kernel_mul_mm(
      threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
  
      constexpr int NR0 = 64;
@@ -4528,7 +4528,7 @@ index 969fddfa5..3c6cb3170 100644
  
      constexpr int NK  = 32;
      constexpr int NL0 = NK/16;
-@@ -10122,7 +11161,8 @@ kernel void kernel_mul_mm(
+@@ -10122,7 +11157,8 @@ kernel void kernel_mul_mm(
  
      // a thread shouldn't load data outside of the matrix
      const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
@@ -4538,7 +4538,7 @@ index 969fddfa5..3c6cb3170 100644
  
      const short il0 = (tiitg % NL0);
  
-@@ -10144,132 +11184,202 @@ kernel void kernel_mul_mm(
+@@ -10144,132 +11180,202 @@ kernel void kernel_mul_mm(
          + args.nb11*(r1 + lr1)
          + args.nb10*iy);
  
@@ -4797,7 +4797,7 @@ index 969fddfa5..3c6cb3170 100644
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
-@@ -10360,6 +11470,8 @@ kernel void kernel_mul_mm_id_map0(
+@@ -10360,6 +11466,8 @@ kernel void kernel_mul_mm_id_map0(
  
  typedef decltype(kernel_mul_mm_id_map0<1>) kernel_mul_mm_id_map0_t;
  
@@ -4806,7 +4806,7 @@ index 969fddfa5..3c6cb3170 100644
  template [[host_name("kernel_mul_mm_id_map0_ne20_1" )]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<1>;
  template [[host_name("kernel_mul_mm_id_map0_ne20_2" )]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<2>;
  template [[host_name("kernel_mul_mm_id_map0_ne20_4" )]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<4>;
-@@ -10424,9 +11536,17 @@ kernel void kernel_mul_mm_id(
+@@ -10424,9 +11532,17 @@ kernel void kernel_mul_mm_id(
  
      const int id = ids_i32[im*args.ne21 + r1 + lr1];
  
@@ -4827,7 +4827,7 @@ index 969fddfa5..3c6cb3170 100644
  
      const uint64_t offset0 = im*args.nb02 + i13*args.nb03;
      const short    offset1 = il0/nl;
-@@ -10442,13 +11562,24 @@ kernel void kernel_mul_mm_id(
+@@ -10442,13 +11558,24 @@ kernel void kernel_mul_mm_id(
          + args.nb10*iy);
  
  #ifndef GGML_METAL_HAS_TENSOR
@@ -4854,7 +4854,7 @@ index 969fddfa5..3c6cb3170 100644
      }
  #else
      auto tA = tensor<threadgroup S0, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK,  NR0));
-@@ -10479,7 +11610,11 @@ kernel void kernel_mul_mm_id(
+@@ -10479,7 +11606,11 @@ kernel void kernel_mul_mm_id(
  
                  const short ib = 8*sx + sy;
  
@@ -4867,7 +4867,7 @@ index 969fddfa5..3c6cb3170 100644
              }
          } else {
              S0_4x4 temp_a;
-@@ -10491,17 +11626,14 @@ kernel void kernel_mul_mm_id(
+@@ -10491,17 +11622,14 @@ kernel void kernel_mul_mm_id(
                  const short sx = 2*il0 + i/8;
                  const short sy = (tiitg/NL0)/8;
  
@@ -4887,7 +4887,7 @@ index 969fddfa5..3c6cb3170 100644
              }
          }
  
-@@ -10602,30 +11734,66 @@ kernel void kernel_mul_mm_id(
+@@ -10602,30 +11730,66 @@ kernel void kernel_mul_mm_id(
  
  #ifndef GGML_METAL_HAS_TENSOR
          // load matrices from threadgroup memory and conduct outer products
@@ -4970,7 +4970,7 @@ index 969fddfa5..3c6cb3170 100644
          }
  #else
          auto sA = tA.slice(0, 0);
-@@ -10642,20 +11810,31 @@ kernel void kernel_mul_mm_id(
+@@ -10642,20 +11806,31 @@ kernel void kernel_mul_mm_id(
      auto tC = tensor<threadgroup float, dextents<int32_t, 2>, tensor_inline>(sc, dextents<int32_t, 2>(NR0, NR1));
      cT.store(tC);
  #else
@@ -5008,7 +5008,7 @@ index 969fddfa5..3c6cb3170 100644
  
          device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
          device float4 * D4 = (device float4 *) D;
-@@ -10663,12 +11842,12 @@ kernel void kernel_mul_mm_id(
+@@ -10663,12 +11838,12 @@ kernel void kernel_mul_mm_id(
          threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
          threadgroup float4 * C4 = (threadgroup float4 *) C;
  
@@ -5023,7 +5023,7 @@ index 969fddfa5..3c6cb3170 100644
          for (; i < nr0; i += 32) {
              *(D + i) = *(C + i);
          }
-@@ -10681,6 +11860,15 @@ kernel void kernel_mul_mm_id(
+@@ -10681,6 +11856,15 @@ kernel void kernel_mul_mm_id(
  
  typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
  

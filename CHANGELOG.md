@@ -7,6 +7,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 - **Generation is faster deep into a conversation on AMD**... attention splits each 128-wide head's cache row across half as many lanes, +1.1% at 8k of context.
+- **The same speedup reaches 64-wide attention heads**... models like Llama-3.2 split those cache rows too, +3.5% at 8k of context.
 - **Small models generate faster**... the matmul now picks a wider row tile when the matrices are small, +1.5% on Llama-3.2-1B.
 
 ### Fixed
