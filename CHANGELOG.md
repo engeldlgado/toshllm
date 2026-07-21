@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.82.6] - 2026-07-21
 
 ### Improved
 - **Long prompts are much faster on AMD**... attention now streams the KV cache through a blocked Metal kernel instead of writing the whole score matrix out to VRAM and reading it back three times; at 8k of context Qwen3-8B Q4_K_M goes 395 → 470 t/s of prefill, Qwen3.5-9B 484 → 550 and Gemma 3 4B 1068 → 1246, and the deeper the conversation the more it helps.
