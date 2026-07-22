@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.82.8] - 2026-07-22
 
 ### Improved
 - **Generation is faster deep into a conversation on AMD**... attention splits each 128-wide head's cache row across half as many lanes, +1.1% at 8k of context.
@@ -11,6 +11,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **Small models generate faster**... the matmul now picks a wider row tile when the matrices are small, +1.5% on Llama-3.2-1B.
 
 ### Fixed
+- **Generation no longer garbles on GCN/Vega GPUs with 128- or 512-wide attention heads**... the wave64 flash-attention kernel was built for a different simdgroup count than the host dispatched, corrupting the merge on models like Qwen3 and Gemma 4.
 - **Vision decode no longer garbles on the 72-wide attention path**... the SigLIP/Qwen3-VL tower's head size fell on a reduction that assumed a power-of-two width; it now runs correctly (latent, only the encode path was ever reached in practice).
 
 ## [0.82.7] - 2026-07-21
