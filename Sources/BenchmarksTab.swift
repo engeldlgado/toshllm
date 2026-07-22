@@ -552,6 +552,7 @@ struct BenchmarksView: View {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 6) {
                                 Text(r.shortModel).font(.callout.weight(.medium)).lineLimit(1)
+                                quantChip(r.quantization)
                                 Text(r.configLabel)
                                     .font(.system(size: 10, design: .monospaced))
                                     .padding(.horizontal, 5).padding(.vertical, 1)
@@ -614,6 +615,17 @@ struct BenchmarksView: View {
                 .font(.system(.caption, design: .monospaced).weight(.medium))
                 .frame(width: 48, alignment: .trailing)
         }
+    }
+
+    private func quantChip(_ quant: String) -> some View {
+        Text(quant)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .foregroundStyle(quant == "—" ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.appAccent))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background((quant == "—" ? Color.secondary : Color.appAccent).opacity(0.12), in: Capsule())
+            .help(quant == "—"
+                  ? loc.t("El resultado antiguo no guardó el quant", "This older result did not store its quant")
+                  : loc.t("Quantización del modelo", "Model quantization"))
     }
 
     private func legendDot(_ color: Color, _ text: String) -> some View {
@@ -698,6 +710,15 @@ private struct BenchHistoryRow: View, Equatable {
                             .help(loc.t("Mejor generación", "Best generation"))
                     }
                     Text(r.shortModel).font(.callout.weight(.medium))
+                    Text(r.quantization)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(r.quantization == "—" ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.appAccent))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background((r.quantization == "—" ? Color.secondary : Color.appAccent).opacity(0.12),
+                                    in: Capsule())
+                        .help(r.quantization == "—"
+                              ? loc.t("El resultado antiguo no guardó el quant", "This older result did not store its quant")
+                              : loc.t("Quantización del modelo", "Model quantization"))
                     if r.shared == true {
                         Image(systemName: "globe")
                             .font(.system(size: 9)).foregroundStyle(Color.appAccent)

@@ -319,6 +319,33 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(args[args.firstIndex(of: "--cache-reuse")! + 1], "256")
     }
 
+    func testAgentToolsArgumentsAreEmittedExactlyOnce() {
+        var settings = makeSettings()
+        settings.jinja = false
+        settings.agentToolsEnabled = true
+        var args = settings.arguments
+        XCTAssertEqual(args.filter { $0 == "--jinja" }.count, 1)
+        XCTAssertEqual(args.filter { $0 == "--tools" }.count, 1)
+        XCTAssertEqual(args[args.firstIndex(of: "--tools")! + 1], "all")
+
+        settings.routerMode = true
+        args = settings.arguments
+        XCTAssertEqual(args.filter { $0 == "--jinja" }.count, 1)
+        XCTAssertEqual(args.filter { $0 == "--tools" }.count, 1)
+        XCTAssertEqual(args[args.firstIndex(of: "--tools")! + 1], "all")
+        XCTAssertLessThanOrEqual(args.filter { $0 == "--path" }.count, 1)
+    }
+
+    func testAgentToolsArgumentsStayAbsentWhenDisabled() {
+        var settings = makeSettings()
+        settings.jinja = false
+        settings.agentToolsEnabled = false
+        XCTAssertFalse(settings.arguments.contains("--tools"))
+
+        settings.routerMode = true
+        XCTAssertFalse(settings.arguments.contains("--tools"))
+    }
+
     func testBenchmarkWorkloadArguments() {
         var s = makeSettings()
         // Defaults reproduce the classic pp512/tg128 run.
@@ -521,6 +548,8 @@ final class ServerSettingsTests: XCTestCase {
                      "la concurrencia la decide el engine según el tipo de GPU, la app no la fija")
         XCTAssertEqual(env["GGML_METAL_VRAM_RESERVE_MB"], "1024")
         XCTAssertNil(env["GGML_METAL_DEVICE_INDEX"], "gpuIndex -1 no debe fijar índice")
+        XCTAssertTrue(env["PATH"]?.contains("/usr/local/bin") == true)
+        XCTAssertTrue(env["PATH"]?.contains("/opt/homebrew/bin") == true)
     }
 
     func testSingleGPUSelectionPinsDeviceUnlessMultiGPUIsEnabled() {
@@ -650,6 +679,22 @@ final class ServerSettingsTests: XCTestCase {
 // MARK: - Chat
 
 final class ChatMessageTests: XCTestCase {
+    func testInlineMathDetectionSupportsDollarAndParenthesizedForms() {
+        XCTAssertTrue(RichText.containsInlineMath("Energy is $E = mc^2$."))
+        XCTAssertTrue(RichText.containsInlineMath(#"Energy is \(E = mc^2\)."#))
+        XCTAssertFalse(RichText.containsInlineMath(#"The price is \$5."#))
+        XCTAssertFalse(RichText.containsInlineMath("A display block uses $$x$$"))
+    }
+
+    func testSVGSanitizerRemovesActiveAndRemoteContent() {
+        let input = #"<svg onload="bad()"><foreignObject><iframe src="https://evil.test"></iframe></foreignObject><path style="fill:url(https://evil.test/x)"/><script>bad()</script></svg>"#
+        let output = RichContentSanitizer.svg(input)
+        XCTAssertFalse(output.localizedCaseInsensitiveContains("onload"))
+        XCTAssertFalse(output.localizedCaseInsensitiveContains("foreignObject"))
+        XCTAssertFalse(output.localizedCaseInsensitiveContains("https://"))
+        XCTAssertFalse(output.localizedCaseInsensitiveContains("<script"))
+    }
+
     func testThinkingBlockIsSeparated() {
         let msg = ChatMessage(role: "assistant",
                               content: "<think>razonando…</think>La respuesta es 4.")
@@ -672,11 +717,270 @@ final class ChatMessageTests: XCTestCase {
     func testConversationRoundTripsThroughJSON() throws {
         var conv = Conversation(title: "Prueba")
         conv.messages.append(ChatMessage(role: "user", content: "hola"))
-        conv.messages.append(ChatMessage(role: "assistant", content: "¡Hola!", genSpeed: 25.7))
+        conv.messages.append(ChatMessage(
+            role: "assistant", content: "¡Hola!", genSpeed: 25.7,
+            timings: ChatTimings(cachedTokens: 100, promptTokens: 20,
+                                 promptMilliseconds: 10, generatedTokens: 5,
+                                 generationMilliseconds: 250)))
+        conv.draft = ChatDraft(text: "pendiente")
         let data = try JSONEncoder().encode([conv])
         let back = try JSONDecoder().decode([Conversation].self, from: data)
         XCTAssertEqual(back.first?.messages.count, 2)
         XCTAssertEqual(back.first?.messages.last?.genSpeed, 25.7)
+        XCTAssertEqual(back.first?.messages.last?.timings?.generatedTokens, 5)
+        XCTAssertEqual(back.first?.draft?.text, "pendiente")
+    }
+
+    func testServerTimingsAreParsedAndRatesCalculated() throws {
+        let timings = try XCTUnwrap(ChatTimings(json: [
+            "cache_n": 300,
+            "prompt_n": 200,
+            "prompt_ms": 500.0,
+            "predicted_n": 40,
+            "predicted_ms": 2_000.0
+        ]))
+        XCTAssertEqual(timings.cachedTokens, 300)
+        XCTAssertEqual(try XCTUnwrap(timings.promptTokensPerSecond), 400, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(timings.generationTokensPerSecond), 20, accuracy: 0.001)
+    }
+
+    func testStreamAccumulatorCombinesReasoningContentAndFinalMetadata() throws {
+        var stream = ChatStreamAccumulator()
+        let reasoning = #"data: {"choices":[{"delta":{"reasoning_content":"think "}}]}"#
+        let answer = #"data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}],"timings":{"prompt_n":20,"predicted_n":4,"predicted_ms":200},"usage":{"prompt_tokens":20,"completion_tokens":4}}"#
+        XCTAssertTrue(try XCTUnwrap(stream.consume(reasoning)).receivedContent)
+        XCTAssertTrue(try XCTUnwrap(stream.consume(answer)).receivedContent)
+        XCTAssertTrue(try XCTUnwrap(stream.consume("data: [DONE]")).completed)
+        XCTAssertEqual(stream.reasoning, "think ")
+        XCTAssertEqual(stream.visible, "answer")
+        XCTAssertEqual(stream.finishReason, "stop")
+        XCTAssertEqual(stream.timings?.generatedTokens, 4)
+        XCTAssertEqual(stream.usage?.completion, 4)
+    }
+
+    func testStreamAccumulatorMergesFragmentedToolCallsByIndex() throws {
+        var stream = ChatStreamAccumulator()
+        let first = #"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_7","function":{"name":"read_","arguments":"{\"path\":"}}]}}]}"#
+        let second = #"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"file","arguments":"\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#
+        XCTAssertTrue(try XCTUnwrap(stream.consume(first)).receivedToolCall)
+        XCTAssertTrue(try XCTUnwrap(stream.consume(second)).receivedToolCall)
+        let call = try XCTUnwrap(stream.toolCalls.first)
+        XCTAssertEqual(call.serverID, "call_7")
+        XCTAssertEqual(call.name, "read_file")
+        XCTAssertEqual(call.arguments, #"{"path":"a.txt"}"#)
+        XCTAssertEqual(stream.finishReason, "tool_calls")
+    }
+
+    func testToolArgumentsRequireAJSONObject() throws {
+        let value = try ChatToolsService.parseArguments(#"{"path":"a.txt","line":4}"#)
+        XCTAssertEqual(value["path"] as? String, "a.txt")
+        XCTAssertEqual(value["line"] as? Int, 4)
+        XCTAssertThrowsError(try ChatToolsService.parseArguments("[]"))
+    }
+
+    func testToolMessagesRoundTripThroughOpenAIHistory() throws {
+        let call = ChatToolCall(serverID: "call_1", name: "get_datetime", arguments: "{}",
+                                result: "2026-07-21", state: .completed)
+        let messages = [
+            ChatMessage(role: "assistant", content: "", toolCalls: [call]),
+            ChatMessage(role: "tool", content: "2026-07-21", toolCallID: "call_1")
+        ]
+        let history = ChatStore.requestHistory(system: "", summary: nil, messages: messages, from: 0)
+        XCTAssertEqual(history.count, 2)
+        let toolCalls = try XCTUnwrap(history[0]["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(toolCalls.first?["id"] as? String, "call_1")
+        XCTAssertEqual((toolCalls.first?["function"] as? [String: Any])?["name"] as? String,
+                       "get_datetime")
+        XCTAssertEqual(history[1]["role"] as? String, "tool")
+        XCTAssertEqual(history[1]["tool_call_id"] as? String, "call_1")
+    }
+
+    func testBuiltinToolMetadataPreservesDefinition() throws {
+        let json: [String: Any] = [
+            "display_name": "Read file", "tool": "read_file", "type": "builtin",
+            "permissions": ["write": false],
+            "definition": ["type": "function", "function": ["name": "read_file"]]
+        ]
+        let tool = try XCTUnwrap(BuiltinToolInfo(json: json))
+        XCTAssertEqual(tool.displayName, "Read file")
+        XCTAssertFalse(tool.writesData)
+        XCTAssertEqual((tool.openAIDefinition?["function"] as? [String: Any])?["name"] as? String,
+                       "read_file")
+    }
+
+    func testJavaScriptSandboxToolMatchesLlamaContract() throws {
+        let tool = JavaScriptSandboxService.tool
+        XCTAssertEqual(tool.name, "run_javascript")
+        XCTAssertFalse(tool.writesData)
+        let function = try XCTUnwrap(tool.openAIDefinition?["function"] as? [String: Any])
+        XCTAssertEqual(function["name"] as? String, "run_javascript")
+        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
+        XCTAssertEqual(parameters["required"] as? [String], ["code"])
+    }
+
+    func testJavaScriptSandboxReplyFormattingAndTruncation() {
+        XCTAssertEqual(
+            JavaScriptSandboxService.formatReply(logs: ["one", "warn: two"],
+                                                  result: "3", error: nil),
+            ToolExecutionResult(content: "one\nwarn: two\n=> 3", isError: false))
+        XCTAssertEqual(
+            JavaScriptSandboxService.formatReply(logs: [], result: nil, error: nil).content,
+            "(no output)")
+        let error = JavaScriptSandboxService.formatReply(logs: [], result: nil, error: "bad")
+        XCTAssertTrue(error.isError)
+        XCTAssertEqual(error.content, "Error: bad")
+        let long = JavaScriptSandboxService.formatReply(
+            logs: [String(repeating: "x", count: 9_000)], result: nil, error: nil)
+        XCTAssertTrue(long.content.hasSuffix("\n[output truncated]"))
+        XCTAssertEqual(long.content.count,
+                       JavaScriptSandboxService.maximumOutputCharacters + "\n[output truncated]".count)
+    }
+
+    @MainActor
+    func testJavaScriptSandboxExecutesAwaitAndCapturesConsole() async {
+        let result = await JavaScriptSandboxService.execute(arguments: [
+            "code": "console.log('sum'); return await Promise.resolve(2 + 2);",
+            "timeout_ms": 3_000
+        ])
+        XCTAssertFalse(result.isError, result.content)
+        XCTAssertEqual(result.content, "sum\n=> 4")
+    }
+
+    func testSpecializedToolPresentationAcceptsArgumentAliases() {
+        let shell = ToolCallPresentation.make(ChatToolCall(
+            name: "exec_shell_command", arguments: #"{"cmd":"pwd"}"#))
+        XCTAssertEqual(shell.kind, .shell)
+        XCTAssertEqual(shell.code, "pwd")
+
+        let read = ToolCallPresentation.make(ChatToolCall(
+            name: "read_file",
+            arguments: #"{"filePath":"/tmp/a.swift","startLine":3,"count":4}"#))
+        XCTAssertEqual(read.kind, .read)
+        XCTAssertEqual(read.path, "/tmp/a.swift")
+        XCTAssertEqual(read.language, "swift")
+        XCTAssertEqual(read.detail, "lines 3–6")
+    }
+
+    func testSettingsArchiveRoundTripFiltersRuntimeAndUnknownKeys() throws {
+        let sourceName = "ToshLLMTests.Settings.Source.\(UUID().uuidString)"
+        let targetName = "ToshLLMTests.Settings.Target.\(UUID().uuidString)"
+        let source = try XCTUnwrap(UserDefaults(suiteName: sourceName))
+        let target = try XCTUnwrap(UserDefaults(suiteName: targetName))
+        defer {
+            source.removePersistentDomain(forName: sourceName)
+            target.removePersistentDomain(forName: targetName)
+        }
+        source.set(0.42, forKey: SettingsKeys.chatTopP)
+        let mcpData = Data(#"[{"name":"local"}]"#.utf8)
+        source.set(mcpData, forKey: SettingsKeys.mcpServers)
+        source.set("must-not-export", forKey: SettingsKeys.modelPath)
+        let data = try SettingsArchive.exportData(defaults: source)
+        let count = try SettingsArchive.importData(data, defaults: target)
+        XCTAssertGreaterThanOrEqual(count, 1)
+        XCTAssertEqual(target.double(forKey: SettingsKeys.chatTopP), 0.42, accuracy: 0.001)
+        XCTAssertEqual(target.data(forKey: SettingsKeys.mcpServers), mcpData)
+        XCTAssertNil(target.object(forKey: SettingsKeys.modelPath))
+    }
+
+    func testMCPResourceTemplateExpandsPathAndQueryExpressions() {
+        let template = "repo://{owner}/{name}/file{?ref,path}"
+        XCTAssertEqual(MCPURITemplate.variables(in: template), ["owner", "name", "ref", "path"])
+        XCTAssertEqual(
+            MCPURITemplate.expand(template, values: [
+                "owner": "open ai", "name": "llama", "ref": "main", "path": "a/b.swift"
+            ]),
+            "repo://open%20ai/llama/file?ref=main&path=a%2Fb.swift")
+    }
+
+    func testConversationBranchesPreserveAndSwitchCompletePaths() throws {
+        let user = ChatMessage(role: "user", content: "Pregunta")
+        let first = ChatMessage(role: "assistant", content: "Respuesta A")
+        var conversation = Conversation(title: "Ramas", messages: [user, first])
+        conversation.beginAlternativeBranch(messages: [user])
+        conversation.messages.append(ChatMessage(role: "assistant", content: "Respuesta B"))
+        let firstBranch = try XCTUnwrap(conversation.branches?.first)
+        XCTAssertEqual(conversation.branches?.count, 2)
+        XCTAssertTrue(conversation.activateBranch(firstBranch.id))
+        XCTAssertEqual(conversation.messages.last?.content, "Respuesta A")
+        let secondBranch = try XCTUnwrap(conversation.branches?.last)
+        XCTAssertTrue(conversation.activateBranch(secondBranch.id))
+        XCTAssertEqual(conversation.messages.last?.content, "Respuesta B")
+
+        let decoded = try JSONDecoder().decode(
+            Conversation.self, from: JSONEncoder().encode(conversation))
+        XCTAssertEqual(decoded.branches?.count, 2)
+        XCTAssertEqual(decoded.activeBranchID, secondBranch.id)
+    }
+
+    func testLlamaJSONLRoundTripPreservesBranchesReasoningAndAttachments() throws {
+        let user = ChatMessage(role: "user", content: "Pregunta",
+                               attachments: [ChatAttachment(name: "notes.txt", content: "context")],
+                               imageURIs: ["data:image/jpeg;base64,aW1hZ2U="])
+        let first = ChatMessage(role: "assistant", content: "<think>plan</think>Respuesta A")
+        var conversation = Conversation(title: "JSONL", messages: [user, first], pinned: true,
+                                        systemPrompt: "Be useful", enabledToolNames: ["read_file"])
+        conversation.beginAlternativeBranch(messages: [user])
+        conversation.messages.append(ChatMessage(role: "assistant", content: "Respuesta B"))
+
+        let data = try ChatJSONL.encode([conversation])
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertTrue(text.contains(#""harness":"llama.app""#))
+        let decoded = try XCTUnwrap(ChatJSONL.decode(data).first)
+        XCTAssertEqual(decoded.title, "JSONL")
+        XCTAssertEqual(decoded.branches?.count, 2)
+        XCTAssertEqual(decoded.systemPrompt, "Be useful")
+        XCTAssertEqual(decoded.enabledToolNames, ["read_file"])
+        XCTAssertEqual(decoded.branches?.flatMap(\.messages).first(where: { $0.parts.thinking == "plan" })?.parts.body,
+                       "Respuesta A")
+        XCTAssertEqual(decoded.messages.first?.attachments?.first?.content, "context")
+        XCTAssertEqual(decoded.messages.first?.imageURIs?.count, 1)
+    }
+
+    func testAudioAndVideoAttachmentsUseOpenAIMultimodalParts() throws {
+        let audio = ChatAttachment(name: "voice.wav", content: "", mimeType: "audio/wav",
+                                   dataURI: "data:audio/wav;base64,YXVkaW8=")
+        let video = ChatAttachment(name: "clip.mp4", content: "", mimeType: "video/mp4",
+                                   dataURI: "data:video/mp4;base64,dmlkZW8=")
+        let message = ChatMessage(role: "user", content: "Describe", attachments: [audio, video])
+        let history = ChatStore.requestHistory(system: "", summary: nil,
+                                               messages: [message], from: 0)
+        let parts = try XCTUnwrap(history.first?["content"] as? [[String: Any]])
+        XCTAssertEqual(parts.map { $0["type"] as? String }, ["text", "input_audio", "input_video"])
+        let inputAudio = try XCTUnwrap(parts[1]["input_audio"] as? [String: Any])
+        XCTAssertEqual(inputAudio["data"] as? String, "YXVkaW8=")
+        XCTAssertEqual(inputAudio["format"] as? String, "wav")
+        let inputVideo = try XCTUnwrap(parts[2]["input_video"] as? [String: Any])
+        XCTAssertEqual(inputVideo["format"] as? String, "mp4")
+    }
+
+    func testMultimediaFormatsMatchLlamaWebUICompatibilityRules() {
+        XCTAssertEqual(ChatAttachment(name: "voice.wav", content: "", mimeType: "audio/x-wav").audioInputFormat, "wav")
+        XCTAssertEqual(ChatAttachment(name: "voice.flac", content: "", mimeType: "audio/flac").audioInputFormat, "mp3")
+        XCTAssertEqual(ChatAttachment(name: "clip.ogg", content: "", mimeType: "video/ogg").videoInputFormat, "ogg")
+        XCTAssertEqual(ChatAttachment(name: "clip.mov", content: "", mimeType: "video/quicktime").videoInputFormat, "auto")
+    }
+
+    func testUnsupportedHistoricalMediaIsFilteredForSelectedModel() throws {
+        let audio = ChatAttachment(name: "voice.wav", content: "", mimeType: "audio/wav",
+                                   dataURI: "data:audio/wav;base64,YXVkaW8=")
+        let video = ChatAttachment(name: "clip.mp4", content: "", mimeType: "video/mp4",
+                                   dataURI: "data:video/mp4;base64,dmlkZW8=")
+        let message = ChatMessage(role: "user", content: "Describe",
+                                  attachments: [audio, video], imageURIs: ["data:image/jpeg;base64,aW1hZ2U="])
+        let history = ChatStore.requestHistory(
+            system: "", summary: nil, messages: [message], from: 0,
+            modalities: ModelModalities(vision: false, audio: true, video: false))
+        let parts = try XCTUnwrap(history.first?["content"] as? [[String: Any]])
+        XCTAssertEqual(parts.compactMap { $0["type"] as? String }, ["text", "input_audio"])
+    }
+
+    func testResumableStreamIdentityIncludesRouterModelAndEscapesURL() throws {
+        let id = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let identity = ChatStreamIdentity.value(conversationID: id, model: "model/name")
+        XCTAssertEqual(identity, "11111111-1111-1111-1111-111111111111::model/name")
+        let url = try XCTUnwrap(ChatStreamIdentity.resumeURL(port: 8080, identity: identity, from: 42))
+        XCTAssertTrue(url.absoluteString.contains("model%2Fname"))
+        XCTAssertTrue(url.absoluteString.hasSuffix("?from=42"))
     }
 
     func testLegacyConversationWithoutCompactionFieldsDecodes() throws {
@@ -856,6 +1160,7 @@ final class BenchAndProfileTests: XCTestCase {
                             fa: "amd-gpu")
         XCTAssertEqual(r.configLabel, "ncmoe 24 · K:turbo4 · V:turbo3 · FA AMD GPU · turbo")
         XCTAssertFalse(r.shortModel.contains(".gguf"))
+        XCTAssertEqual(r.quantization, "UD-Q4_K_S")
     }
 
     func testBenchmarkFlashAttentionRouteLabelsCPUAndGPU() {

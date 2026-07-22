@@ -8,6 +8,7 @@ private enum MDBlock: Equatable {
     case bullet([String])
     case numbered([String])
     case code(String, String)   // language, content
+    case math(String)
     case quote(String)
     case table([String], [[String]])   // headers, rows
     case rule
@@ -115,7 +116,23 @@ struct RichText: View {
             lines = lines.dropFirst()
             let l = String(line)
 
-            if let fence = fenceInfo(l) {
+            let trimmed = l.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("$$") || trimmed == "\\[" {
+                flush()
+                let bracketed = trimmed == "\\["
+                let closing = bracketed ? "\\]" : "$$"
+                if !bracketed, trimmed.count > 4, trimmed.hasSuffix("$$") {
+                    blocks.append(.math(String(trimmed.dropFirst(2).dropLast(2))))
+                    continue
+                }
+                var formula: [String] = []
+                while let next = lines.first {
+                    lines = lines.dropFirst()
+                    if next.trimmingCharacters(in: .whitespaces) == closing { break }
+                    formula.append(String(next))
+                }
+                blocks.append(.math(formula.joined(separator: "\n")))
+            } else if let fence = fenceInfo(l) {
                 flush()
                 var code: [String] = []
                 // CommonMark: close only on a bare fence of the same char and
@@ -235,6 +252,11 @@ struct RichText: View {
         }
         return attr
     }
+
+    static func containsInlineMath(_ value: String) -> Bool {
+        value.range(of: #"\\\([\s\S]+?\\\)|(?<![\\$])\$(?!\$)[\s\S]+?(?<![\\$])\$(?!\$)"#,
+                    options: .regularExpression) != nil
+    }
 }
 
 /// Renders the still-growing tail of a streaming answer cheaply. Completed
@@ -298,7 +320,11 @@ private struct MDBlockView: View, Equatable {
     var body: some View {
         switch block {
         case .paragraph(let s):
-            Text(RichText.inline(s)).textSelection(.enabled)
+            if RichText.containsInlineMath(s) {
+                InlineMathText(source: s)
+            } else {
+                Text(RichText.inline(s)).textSelection(.enabled)
+            }
         case .header(let level, let s):
             Text(RichText.inline(s))
                 .font(level <= 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
@@ -333,7 +359,13 @@ private struct MDBlockView: View, Equatable {
                 }
             }
         case .code(let lang, let content):
-            CodeBlock(language: lang, content: content)
+            switch lang.lowercased() {
+            case "mermaid": RichContentBlock(source: content, kind: .mermaid)
+            case "svg": RichContentBlock(source: content, kind: .svg)
+            default: CodeBlock(language: lang, content: content)
+            }
+        case .math(let formula):
+            RichContentBlock(source: formula, kind: .math)
         case .quote(let s):
             HStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 2).fill(.tertiary).frame(width: 3)
@@ -386,6 +418,7 @@ struct CodeBlock: View {
     let content: String
     @EnvironmentObject var loc: Localizer
     @State private var copied = false
+    @State private var previewing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -395,12 +428,23 @@ struct CodeBlock: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
+                    previewing = true
+                } label: {
+                    Label(loc.t("Ampliar código", "Expand code"),
+                          systemImage: "arrow.up.left.and.arrow.down.right")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .help(loc.t("Abrir código en una vista amplia", "Open code in a larger view"))
+                Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(content, forType: .string)
                     copied = true
                     Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
                 } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    Label(loc.t("Copiar código", "Copy code"),
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .labelStyle(.iconOnly)
                         .font(.system(size: 10))
                         .foregroundStyle(copied ? .green : .secondary)
                 }
@@ -408,16 +452,18 @@ struct CodeBlock: View {
                 .help(loc.t("Copiar código", "Copy code"))
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.black.opacity(0.35))
+            .background(Color(nsColor: OneDarkPro.background).brightness(-0.04))
 
             ScrollView(.horizontal) {
-                Text(content)
-                    .font(.system(size: 12, design: .monospaced))
+                SyntaxHighlightedCode(source: content, language: language)
                     .padding(10)
-                    .textSelection(.enabled)
             }
-            .background(.black.opacity(0.22))
+            .background(Color(nsColor: OneDarkPro.background))
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .sheet(isPresented: $previewing) {
+            CodePreview(language: language, content: content)
+                .environmentObject(loc)
+        }
     }
 }

@@ -20,8 +20,6 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
     @AppStorage(SettingsKeys.ctx) private var ctx = 16384
-    @AppStorage(SettingsKeys.chatAutoCompact) private var chatAutoCompact = true
-    @AppStorage(SettingsKeys.smoothTyping) private var smoothTyping = true
     @AppStorage(SettingsKeys.threads) private var threads = 6
     @AppStorage(SettingsKeys.flashAttn) private var flashAttn = "auto"
     @AppStorage(SettingsKeys.noMmap) private var noMmap = true
@@ -52,6 +50,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.localNetworkDiscovery) private var localNetworkDiscovery = false
     @State private var profileName = ""
     @State private var showResetConfirm = false
+    @State private var settingsTransferMessage: String?
 
     private var availableKVTypes: [String] {
         // Only f16/q8_0/q4_0 have an FA-AMD KV kernel; the other quant types fall
@@ -122,6 +121,14 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button(loc.t("Importar", "Import"), systemImage: "square.and.arrow.down") {
+                    importSettings()
+                }
+                .buttonStyle(.bordered)
+                Button(loc.t("Exportar", "Export"), systemImage: "square.and.arrow.up") {
+                    exportSettings()
+                }
+                .buttonStyle(.bordered)
                 Button(role: .destructive) { showResetConfirm = true } label: {
                     Label(loc.t("Restablecer opciones por defecto", "Reset options to defaults"),
                           systemImage: "arrow.counterclockwise")
@@ -149,6 +156,41 @@ struct SettingsView: View {
         } message: {
             Text(loc.t("Tus modelos descargados y la carpeta de modelos se conservan.",
                        "Your downloaded models and models folder are kept."))
+        }
+        .alert(loc.t("Ajustes", "Settings"),
+               isPresented: Binding(get: { settingsTransferMessage != nil },
+                                    set: { if !$0 { settingsTransferMessage = nil } })) {
+            Button("OK") { settingsTransferMessage = nil }
+        } message: {
+            Text(settingsTransferMessage ?? "")
+        }
+    }
+
+    private func exportSettings() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "ToshLLM Settings.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try SettingsArchive.exportData().write(to: url, options: .atomic)
+            settingsTransferMessage = loc.t("Ajustes exportados correctamente.",
+                                            "Settings exported successfully.")
+        } catch {
+            settingsTransferMessage = error.localizedDescription
+        }
+    }
+
+    private func importSettings() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let count = try SettingsArchive.importData(Data(contentsOf: url))
+            settingsTransferMessage = loc.t("Se importaron \(count) ajustes. Reinicia el servidor para aplicar los cambios del motor.",
+                                            "Imported \(count) settings. Restart the server to apply engine changes.")
+        } catch {
+            settingsTransferMessage = error.localizedDescription
         }
     }
 
@@ -396,12 +438,6 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Toggle(loc.t("Autocompactar conversaciones largas", "Auto-compact long conversations"), isOn: $chatAutoCompact)
-                    .infoTip(loc.t("Al superar ~70% del contexto, el chat resume los mensajes antiguos con el propio modelo y envía solo el resumen + los mensajes recientes. La conversación completa sigue visible y guardada.",
-                                "Past ~70% of the context, the chat summarizes older messages with the model itself and sends only the summary + recent messages. The full conversation stays visible and saved."))
-                Toggle(loc.t("Animación de escritura fluida", "Smooth typing animation"), isOn: $smoothTyping)
-                    .infoTip(loc.t("Revela la respuesta carácter a carácter a ritmo constante (efecto máquina de escribir), en vez de a saltos según llegan los tokens. Si notas que la generación se ralentiza en tu GPU, desactívalo para volver al renderizado directo (más rápido).",
-                                "Reveals the answer character by character at a steady rate (typewriter effect) instead of in bursts as tokens arrive. If you notice generation slowing on your GPU, turn it off to return to direct rendering (faster)."))
                 Picker(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)"), selection: $cacheTypeK) {
                     ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
                 }

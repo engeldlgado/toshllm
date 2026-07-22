@@ -28,6 +28,16 @@ struct BenchResult: Codable, Identifiable {
 
     var shortModel: String { ModelName(model).title }
 
+    var quantization: String {
+        let stored = ModelName(model).quant
+        if !stored.isEmpty { return stored }
+        if let path = profile?.modelPath {
+            let fromProfile = ModelName.forPath(path).quant
+            if !fromProfile.isEmpty { return fromProfile }
+        }
+        return "—"
+    }
+
     var configLabel: String {
         var parts: [String] = []
         if kind == "real" { parts.append("gen real") }

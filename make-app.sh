@@ -65,6 +65,19 @@ fi
 mkdir -p "$APP/Contents/Resources/test-ui"
 cp Assets/test-ui/index.html "$APP/Contents/Resources/test-ui/"
 
+mkdir -p "$APP/Contents/Resources/rich-content/mermaid/dist" \
+         "$APP/Contents/Resources/rich-content/katex/dist/fonts" \
+         "$APP/Contents/Resources/rich-content/marked/lib"
+cp vendor/llama.cpp/tools/ui/node_modules/mermaid/dist/mermaid.min.js \
+   "$APP/Contents/Resources/rich-content/mermaid/dist/"
+cp vendor/llama.cpp/tools/ui/node_modules/katex/dist/katex.min.js \
+   vendor/llama.cpp/tools/ui/node_modules/katex/dist/katex.min.css \
+   "$APP/Contents/Resources/rich-content/katex/dist/"
+cp vendor/llama.cpp/tools/ui/node_modules/katex/dist/fonts/* \
+   "$APP/Contents/Resources/rich-content/katex/dist/fonts/"
+cp vendor/llama.cpp/tools/ui/node_modules/marked/lib/marked.umd.js \
+   "$APP/Contents/Resources/rich-content/marked/lib/"
+
 # Community translation overlays (English-string -> translation). Optional:
 # es/en are built in; missing keys fall back to English. Copied both for the
 # native app (Resources/lang) and for the web console to fetch (test-ui/lang).
@@ -112,6 +125,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     </dict>
     <key>NSLocalNetworkUsageDescription</key>
     <string>ToshLLM can expose and advertise its local OpenAI-compatible API to devices on your trusted local network.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ToshLLM records audio only when you press the microphone button, so you can send it to a local audio-capable model.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_http._tcp.</string>

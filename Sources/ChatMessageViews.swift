@@ -33,7 +33,10 @@ struct MessageBubble: View, Equatable {
     let isLastUser: Bool
     let canRegenerate: Bool
     let onRegenerate: () -> Void
+    let onContinue: () -> Void
     let onEdit: () -> Void
+    let onFork: () -> Void
+    let onDelete: () -> Void
 
     // Skips re-rendering finished bubbles while another one streams; without
     // this every visible bubble re-parses its markdown on each flush. The
@@ -48,15 +51,39 @@ struct MessageBubble: View, Equatable {
     @State private var thinkExpanded = false
     @State private var copied = false
     @State private var hovering = false
+    @State private var hoverDismissTask: Task<Void, Never>?
+    @State private var showingMetrics = false
+    @State private var confirmingDelete = false
+    @State private var previewAttachment: ChatAttachment?
+    @State private var showRawOutput = false
+    @FocusState private var actionsFocused: Bool
 
     private var isUser: Bool { message.role == "user" }
+    private var isTool: Bool { message.role == "tool" }
+
+    private func updateActionsHover(_ isInside: Bool) {
+        hoverDismissTask?.cancel()
+        hoverDismissTask = nil
+
+        if isInside {
+            hovering = true
+            return
+        }
+
+        hoverDismissTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(280))
+            guard !Task.isCancelled else { return }
+            hovering = false
+        }
+    }
 
     /// One action affordance: an icon with a generous, fixed hit area so it is
-    /// reliably clickable. Lives in a stable row under the bubble, not on hover.
+    /// reliably clickable. Its row keeps a stable layout while appearing on hover.
     private func actionButton(_ icon: String, help: String,
                               tint: Color = .secondary, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon)
+            Label(help, systemImage: icon)
+                .labelStyle(.iconOnly)
                 .font(.system(size: 12))
                 .foregroundStyle(tint)
                 .frame(width: 28, height: 24)
@@ -66,9 +93,8 @@ struct MessageBubble: View, Equatable {
         .help(help)
     }
 
-    /// Copy / regenerate / edit, in a row beneath the message. Always present
-    /// (not hover-gated) so every message — old ones included — stays
-    /// reachable; the row just dims when the pointer is elsewhere.
+    /// Copy / regenerate / edit. The stable row becomes visible on pointer or
+    /// keyboard focus, avoiding visual noise without making actions inaccessible.
     @ViewBuilder
     private var actionsRow: some View {
         HStack(spacing: 0) {
@@ -85,15 +111,38 @@ struct MessageBubble: View, Equatable {
                 actionButton("arrow.clockwise",
                              help: loc.t("Regenerar respuesta", "Regenerate response"),
                              action: onRegenerate)
+                actionButton("arrow.right.to.line.compact",
+                             help: loc.t("Continuar respuesta", "Continue response"),
+                             action: onContinue)
             }
-            if isLastUser && canRegenerate {
+            if isUser && canRegenerate {
                 actionButton("pencil",
                              help: loc.t("Editar y reenviar", "Edit and resend"),
                              action: onEdit)
             }
+            actionButton("arrow.triangle.branch",
+                         help: loc.t("Bifurcar conversación aquí", "Fork conversation here"),
+                         action: onFork)
+            actionButton("trash",
+                         help: loc.t("Eliminar desde este mensaje", "Delete from this message"),
+                         tint: .red) {
+                confirmingDelete = true
+            }
+            if !isUser && !isTool {
+                actionButton(showRawOutput ? "doc.richtext.fill" : "doc.plaintext",
+                             help: showRawOutput
+                             ? loc.t("Mostrar respuesta renderizada", "Show rendered response")
+                             : loc.t("Mostrar salida sin procesar", "Show raw output")) {
+                    showRawOutput.toggle()
+                }
+            }
         }
-        .opacity(hovering ? 1 : 0.45)
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .contentShape(Rectangle())
+        .focusable()
+        .focused($actionsFocused)
+        .onHover(perform: updateActionsHover)
+        .opacity(hovering || actionsFocused || confirmingDelete ? 1 : 0)
+        .animation(.easeOut(duration: 0.12), value: hovering || actionsFocused)
     }
 
     var body: some View {
@@ -101,7 +150,7 @@ struct MessageBubble: View, Equatable {
             if isUser { Spacer(minLength: 70) }
 
             if !isUser {
-                Image(systemName: "cpu.fill")
+                Image(systemName: isTool ? "wrench.and.screwdriver.fill" : "cpu.fill")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.appAccent)
                     .frame(width: 26, height: 26)
@@ -111,7 +160,9 @@ struct MessageBubble: View, Equatable {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
                 // header
                 HStack(spacing: 8) {
-                    Text(isUser ? loc.t("Tú", "You") : loc.t("Asistente", "Assistant"))
+                    Text(isUser ? loc.t("Tú", "You")
+                         : isTool ? loc.t("Herramienta", "Tool")
+                         : loc.t("Asistente", "Assistant"))
                         .font(.caption.weight(.medium))
                     Text(message.date.formatted(date: .omitted, time: .shortened))
                         .font(.caption2).foregroundStyle(.tertiary)
@@ -127,10 +178,27 @@ struct MessageBubble: View, Equatable {
                             .help(loc.t("Aceptación de la predicción multi-token: qué fracción de los tokens que el cabezal MTP adelantó resultó correcta. Más alta = más aceleración, sin cambio de calidad.",
                                         "Multi-token prediction acceptance: the fraction of tokens the MTP head drafted that turned out right. Higher = more speedup, no quality change."))
                     }
+                    if let timings = message.timings {
+                        Button {
+                            showingMetrics.toggle()
+                        } label: {
+                            Label(loc.t("Métricas", "Metrics"), systemImage: "gauge.with.dots.needle.33percent")
+                                .labelStyle(.iconOnly)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help(loc.t("Métricas de procesamiento y generación", "Prompt and generation metrics"))
+                        .popover(isPresented: $showingMetrics, arrowEdge: .bottom) {
+                            ChatMetricsView(timings: timings)
+                        }
+                    }
                 }
 
                 // body
                 VStack(alignment: .leading, spacing: 6) {
+                    if !showRawOutput, let calls = message.toolCalls {
+                        ForEach(calls) { ToolCallCard(call: $0) }
+                    }
                     if let imgs = message.imageURIs, !imgs.isEmpty {
                         HStack(spacing: 6) {
                             ForEach(Array(imgs.enumerated()), id: \.offset) { _, uri in
@@ -145,7 +213,14 @@ struct MessageBubble: View, Equatable {
                     if let files = message.attachments, !files.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(files) { a in
-                                Label(a.name, systemImage: "doc.text")
+                                Button {
+                                    if a.mediaKind != nil { previewAttachment = a }
+                                } label: {
+                                    Label(a.name, systemImage: a.mediaKind == "audio" ? "waveform"
+                                          : a.mediaKind == "video" ? "film" : "doc.text")
+                                }
+                                    .buttonStyle(.plain)
+                                    .disabled(a.mediaKind == nil)
                                     .font(.caption)
                                     .padding(.horizontal, 8).padding(.vertical, 3)
                                     .background(.quaternary.opacity(0.7), in: Capsule())
@@ -156,7 +231,11 @@ struct MessageBubble: View, Equatable {
                     }
                     let parts = message.parts
                     let isThinkingLive = streaming && parts.body.isEmpty && parts.thinking != nil
-                    if let think = parts.thinking, !think.isEmpty {
+                    if showRawOutput {
+                        Text(rawOutput)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    } else if let think = parts.thinking, !think.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Button {
                                 withAnimation(.easeInOut(duration: 0.2)) { thinkExpanded.toggle() }
@@ -173,7 +252,11 @@ struct MessageBubble: View, Equatable {
                             }
                         }
                     }
-                    if !parts.body.isEmpty || parts.thinking == nil {
+                    if showRawOutput {
+                        EmptyView()
+                    } else if isTool {
+                        ToolResultCard(message: message)
+                    } else if !parts.body.isEmpty || parts.thinking == nil {
                         RichText(text: isUser ? message.content : parts.body)
                     }
                     if streaming {
@@ -203,7 +286,32 @@ struct MessageBubble: View, Equatable {
             }
             if !isUser { Spacer(minLength: 70) }
         }
-        .onHover { hovering = $0 }
+        .contentShape(Rectangle())
+        .onHover(perform: updateActionsHover)
+        .onDisappear {
+            hoverDismissTask?.cancel()
+            hoverDismissTask = nil
+        }
+        .confirmationDialog(
+            loc.t("¿Eliminar este mensaje y todo lo que sigue?",
+                  "Delete this message and everything after it?"),
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button(loc.t("Eliminar", "Delete"), role: .destructive, action: onDelete)
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { }
+        }
+        .sheet(item: $previewAttachment) { MediaAttachmentPreview(attachment: $0) }
+    }
+
+    private var rawOutput: String {
+        if let raw = message.rawOutput, !raw.isEmpty { return raw }
+        var sections = [message.content]
+        for call in message.toolCalls ?? [] {
+            sections.append("[tool_call \(call.serverID ?? call.id.uuidString)]\n\(call.name)\n\(call.arguments)")
+            if let result = call.result { sections.append("[tool_result]\n\(result)") }
+        }
+        return sections.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 }
 
@@ -429,4 +537,3 @@ struct LiveSpeedBadge: View {
         }
     }
 }
-

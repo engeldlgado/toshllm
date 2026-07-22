@@ -11,11 +11,42 @@ struct ChatAttachment: Identifiable, Codable, Equatable {
     var id = UUID()
     var name: String
     var content: String
+    var mimeType: String? = nil
+    var dataURI: String? = nil
+    var byteCount: Int? = nil
 
     /// Rough token estimate (chars/4) for context budgeting in the UI.
     var estimatedTokens: Int { max(1, content.count / 4) }
 
     var fenceHint: String { (name as NSString).pathExtension.lowercased() }
+
+    var mediaKind: String? {
+        guard let mimeType else { return nil }
+        if mimeType.hasPrefix("audio/") { return "audio" }
+        if mimeType.hasPrefix("video/") { return "video" }
+        return nil
+    }
+
+    var base64Payload: String? {
+        guard let dataURI, let comma = dataURI.firstIndex(of: ",") else { return nil }
+        return String(dataURI[dataURI.index(after: comma)...])
+    }
+
+    var audioInputFormat: String {
+        let normalized = (mimeType ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let waveTypes: Set<String> = [
+            "audio/wav", "audio/wave", "audio/x-wav", "audio/x-wave",
+            "audio/vnd.wave", "audio/x-pn-wav",
+        ]
+        return waveTypes.contains(normalized) ? "wav" : "mp3"
+    }
+
+    var videoInputFormat: String {
+        let normalized = (mimeType ?? "").lowercased()
+        if normalized.contains("mp4") { return "mp4" }
+        if normalized.contains("ogg") { return "ogg" }
+        return "auto"
+    }
 }
 
 struct ChatMessage: Identifiable, Codable, Equatable {
@@ -25,6 +56,11 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var date = Date()
     var genSpeed: Double?     // t/s for this response
     var mtpAccept: Double?    // MTP acceptance 0-1, when speculation ran
+    var timings: ChatTimings? = nil
+    var model: String? = nil
+    var rawOutput: String? = nil
+    var toolCalls: [ChatToolCall]? = nil
+    var toolCallID: String? = nil
     // Optional keeps pre-attachment JSON decodable.
     var attachments: [ChatAttachment]? = nil
     // Attached images as data URIs (data:image/jpeg;base64,…) for vision models.
@@ -34,10 +70,10 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     /// then the typed text.
     var wireContent: String {
         guard let attachments, !attachments.isEmpty else { return content }
-        let blocks = attachments.map { a in
+        let blocks = attachments.filter { $0.mediaKind == nil }.map { a in
             "File: \(a.name)\n```\(a.fenceHint)\n\(a.content)\n```"
         }
-        return (blocks.joined(separator: "\n\n") + "\n\n" + content)
+        return ((blocks.isEmpty ? "" : blocks.joined(separator: "\n\n") + "\n\n") + content)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -74,6 +110,49 @@ struct Conversation: Identifiable, Codable {
     /// Per-conversation system prompt. Empty/nil falls back to the project's,
     /// then to the global one.
     var systemPrompt: String? = nil
+    var draft: ChatDraft? = nil
+    var branches: [ChatBranch]? = nil
+    var activeBranchID: UUID? = nil
+    var enabledToolNames: [String]? = nil
+}
+
+struct ChatBranch: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var messages: [ChatMessage]
+    var created = Date()
+}
+
+extension Conversation {
+    mutating func beginAlternativeBranch(messages newMessages: [ChatMessage]) {
+        var values = branches ?? []
+        if values.isEmpty {
+            let original = ChatBranch(name: "Branch 1", messages: messages)
+            values.append(original)
+            activeBranchID = original.id
+        } else if let activeBranchID,
+                  let index = values.firstIndex(where: { $0.id == activeBranchID }) {
+            values[index].messages = messages
+        }
+        let branch = ChatBranch(name: "Branch \(values.count + 1)", messages: newMessages)
+        values.append(branch)
+        branches = values
+        activeBranchID = branch.id
+        messages = newMessages
+    }
+
+    mutating func activateBranch(_ id: UUID) -> Bool {
+        guard var values = branches,
+              let target = values.firstIndex(where: { $0.id == id }) else { return false }
+        if let activeBranchID,
+           let current = values.firstIndex(where: { $0.id == activeBranchID }) {
+            values[current].messages = messages
+        }
+        branches = values
+        activeBranchID = id
+        messages = values[target].messages
+        return true
+    }
 }
 
 /// Folder in the chat sidebar grouping conversations, with its own system
@@ -218,8 +297,32 @@ final class StreamBuffer: @unchecked Sendable {
     }
 }
 
+private struct AgentRunContext {
+    let port: Int
+    let temperature: Double
+    let maxTokens: Int
+    let system: String
+    let thinking: Bool
+    let sampling: ChatSamplingSettings
+    let modalities: ModelModalities?
+    var remainingTurns: Int
+    var tools: [BuiltinToolInfo]
+}
+
 @MainActor
 final class ChatStore: ObservableObject {
+    nonisolated static func reasoningBudget(for effort: String) -> Int? {
+        switch effort {
+        case "low": 512
+        case "medium": 2_048
+        case "high": 8_192
+        default: nil
+        }
+    }
+    private static var configuredAgentTurnLimit: Int {
+        max(1, UserDefaults.standard.object(forKey: SettingsKeys.chatAgenticMaxTurns) as? Int ?? 10)
+    }
+
     @Published var conversations: [Conversation] = []
     @Published var projects: [ChatProject] = []
     @Published var currentID: UUID?
@@ -228,6 +331,9 @@ final class ChatStore: ObservableObject {
     @Published var generatingConvID: UUID?
     @Published var compacting = false
     @Published var lastError: String?
+    @Published var pendingToolPermission: PendingToolPermission?
+    @Published var pendingAgentContinuation: PendingAgentContinuation?
+    @Published var queuedMessage: QueuedChatMessage?
     let live = LiveStream()
     /// Streaming uses a dedicated session, not URLSession.shared, so the long
     /// idle timeout actually applies. A per-request `timeoutInterval` is
@@ -257,6 +363,11 @@ final class ChatStore: ObservableObject {
     /// disk cache persistence is on. Reset to nil whenever a fresh engine starts
     /// (empty slots), so the next turn restores the active conversation.
     private var slotConvID: UUID?
+    private var agentContext: AgentRunContext?
+
+    var agentFlowActive: Bool {
+        generating || pendingToolPermission != nil || pendingAgentContinuation != nil || agentContext != nil
+    }
 
     private var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -309,6 +420,16 @@ final class ChatStore: ObservableObject {
 
     func delete(_ c: Conversation) {
         if generating && c.id == currentID { stop() }
+        if pendingToolPermission?.conversationID == c.id {
+            pendingToolPermission = nil
+            agentContext = nil
+            task?.cancel()
+        }
+        if pendingAgentContinuation?.conversationID == c.id {
+            pendingAgentContinuation = nil
+            agentContext = nil
+        }
+        if queuedMessage?.conversationID == c.id { queuedMessage = nil }
         conversations.removeAll { $0.id == c.id }
         if currentID == c.id { currentID = conversations.first?.id }
         if conversations.isEmpty { newConversation() }
@@ -437,9 +558,14 @@ final class ChatStore: ObservableObject {
 
     func send(text: String, attachments: [ChatAttachment] = [], images: [String] = [],
               port: Int, temperature: Double,
-              maxTokens: Int, system: String, thinking: Bool) {
+              maxTokens: Int, system: String, thinking: Bool,
+              sampling: ChatSamplingSettings = ChatSamplingSettings(),
+              modalities: ModelModalities? = nil) {
         guard !generating, let i = currentIndex else { return }
         lastError = nil
+        pendingAgentContinuation = nil
+        queuedMessage = nil
+        agentContext = nil
         conversations[i].messages.append(ChatMessage(role: "user", content: text,
                                                      attachments: attachments.isEmpty ? nil : attachments,
                                                      imageURIs: images.isEmpty ? nil : images))
@@ -447,17 +573,39 @@ final class ChatStore: ObservableObject {
             let smart = Self.smartTitle(from: text)
             conversations[i].title = smart.isEmpty ? (attachments.first?.name ?? "…") : smart
         }
-        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system, thinking: thinking)
+        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens,
+               system: system, thinking: thinking, sampling: sampling, modalities: modalities)
     }
 
-    func regenerate(port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
+    func regenerate(port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool,
+                    sampling: ChatSamplingSettings = ChatSamplingSettings(),
+                    modalities: ModelModalities? = nil) {
         guard !generating, let i = currentIndex,
               conversations[i].messages.last?.role == "assistant" else { return }
-        conversations[i].messages.removeLast()
-        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens, system: system, thinking: thinking)
+        let path = Array(conversations[i].messages.dropLast())
+        beginAlternativeBranch(conversationIndex: i, messages: path)
+        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens,
+               system: system, thinking: thinking, sampling: sampling, modalities: modalities)
     }
 
-    private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int, system: String, thinking: Bool) {
+    func continueResponse(port: Int, temperature: Double, maxTokens: Int,
+                          system: String, thinking: Bool,
+                          sampling: ChatSamplingSettings = ChatSamplingSettings(),
+                          modalities: ModelModalities? = nil) {
+        guard !generating, let i = currentIndex,
+              conversations[i].messages.last?.role == "assistant" else { return }
+        stream(into: i, port: port, temperature: temperature, maxTokens: maxTokens,
+               system: system, thinking: thinking,
+               sampling: sampling, modalities: modalities,
+               continuationInstruction: "Continue exactly where the previous response stopped. Do not repeat any text.")
+    }
+
+    private func stream(into i: Int, port: Int, temperature: Double, maxTokens: Int,
+                        system: String, thinking: Bool,
+                        sampling: ChatSamplingSettings = ChatSamplingSettings(),
+                        modalities: ModelModalities? = nil,
+                        continuationInstruction: String? = nil,
+                        agentRun: AgentRunContext? = nil) {
         generating = true
         generatingConvID = conversations[i].id
         live.reset()
@@ -465,15 +613,23 @@ final class ChatStore: ObservableObject {
         // The user can switch or delete conversations mid-stream; the result
         // must land in the one this request started from, found by id.
         let convID = conversations[i].id
+        let toolsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.agentToolsEnabled)
+        let javaScriptEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.jsSandboxEnabled)
+        let agentTurnLimit = Self.configuredAgentTurnLimit
+        let enabledToolNames = conversations[i].enabledToolNames
 
         var history = Self.requestHistory(system: system,
                                           summary: conversations[i].summary,
                                           messages: conversations[i].messages,
-                                          from: conversations[i].summarizedCount ?? 0)
+                                          from: conversations[i].summarizedCount ?? 0,
+                                          modalities: modalities)
+        if let continuationInstruction {
+            history.append(["role": "user", "content": continuationInstruction])
+        }
 
         // Reasoning off can come from the toggle or a typed /no_think; a typed
         // switch overrides the toggle for this turn. Not persisted to history.
-        var reasoningOff = !thinking
+        var reasoningOff = !thinking || sampling.reasoningEffort == "off"
         if let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
             let typed = Self.messageText(history[last]["content"])
             if typed.contains("/no_think") { reasoningOff = true }
@@ -528,18 +684,17 @@ final class ChatStore: ObservableObject {
             // Token arrival times within the last seconds; drives the live
             // t/s as an instantaneous reading instead of a cumulative average.
             var stamps: [Date] = []
-            var reasoning = ""
-            var visible = ""
+            var accumulator = ChatStreamAccumulator()
+            var availableTools = agentRun?.tools ?? []
             var lastFlush = Date.distantPast
-            var usage: (prompt: Int, completion: Int)?
-            var mtpAccept: Double?
-            var finishReason: String?
             var cancelled = false
             var reportedError = false
+            var bytesReceived = 0
 
             func composed() -> String {
-                guard !reasoning.isEmpty else { return visible }
-                return "<think>" + reasoning + (visible.isEmpty ? "" : "</think>" + visible)
+                guard !accumulator.reasoning.isEmpty else { return accumulator.visible }
+                return "<think>" + accumulator.reasoning
+                    + (accumulator.visible.isEmpty ? "" : "</think>" + accumulator.visible)
             }
 
             // Hands the latest snapshot to the display pump at most ~12 Hz.
@@ -551,7 +706,7 @@ final class ChatStore: ObservableObject {
             func flush() {
                 let now = Date()
                 let interval: TimeInterval = {
-                    let n = visible.count
+                    let n = accumulator.visible.count
                     return n > 12000 ? 0.6 : n > 6000 ? 0.35 : n > 2500 ? 0.18 : 0.08
                 }()
                 guard now.timeIntervalSince(lastFlush) > interval else { return }
@@ -566,13 +721,42 @@ final class ChatStore: ObservableObject {
                     let dt = now.timeIntervalSince(first)
                     if dt > 0.3 { speed = Double(stamps.count - 1) / dt }
                 }
-                buffer.write(reasoning: reasoning, visible: visible, speed: speed)
+                buffer.write(reasoning: accumulator.reasoning,
+                             visible: accumulator.visible, speed: speed)
+            }
+
+            func drain(_ bytes: URLSession.AsyncBytes) async throws -> Bool {
+                for try await line in bytes.lines {
+                    if Task.isCancelled { throw CancellationError() }
+                    bytesReceived += line.utf8.count + 1
+                    guard let event = try accumulator.consume(line) else { continue }
+                    if let progress = event.progress { buffer.writeProgress(progress) }
+                    if event.receivedContent {
+                        let now = Date()
+                        if tFirst == nil { tFirst = now }
+                        nTokens += 1
+                        stamps.append(now)
+                        flush()
+                    }
+                    if event.completed { return true }
+                }
+                return false
             }
 
             do {
                 // Restore this conversation's persisted KV (if any) so the slot
                 // holds the unchanged history and only the new turn is prefilled.
                 await self?.prepareSlot(convID: convID, port: port)
+
+                if availableTools.isEmpty {
+                    if toolsEnabled { availableTools = try await ChatToolsService.list(port: port) }
+                    if javaScriptEnabled { availableTools.append(JavaScriptSandboxService.tool) }
+                    availableTools += await ToshMCPService.shared.discoverTools()
+                    if let enabledToolNames {
+                        let selected = Set(enabledToolNames)
+                        availableTools.removeAll { !selected.contains($0.name) }
+                    }
+                }
 
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
                 req.httpMethod = "POST"
@@ -585,10 +769,31 @@ final class ChatStore: ObservableObject {
                 if let key = ServerSettings.activeAPIKey() {
                     req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
                 }
+                let activeModel = ServerSettings.activeRouterModel()
+                let streamIdentity = ChatStreamIdentity.value(conversationID: convID, model: activeModel)
+                req.setValue(streamIdentity, forHTTPHeaderField: "X-Conversation-Id")
                 var body: [String: Any] = [
                     "messages": history,
                     "stream": true,
                     "temperature": temperature,
+                    "top_p": sampling.topP,
+                    "min_p": sampling.minP,
+                    "top_k": sampling.topK,
+                    "repeat_penalty": sampling.repeatPenalty,
+                    "repeat_last_n": sampling.repeatLastN,
+                    "dynatemp_range": sampling.dynatempRange,
+                    "dynatemp_exponent": sampling.dynatempExponent,
+                    "xtc_probability": sampling.xtcProbability,
+                    "xtc_threshold": sampling.xtcThreshold,
+                    "typ_p": sampling.typicalP,
+                    "presence_penalty": sampling.presencePenalty,
+                    "frequency_penalty": sampling.frequencyPenalty,
+                    "dry_multiplier": sampling.dryMultiplier,
+                    "dry_base": sampling.dryBase,
+                    "dry_allowed_length": sampling.dryAllowedLength,
+                    "dry_penalty_last_n": sampling.dryPenaltyLastN,
+                    "backend_sampling": sampling.backendSampling,
+                    "seed": sampling.seed,
                     "max_tokens": maxTokens,
                     // Reuse the server-side KV cache for the unchanged history
                     // prefix so each turn only processes the new tokens.
@@ -597,16 +802,38 @@ final class ChatStore: ObservableObject {
                     "stream_options": ["include_usage": true],
                     // Stream prompt-processing progress (in `prompt_progress`).
                     "return_progress": true,
+                    "timings_per_token": true,
                 ]
-                if let model = ServerSettings.activeRouterModel() { body["model"] = model }
+                let samplerOrder = sampling.samplers.split(separator: ";")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                if !samplerOrder.isEmpty { body["samplers"] = samplerOrder }
+                if let activeModel { body["model"] = activeModel }
+                if !availableTools.isEmpty {
+                    body["tools"] = availableTools.compactMap(\.openAIDefinition)
+                    body["tool_choice"] = "auto"
+                }
                 if reasoningOff {
                     body["chat_template_kwargs"] = ["enable_thinking": false]
                     // For templates that ignore enable_thinking (Qwen3.6 still
                     // prefills <think>): 0 forces the reasoning block to close now.
                     body["thinking_budget_tokens"] = 0
+                } else {
+                    body["chat_template_kwargs"] = [
+                        "enable_thinking": true,
+                        "reasoning_effort": sampling.reasoningEffort,
+                    ]
+                    if let budget = Self.reasoningBudget(for: sampling.reasoningEffort) {
+                        body["thinking_budget_tokens"] = budget
+                    }
+                    body["reasoning_control"] = true
                 }
                 // Pin to slot 0 so the saved/restored KV always matches the chat.
                 if self?.slotPersistEnabled == true { body["id_slot"] = 0 }
+                if let data = sampling.customJSON.data(using: .utf8),
+                   let custom = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    body.merge(custom) { _, customValue in customValue }
+                }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                 let (bytes, response) = try await ChatStore.streamingSession.bytes(for: req)
@@ -622,70 +849,45 @@ final class ChatStore: ObservableObject {
                     throw StreamError(message: Self.describeServerError(status: status, body: raw))
                 }
 
-                for try await line in bytes.lines {
-                    if Task.isCancelled {
-                        cancelled = true
-                        break
-                    }
-                    guard line.hasPrefix("data: ") else { continue }
-                    let payload = String(line.dropFirst(6))
-                    if payload == "[DONE]" { break }
-                    guard let data = payload.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                var completed = false
+                var resumeError: Error?
+                do {
+                    completed = try await drain(bytes)
+                } catch {
+                    if error is CancellationError { throw error }
+                    resumeError = error
+                }
 
-                    if let message = Self.streamedError(from: obj) {
-                        throw StreamError(message: message)
-                    }
-
-                    if let u = obj["usage"] as? [String: Any],
-                       let p = u["prompt_tokens"] as? Int, let c = u["completion_tokens"] as? Int {
-                        usage = (p, c)
-                    }
-
-                    // The final chunk's timings carry the draft counters when MTP ran.
-                    if let t = obj["timings"] as? [String: Any],
-                       let dn = t["draft_n"] as? Int, dn > 0,
-                       let da = t["draft_n_accepted"] as? Int {
-                        mtpAccept = Double(da) / Double(dn)
-                    }
-
-                    // {total, cache, processed, time_ms} → processed/total bar.
-                    if let pp = obj["prompt_progress"] as? [String: Any],
-                       let processed = pp["processed"] as? Int,
-                       let totalTok = pp["total"] as? Int, totalTok > 0 {
-                        buffer.writeProgress(min(1.0, Double(processed) / Double(totalTok)))
-                    }
-
-                    guard let choices = obj["choices"] as? [[String: Any]],
-                          let choice = choices.first else { continue }
-                    if let reason = choice["finish_reason"] as? String, !reason.isEmpty {
-                        finishReason = reason
-                    }
-
-                    var got = false
-                    // Some server configurations emit the reasoning in a
-                    // dedicated field instead of inline <think> tags.
-                    if let delta = choice["delta"] as? [String: Any] {
-                        if let r = delta["reasoning_content"] as? String, !r.isEmpty {
-                            reasoning += r
-                            got = true
+                var attempts = 0
+                while !completed, attempts < 3, !Task.isCancelled {
+                    attempts += 1
+                    let before = bytesReceived
+                    do {
+                        guard let url = ChatStreamIdentity.resumeURL(
+                            port: port, identity: streamIdentity, from: bytesReceived)
+                        else { throw StreamError(message: "Invalid stream identity") }
+                        var resumeRequest = URLRequest(url: url)
+                        resumeRequest.timeoutInterval = 30
+                        if let key = ServerSettings.activeAPIKey() {
+                            resumeRequest.setValue("Bearer " + key,
+                                                   forHTTPHeaderField: "Authorization")
                         }
-                        if let piece = delta["content"] as? String, !piece.isEmpty {
-                            visible += piece
-                            got = true
+                        let (resumeBytes, resumeResponse) = try await ChatStore.streamingSession.bytes(for: resumeRequest)
+                        let resumeStatus = (resumeResponse as? HTTPURLResponse)?.statusCode ?? 0
+                        guard resumeStatus == 200 else {
+                            throw StreamError(message: "Stream resume failed (HTTP \(resumeStatus))")
                         }
+                        completed = try await drain(resumeBytes)
+                        if !completed, bytesReceived == before {
+                            throw StreamError(message: "Stream resume returned no new data")
+                        }
+                    } catch {
+                        if error is CancellationError { throw error }
+                        resumeError = error
                     }
-                    if got {
-                        let now = Date()
-                        if tFirst == nil { tFirst = now }
-                        nTokens += 1
-                        stamps.append(now)
-                        flush()
-                    }
-                    // Keep consuming after finish_reason: llama-server sends
-                    // the final usage counters in a later SSE event before
-                    // [DONE]. Those counters drive the context meter and
-                    // automatic compaction.
+                }
+                if !completed {
+                    throw resumeError ?? StreamError(message: "The response stream ended before completion")
                 }
             } catch {
                 if error is CancellationError {
@@ -709,27 +911,52 @@ final class ChatStore: ObservableObject {
             // A reasoning-only turn is not a usable assistant response. Drop
             // it instead of persisting an apparently duplicated empty bubble
             // and sending an empty assistant message in the next request.
-            let hasVisibleAnswer = !visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasVisibleAnswer = !accumulator.visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let finalText = hasVisibleAnswer ? composed() : ""
-            let finalUsage = usage
-            let finalAccept = mtpAccept
-            let finalFinishReason = finishReason
+            let finalUsage = accumulator.usage
+            let finalAccept = accumulator.mtpAccept
+            let finalTimings = accumulator.timings
+            let finalFinishReason = accumulator.finishReason
             let wasCancelled = cancelled
             let didReportError = reportedError
-            let hadReasoning = !reasoning.isEmpty
+            let hadReasoning = !accumulator.reasoning.isEmpty
+            let finalToolCalls = accumulator.toolCalls.filter { !$0.name.isEmpty }
+            let nextAgentRun = AgentRunContext(
+                port: port, temperature: temperature, maxTokens: maxTokens,
+                system: system, thinking: thinking, sampling: sampling,
+                modalities: modalities,
+                remainingTurns: agentRun?.remainingTurns ?? agentTurnLimit,
+                tools: availableTools)
             let store = self
-            await MainActor.run {
-                if !wasCancelled && !didReportError && hadReasoning && !hasVisibleAnswer {
+            let shouldDeliverQueued: Bool = await MainActor.run {
+                if !wasCancelled && !didReportError && hadReasoning && !hasVisibleAnswer
+                    && finalToolCalls.isEmpty {
                     store?.lastError = Self.emptyResponseMessage(finishReason: finalFinishReason)
                 }
                 if let finalUsage { store?.contextUsed = finalUsage.prompt + finalUsage.completion }
-                store?.finish(conversation: convID, text: finalText, speed: finalSpeed, mtpAccept: finalAccept)
-                store?.compactIfNeeded(conversation: convID, port: port)
+                store?.finish(conversation: convID, text: finalText, speed: finalSpeed,
+                              mtpAccept: finalAccept, timings: finalTimings,
+                              toolCalls: finalToolCalls)
+                let shouldDeliverQueued = store?.queuedMessage?.conversationID == convID
+                if shouldDeliverQueued {
+                    if !finalToolCalls.isEmpty { store?.interruptPendingToolCalls(conversation: convID) }
+                } else if !wasCancelled && !didReportError && !finalToolCalls.isEmpty {
+                    store?.beginToolPermissions(conversation: convID, context: nextAgentRun)
+                } else {
+                    store?.agentContext = nil
+                    store?.compactIfNeeded(conversation: convID, port: port)
+                }
+                return shouldDeliverQueued
             }
             // Persist the conversation's KV after a real answer, so reopening it
             // (or restarting the engine) skips re-prefilling the history.
             if !wasCancelled && !didReportError && hasVisibleAnswer {
                 await self?.saveSlot(convID: convID, port: port)
+            }
+            if shouldDeliverQueued {
+                await MainActor.run {
+                    store?.deliverQueuedMessage(conversation: convID, context: nextAgentRun)
+                }
             }
             pump.cancel()
         }
@@ -738,16 +965,21 @@ final class ChatStore: ObservableObject {
     /// Writes the completed response into its conversation and clears the
     /// live-streaming state. The conversation may no longer be the current
     /// one, or may have been deleted, hence the lookup by id.
-    private func finish(conversation id: UUID, text: String, speed: Double?, mtpAccept: Double? = nil) {
+    private func finish(conversation id: UUID, text: String, speed: Double?,
+                        mtpAccept: Double? = nil, timings: ChatTimings? = nil,
+                        toolCalls: [ChatToolCall] = []) {
         if let i = conversations.firstIndex(where: { $0.id == id }) {
             if let j = conversations[i].messages.indices.last,
                conversations[i].messages[j].role == "assistant" {
-                if text.isEmpty {
+                if text.isEmpty && toolCalls.isEmpty {
                     conversations[i].messages.removeLast()
                 } else {
                     conversations[i].messages[j].content = text
                     conversations[i].messages[j].genSpeed = speed
                     conversations[i].messages[j].mtpAccept = mtpAccept
+                    conversations[i].messages[j].timings = timings
+                    conversations[i].messages[j].toolCalls = toolCalls.isEmpty ? nil : toolCalls
+                    conversations[i].messages[j].model = ServerSettings.activeRouterModel()
                 }
             }
             conversations[i].updated = Date()
@@ -761,6 +993,217 @@ final class ChatStore: ObservableObject {
         watchdog?.cancel()
         watchdog = nil
         save()
+    }
+
+    private func beginToolPermissions(conversation id: UUID, context: AgentRunContext) {
+        guard context.remainingTurns > 0 else {
+            agentContext = context
+            pendingAgentContinuation = PendingAgentContinuation(conversationID: id)
+            return
+        }
+        agentContext = context
+        advanceToolPermissions(conversation: id)
+    }
+
+    private func advanceToolPermissions(conversation id: UUID) {
+        if queuedMessage?.conversationID == id, let context = agentContext {
+            interruptPendingToolCalls(conversation: id)
+            deliverQueuedMessage(conversation: id, context: context)
+            return
+        }
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == id }),
+              let messageIndex = conversations[conversationIndex].messages.lastIndex(where: {
+                  $0.role == "assistant" && !($0.toolCalls ?? []).isEmpty
+              }) else {
+            agentContext = nil
+            return
+        }
+        let message = conversations[conversationIndex].messages[messageIndex]
+        if let call = message.toolCalls?.first(where: { $0.state == .pending }) {
+            let info = agentContext?.tools.first(where: { $0.name == call.name })
+            let request = PendingToolPermission(
+                conversationID: id, messageID: message.id, callID: call.id,
+                name: call.name, displayName: info?.displayName ?? call.name,
+                arguments: call.arguments, writesData: info?.writesData ?? true,
+                serverID: info?.mcpServerID,
+                serverName: info?.mcpServerID.flatMap { serverID in
+                    MCPServerStore.load().first(where: { $0.id == serverID })?.name
+                })
+            pendingToolPermission = request
+            updateToolCall(request, state: .awaitingPermission)
+            if ChatToolsService.isAlwaysAllowed(call.name) {
+                respondToToolPermission(.once)
+            }
+            return
+        }
+
+        guard var context = agentContext else { return }
+        context.remainingTurns -= 1
+        agentContext = context
+        guard context.remainingTurns > 0 else {
+            pendingAgentContinuation = PendingAgentContinuation(conversationID: id)
+            return
+        }
+        stream(into: conversationIndex, port: context.port, temperature: context.temperature,
+               maxTokens: context.maxTokens, system: context.system, thinking: context.thinking,
+               sampling: context.sampling, modalities: context.modalities, agentRun: context)
+    }
+
+    func queueMessage(text: String, attachments: [ChatAttachment], images: [String]) {
+        guard let conversationID = currentID,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !attachments.isEmpty || !images.isEmpty else { return }
+        queuedMessage = QueuedChatMessage(conversationID: conversationID, text: text,
+                                          attachments: attachments, imageURIs: images)
+        if !generating, pendingToolPermission?.conversationID == conversationID,
+           let context = agentContext {
+            interruptPendingToolCalls(conversation: conversationID)
+            deliverQueuedMessage(conversation: conversationID, context: context)
+        }
+    }
+
+    func cancelQueuedMessage() {
+        queuedMessage = nil
+    }
+
+    private func interruptPendingToolCalls(conversation id: UUID) {
+        pendingToolPermission = nil
+        guard let i = conversations.firstIndex(where: { $0.id == id }),
+              let j = conversations[i].messages.lastIndex(where: {
+                  $0.role == "assistant" && !($0.toolCalls ?? []).isEmpty
+              }) else { return }
+        let interruption = "Tool execution was interrupted by a new user message."
+        var resultMessages: [ChatMessage] = []
+        for index in conversations[i].messages[j].toolCalls?.indices ?? 0..<0 {
+            guard conversations[i].messages[j].toolCalls?[index].state == .pending
+                    || conversations[i].messages[j].toolCalls?[index].state == .awaitingPermission else { continue }
+            conversations[i].messages[j].toolCalls?[index].state = .denied
+            conversations[i].messages[j].toolCalls?[index].result = interruption
+            conversations[i].messages[j].toolCalls?[index].finishedAt = Date()
+            if let call = conversations[i].messages[j].toolCalls?[index] {
+                resultMessages.append(ChatMessage(role: "tool", content: interruption,
+                                                  toolCallID: call.serverID ?? call.id.uuidString))
+            }
+        }
+        conversations[i].messages.append(contentsOf: resultMessages)
+        save()
+    }
+
+    private func deliverQueuedMessage(conversation id: UUID, context: AgentRunContext) {
+        guard let queued = queuedMessage, queued.conversationID == id,
+              let i = conversations.firstIndex(where: { $0.id == id }) else { return }
+        queuedMessage = nil
+        pendingToolPermission = nil
+        pendingAgentContinuation = nil
+        agentContext = nil
+        conversations[i].messages.append(ChatMessage(
+            role: "user", content: queued.text,
+            attachments: queued.attachments.isEmpty ? nil : queued.attachments,
+            imageURIs: queued.imageURIs.isEmpty ? nil : queued.imageURIs))
+        stream(into: i, port: context.port, temperature: context.temperature,
+               maxTokens: context.maxTokens, system: context.system, thinking: context.thinking,
+               sampling: context.sampling, modalities: context.modalities)
+    }
+
+    func respondToAgentContinuation(_ shouldContinue: Bool) {
+        guard let pending = pendingAgentContinuation else { return }
+        pendingAgentContinuation = nil
+        lastError = nil
+        guard shouldContinue, var context = agentContext,
+              let conversationIndex = conversations.firstIndex(where: { $0.id == pending.conversationID }) else {
+            agentContext = nil
+            return
+        }
+        context.remainingTurns = Self.configuredAgentTurnLimit
+        agentContext = context
+        stream(into: conversationIndex, port: context.port, temperature: context.temperature,
+               maxTokens: context.maxTokens, system: context.system, thinking: context.thinking,
+               sampling: context.sampling, modalities: context.modalities, agentRun: context)
+    }
+
+    func respondToToolPermission(_ decision: ToolPermissionDecision) {
+        guard let request = pendingToolPermission else { return }
+        pendingToolPermission = nil
+        if decision == .deny {
+            let result = "Tool execution was denied by the user."
+            completeToolCall(request, result: result, state: .denied)
+            advanceToolPermissions(conversation: request.conversationID)
+            return
+        }
+        if decision == .always {
+            ChatToolsService.allowAlways(request.name)
+        } else if decision == .alwaysServer, let serverID = request.serverID,
+                  let context = agentContext {
+            for tool in context.tools where tool.mcpServerID == serverID {
+                ChatToolsService.allowAlways(tool.name)
+            }
+        }
+        updateToolCall(request, state: .running, startedAt: Date())
+        task = Task { [weak self] in
+            do {
+                let arguments = try ChatToolsService.parseArguments(request.arguments)
+                guard let context = self?.agentContext else { return }
+                let result: ToolExecutionResult
+                if let tool = context.tools.first(where: { $0.name == request.name }),
+                   let serverID = tool.mcpServerID, let remoteName = tool.remoteName {
+                    result = try await ToshMCPService.shared.call(
+                        serverID: serverID, name: remoteName, arguments: arguments)
+                } else if request.name == JavaScriptSandboxService.toolName {
+                    result = await JavaScriptSandboxService.execute(arguments: arguments)
+                } else if request.name == "exec_shell_command" {
+                    result = try await ChatToolsService.executeStreaming(
+                        name: request.name, arguments: arguments, port: context.port
+                    ) { [weak self] partial in
+                        await MainActor.run { self?.updateToolCallResult(request, result: partial) }
+                    }
+                } else {
+                    result = try await ChatToolsService.execute(
+                        name: request.name, arguments: arguments, port: context.port)
+                }
+                guard !Task.isCancelled else { return }
+                self?.completeToolCall(request, result: result.content,
+                                       state: result.isError ? .failed : .completed)
+                self?.advanceToolPermissions(conversation: request.conversationID)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.completeToolCall(request, result: error.localizedDescription, state: .failed)
+                self?.advanceToolPermissions(conversation: request.conversationID)
+            }
+        }
+    }
+
+    private func updateToolCall(_ request: PendingToolPermission, state: ChatToolCallState,
+                                startedAt: Date? = nil) {
+        guard let i = conversations.firstIndex(where: { $0.id == request.conversationID }),
+              let j = conversations[i].messages.firstIndex(where: { $0.id == request.messageID }),
+              let k = conversations[i].messages[j].toolCalls?.firstIndex(where: { $0.id == request.callID })
+        else { return }
+        conversations[i].messages[j].toolCalls?[k].state = state
+        if let startedAt { conversations[i].messages[j].toolCalls?[k].startedAt = startedAt }
+        save()
+    }
+
+    private func completeToolCall(_ request: PendingToolPermission, result: String,
+                                  state: ChatToolCallState) {
+        guard let i = conversations.firstIndex(where: { $0.id == request.conversationID }),
+              let j = conversations[i].messages.firstIndex(where: { $0.id == request.messageID }),
+              let k = conversations[i].messages[j].toolCalls?.firstIndex(where: { $0.id == request.callID })
+        else { return }
+        conversations[i].messages[j].toolCalls?[k].state = state
+        conversations[i].messages[j].toolCalls?[k].result = result
+        conversations[i].messages[j].toolCalls?[k].finishedAt = Date()
+        let serverID = conversations[i].messages[j].toolCalls?[k].serverID ?? request.callID.uuidString
+        conversations[i].messages.append(ChatMessage(role: "tool", content: result, toolCallID: serverID))
+        conversations[i].updated = Date()
+        save()
+    }
+
+    private func updateToolCallResult(_ request: PendingToolPermission, result: String) {
+        guard let i = conversations.firstIndex(where: { $0.id == request.conversationID }),
+              let j = conversations[i].messages.firstIndex(where: { $0.id == request.messageID }),
+              let k = conversations[i].messages[j].toolCalls?.firstIndex(where: { $0.id == request.callID })
+        else { return }
+        conversations[i].messages[j].toolCalls?[k].result = result
     }
 
     // MARK: KV slot persistence
@@ -881,7 +1324,8 @@ final class ChatStore: ObservableObject {
     /// compacted turns folded in, then the messages that remain uncompacted,
     /// stripped of reasoning blocks (saves context).
     nonisolated static func requestHistory(system: String, summary: String?,
-                                           messages: [ChatMessage], from start: Int) -> [[String: Any]] {
+                                           messages: [ChatMessage], from start: Int,
+                                           modalities: ModelModalities? = nil) -> [[String: Any]] {
         var history: [[String: Any]] = []
         var sys = system.trimmingCharacters(in: .whitespaces)
         if let summary, !summary.isEmpty {
@@ -891,15 +1335,42 @@ final class ChatStore: ObservableObject {
         if !sys.isEmpty { history.append(["role": "system", "content": sys]) }
         let safeStart = min(max(0, start), messages.count)
         history += messages[safeStart...].compactMap { m -> [String: Any]? in
+            if m.role == "tool", let callID = m.toolCallID {
+                return ["role": "tool", "tool_call_id": callID, "content": m.content]
+            }
             let text = m.role == "assistant" ? m.parts.body : m.wireContent
-            guard m.role != "assistant"
-                    || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            if m.role == "assistant", let calls = m.toolCalls, !calls.isEmpty {
+                let payload: [[String: Any]] = calls.map { call in
+                    ["id": call.serverID ?? call.id.uuidString,
+                     "type": "function",
+                     "function": ["name": call.name, "arguments": call.arguments]]
+                }
+                return ["role": "assistant", "content": text, "tool_calls": payload]
+            }
+            guard m.role != "assistant" || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
             // A user turn with images uses the OpenAI multimodal content array
             // (text part + image_url parts); everything else stays a plain string.
-            if m.role == "user", let imgs = m.imageURIs, !imgs.isEmpty {
+            let media = m.attachments?.filter { $0.mediaKind != nil && $0.base64Payload != nil } ?? []
+            if m.role == "user", !(m.imageURIs ?? []).isEmpty || !media.isEmpty {
                 var parts: [[String: Any]] = []
                 if !text.isEmpty { parts.append(["type": "text", "text": text]) }
-                for uri in imgs { parts.append(["type": "image_url", "image_url": ["url": uri]]) }
+                if modalities?.vision != false {
+                    for uri in m.imageURIs ?? [] {
+                        parts.append(["type": "image_url", "image_url": ["url": uri]])
+                    }
+                }
+                for attachment in media {
+                    guard let data = attachment.base64Payload else { continue }
+                    if attachment.mediaKind == "audio" {
+                        guard modalities?.audio != false else { continue }
+                        parts.append(["type": "input_audio",
+                                      "input_audio": ["data": data, "format": attachment.audioInputFormat]])
+                    } else if modalities?.video != false {
+                        parts.append(["type": "input_video",
+                                      "input_video": ["data": data, "format": attachment.videoInputFormat]])
+                    }
+                }
                 return ["role": m.role, "content": parts]
             }
             return ["role": m.role, "content": text]
@@ -1046,6 +1517,9 @@ final class ChatStore: ObservableObject {
         if message.lowercased().contains("context") {
             return "Contexto lleno: el mensaje, los archivos adjuntos y el historial juntos superan el contexto. Sube el contexto en Ajustes, adjunta menos o inicia un chat nuevo / context full: your message, attached files and history together exceed the context. Raise the context size in Settings, attach less, or start a new chat"
         }
+        if message.contains("bad_function_call") {
+            return "No se pudo decodificar el video. Verifica que ffmpeg y ffprobe estén disponibles y vuelve a iniciar el servidor / the video could not be decoded. Make sure ffmpeg and ffprobe are available, then restart the server"
+        }
         return "HTTP \(status): \(message.prefix(300))"
     }
 
@@ -1088,6 +1562,98 @@ final class ChatStore: ObservableObject {
         return message
     }
 
+    func editMessage(_ messageID: UUID) -> ChatMessage? {
+        guard !generating, let i = currentIndex,
+              let j = conversations[i].messages.firstIndex(where: { $0.id == messageID }),
+              conversations[i].messages[j].role == "user" else { return nil }
+        let message = conversations[i].messages[j]
+        beginAlternativeBranch(conversationIndex: i,
+                               messages: Array(conversations[i].messages[..<j]))
+        conversations[i].summary = nil
+        conversations[i].summarizedCount = nil
+        conversations[i].updated = Date()
+        contextUsed = nil
+        save()
+        return message
+    }
+
+    func deleteMessageAndFollowing(_ messageID: UUID) {
+        guard !generating, let i = currentIndex,
+              let j = conversations[i].messages.firstIndex(where: { $0.id == messageID }) else { return }
+        conversations[i].messages.removeSubrange(j...)
+        conversations[i].summary = nil
+        conversations[i].summarizedCount = nil
+        conversations[i].updated = Date()
+        contextUsed = nil
+        save()
+    }
+
+    var currentBranchPosition: (index: Int, count: Int)? {
+        guard let c = current, let branches = c.branches, branches.count > 1,
+              let active = c.activeBranchID,
+              let index = branches.firstIndex(where: { $0.id == active }) else { return nil }
+        return (index + 1, branches.count)
+    }
+
+    func switchBranch(_ branchID: UUID) {
+        guard !generating, let i = currentIndex,
+              conversations[i].activateBranch(branchID) else { return }
+        conversations[i].summary = nil
+        conversations[i].summarizedCount = nil
+        conversations[i].updated = Date()
+        contextUsed = nil
+        save()
+    }
+
+    func toggleTool(_ name: String, allTools: [BuiltinToolInfo]) {
+        guard let i = currentIndex else { return }
+        var selected = Set(conversations[i].enabledToolNames ?? allTools.map(\.name))
+        if selected.contains(name) { selected.remove(name) } else { selected.insert(name) }
+        conversations[i].enabledToolNames = selected.sorted()
+        save()
+    }
+
+    func enableAllTools() {
+        guard let i = currentIndex else { return }
+        conversations[i].enabledToolNames = nil
+        save()
+    }
+
+    private func beginAlternativeBranch(conversationIndex i: Int, messages: [ChatMessage]) {
+        conversations[i].beginAlternativeBranch(messages: messages)
+    }
+
+    @discardableResult
+    func forkConversation(at messageID: UUID, title: String? = nil,
+                          includeAttachments: Bool = true) -> Conversation? {
+        guard let source = current,
+              let j = source.messages.firstIndex(where: { $0.id == messageID }) else { return nil }
+        var messages = Array(source.messages[...j])
+        if !includeAttachments {
+            for index in messages.indices {
+                messages[index].attachments = nil
+                messages[index].imageURIs = nil
+            }
+        }
+        let proposed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = proposed?.isEmpty == false ? proposed! : "Fork of \(displayTitle(source))"
+        let fork = Conversation(title: name, messages: messages, created: Date(), updated: Date(),
+                                projectID: source.projectID, systemPrompt: source.systemPrompt)
+        conversations.insert(fork, at: 0)
+        currentID = fork.id
+        contextUsed = nil
+        save()
+        return fork
+    }
+
+    func updateDraft(conversationID: UUID, text: String,
+                     attachments: [ChatAttachment], imageURIs: [String]) {
+        guard let i = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        let draft = ChatDraft(text: text, attachments: attachments, imageURIs: imageURIs)
+        conversations[i].draft = draft.isEmpty ? nil : draft
+        save()
+    }
+
     // MARK: persistence
 
     private func load() {
@@ -1106,6 +1672,11 @@ final class ChatStore: ObservableObject {
     private static let saveQueue = DispatchQueue(label: "dev.engel.toshllm.chat-save", qos: .utility)
 
     func save() {
+        for i in conversations.indices {
+            guard let active = conversations[i].activeBranchID,
+                  let j = conversations[i].branches?.firstIndex(where: { $0.id == active }) else { continue }
+            conversations[i].branches?[j].messages = conversations[i].messages
+        }
         let snapshot = conversations
         let projectsSnapshot = projects
         let url = fileURL
@@ -1126,6 +1697,41 @@ final class ChatStore: ObservableObject {
             return "\(who)\n\n\(m.role == "assistant" ? m.parts.body : m.content)"
         }.joined(separator: "\n\n---\n\n")
     }
+
+    func exportArchiveData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(ChatArchive(conversations: conversations, projects: projects))
+    }
+
+    func exportJSONLData() throws -> Data {
+        try ChatJSONL.encode(conversations)
+    }
+
+    func importArchiveData(_ data: Data) throws -> Int {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let imported: ChatArchive
+        if let archive = try? decoder.decode(ChatArchive.self, from: data) {
+            imported = archive
+        } else if let legacy = try? JSONDecoder().decode([Conversation].self, from: data) {
+            imported = ChatArchive(conversations: legacy, projects: [])
+        } else if let jsonl = try? ChatJSONL.decode(data) {
+            imported = ChatArchive(conversations: jsonl, projects: [])
+        } else {
+            throw ChatArchiveError.unsupported
+        }
+
+        let existingConversationIDs = Set(conversations.map(\.id))
+        let additions = imported.conversations.filter { !existingConversationIDs.contains($0.id) }
+        let existingProjectIDs = Set(projects.map(\.id))
+        projects.append(contentsOf: imported.projects.filter { !existingProjectIDs.contains($0.id) })
+        conversations.insert(contentsOf: additions, at: 0)
+        if currentID == nil { currentID = conversations.first?.id }
+        save()
+        return additions.count
+    }
 }
 
 // MARK: - Main chat view
@@ -1134,14 +1740,42 @@ final class ChatStore: ObservableObject {
 /// `ConversationListView` (the split-view sidebar); both share the ChatStore
 /// from the environment, injected by ChatMainView.
 struct NativeChatView: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var chat: ChatStore
     @EnvironmentObject var models: ModelStore
+    @EnvironmentObject var control: ControlPanelState
     @AppStorage(SettingsKeys.chatTemp) private var temperature = 0.7
     @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = 2048
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
     @AppStorage(SettingsKeys.chatThinking) private var thinkingEnabled = true
+    @AppStorage(SettingsKeys.chatReasoningEffort) private var reasoningEffort = "medium"
+    @AppStorage(SettingsKeys.chatTopP) private var topP = 0.95
+    @AppStorage(SettingsKeys.chatMinP) private var minP = 0.05
+    @AppStorage(SettingsKeys.chatTopK) private var topK = 40
+    @AppStorage(SettingsKeys.chatRepeatPenalty) private var repeatPenalty = 1.0
+    @AppStorage(SettingsKeys.chatRepeatLastN) private var repeatLastN = 64
+    @AppStorage(SettingsKeys.chatSeed) private var seed = -1
+    @AppStorage(SettingsKeys.chatDynatempRange) private var dynatempRange = 0.0
+    @AppStorage(SettingsKeys.chatDynatempExponent) private var dynatempExponent = 1.0
+    @AppStorage(SettingsKeys.chatXTCProbability) private var xtcProbability = 0.0
+    @AppStorage(SettingsKeys.chatXTCThreshold) private var xtcThreshold = 0.1
+    @AppStorage(SettingsKeys.chatTypicalP) private var typicalP = 1.0
+    @AppStorage(SettingsKeys.chatPresencePenalty) private var presencePenalty = 0.0
+    @AppStorage(SettingsKeys.chatFrequencyPenalty) private var frequencyPenalty = 0.0
+    @AppStorage(SettingsKeys.chatDryMultiplier) private var dryMultiplier = 0.0
+    @AppStorage(SettingsKeys.chatDryBase) private var dryBase = 1.75
+    @AppStorage(SettingsKeys.chatDryAllowedLength) private var dryAllowedLength = 2
+    @AppStorage(SettingsKeys.chatDryPenaltyLastN) private var dryPenaltyLastN = -1
+    @AppStorage(SettingsKeys.chatSamplers) private var samplers = ""
+    @AppStorage(SettingsKeys.chatBackendSampling) private var backendSampling = false
+    @AppStorage(SettingsKeys.chatCustomJSON) private var customJSON = ""
+    @AppStorage(SettingsKeys.chatAgenticMaxTurns) private var agenticMaxTurns = 10
+    @AppStorage(SettingsKeys.chatPasteLongTextLength) private var pasteLongTextLength = 2500
+    @AppStorage(SettingsKeys.chatMaxImageMegapixels) private var maxImageMegapixels = 1.0
+    @AppStorage(SettingsKeys.chatPDFAsImages) private var pdfAsImages = false
+    @AppStorage(SettingsKeys.chatShowSystemMessage) private var showSystemMessage = true
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ctx) private var contextLimit = 16384
     @AppStorage(SettingsKeys.routerMode) private var routerMode = false
@@ -1161,6 +1795,19 @@ struct NativeChatView: View {
     @State private var atBottom = true
     @FocusState private var inputFocused: Bool
     @State private var pasteMonitor: Any?
+    @State private var draftOwnerID: UUID?
+    @State private var draftSaveTask: Task<Void, Never>?
+    @State private var showMCPBrowser = false
+    @State private var showAttachments = false
+    @State private var showTools = false
+    @StateObject private var audioRecorder = AudioRecorderController()
+    @State private var previewAttachment: ChatAttachment?
+    @State private var availableTools: [BuiltinToolInfo] = []
+    @State private var loadingTools = false
+    @State private var forkMessage: ChatMessage?
+    @State private var modelModalities: ModelModalities?
+    @State private var loadingModalities = false
+    @State private var capabilitiesAreComplete = false
 
     private var maxTokenOptions: [Int] {
         [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072].filter { $0 <= contextLimit }
@@ -1168,6 +1815,23 @@ struct NativeChatView: View {
 
     private var maxTokensIsLarge: Bool {
         contextLimit > 0 && Double(maxTokens) / Double(contextLimit) > 0.5
+    }
+
+    private var samplingSettings: ChatSamplingSettings {
+        ChatSamplingSettings(reasoningEffort: reasoningEffort,
+                             topP: topP, minP: minP, topK: topK,
+                             repeatPenalty: repeatPenalty, repeatLastN: repeatLastN, seed: seed,
+                             dynatempRange: dynatempRange, dynatempExponent: dynatempExponent,
+                             xtcProbability: xtcProbability, xtcThreshold: xtcThreshold,
+                             typicalP: typicalP, presencePenalty: presencePenalty,
+                             frequencyPenalty: frequencyPenalty, dryMultiplier: dryMultiplier,
+                             dryBase: dryBase, dryAllowedLength: dryAllowedLength,
+                             dryPenaltyLastN: dryPenaltyLastN, samplers: samplers,
+                             backendSampling: backendSampling, customJSON: customJSON)
+    }
+
+    private var capabilityTaskID: String {
+        "\(String(describing: server.state))-\(port)-\(routerMode ? chatSelectedModel : modelPath)-\(chat.generating)"
     }
 
     private var contextMaySlowGeneration: Bool {
@@ -1184,11 +1848,12 @@ struct NativeChatView: View {
         chatColumn
             .onAppear {
                 inputFocused = true
+                loadDraft(for: chat.currentID)
                 // The field editor swallows Cmd+V before SwiftUI's paste command
                 // sees it, so intercept the key itself when the clipboard carries
                 // an image or files; plain text falls through to the normal paste.
                 pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                    guard inputFocused, !chat.generating,
+                    guard inputFocused,
                           event.modifierFlags.contains(.command),
                           event.charactersIgnoringModifiers?.lowercased() == "v",
                           clipboardHasAttachables else { return event }
@@ -1197,8 +1862,20 @@ struct NativeChatView: View {
                 }
             }
             .onDisappear {
+                saveDraftNow()
+                draftSaveTask?.cancel()
                 if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
                 pasteMonitor = nil
+            }
+            .onChange(of: chat.currentID) { oldID, newID in
+                saveDraftNow(for: oldID)
+                loadDraft(for: newID)
+            }
+            .task(id: "\(chat.currentID?.uuidString ?? "")-\(String(describing: server.state))") {
+                await refreshAvailableTools()
+            }
+            .task(id: capabilityTaskID) {
+                await refreshModelModalities()
             }
             .sheet(item: $promptConversation) { c in
                 PromptEditorSheet(
@@ -1215,6 +1892,29 @@ struct NativeChatView: View {
                                 "Inherited by every conversation in the project without its own prompt."),
                     initial: p.systemPrompt
                 ) { chat.setProjectPrompt(p, $0) }
+            }
+            .sheet(isPresented: $showMCPBrowser) {
+                MCPBrowserView(
+                    addAttachment: { attachment in
+                        if !attachments.contains(where: { $0.name == attachment.name && $0.content == attachment.content }) {
+                            attachments.append(attachment)
+                        }
+                    },
+                    insertPrompt: { value in
+                        draft = [draft, value].filter { !$0.isEmpty }.joined(separator: "\n\n")
+                    })
+                    .environmentObject(loc)
+            }
+            .sheet(item: $previewAttachment) { attachment in
+                MediaAttachmentPreview(attachment: attachment)
+            }
+            .sheet(item: $forkMessage) { message in
+                ForkConversationSheet(sourceTitle: chat.current.map(chat.displayTitle) ?? "") {
+                    title, includeAttachments in
+                    chat.forkConversation(at: message.id, title: title,
+                                          includeAttachments: includeAttachments)
+                }
+                .environmentObject(loc)
             }
             // Markdown links: open valid web/mail URLs in the default browser
             // and silently drop malformed ones (e.g. placeholder "#" links),
@@ -1283,6 +1983,29 @@ struct NativeChatView: View {
                 .help(loc.t("Haz clic para renombrar la conversación (Enter guarda).",
                             "Click to rename the conversation (Enter saves)."))
             Spacer()
+            if let branches = chat.current?.branches, branches.count > 1,
+               let position = chat.currentBranchPosition {
+                Menu {
+                    ForEach(Array(branches.enumerated()), id: \.element.id) { index, branch in
+                        Button {
+                            chat.switchBranch(branch.id)
+                        } label: {
+                            if branch.id == chat.current?.activeBranchID {
+                                Label(loc.t("Rama \(index + 1)", "Branch \(index + 1)"),
+                                      systemImage: "checkmark")
+                            } else {
+                                Text(loc.t("Rama \(index + 1)", "Branch \(index + 1)"))
+                            }
+                        }
+                    }
+                } label: {
+                    Label("\(position.index)/\(position.count)", systemImage: "arrow.triangle.branch")
+                        .font(.caption)
+                }
+                .menuStyle(.button)
+                .help(loc.t("Cambiar entre respuestas y ediciones alternativas sin salir del chat.",
+                            "Switch between alternate responses and edits without leaving the chat."))
+            }
             if !(chat.current?.systemPrompt ?? "").isEmpty {
                 Button {
                     promptConversation = chat.current
@@ -1328,6 +2051,19 @@ struct NativeChatView: View {
             ScrollView {
                 LazyVStack(spacing: 14) {
                     Color.clear.frame(height: 1).id(Self.bottomID)
+                    if chat.pendingAgentContinuation?.conversationID == chat.currentID {
+                        AgentContinuationCard(
+                            continueAction: { chat.respondToAgentContinuation(true) },
+                            stopAction: { chat.respondToAgentContinuation(false) })
+                            .environmentObject(loc)
+                            .flippedUpsideDown()
+                    }
+                    if let request = chat.pendingToolPermission,
+                       request.conversationID == chat.currentID {
+                        ToolPermissionCard(request: request) { chat.respondToToolPermission($0) }
+                            .environmentObject(loc)
+                            .flippedUpsideDown()
+                    }
                     if let err = chat.lastError {
                         Label(err, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.red)
@@ -1339,6 +2075,13 @@ struct NativeChatView: View {
                             .id(msg.id)
                             .onAppear { if msg.id == newestID { atBottom = true } }
                             .onDisappear { if msg.id == newestID { atBottom = false } }
+                    }
+                    if showSystemMessage {
+                        let prompt = chat.effectiveSystemPrompt(global: systemPrompt)
+                        if !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            SystemPromptCard(prompt: prompt) { promptConversation = chat.current }
+                                .flippedUpsideDown()
+                        }
                     }
                 }
                 .padding()
@@ -1393,14 +2136,29 @@ struct NativeChatView: View {
                         chat.regenerate(port: port, temperature: temperature,
                                         maxTokens: maxTokens,
                                         system: chat.effectiveSystemPrompt(global: systemPrompt),
-                                        thinking: thinkingEnabled)
+                                        thinking: thinkingEnabled, sampling: samplingSettings,
+                                        modalities: modelModalities)
+                    },
+                    onContinue: {
+                        chat.continueResponse(port: port, temperature: temperature,
+                                              maxTokens: maxTokens,
+                                              system: chat.effectiveSystemPrompt(global: systemPrompt),
+                                              thinking: thinkingEnabled, sampling: samplingSettings,
+                                              modalities: modelModalities)
                     },
                     onEdit: {
-                        if let m = chat.popLastExchange() {
+                        if let m = chat.editMessage(msg.id) {
                             draft = m.content
                             attachments = m.attachments ?? []
+                            images = m.imageURIs ?? []
                             inputFocused = true
                         }
+                    },
+                    onFork: {
+                        forkMessage = msg
+                    },
+                    onDelete: {
+                        chat.deleteMessageAndFollowing(msg.id)
                     })
                     .equatable()
             }
@@ -1444,13 +2202,17 @@ struct NativeChatView: View {
     private var inputArea: some View {
         VStack(spacing: 8) {
             statusStrip
+            if let queued = chat.queuedMessage, queued.conversationID == chat.currentID {
+                QueuedMessageBanner(message: queued, cancel: chat.cancelQueuedMessage)
+                    .environmentObject(loc)
+            }
             if !attachments.isEmpty { attachmentChips }
             if !images.isEmpty { imageChips }
             if ocrPending > 0 {
                 HStack(spacing: 5) {
                     ProgressView().controlSize(.mini)
-                    Text(loc.t("Extrayendo texto de PDF escaneado por OCR…",
-                               "Extracting text from scanned PDF via OCR…"))
+                    Text(loc.t("Procesando PDF en el dispositivo…",
+                               "Processing PDF on device…"))
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1462,8 +2224,14 @@ struct NativeChatView: View {
             }
 
             HStack(alignment: .bottom, spacing: 10) {
-                paramsButton
-                attachButton
+                HStack(spacing: 6) {
+                    paramsButton
+                    attachButton
+                    if !availableTools.isEmpty { toolsButton }
+                    recordButton
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.bottom, 4)
                 TextField(loc.t("Escribe tu mensaje…", "Type your message…"),
                           text: $draft, axis: .vertical)
                     .lineLimit(1...8)
@@ -1474,6 +2242,7 @@ struct NativeChatView: View {
                     .onSubmit(send)
                     .onChange(of: draft) { _, value in
                         absorbLargeDraft(value)
+                        scheduleDraftSave()
                     }
                     .onPasteCommand(of: [.image, .png, .tiff, .fileURL]) { _ in
                         pasteFromClipboard()
@@ -1481,21 +2250,31 @@ struct NativeChatView: View {
                     .help(loc.t("Intro envía; Opción+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto; pegar una imagen (captura) la adjunta si el modelo tiene visión.",
                                 "Return sends; Option+Return inserts a line break. Large pasted text becomes an attachment; pasting an image (screenshot) attaches it if the model has vision."))
                 if chat.generating {
-                    Button { chat.stop() } label: {
-                        Image(systemName: "stop.circle.fill")
+                    Button(loc.t("Intervenir", "Steer"), systemImage: "arrow.up.circle.fill",
+                           action: send)
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 26))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
+                        .buttonStyle(.borderless)
+                        .padding(.bottom, 2)
+                        .disabled(!canSend)
+                        .help(loc.t("Enviar una intervención: se aplicará al terminar el turno actual del agente.",
+                                    "Send a steering message after the agent's current turn."))
+                    Button(loc.t("Detener", "Stop"), systemImage: "stop.circle.fill",
+                           action: chat.stop)
+                        .labelStyle(.iconOnly)
                             .font(.system(size: 26))
                             .foregroundStyle(.red)
-                    }
-                    .buttonStyle(.borderless)
-                    .padding(.bottom, 2)
-                    .help(loc.t("Detener la generación.", "Stop generation."))
+                        .buttonStyle(.borderless)
+                        .padding(.bottom, 2)
+                        .help(loc.t("Detener la generación.", "Stop generation."))
                 } else {
-                    Button(action: send) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 26))
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
-                    }
+                    Button(loc.t("Enviar", "Send"), systemImage: "arrow.up.circle.fill", action: send)
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 26))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
                     .buttonStyle(.borderless)
                     .padding(.bottom, 2)
                     .disabled(!canSend)
@@ -1511,23 +2290,58 @@ struct NativeChatView: View {
             addAttachments(urls: urls)
             return true
         }
+        .onChange(of: attachments) { scheduleDraftSave() }
+        .onChange(of: images) { scheduleDraftSave() }
+        .alert(loc.t("No se pudo grabar audio", "Audio recording failed"),
+               isPresented: Binding(get: { audioRecorder.error != nil },
+                                    set: { if !$0 { audioRecorder.error = nil } })) {
+        } message: { Text(audioRecorder.error ?? "") }
     }
 
     private var canSend: Bool {
-        !chat.generating && ocrPending == 0
-            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ocrPending == 0 && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty || !images.isEmpty)
+    }
+
+    private func loadDraft(for conversationID: UUID?) {
+        draftSaveTask?.cancel()
+        draftOwnerID = conversationID
+        let saved = chat.conversations.first(where: { $0.id == conversationID })?.draft
+        draft = saved?.text ?? ""
+        attachments = saved?.attachments ?? []
+        images = saved?.imageURIs ?? []
+    }
+
+    private func scheduleDraftSave() {
+        let owner = draftOwnerID
+        let text = draft
+        let files = attachments
+        let imageValues = images
+        draftSaveTask?.cancel()
+        draftSaveTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, let owner else { return }
+            chat.updateDraft(conversationID: owner, text: text,
+                             attachments: files, imageURIs: imageValues)
+        }
+    }
+
+    private func saveDraftNow(for conversationID: UUID? = nil) {
+        guard let owner = conversationID ?? draftOwnerID else { return }
+        chat.updateDraft(conversationID: owner, text: draft,
+                         attachments: attachments, imageURIs: images)
     }
 
     private var paramsButton: some View {
         Button {
             showSystem.toggle()
         } label: {
-            Image(systemName: "slider.horizontal.3")
+            ComposerCircleLabel(
+                title: loc.t("Parámetros del chat", "Chat parameters"),
+                systemImage: "slider.horizontal.3",
+                active: showSystem)
         }
-        .buttonStyle(GlassIconButtonStyle(
-            active: !chat.effectiveSystemPrompt(global: systemPrompt).isEmpty))
-        .padding(.bottom, 4)
+        .buttonStyle(.plain)
         .popover(isPresented: $showSystem, arrowEdge: .top) { paramsPopover }
         .help(loc.t("Parámetros del chat: razonamiento, creatividad, longitud de respuesta y prompt de sistema.",
                     "Chat parameters: reasoning, creativity, response length and system prompt."))
@@ -1556,14 +2370,29 @@ struct NativeChatView: View {
                     }
                 }
 
+                modalityBadges
+
                 Divider()
             }
 
-            Toggle(isOn: $thinkingEnabled) {
-                Label(loc.t("Razonamiento", "Reasoning"), systemImage: "brain")
+            Picker(selection: $reasoningEffort) {
+                Text(loc.t("Desactivado", "Off")).tag("off")
+                Text(loc.t("Bajo · 512 tokens", "Low · 512 tokens")).tag("low")
+                Text(loc.t("Medio · 2.048 tokens", "Medium · 2,048 tokens")).tag("medium")
+                Text(loc.t("Alto · 8.192 tokens", "High · 8,192 tokens")).tag("high")
+                Text(loc.t("Máximo · sin presupuesto", "Maximum · no budget")).tag("max")
+            } label: {
+                Label(loc.t("Esfuerzo de razonamiento", "Reasoning effort"), systemImage: "brain")
             }
+            .disabled(modelModalities?.thinking == false)
+            .onChange(of: reasoningEffort) { _, value in thinkingEnabled = value != "off" }
             .infoTip(loc.t("Los modelos razonadores piensan antes de responder (esos tokens cuentan dentro del límite de respuesta). Al desactivarlo se envía enable_thinking:false y /no_think; algunos modelos entrenados solo para razonar (p. ej. R1) pueden seguir pensando de todos modos.",
                         "Reasoning models think before answering (those tokens count toward the response limit). Turning it off sends enable_thinking:false and /no_think; some reasoning-only models (e.g. R1) may still think regardless."))
+
+            Toggle(isOn: $showSystemMessage) {
+                Label(loc.t("Mostrar prompt de sistema", "Show system prompt"),
+                      systemImage: "text.bubble")
+            }
 
             HStack(spacing: 8) {
                 Label(loc.t("Creatividad", "Creativity"), systemImage: "dial.medium")
@@ -1590,6 +2419,128 @@ struct NativeChatView: View {
                     .font(.caption).foregroundStyle(.orange)
             }
 
+            if false { DisclosureGroup {
+                VStack(alignment: .leading, spacing: 10) {
+                    samplingSlider(loc.t("Top P", "Top P"), value: $topP, range: 0...1)
+                    samplingSlider(loc.t("Min P", "Min P"), value: $minP, range: 0...1)
+                    samplingSlider(loc.t("Typical P", "Typical P"), value: $typicalP, range: 0...1)
+                    Stepper(value: $topK, in: 0...200) {
+                        parameterValue(loc.t("Top K", "Top K"), value: topK.formatted())
+                    }
+                    samplingSlider(loc.t("Penalización de repetición", "Repeat penalty"),
+                                   value: $repeatPenalty, range: 0.5...2)
+                    samplingSlider(loc.t("Penalización de presencia", "Presence penalty"),
+                                   value: $presencePenalty, range: -2...2)
+                    samplingSlider(loc.t("Penalización de frecuencia", "Frequency penalty"),
+                                   value: $frequencyPenalty, range: -2...2)
+                    Stepper(value: $repeatLastN, in: 0...4096, step: 16) {
+                        parameterValue(loc.t("Ventana de repetición", "Repeat window"),
+                                       value: repeatLastN.formatted())
+                    }
+                    HStack {
+                        Text(loc.t("Semilla", "Seed"))
+                        Spacer()
+                        TextField("-1", value: $seed, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 90)
+                    }
+                    GroupBox(loc.t("Temperatura dinámica y XTC", "Dynamic temperature and XTC")) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            samplingSlider(loc.t("Rango dinámico", "Dynamic range"),
+                                           value: $dynatempRange, range: 0...2)
+                            samplingSlider(loc.t("Exponente dinámico", "Dynamic exponent"),
+                                           value: $dynatempExponent, range: 0.1...4)
+                            samplingSlider(loc.t("Probabilidad XTC", "XTC probability"),
+                                           value: $xtcProbability, range: 0...1)
+                            samplingSlider(loc.t("Umbral XTC", "XTC threshold"),
+                                           value: $xtcThreshold, range: 0...1)
+                        }
+                    }
+                    GroupBox("DRY") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            samplingSlider(loc.t("Multiplicador", "Multiplier"),
+                                           value: $dryMultiplier, range: 0...2)
+                            samplingSlider(loc.t("Base", "Base"), value: $dryBase, range: 1...3)
+                            Stepper(value: $dryAllowedLength, in: 0...32) {
+                                parameterValue(loc.t("Longitud permitida", "Allowed length"),
+                                               value: dryAllowedLength.formatted())
+                            }
+                            Stepper(value: $dryPenaltyLastN, in: -1...32768, step: 64) {
+                                parameterValue(loc.t("Ventana DRY", "DRY window"),
+                                               value: dryPenaltyLastN.formatted())
+                            }
+                        }
+                    }
+                    TextField(loc.t("Orden: top_k;typ_p;top_p;min_p;temperature",
+                                    "Order: top_k;typ_p;top_p;min_p;temperature"),
+                              text: $samplers)
+                        .textFieldStyle(.roundedBorder)
+                    Toggle(loc.t("Muestreo en backend", "Backend sampling"),
+                           isOn: $backendSampling)
+                    Stepper(value: $agenticMaxTurns, in: 1...100) {
+                        parameterValue(loc.t("Turnos máximos del agente", "Maximum agent turns"),
+                                       value: agenticMaxTurns.formatted())
+                    }
+                    Stepper(value: $pasteLongTextLength, in: 0...100_000, step: 500) {
+                        parameterValue(loc.t("Texto pegado a archivo", "Paste text to file"),
+                                       value: pasteLongTextLength == 0
+                                           ? loc.t("Desactivado", "Off")
+                                           : pasteLongTextLength.formatted())
+                    }
+                    HStack {
+                        Text(loc.t("Máximo de imagen (MP)", "Maximum image size (MP)"))
+                        Spacer()
+                        TextField("0", value: $maxImageMegapixels, format: .number)
+                            .textFieldStyle(.roundedBorder).frame(width: 80)
+                    }
+                    Toggle(loc.t("PDF como imágenes para modelos con visión",
+                                 "PDF as images for vision models"), isOn: $pdfAsImages)
+                    DisclosureGroup(loc.t("JSON personalizado de la petición",
+                                          "Custom request JSON")) {
+                        TextEditor(text: $customJSON)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(minHeight: 80)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                        Text(loc.t("Las claves válidas reemplazan los parámetros anteriores para esta petición.",
+                                   "Valid keys override the parameters above for this request."))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Button(loc.t("Restaurar muestreo", "Reset sampling"),
+                           systemImage: "arrow.counterclockwise") {
+                        topP = 0.95
+                        minP = 0.05
+                        topK = 40
+                        repeatPenalty = 1
+                        repeatLastN = 64
+                        seed = -1
+                        dynatempRange = 0
+                        dynatempExponent = 1
+                        xtcProbability = 0
+                        xtcThreshold = 0.1
+                        typicalP = 1
+                        presencePenalty = 0
+                        frequencyPenalty = 0
+                        dryMultiplier = 0
+                        dryBase = 1.75
+                        dryAllowedLength = 2
+                        dryPenaltyLastN = -1
+                        samplers = ""
+                        backendSampling = false
+                        customJSON = ""
+                        agenticMaxTurns = 10
+                        pasteLongTextLength = 2500
+                        maxImageMegapixels = 1
+                        pdfAsImages = false
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+                .padding(.top, 8)
+            } label: {
+                Label(loc.t("Muestreo avanzado", "Advanced sampling"),
+                      systemImage: "slider.horizontal.2.square")
+            }
+
             Divider()
 
             Label(loc.t("Prompt de sistema global", "Global system prompt"), systemImage: "gearshape")
@@ -1602,6 +2553,17 @@ struct NativeChatView: View {
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
+            }
+
+            Button {
+                showSystem = false
+                control.openSettings(.chat)
+                openWindow(id: "control")
+            } label: {
+                Label(loc.t("Abrir ajustes avanzados del chat…", "Open advanced chat settings…"),
+                      systemImage: "gearshape.2")
+            }
+            .buttonStyle(.bordered)
 
             HStack(spacing: 10) {
                 Button {
@@ -1634,6 +2596,25 @@ struct NativeChatView: View {
         .frame(width: 380)
     }
 
+    private func samplingSlider(_ title: String, value: Binding<Double>,
+                                range: ClosedRange<Double>) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+            Slider(value: value, in: range)
+            Text(value.wrappedValue, format: .number.precision(.fractionLength(2)))
+                .font(.system(.caption, design: .monospaced))
+                .frame(width: 38, alignment: .trailing)
+        }
+    }
+
+    private func parameterValue(_ title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value).font(.system(.caption, design: .monospaced))
+        }
+    }
+
     /// Which system prompt actually applies to the open conversation.
     private var activePromptCaption: String {
         if !(chat.current?.systemPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1649,14 +2630,202 @@ struct NativeChatView: View {
     }
 
     private var attachButton: some View {
-        Button(action: pickAttachments) {
-            Image(systemName: "paperclip")
+        Button {
+            showAttachments.toggle()
+        } label: {
+            ComposerCircleLabel(
+                title: loc.t("Adjuntar", "Attach"),
+                systemImage: "paperclip",
+                active: showAttachments || !attachments.isEmpty || !images.isEmpty)
         }
-        .buttonStyle(GlassIconButtonStyle(active: !attachments.isEmpty))
-        .padding(.bottom, 4)
-        .disabled(chat.generating)
+        .buttonStyle(.plain)
+        .popover(isPresented: $showAttachments, arrowEdge: .top) { attachmentsPopover }
         .help(loc.t("Adjuntar archivos: texto, código y PDF (se extrae su texto; los PDF escaneados por OCR); de otros binarios se extraen las cadenas legibles. Imágenes solo si el modelo tiene visión (su mmproj). También puedes arrastrarlos al área de escritura.",
                     "Attach files: text, code and PDF (text is extracted; scanned PDFs via OCR); other binaries contribute their readable strings. Images only if the model has vision (its mmproj). You can also drag them onto the input area."))
+    }
+
+    private var attachmentsPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(loc.t("Adjuntar", "Attach")).font(.headline)
+            Button(loc.t("Archivos del Mac…", "Files from Mac…"), systemImage: "doc.badge.plus") {
+                showAttachments = false
+                pickAttachments()
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 6)
+            if MCPServerStore.load().contains(where: \.enabled) {
+                Divider()
+                Button(loc.t("Recursos MCP…", "MCP resources…"),
+                       systemImage: "point.3.connected.trianglepath.dotted") {
+                    showAttachments = false
+                    showMCPBrowser = true
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 6)
+            }
+        }
+        .padding(14)
+        .frame(width: 240)
+    }
+
+    private var recordButton: some View {
+        Button {
+            guard audioAvailable || audioRecorder.isRecording else {
+                attachError = capabilitiesAreComplete
+                    ? loc.t("El modelo actual no admite audio.", "The current model doesn't support audio.")
+                    : loc.t("Las capacidades de audio estarán disponibles cuando el router cargue el modelo.",
+                            "Audio capabilities will be available after the router loads the model.")
+                return
+            }
+            attachError = nil
+            audioRecorder.toggle { attachments.append($0) }
+        } label: {
+            ComposerCircleLabel(
+                title: audioRecorder.isRecording
+                    ? loc.t("Detener grabación", "Stop recording")
+                    : loc.t("Grabar audio", "Record audio"),
+                systemImage: audioRecorder.isRecording ? "stop.fill" : "mic.fill",
+                active: audioRecorder.isRecording)
+        }
+        .buttonStyle(.plain)
+        .help(audioRecorder.isRecording
+              ? loc.t("Detener (\(Int(audioRecorder.duration)) s)", "Stop (\(Int(audioRecorder.duration)) s)")
+              : audioAvailable
+                ? loc.t("Grabar audio", "Record audio")
+                : loc.t("El modelo actual no admite audio", "The current model doesn't support audio"))
+    }
+
+    private var toolsButton: some View {
+        Button {
+            showTools.toggle()
+        } label: {
+            ComposerCircleLabel(
+                title: loc.t("Herramientas", "Tools"),
+                systemImage: "wrench.and.screwdriver",
+                active: showTools)
+        }
+        .buttonStyle(.plain)
+        .disabled(chat.generating)
+        .popover(isPresented: $showTools, arrowEdge: .top) { toolsPopover }
+        .help(loc.t("Herramientas disponibles para esta conversación",
+                    "Tools available to this conversation"))
+    }
+
+    private var toolsPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(loc.t("Herramientas del chat", "Chat tools"),
+                      systemImage: "wrench.and.screwdriver")
+                    .font(.headline)
+                Spacer()
+                Button(loc.t("Activar todas", "Enable all"), systemImage: "checkmark.circle") {
+                    chat.enableAllTools()
+                }
+                .buttonStyle(.borderless)
+            }
+            Divider()
+            ForEach(availableTools) { tool in
+                let enabled = chat.current?.enabledToolNames.map { $0.contains(tool.name) } ?? true
+                Button {
+                    chat.toggleTool(tool.name, allTools: availableTools)
+                } label: {
+                    HStack {
+                        Image(systemName: enabled ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(enabled ? Color.appAccent : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(tool.displayName)
+                            Text(tool.name).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+
+    private func refreshAvailableTools() async {
+        loadingTools = true
+        var tools: [BuiltinToolInfo] = []
+        if UserDefaults.standard.bool(forKey: SettingsKeys.agentToolsEnabled),
+           let builtins = try? await ChatToolsService.list(port: port) {
+            tools += builtins
+        }
+        if UserDefaults.standard.bool(forKey: SettingsKeys.jsSandboxEnabled) {
+            tools.append(JavaScriptSandboxService.tool)
+        }
+        tools += await ToshMCPService.shared.discoverTools()
+        var seen = Set<String>()
+        availableTools = tools.filter { seen.insert($0.name).inserted }
+        loadingTools = false
+    }
+
+    private func refreshModelModalities() async {
+        guard server.state == .running else {
+            modelModalities = nil
+            loadingModalities = false
+            return
+        }
+        loadingModalities = true
+        let selected = routerMode && !chatSelectedModel.isEmpty ? chatSelectedModel : nil
+        if let fetched = try? await ModelCapabilitiesService.fetch(port: port, model: selected) {
+            modelModalities = fetched
+            capabilitiesAreComplete = true
+        } else if routerMode,
+                  let local = models.models.first(where: {
+                      ServerSettings.routerAlias(for: $0.url.path) == chatSelectedModel
+                  }) {
+            modelModalities = ModelModalities(
+                vision: ServerSettings.mmprojPath(forModel: local.url.path) != nil,
+                audio: false, video: false, thinking: nil)
+            capabilitiesAreComplete = false
+        } else {
+            modelModalities = nil
+            capabilitiesAreComplete = false
+        }
+        loadingModalities = false
+    }
+
+    @ViewBuilder
+    private var modalityBadges: some View {
+        HStack(spacing: 6) {
+            if loadingModalities {
+                ProgressView().controlSize(.small)
+                Text(loc.t("Detectando capacidades…", "Detecting capabilities…"))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let modelModalities {
+                modalityBadge(loc.t("Texto", "Text"), icon: "text.alignleft", enabled: true)
+                modalityBadge(loc.t("Visión", "Vision"), icon: "eye", enabled: modelModalities.vision)
+                if capabilitiesAreComplete {
+                    modalityBadge(loc.t("Audio", "Audio"), icon: "waveform", enabled: modelModalities.audio)
+                    modalityBadge(loc.t("Video", "Video"), icon: "film", enabled: modelModalities.video)
+                } else {
+                    Label(loc.t("Se completan al cargar", "Complete after loading"),
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Label(loc.t("Capacidades no disponibles", "Capabilities unavailable"),
+                      systemImage: "questionmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func modalityBadge(_ title: String, icon: String, enabled: Bool) -> some View {
+        Label(title, systemImage: icon)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background((enabled ? Color.accentColor : Color.secondary).opacity(enabled ? 0.14 : 0.07),
+                        in: Capsule())
+            .help(enabled
+                  ? loc.t("Compatible", "Supported")
+                  : loc.t("No compatible con el modelo seleccionado", "Not supported by the selected model"))
     }
 
     static func nsImage(fromDataURI uri: String) -> NSImage? {
@@ -1692,11 +2861,19 @@ struct NativeChatView: View {
             HStack(spacing: 6) {
                 ForEach(attachments) { a in
                     HStack(spacing: 5) {
-                        Image(systemName: "doc.text")
+                        Image(systemName: a.mediaKind == "audio" ? "waveform"
+                              : a.mediaKind == "video" ? "film" : "doc.text")
                         Text(a.name).lineLimit(1)
-                        Text("~\(a.estimatedTokens)t")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                        if a.mediaKind == nil {
+                            Text("~\(a.estimatedTokens)t")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Button(loc.t("Vista previa", "Preview"), systemImage: "play.circle") {
+                                previewAttachment = a
+                            }
+                            .labelStyle(.iconOnly).buttonStyle(.borderless)
+                        }
                         Button {
                             attachments.removeAll { $0.id == a.id }
                         } label: {
@@ -1749,7 +2926,7 @@ struct NativeChatView: View {
     /// keystroke, so a large pasted blob makes typing crawl. Fold it into an
     /// attachment chip instead; it still reaches the model verbatim.
     private func absorbLargeDraft(_ value: String) {
-        guard value.count > 4000 else { return }
+        guard pasteLongTextLength > 0, value.count > pasteLongTextLength else { return }
         let base = loc.t("Texto pegado", "Pasted text")
         let existing = attachments.filter { $0.name.hasPrefix(base) }.count
         let name = existing == 0 ? base + ".txt" : "\(base) \(existing + 1).txt"
@@ -1780,7 +2957,7 @@ struct NativeChatView: View {
                                 "Pasted image: the current model can't read images (load a vision model with its mmproj)")
             return
         }
-        guard let uri = Self.imageDataURI(from: data) else {
+        guard let uri = Self.imageDataURI(from: data, maxMegapixels: maxImageMegapixels) else {
             attachError = loc.t("No se pudo procesar la imagen pegada", "Couldn't process the pasted image")
             return
         }
@@ -1813,13 +2990,29 @@ struct NativeChatView: View {
 
             let ext = (name as NSString).pathExtension.lowercased()
 
+            if ["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "mp4", "mov", "webm", "mkv"].contains(ext) {
+                let mime = UTType(filenameExtension: ext)?.preferredMIMEType
+                    ?? (["mp4", "mov", "webm", "mkv"].contains(ext) ? "video/\(ext)" : "audio/\(ext)")
+                let kind = mime.hasPrefix("video/") ? "video" : "audio"
+                guard kind == "video" ? videoAvailable : audioAvailable else {
+                    errors.append(kind == "video"
+                        ? loc.t("\(name): el modelo actual no admite video", "\(name): the current model doesn't support video")
+                        : loc.t("\(name): el modelo actual no admite audio", "\(name): the current model doesn't support audio"))
+                    continue
+                }
+                let uri = "data:\(mime);base64," + data.base64EncodedString()
+                attachments.append(ChatAttachment(name: name, content: "", mimeType: mime,
+                                                    dataURI: uri, byteCount: data.count))
+                continue
+            }
+
             // Images → vision (only if the loaded model has a multimodal projector).
             if ["png", "jpg", "jpeg", "heic", "heif", "gif", "bmp", "tiff", "tif", "webp"].contains(ext) {
                 guard visionAvailable else {
                     errors.append(loc.t("\(name): el modelo actual no admite imágenes (carga un modelo con visión y su mmproj)",
                                         "\(name): the current model can't read images (load a vision model with its mmproj)")); continue
                 }
-                guard let uri = Self.imageDataURI(from: data) else {
+                guard let uri = Self.imageDataURI(from: data, maxMegapixels: maxImageMegapixels) else {
                     errors.append(loc.t("\(name): no se pudo procesar la imagen", "\(name): couldn't process the image")); continue
                 }
                 images.append(uri); continue
@@ -1829,6 +3022,21 @@ struct NativeChatView: View {
             if ext == "pdf" || data.prefix(5) == Data("%PDF-".utf8) {
                 guard let pdf = PDFDocument(data: data) else {
                     errors.append(loc.t("\(name): no se pudo abrir el PDF", "\(name): couldn't open the PDF")); continue
+                }
+                if pdfAsImages && visionAvailable {
+                    ocrPending += 1
+                    Task { @MainActor in
+                        let pages = Self.pdfImageURIs(pdf, maxPages: 20,
+                                                      maxMegapixels: maxImageMegapixels)
+                        images.append(contentsOf: pages)
+                        ocrPending -= 1
+                        if pages.isEmpty {
+                            attachError = (attachError.map { $0 + "\n" } ?? "")
+                                + loc.t("\(name): no se pudieron renderizar sus páginas",
+                                        "\(name): its pages couldn't be rendered")
+                        }
+                    }
+                    continue
                 }
                 if let s = pdf.string, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     text = s
@@ -1895,17 +3103,22 @@ struct NativeChatView: View {
         return nil
     }
 
-    /// True when the loaded model has a paired multimodal projector (vision).
-    private var visionAvailable: Bool { ServerSettings.mmprojPath(forModel: modelPath) != nil }
+    private var visionAvailable: Bool {
+        modelModalities?.vision ?? (!routerMode && ServerSettings.mmprojPath(forModel: modelPath) != nil)
+    }
+
+    private var audioAvailable: Bool { modelModalities?.audio ?? false }
+    private var videoAvailable: Bool { modelModalities?.video ?? false }
 
     /// Downscale an image (preserving aspect, max dimension) and re-encode as a
     /// JPEG data URI for the OpenAI multimodal `image_url` field — keeps the
     /// request and the persisted conversation from ballooning.
-    private static func imageDataURI(from data: Data, maxDim: CGFloat = 1024) -> String? {
+    private static func imageDataURI(from data: Data, maxMegapixels: Double) -> String? {
         guard let img = NSImage(data: data),
               let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let w = CGFloat(cg.width), h = CGFloat(cg.height)
-        let scale = min(1, maxDim / max(w, h))
+        let pixelLimit = maxMegapixels > 0 ? maxMegapixels * 1_000_000 : Double.greatestFiniteMagnitude
+        let scale = min(1, sqrt(pixelLimit / Double(w * h)))
         let nw = max(1, Int(w * scale)), nh = max(1, Int(h * scale))
         guard let ctx = CGContext(data: nil, width: nw, height: nh, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
@@ -1916,6 +3129,25 @@ struct NativeChatView: View {
         let rep = NSBitmapImageRep(cgImage: out)
         guard let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else { return nil }
         return "data:image/jpeg;base64," + jpeg.base64EncodedString()
+    }
+
+    @MainActor
+    private static func pdfImageURIs(_ document: PDFDocument, maxPages: Int,
+                                     maxMegapixels: Double) -> [String] {
+        var output: [String] = []
+        for index in 0..<min(document.pageCount, maxPages) {
+            guard let page = document.page(at: index) else { continue }
+            let bounds = page.bounds(for: .mediaBox)
+            let aspect = max(0.1, bounds.width / max(1, bounds.height))
+            let pixels = maxMegapixels > 0 ? maxMegapixels * 1_000_000 : 4_000_000
+            let height = sqrt(pixels / Double(aspect))
+            let size = CGSize(width: max(1, height * Double(aspect)), height: max(1, height))
+            let thumbnail = page.thumbnail(of: size, for: .mediaBox)
+            guard let data = thumbnail.tiffRepresentation,
+                  let uri = imageDataURI(from: data, maxMegapixels: 0) else { continue }
+            output.append(uri)
+        }
+        return output
     }
 
     /// OCR a scanned (text-less) PDF on-device with the Vision framework. Renders
@@ -2034,9 +3266,14 @@ struct NativeChatView: View {
         images = []
         attachError = nil
         atBottom = true
+        if chat.agentFlowActive {
+            chat.queueMessage(text: text, attachments: files, images: imgs)
+            return
+        }
         chat.send(text: text, attachments: files, images: imgs, port: port, temperature: temperature,
                   maxTokens: maxTokens, system: chat.effectiveSystemPrompt(global: systemPrompt),
-                  thinking: thinkingEnabled)
+                  thinking: thinkingEnabled, sampling: samplingSettings,
+                  modalities: modelModalities)
     }
 }
 
@@ -2071,6 +3308,7 @@ struct ConversationListView: View {
     @State private var newProjectName = ""
     @State private var promptProject: ChatProject?
     @State private var promptConversation: Conversation?
+    @State private var archiveMessage: String?
     @AppStorage(SettingsKeys.chatSortOrder) private var sortOrderRaw = ConversationSortOrder.lastUsed.rawValue
 
     private var sortOrder: ConversationSortOrder {
@@ -2161,6 +3399,13 @@ struct ConversationListView: View {
                             }
                         }
                     }
+                    Divider()
+                    Button(loc.t("Importar archivo…", "Import archive…"),
+                           systemImage: "square.and.arrow.down") { importArchive() }
+                    Button(loc.t("Exportar todo…", "Export all…"),
+                           systemImage: "square.and.arrow.up") { exportArchive() }
+                    Button(loc.t("Exportar JSONL para llama.cpp…", "Export JSONL for llama.cpp…"),
+                           systemImage: "doc.text") { exportJSONL() }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
                         .font(.system(size: 13, weight: .medium))
@@ -2261,11 +3506,62 @@ struct ConversationListView: View {
                 initial: c.systemPrompt ?? ""
             ) { chat.setConversationPrompt(c, $0) }
         }
+        .alert(loc.t("Conversaciones", "Conversations"),
+               isPresented: Binding(get: { archiveMessage != nil },
+                                    set: { if !$0 { archiveMessage = nil } })) {
+            Button(loc.t("Aceptar", "OK")) { archiveMessage = nil }
+        } message: {
+            Text(archiveMessage ?? "")
+        }
     }
 
     private func expandBinding(_ p: ChatProject) -> Binding<Bool> {
         Binding(get: { !(p.collapsed ?? false) },
                 set: { chat.setProjectCollapsed(p, !$0) })
+    }
+
+    private func importArchive() {
+        let panel = NSOpenPanel()
+        var allowedTypes: [UTType] = [.json]
+        if let jsonl = UTType(filenameExtension: "jsonl") { allowedTypes.append(jsonl) }
+        panel.allowedContentTypes = allowedTypes
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let count = try chat.importArchiveData(Data(contentsOf: url))
+            archiveMessage = loc.t("Se importaron \(count) conversaciones nuevas.",
+                                   "Imported \(count) new conversations.")
+        } catch {
+            archiveMessage = error.localizedDescription
+        }
+    }
+
+    private func exportArchive() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "ToshLLM-conversations.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try chat.exportArchiveData().write(to: url, options: .atomic)
+            archiveMessage = loc.t("Historial exportado correctamente.",
+                                   "Conversation history exported successfully.")
+        } catch {
+            archiveMessage = error.localizedDescription
+        }
+    }
+
+    private func exportJSONL() {
+        let panel = NSSavePanel()
+        if let jsonl = UTType(filenameExtension: "jsonl") { panel.allowedContentTypes = [jsonl] }
+        panel.nameFieldStringValue = "ToshLLM-conversations.jsonl"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try chat.exportJSONLData().write(to: url, options: .atomic)
+            archiveMessage = loc.t("Historial JSONL compatible con llama.cpp exportado correctamente.",
+                                   "llama.cpp-compatible JSONL history exported successfully.")
+        } catch {
+            archiveMessage = error.localizedDescription
+        }
     }
 
     // MARK: rows

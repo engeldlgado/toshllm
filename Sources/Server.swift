@@ -35,6 +35,7 @@ struct ServerSettings {
     /// Serve /v1/embeddings (--embeddings). llama-server restricts the process
     /// to embedding use, so it's meant for a dedicated embedding-model server.
     var embeddings: Bool = false
+    var agentToolsEnabled: Bool = false
     var cacheTypeK: String     // f16 | q8_0 | q5_x | q4_x | iq4_nl
     var cacheTypeV: String
     var mlock: Bool
@@ -167,6 +168,10 @@ struct ServerSettings {
         // Which devices to split across is decided by the env vars below.
         if multiGPU || gpuList.count >= 2 { args += ["--split-mode", "layer"] }
         if embeddings { args.append("--embeddings") }
+        if agentToolsEnabled {
+            if !args.contains("--jinja") { args.append("--jinja") }
+            args += ["--tools", "all"]
+        }
         // Silently skipped with a loaded projector: llama.cpp cannot save/restore
         // slots with mmproj. Turning the vision eye off re-enables it.
         if persistCache && effectiveFaAmd && mmproj == nil {
@@ -200,6 +205,7 @@ struct ServerSettings {
             "--host", localNetworkDiscovery ? "0.0.0.0" : "127.0.0.1",
             "--port", String(port),
         ]
+        if agentToolsEnabled { args += ["--jinja", "--tools", "all"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
         return args
@@ -343,6 +349,9 @@ struct ServerSettings {
 
     var environment: [String: String] {
         var env = ProcessInfo.processInfo.environment
+        // Finder-launched apps inherit a minimal PATH. Video input is decoded by
+        // llama.cpp through ffmpeg/ffprobe, so expose their standard macOS locations.
+        env["PATH"] = VideoRuntimeAvailability.augmentedPath(env["PATH"])
         // The engine logs this, so a log pasted from a bug report identifies the
         // app build even when the engine binary is older than the app.
         env["TOSH_APP_VERSION"] = AppInfo.version
@@ -464,6 +473,7 @@ struct ServerSettings {
             gpuList: gpuList(fromCSV: d.string(forKey: SettingsKeys.gpuList)),
             extraArgs: d.string(forKey: SettingsKeys.extraArgs) ?? "",
             embeddings: bool(SettingsKeys.embeddings, false),
+            agentToolsEnabled: bool(SettingsKeys.agentToolsEnabled, false),
             cacheTypeK: Self.sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeK), default: "f16"),
             cacheTypeV: Self.sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeV), default: "f16"),
             mlock: bool(SettingsKeys.mlock, false),

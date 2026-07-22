@@ -47,6 +47,9 @@ enum SettingsKeys {
     static let gpuList = "gpuList"
     static let extraArgs = "extraArgs"
     static let embeddings = "embeddings"
+    static let agentToolsEnabled = "agentToolsEnabled"
+    static let jsSandboxEnabled = "jsSandboxEnabled"
+    static let mcpServers = "mcpServers"
     static let cacheTypeK = "cacheTypeK"
     static let cacheTypeV = "cacheTypeV"
     static let mlock = "mlock"
@@ -81,10 +84,36 @@ enum SettingsKeys {
     static let chatMaxTokens = "chatMaxTokens"
     static let chatSystem = "chatSystem"
     static let chatThinking = "chatThinking"
+    static let chatReasoningEffort = "chatReasoningEffort"
+    static let chatTopP = "chatTopP"
+    static let chatMinP = "chatMinP"
+    static let chatTopK = "chatTopK"
+    static let chatRepeatPenalty = "chatRepeatPenalty"
+    static let chatRepeatLastN = "chatRepeatLastN"
+    static let chatSeed = "chatSeed"
+    static let chatDynatempRange = "chatDynatempRange"
+    static let chatDynatempExponent = "chatDynatempExponent"
+    static let chatXTCProbability = "chatXTCProbability"
+    static let chatXTCThreshold = "chatXTCThreshold"
+    static let chatTypicalP = "chatTypicalP"
+    static let chatPresencePenalty = "chatPresencePenalty"
+    static let chatFrequencyPenalty = "chatFrequencyPenalty"
+    static let chatDryMultiplier = "chatDryMultiplier"
+    static let chatDryBase = "chatDryBase"
+    static let chatDryAllowedLength = "chatDryAllowedLength"
+    static let chatDryPenaltyLastN = "chatDryPenaltyLastN"
+    static let chatSamplers = "chatSamplers"
+    static let chatBackendSampling = "chatBackendSampling"
+    static let chatCustomJSON = "chatCustomJSON"
+    static let chatAgenticMaxTurns = "chatAgenticMaxTurns"
+    static let chatPasteLongTextLength = "chatPasteLongTextLength"
+    static let chatMaxImageMegapixels = "chatMaxImageMegapixels"
+    static let chatPDFAsImages = "chatPDFAsImages"
     /// Conversation list sort order. Like chatSelectedModel, a runtime UI
     /// preference excluded from resettableOptionKeys, not a real "setting".
     static let chatSortOrder = "chatSortOrder"
     static let chatAutoCompact = "chatAutoCompact"
+    static let chatShowSystemMessage = "chatShowSystemMessage"
     static let smoothTyping = "smoothTyping"
     static let onboardingDone = "onboardingDone"
 
@@ -129,13 +158,22 @@ enum SettingsKeys {
     /// live outside UserDefaults and are untouched.
     static let resettableOptionKeys = [
         serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja,
-        vramReserve, gpuIndex, gpuList, extraArgs, embeddings, cacheTypeK, cacheTypeV, mlock, cacheRAM,
+        vramReserve, gpuIndex, gpuList, extraArgs, embeddings, agentToolsEnabled, jsSandboxEnabled, mcpServers,
+        cacheTypeK, cacheTypeV, mlock, cacheRAM,
         parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, routerMode, routerModelsMax,
         persistCache, multiGPU, multiGPUCount,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, updateAutoCheck, appAccent,
-        chatTemp, chatMaxTokens, chatSystem, chatThinking,
-        chatAutoCompact, smoothTyping,
+        chatTemp, chatMaxTokens, chatSystem, chatThinking, chatReasoningEffort,
+        chatTopP, chatMinP, chatTopK,
+        chatRepeatPenalty, chatRepeatLastN, chatSeed,
+        chatDynatempRange, chatDynatempExponent, chatXTCProbability, chatXTCThreshold,
+        chatTypicalP, chatPresencePenalty, chatFrequencyPenalty, chatDryMultiplier,
+        chatDryBase, chatDryAllowedLength, chatDryPenaltyLastN, chatSamplers,
+        chatBackendSampling, chatCustomJSON, chatAgenticMaxTurns,
+        chatPasteLongTextLength, chatMaxImageMegapixels,
+        chatPDFAsImages,
+        chatAutoCompact, chatShowSystemMessage, smoothTyping,
         imagenAspect, imagenBaseSize, imagenSteps, imagenFormat, imagenOffloadCPU, imagenGPU,
     ]
 

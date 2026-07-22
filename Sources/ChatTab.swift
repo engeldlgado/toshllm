@@ -8,6 +8,16 @@ import Charts
 @MainActor
 final class ControlPanelState: ObservableObject {
     @Published var section: Section_ = .dashboard
+    @Published var settingsAnchor: SettingsAnchor?
+
+    func openSettings(_ anchor: SettingsAnchor) {
+        settingsAnchor = anchor
+        section = anchor == .chat ? .chatSettings : .settings
+    }
+}
+
+enum SettingsAnchor: Hashable {
+    case chat
 }
 
 /// Top-level mode of the main window: the chat, or the image studio.
