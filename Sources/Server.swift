@@ -1094,9 +1094,10 @@ final class ServerController: ObservableObject {
             "    [\($0.index)] \($0.name) · \($0.vramMB / 1024) GB\($0.isExternal ? " · EXTERNAL/eGPU" : "")\($0.isIntegrated ? " · iGPU (not auto-selected)" : "")"
         }.joined(separator: "\n")
         let envKeys = ["GGML_METAL_VRAM_RESERVE_MB",
-                       "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES",
+                       "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES", "GGML_METAL_DEVICE_LIST",
                        "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD",
-                       "GGML_SCHED_PREFETCH_EXPERTS", "GGML_CPU_NO_REPACK"]
+                       "GGML_SCHED_PREFETCH_EXPERTS", "GGML_CPU_NO_REPACK",
+                       "TOSH_MGPU_PEER", "TOSH_MGPU_PEER_DISABLE", "TOSH_MGPU_EVENTS"]
         let env = settings.environment
         let envLine = envKeys.compactMap { k in env[k].map { "\(k)=\($0)" } }.joined(separator: " ")
         let gpuSel = settings.multiGPU ? "split-all" : (settings.gpuIndex >= 0 ? "index \(settings.gpuIndex)" : "default (macOS picks)")

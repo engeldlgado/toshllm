@@ -131,6 +131,9 @@ struct Conversation: Identifiable, Codable {
     var branches: [ChatBranch]? = nil
     var activeBranchID: UUID? = nil
     var enabledToolNames: [String]? = nil
+    /// Last exchange's context tokens, per chat so the bar follows the open
+    /// conversation and persists with the KV cache. Optional for old JSON.
+    var contextUsed: Int? = nil
 }
 
 struct ChatBranch: Identifiable, Codable, Equatable {
@@ -365,9 +368,14 @@ final class ChatStore: ObservableObject {
         cfg.timeoutIntervalForResource = 3600
         return URLSession(configuration: cfg)
     }()
-    /// Tokens of context consumed by the last exchange (prompt + completion),
-    /// reported by the server. Drives the context-usage bar.
-    @Published var contextUsed: Int?
+    /// Context consumed by the current conversation's last exchange; drives the
+    /// usage bar. Stored per chat, so switching conversations follows the value.
+    var contextUsed: Int? { current?.contextUsed }
+
+    func setContextUsed(_ value: Int?, for id: UUID) {
+        guard let i = conversations.firstIndex(where: { $0.id == id }) else { return }
+        conversations[i].contextUsed = value
+    }
 
     private var task: Task<Void, Never>?
     // Watchdog: large MoE models with CPU offload can deadlock the AMD Metal
@@ -425,14 +433,12 @@ final class ChatStore: ObservableObject {
         if let empty = conversations.first(where: { $0.messages.isEmpty && $0.projectID == projectID }) {
             currentID = empty.id
             lastError = nil
-            contextUsed = nil
             return
         }
         let c = Conversation(title: "", projectID: projectID)
         conversations.insert(c, at: 0)
         currentID = c.id
         lastError = nil
-        contextUsed = nil
     }
 
     func delete(_ c: Conversation) {
@@ -950,7 +956,7 @@ final class ChatStore: ObservableObject {
                     && finalToolCalls.isEmpty {
                     store?.lastError = Self.emptyResponseMessage(finishReason: finalFinishReason)
                 }
-                if let finalUsage { store?.contextUsed = finalUsage.prompt + finalUsage.completion }
+                if let finalUsage { store?.setContextUsed(finalUsage.prompt + finalUsage.completion, for: convID) }
                 store?.finish(conversation: convID, text: finalText, speed: finalSpeed,
                               mtpAccept: finalAccept, timings: finalTimings,
                               toolCalls: finalToolCalls)
@@ -1427,8 +1433,8 @@ final class ChatStore: ObservableObject {
         let limit = d.object(forKey: SettingsKeys.ctx) == nil
             ? 16384 : d.integer(forKey: SettingsKeys.ctx)
         guard enabled, !generating, !compacting, limit > 0,
-              let used = contextUsed, Double(used) / Double(limit) > 0.7,
-              let i = conversations.firstIndex(where: { $0.id == id }) else { return }
+              let i = conversations.firstIndex(where: { $0.id == id }),
+              let used = conversations[i].contextUsed, Double(used) / Double(limit) > 0.7 else { return }
         let start = conversations[i].summarizedCount ?? 0
         guard let cutoff = Self.compactionCutoff(messages: conversations[i].messages,
                                                  alreadyCompacted: start) else { return }
@@ -1591,7 +1597,7 @@ final class ChatStore: ObservableObject {
         conversations[i].summary = nil
         conversations[i].summarizedCount = nil
         conversations[i].updated = Date()
-        contextUsed = nil
+        conversations[i].contextUsed = nil
         save()
         return message
     }
@@ -1603,7 +1609,7 @@ final class ChatStore: ObservableObject {
         conversations[i].summary = nil
         conversations[i].summarizedCount = nil
         conversations[i].updated = Date()
-        contextUsed = nil
+        conversations[i].contextUsed = nil
         save()
     }
 
@@ -1620,7 +1626,7 @@ final class ChatStore: ObservableObject {
         conversations[i].summary = nil
         conversations[i].summarizedCount = nil
         conversations[i].updated = Date()
-        contextUsed = nil
+        conversations[i].contextUsed = nil
         save()
     }
 
@@ -1660,7 +1666,6 @@ final class ChatStore: ObservableObject {
                                 projectID: source.projectID, systemPrompt: source.systemPrompt)
         conversations.insert(fork, at: 0)
         currentID = fork.id
-        contextUsed = nil
         save()
         return fork
     }

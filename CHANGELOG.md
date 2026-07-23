@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **The context-usage bar is now per chat**... it follows the open conversation and persists with the saved cache, instead of one shared value that only cleared when the app was reopened.
+- **Multi-GPU env flags now appear in the startup log**... `TOSH_MGPU_PEER`, `TOSH_MGPU_EVENTS` and the device list show in the engine's env line, so an opt-in transport is verifiable from a pasted log.
+
 ## [0.83.1] - 2026-07-23
 
 ### Improved
