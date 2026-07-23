@@ -28,6 +28,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
     @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
     @AppStorage(SettingsKeys.multiGPUCount) private var multiGPUCount = 0
+    @AppStorage(SettingsKeys.mgpuPeer) private var mgpuPeer = false
     @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
     @AppStorage(SettingsKeys.embeddings) private var embeddings = false
     @AppStorage(SettingsKeys.forcePrivateBuffers) private var forcePrivateBuffers = false
@@ -375,6 +376,10 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                             .labelStyle(.titleAndIcon)
+                        Toggle(loc.t("Infinity Fabric Link entre GPUs (experimental)",
+                                     "Infinity Fabric Link between GPUs (experimental)"), isOn: $mgpuPeer)
+                            .infoTip(loc.t("Si dos GPUs del reparto comparten un puente Infinity Fabric (las dos mitades de una W6800X Duo o Vega II Duo), copia las activaciones directamente entre ellas en vez de pasar por la RAM del sistema. Acelera el procesamiento del prompt; no cambia la velocidad de generación. Si el equipo no lo soporta, la copia vuelve sola al método seguro.",
+                                        "If two GPUs in the split share an Infinity Fabric bridge (the two halves of a W6800X Duo or Vega II Duo), copies activations directly between them instead of through system RAM. Speeds up prompt processing; does not change generation speed. If the machine doesn't support it, the copy falls back to the safe path on its own."))
                     }
                 }
                 // eGPU fix: shown only when an external GPU is present. When the user

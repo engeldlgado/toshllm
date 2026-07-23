@@ -67,6 +67,7 @@ enum SettingsKeys {
     static let persistCache = "persistCache"
     static let multiGPU = "multiGPU"
     static let multiGPUCount = "multiGPUCount"
+    static let mgpuPeer = "mgpuPeer"
     static let forcePrivateBuffers = "forcePrivateBuffers"
     static let cacheReuse = "cacheReuse"
     static let loadVision = "loadVision"

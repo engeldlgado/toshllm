@@ -78,6 +78,10 @@ struct ServerSettings {
     /// How many GPUs to split across when `multiGPU` is on. 0 = all detected.
     /// Fewer GPUs trade prompt speed for generation speed (less cross-card sync).
     var multiGPUCount: Int = 0
+    /// EXPERIMENTAL opt-in: when two split GPUs share a Metal peer group (Infinity
+    /// Fabric Link, e.g. a W6800X/Vega II Duo), copy activations die-to-die instead
+    /// of via host (TOSH_MGPU_PEER). Speeds up prefill; unset falls back to staging.
+    var mgpuPeer: Bool = false
     /// Force VRAM-resident (private) Metal buffers. The backend forces shared ones
     /// for external GPUs, which streams weights over Thunderbolt every op; this
     /// covers the default-GPU case, where the app can't tell macOS picked an eGPU.
@@ -386,6 +390,7 @@ struct ServerSettings {
             env["GGML_METAL_SHARED_BUFFERS_DISABLE"] = "1"
         }
         if effectiveFaAmd { env["TOSH_FA_AMD"] = "1" }
+        if mgpuPeer && (multiGPU || gpuList.count >= 2) { env["TOSH_MGPU_PEER"] = "1" }
         // Router mode has no single ncmoe (it's per-model, in the INI); the envs are
         // no-ops for dense models anyway.
         if prefetchExperts && (ncmoe > 0 || routerMode) {
@@ -490,6 +495,7 @@ struct ServerSettings {
             persistCache: bool(SettingsKeys.persistCache, false),
             multiGPU: bool(SettingsKeys.multiGPU, false),
             multiGPUCount: int(SettingsKeys.multiGPUCount, 0),
+            mgpuPeer: bool(SettingsKeys.mgpuPeer, false),
             forcePrivateBuffers: bool(SettingsKeys.forcePrivateBuffers, false),
             cacheReuse: bool(SettingsKeys.cacheReuse, true),
             loadVision: bool(SettingsKeys.loadVision, true),
