@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.83.3] - 2026-07-23
 
 ### Added
 - **Infinity Fabric Link for multi-GPU splits (experimental, opt-in)**... a new setting copies layer activations directly between GPUs that share a Metal peer group (a W6800X or Vega II Duo) instead of through system RAM, about 2.5× faster prompt processing on a bridged Duo (generation speed unchanged); it validates the first copy and falls back to the safe path on its own if the hardware can't do it.
