@@ -28,7 +28,9 @@ fi
 
 # The shapes the model actually uses, at a depth that reaches the split path.
 echo "\n=== correctness (must be all OK)"
-TOSH_METAL_SIMD_WIDTH="$WIDTH" "$BIN/test-export-graph-ops" -m "$MODEL" -c 8192 -ub 512 -b 512 -fa on -o "$TMP/ops.txt" > /dev/null 2>&1
+# Older llama.cpp checkouts name the target export-graph-ops (no test- prefix).
+if [ -x "$BIN/test-export-graph-ops" ]; then EXPORT="$BIN/test-export-graph-ops"; else EXPORT="$BIN/export-graph-ops"; fi
+TOSH_METAL_SIMD_WIDTH="$WIDTH" "$EXPORT" -m "$MODEL" -c 8192 -ub 512 -b 512 -fa on -o "$TMP/ops.txt" > /dev/null 2>&1
 awk '$1==74' "$TMP/ops.txt" > "$TMP/fa.txt"
 echo "shapes: $(wc -l < "$TMP/fa.txt")"
 "$BIN/test-backend-ops" test -b MTL0 --test-file "$TMP/fa.txt" 2>&1 | grep -E "tests passed|FAIL"
