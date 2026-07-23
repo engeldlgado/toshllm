@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.83.2] - 2026-07-23
 
 ### Fixed
 - **The context-usage bar is now per chat**... it follows the open conversation and persists with the saved cache, instead of one shared value that only cleared when the app was reopened.
