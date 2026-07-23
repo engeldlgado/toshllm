@@ -43,6 +43,7 @@ struct Profile: Codable, Identifiable {
 
     enum Pin {
         static let model      = "model"
+        static let moe        = "moe"
         static let ctx        = "ctx"
         static let gpu        = "gpu"
         static let discovery  = "discovery"
@@ -241,6 +242,7 @@ extension ServerSettings {
     mutating func applyPinned(_ p: Profile, _ pinned: Set<String>) {
         port = p.port
         if pinned.contains(Profile.Pin.model) { modelPath = p.modelPath; ncmoe = p.ncmoe }
+        if pinned.contains(Profile.Pin.moe) { ncmoe = p.ncmoe }
         if pinned.contains(Profile.Pin.ctx) { ctx = p.ctx }
         if pinned.contains(Profile.Pin.gpu) { gpuIndex = p.gpuIndex; gpuList = p.gpuList ?? [] }
         if pinned.contains(Profile.Pin.discovery), let v = p.localNetworkDiscovery { localNetworkDiscovery = v }

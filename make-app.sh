@@ -127,6 +127,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <string>ToshLLM can expose and advertise its local OpenAI-compatible API to devices on your trusted local network.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>ToshLLM records audio only when you press the microphone button, so you can send it to a local audio-capable model.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>ToshLLM transcribes your speech into the message field on your Mac when you use dictation from the microphone button.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_http._tcp.</string>

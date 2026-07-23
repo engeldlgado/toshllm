@@ -214,9 +214,20 @@ struct DashboardView: View {
                         .disabled(server.state == .running || server.state == .starting)
                 }
             }
-            if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
-                row("cpu", loc.t("Expertos MoE en CPU: \(ncmoe) capas",
-                                 "MoE experts on CPU: \(ncmoe) layers"))
+            if ServerSettings.modelIsMoE(at: modelPath) {
+                HStack(spacing: 8) {
+                    Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Expertos MoE en CPU: \(ncmoe)", "MoE experts on CPU: \(ncmoe)")).font(.callout)
+                    Spacer(minLength: 8)
+                    Stepper("", value: Binding(get: { ncmoe }, set: { v in
+                        ncmoe = v
+                        ServerSettings.rememberNcmoe(v, forModel: modelPath)
+                    }), in: 0...99)
+                        .labelsHidden()
+                        .disabled(server.state == .running || server.state == .starting)
+                }
+                .help(loc.t("Capas MoE cuyos expertos corren en CPU (RAM). Súbelo si la VRAM se satura, bájalo si te sobra. Se aplica al reiniciar el servidor.",
+                            "MoE layers whose experts run on the CPU (RAM). Raise it if VRAM saturates, lower it if you have headroom. Applies when the server restarts."))
             }
             if !modelPath.isEmpty && !routerMode {
                 if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
@@ -503,6 +514,7 @@ struct AddedServerCard: View {
     // Live global values, shown (and launched with) wherever this server has not
     // pinned its own; observing them keeps the card in sync with Settings edits.
     @AppStorage(SettingsKeys.modelPath) private var gModelPath = ""
+    @AppStorage(SettingsKeys.ncmoe) private var gNcmoe = 0
     @AppStorage(SettingsKeys.ctx) private var gCtx = 16384
     @AppStorage(SettingsKeys.gpuIndex) private var gGpuIndex = -1
     @AppStorage(SettingsKeys.gpuList) private var gGpuListCSV = ""
@@ -556,6 +568,22 @@ struct AddedServerCard: View {
                         c.profile?.gpuList = $0; pin(Profile.Pin.gpu); manager.persist()
                     }))
                     .disabled(busy)
+            }
+            if ServerSettings.modelIsMoE(at: modelPath) {
+                let moePinned = isPinned(Profile.Pin.moe) || isPinned(Profile.Pin.model)
+                let moeValue = moePinned ? (c.profile?.ncmoe ?? gNcmoe) : gNcmoe
+                HStack(spacing: 8) {
+                    Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Expertos MoE en CPU: \(moeValue)", "MoE experts on CPU: \(moeValue)")).font(.callout)
+                    Spacer(minLength: 8)
+                    Stepper("", value: Binding(
+                        get: { moeValue },
+                        set: { c.profile?.ncmoe = $0; pin(Profile.Pin.moe); manager.persist() }),
+                        in: 0...99)
+                        .labelsHidden().disabled(busy)
+                }
+                .help(loc.t("Capas MoE cuyos expertos corren en CPU (RAM). Hereda el de Ajustes hasta que lo cambies aquí.",
+                            "MoE layers whose experts run on the CPU (RAM). Follows Settings until you change it here."))
             }
             HStack(spacing: 8) {
                 Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)

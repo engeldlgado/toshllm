@@ -188,6 +188,27 @@ private struct DiffPanel: View {
 private struct SearchResultPanel: View {
     let result: String?
 
+    private struct Hit: Identifiable {
+        let id = UUID()
+        let title: String
+        let url: URL
+        let snippet: String
+    }
+
+    /// Search tools return a `{answer, results:[{url,title,content}]}` JSON;
+    /// parse it into a clean list, else fall back to plain URL chips.
+    private var parsed: (answer: String?, hits: [Hit])? {
+        guard let result, let data = result.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = object["results"] as? [[String: Any]] else { return nil }
+        let hits = rows.compactMap { row -> Hit? in
+            guard let link = row["url"] as? String, let url = URL(string: link) else { return nil }
+            return Hit(title: (row["title"] as? String) ?? url.host ?? link, url: url,
+                       snippet: (row["content"] as? String) ?? "")
+        }
+        return hits.isEmpty ? nil : (object["answer"] as? String, hits)
+    }
+
     private var links: [(String, URL)] {
         guard let result else { return [] }
         let pattern = #"https?://[^\s\]\[\)\}\>,\"]+"#
@@ -203,7 +224,28 @@ private struct SearchResultPanel: View {
     }
 
     var body: some View {
-        if links.isEmpty {
+        if let parsed {
+            VStack(alignment: .leading, spacing: 8) {
+                if let answer = parsed.answer, !answer.isEmpty {
+                    Text(answer).font(.caption).textSelection(.enabled)
+                }
+                ForEach(parsed.hits) { hit in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Link(destination: hit.url) {
+                            Label(hit.title, systemImage: "globe").font(.caption.weight(.medium)).lineLimit(2)
+                        }
+                        Text(hit.url.host ?? hit.url.absoluteString)
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        if !hit.snippet.isEmpty {
+                            Text(hit.snippet).font(.caption2).foregroundStyle(.tertiary).lineLimit(3)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+        } else if links.isEmpty {
             Text(result ?? "No results")
                 .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
         } else {

@@ -2,6 +2,7 @@ import SwiftUI
 import PDFKit
 import Vision
 import UniformTypeIdentifiers
+import AVFoundation
 
 // MARK: - Model
 
@@ -14,9 +15,25 @@ struct ChatAttachment: Identifiable, Codable, Equatable {
     var mimeType: String? = nil
     var dataURI: String? = nil
     var byteCount: Int? = nil
+    var durationSeconds: Double? = nil
+    var videoFrameArea: Int? = nil
 
-    /// Rough token estimate (chars/4) for context budgeting in the UI.
-    var estimatedTokens: Int { max(1, content.count / 4) }
+    // mtmd samples video at ~4 fps with no cap; Qwen-VL bills each frame by its
+    // pixels (≈1 token / 32x32) up to a per-frame cap.
+    private static let videoFPS = 4.0
+    private static let videoPixelsPerToken = 1024
+    private static let videoMaxTokensPerFrame = 1120
+
+    /// Rough token estimate for context budgeting in the UI: chars/4 for text,
+    /// duration-and-resolution based for video (its text content is empty).
+    var estimatedTokens: Int {
+        if mediaKind == "video", let seconds = durationSeconds, seconds > 0 {
+            let area = videoFrameArea ?? Self.videoMaxTokensPerFrame * Self.videoPixelsPerToken
+            let perFrame = min(area / Self.videoPixelsPerToken, Self.videoMaxTokensPerFrame)
+            return max(1, Int(seconds * Self.videoFPS) * perFrame)
+        }
+        return max(1, content.count / 4)
+    }
 
     var fenceHint: String { (name as NSString).pathExtension.lowercased() }
 
@@ -1517,8 +1534,10 @@ final class ChatStore: ObservableObject {
         if message.lowercased().contains("context") {
             return "Contexto lleno: el mensaje, los archivos adjuntos y el historial juntos superan el contexto. Sube el contexto en Ajustes, adjunta menos o inicia un chat nuevo / context full: your message, attached files and history together exceed the context. Raise the context size in Settings, attach less, or start a new chat"
         }
+        // std::bad_function_call comes from both a context overflow on a tool turn
+        // and a missing ffmpeg/ffprobe on video; name both, not just video.
         if message.contains("bad_function_call") {
-            return "No se pudo decodificar el video. Verifica que ffmpeg y ffprobe estén disponibles y vuelve a iniciar el servidor / the video could not be decoded. Make sure ffmpeg and ffprobe are available, then restart the server"
+            return "La solicitud falló. Con herramientas activas suele ser que el archivo o la conversación superan el contexto: súbelo en Ajustes o usa un archivo más pequeño. Si adjuntaste un video, verifica que ffmpeg y ffprobe estén disponibles / the request failed. With tools enabled this is usually the file or conversation exceeding the context: raise it in Settings or use a smaller file. If you attached a video, make sure ffmpeg and ffprobe are available"
         }
         return "HTTP \(status): \(message.prefix(300))"
     }
@@ -1801,6 +1820,8 @@ struct NativeChatView: View {
     @State private var showAttachments = false
     @State private var showTools = false
     @StateObject private var audioRecorder = AudioRecorderController()
+    @StateObject private var dictation = SpeechDictationController()
+    @State private var dictationBase = ""
     @State private var previewAttachment: ChatAttachment?
     @State private var availableTools: [BuiltinToolInfo] = []
     @State private var loadingTools = false
@@ -2045,7 +2066,9 @@ struct NativeChatView: View {
     // work without any scrollTo or anchor management — the pattern messaging apps
     // use. Avoids the LazyVStack + scrollPosition blank bug (FB/Apple thread).
     private var messagesScroll: some View {
-        let messages = chat.current?.messages ?? []
+        // Tool results are shown inside the assistant's tool-call card, so the
+        // separate tool-role message is display-only noise and is hidden here.
+        let messages = (chat.current?.messages ?? []).filter { $0.role != "tool" }
         let newestID = messages.last?.id
         return ScrollViewReader { proxy in
             ScrollView {
@@ -2223,64 +2246,7 @@ struct NativeChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            HStack(alignment: .bottom, spacing: 10) {
-                HStack(spacing: 6) {
-                    paramsButton
-                    attachButton
-                    if !availableTools.isEmpty { toolsButton }
-                    recordButton
-                }
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.bottom, 4)
-                TextField(loc.t("Escribe tu mensaje…", "Type your message…"),
-                          text: $draft, axis: .vertical)
-                    .lineLimit(1...8)
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 13).padding(.vertical, 8)
-                    .glassSurface(in: RoundedRectangle(cornerRadius: 20), interactive: true)
-                    .focused($inputFocused)
-                    .onSubmit(send)
-                    .onChange(of: draft) { _, value in
-                        absorbLargeDraft(value)
-                        scheduleDraftSave()
-                    }
-                    .onPasteCommand(of: [.image, .png, .tiff, .fileURL]) { _ in
-                        pasteFromClipboard()
-                    }
-                    .help(loc.t("Intro envía; Opción+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto; pegar una imagen (captura) la adjunta si el modelo tiene visión.",
-                                "Return sends; Option+Return inserts a line break. Large pasted text becomes an attachment; pasting an image (screenshot) attaches it if the model has vision."))
-                if chat.generating {
-                    Button(loc.t("Intervenir", "Steer"), systemImage: "arrow.up.circle.fill",
-                           action: send)
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 26))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
-                        .buttonStyle(.borderless)
-                        .padding(.bottom, 2)
-                        .disabled(!canSend)
-                        .help(loc.t("Enviar una intervención: se aplicará al terminar el turno actual del agente.",
-                                    "Send a steering message after the agent's current turn."))
-                    Button(loc.t("Detener", "Stop"), systemImage: "stop.circle.fill",
-                           action: chat.stop)
-                        .labelStyle(.iconOnly)
-                            .font(.system(size: 26))
-                            .foregroundStyle(.red)
-                        .buttonStyle(.borderless)
-                        .padding(.bottom, 2)
-                        .help(loc.t("Detener la generación.", "Stop generation."))
-                } else {
-                    Button(loc.t("Enviar", "Send"), systemImage: "arrow.up.circle.fill", action: send)
-                        .labelStyle(.iconOnly)
-                        .font(.system(size: 26))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
-                    .buttonStyle(.borderless)
-                    .padding(.bottom, 2)
-                    .disabled(!canSend)
-                    .help(loc.t("Enviar mensaje (Intro).", "Send message (Return)."))
-                }
-            }
+            composerRow
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -2292,10 +2258,81 @@ struct NativeChatView: View {
         }
         .onChange(of: attachments) { scheduleDraftSave() }
         .onChange(of: images) { scheduleDraftSave() }
-        .alert(loc.t("No se pudo grabar audio", "Audio recording failed"),
-               isPresented: Binding(get: { audioRecorder.error != nil },
-                                    set: { if !$0 { audioRecorder.error = nil } })) {
-        } message: { Text(audioRecorder.error ?? "") }
+        .alert(loc.t("Problema con la voz", "Voice problem"),
+               isPresented: Binding(
+                   get: { audioRecorder.error != nil || dictation.error != nil },
+                   set: { if !$0 { audioRecorder.error = nil; dictation.error = nil } })) {
+        } message: { Text(audioRecorder.error ?? dictation.error ?? "") }
+    }
+
+    private var composerRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            HStack(spacing: 6) {
+                paramsButton
+                attachButton
+                if !availableTools.isEmpty { toolsButton }
+                voiceButton
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.bottom, 4)
+            messageField
+            sendControls
+        }
+    }
+
+    private var messageField: some View {
+        TextField(loc.t("Escribe tu mensaje…", "Type your message…"),
+                  text: $draft, axis: .vertical)
+            .lineLimit(1...8)
+            .textFieldStyle(.plain)
+            .padding(.horizontal, 13).padding(.vertical, 8)
+            .glassSurface(in: RoundedRectangle(cornerRadius: 20), interactive: true)
+            .focused($inputFocused)
+            .onSubmit(send)
+            .onChange(of: draft) { _, value in
+                absorbLargeDraft(value)
+                scheduleDraftSave()
+            }
+            .onPasteCommand(of: [.image, .png, .tiff, .fileURL]) { _ in
+                pasteFromClipboard()
+            }
+            .help(loc.t("Intro envía; Opción+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto; pegar una imagen (captura) la adjunta si el modelo tiene visión.",
+                        "Return sends; Option+Return inserts a line break. Large pasted text becomes an attachment; pasting an image (screenshot) attaches it if the model has vision."))
+    }
+
+    @ViewBuilder
+    private var sendControls: some View {
+        if chat.generating {
+            Button(loc.t("Intervenir", "Steer"), systemImage: "arrow.up.circle.fill",
+                   action: send)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 26))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
+                .buttonStyle(.borderless)
+                .padding(.bottom, 2)
+                .disabled(!canSend)
+                .help(loc.t("Enviar una intervención: se aplicará al terminar el turno actual del agente.",
+                            "Send a steering message after the agent's current turn."))
+            Button(loc.t("Detener", "Stop"), systemImage: "stop.circle.fill",
+                   action: chat.stop)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 26))
+                .foregroundStyle(.red)
+                .buttonStyle(.borderless)
+                .padding(.bottom, 2)
+                .help(loc.t("Detener la generación.", "Stop generation."))
+        } else {
+            Button(loc.t("Enviar", "Send"), systemImage: "arrow.up.circle.fill", action: send)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 26))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, canSend ? AppTheme.accent(accentRaw) : Color.secondary.opacity(0.45))
+                .buttonStyle(.borderless)
+                .padding(.bottom, 2)
+                .disabled(!canSend)
+                .help(loc.t("Enviar mensaje (Intro).", "Send message (Return)."))
+        }
     }
 
     private var canSend: Bool {
@@ -2369,11 +2406,11 @@ struct NativeChatView: View {
                         chatSelectedModel = ServerSettings.routerAlias(for: first.url.path)
                     }
                 }
-
-                modalityBadges
-
-                Divider()
             }
+
+            modalityBadges
+
+            Divider()
 
             Picker(selection: $reasoningEffort) {
                 Text(loc.t("Desactivado", "Off")).tag("off")
@@ -2668,31 +2705,62 @@ struct NativeChatView: View {
         .frame(width: 240)
     }
 
-    private var recordButton: some View {
-        Button {
-            guard audioAvailable || audioRecorder.isRecording else {
-                attachError = capabilitiesAreComplete
-                    ? loc.t("El modelo actual no admite audio.", "The current model doesn't support audio.")
-                    : loc.t("Las capacidades de audio estarán disponibles cuando el router cargue el modelo.",
-                            "Audio capabilities will be available after the router loads the model.")
-                return
+    @ViewBuilder
+    private var voiceButton: some View {
+        if dictation.isDictating || audioRecorder.isRecording {
+            Button(action: stopVoice) {
+                ComposerCircleLabel(
+                    title: dictation.isDictating
+                        ? loc.t("Detener dictado", "Stop dictation")
+                        : loc.t("Detener grabación", "Stop recording"),
+                    systemImage: "stop.fill", active: true)
             }
-            attachError = nil
-            audioRecorder.toggle { attachments.append($0) }
-        } label: {
-            ComposerCircleLabel(
-                title: audioRecorder.isRecording
-                    ? loc.t("Detener grabación", "Stop recording")
-                    : loc.t("Grabar audio", "Record audio"),
-                systemImage: audioRecorder.isRecording ? "stop.fill" : "mic.fill",
-                active: audioRecorder.isRecording)
+            .buttonStyle(.plain)
+            .help(dictation.isDictating
+                  ? loc.t("Escuchando… toca para detener", "Listening… tap to stop")
+                  : loc.t("Detener (\(Int(audioRecorder.duration)) s)", "Stop (\(Int(audioRecorder.duration)) s)"))
+        } else if audioAvailable {
+            Menu {
+                Button(action: startDictation) {
+                    Label(loc.t("Dictar a texto", "Dictate to text"), systemImage: "mic")
+                }
+                Button(action: startRecording) {
+                    Label(loc.t("Grabar para el modelo", "Record for the model"), systemImage: "waveform")
+                }
+            } label: {
+                ComposerCircleLabel(title: loc.t("Voz", "Voice"), systemImage: "mic.fill")
+            }
+            .menuStyle(.button)
+            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help(loc.t("Voz: dictar a texto o grabar audio para el modelo",
+                        "Voice: dictate to text or record audio for the model"))
+        } else {
+            Button(action: startDictation) {
+                ComposerCircleLabel(title: loc.t("Dictar a texto", "Dictate to text"),
+                                    systemImage: "mic.fill")
+            }
+            .buttonStyle(.plain)
+            .help(loc.t("Dictar a texto (en el dispositivo)", "Dictate to text (on-device)"))
         }
-        .buttonStyle(.plain)
-        .help(audioRecorder.isRecording
-              ? loc.t("Detener (\(Int(audioRecorder.duration)) s)", "Stop (\(Int(audioRecorder.duration)) s)")
-              : audioAvailable
-                ? loc.t("Grabar audio", "Record audio")
-                : loc.t("El modelo actual no admite audio", "The current model doesn't support audio"))
+    }
+
+    private func startDictation() {
+        attachError = nil
+        let base = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        dictationBase = base.isEmpty ? "" : base + " "
+        dictation.toggle { draft = dictationBase + $0 }
+    }
+
+    private func startRecording() {
+        attachError = nil
+        audioRecorder.toggle { attachments.append($0) }
+    }
+
+    private func stopVoice() {
+        if dictation.isDictating { dictation.stop() }
+        if audioRecorder.isRecording { audioRecorder.toggle { attachments.append($0) } }
     }
 
     private var toolsButton: some View {
@@ -2972,6 +3040,23 @@ struct NativeChatView: View {
         if panel.runModal() == .OK { addAttachments(urls: panel.urls) }
     }
 
+    private func loadVideoDuration(url: URL, attachmentID: UUID) {
+        Task { @MainActor in
+            let asset = AVURLAsset(url: url)
+            guard let duration = try? await asset.load(.duration) else { return }
+            let seconds = CMTimeGetSeconds(duration)
+            guard seconds.isFinite, seconds > 0 else { return }
+            var area: Int? = nil
+            if let track = try? await asset.loadTracks(withMediaType: .video).first,
+               let size = try? await track.load(.naturalSize) {
+                area = Int(abs(size.width) * abs(size.height))
+            }
+            guard let idx = attachments.firstIndex(where: { $0.id == attachmentID }) else { return }
+            attachments[idx].durationSeconds = seconds
+            attachments[idx].videoFrameArea = area
+        }
+    }
+
     // Read cap (raw bytes) and extracted-text cap. Text beyond the latter is
     // truncated with a note; the proactive context warning catches huge totals.
     private static let maxAttachBytes = 40 * 1024 * 1024
@@ -3001,8 +3086,10 @@ struct NativeChatView: View {
                     continue
                 }
                 let uri = "data:\(mime);base64," + data.base64EncodedString()
-                attachments.append(ChatAttachment(name: name, content: "", mimeType: mime,
-                                                    dataURI: uri, byteCount: data.count))
+                let attachment = ChatAttachment(name: name, content: "", mimeType: mime,
+                                                dataURI: uri, byteCount: data.count)
+                attachments.append(attachment)
+                if kind == "video" { loadVideoDuration(url: url, attachmentID: attachment.id) }
                 continue
             }
 
