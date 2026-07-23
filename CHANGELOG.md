@@ -3,10 +3,15 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- **The Infinity Fabric peer transfer now prints a confirmation line in the log**... the "peer transfer enabled" line shows at the normal log level so you can verify the path engaged, and the experimental first-copy probe from 0.83.3 (never validated on bridged hardware) is removed so it cannot disable the copy on a transient fault.
+
 ## [0.83.3] - 2026-07-23
 
 ### Added
-- **Infinity Fabric Link for multi-GPU splits (experimental, opt-in)**... a new setting copies layer activations directly between GPUs that share a Metal peer group (a W6800X or Vega II Duo) instead of through system RAM, about 2.5× faster prompt processing on a bridged Duo (generation speed unchanged); it validates the first copy and falls back to the safe path on its own if the hardware can't do it.
+- **Infinity Fabric Link for multi-GPU splits (experimental, opt-in)**... a new setting copies layer activations directly between GPUs that share a Metal peer group (a W6800X or Vega II Duo) instead of through system RAM; it can speed up prompt processing on some bridged multi-GPU configurations and does not change generation speed.
 
 ## [0.83.2] - 2026-07-23
 

@@ -431,7 +431,7 @@ index abf4b06ed..d063f95e4 100644
  void             ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..2b69be6ca 100644
+index 32d97cd5d..7a3e4acad 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -16,10 +16,11 @@
@@ -446,7 +446,7 @@ index 32d97cd5d..2b69be6ca 100644
      id<MTLCommandBuffer> obj;
  };
  
-@@ -27,12 +28,41 @@
+@@ -27,12 +28,39 @@
      char name[128];
  
      ggml_metal_device_t  dev;
@@ -478,8 +478,6 @@ index 32d97cd5d..2b69be6ca 100644
 +        id<MTLSharedEvent>   ev_ready, ev_done;
 +        uint64_t             seq;
 +        bool                 peer_logged;
-+        // 0 = untried, 1 = validated, -1 = failed its first copy (fall back to host)
-+        int                  peer_probe;
 +    } xlinks[4];
 +    int n_xlinks;
 +
@@ -488,7 +486,7 @@ index 32d97cd5d..2b69be6ca 100644
      // additional, inference-time compiled pipelines
      ggml_metal_pipelines_t pipelines_ext;
  
-@@ -79,11 +109,11 @@
+@@ -79,11 +107,11 @@
      // error state - set when a command buffer fails during synchronize
      // once set, graph_compute will return GGML_STATUS_FAILED until the backend is recreated
      bool has_error;
@@ -501,7 +499,7 @@ index 32d97cd5d..2b69be6ca 100644
  #if TARGET_OS_OSX && !GGML_METAL_NDEBUG
      // Show all the Metal device instances in the system
      NSArray * devices = MTLCopyAllDevices();
-@@ -101,15 +131,23 @@
+@@ -101,15 +129,23 @@
      GGML_LOG_INFO("%s: picking default device: %s\n", __func__, [[device name] UTF8String]);
  
      // TODO: would it be better to have one queue for the backend and one queue for the device?
@@ -527,7 +525,7 @@ index 32d97cd5d..2b69be6ca 100644
      res->lib = ggml_metal_device_get_library(dev);
      if (res->lib == NULL) {
          GGML_LOG_WARN("%s: the device does not have a precompiled Metal library - this is unexpected\n", __func__);
-@@ -132,11 +170,16 @@
+@@ -132,11 +168,16 @@
      snprintf(res->name, sizeof(res->name), "%s", props_dev->name);
  
      res->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
@@ -545,7 +543,7 @@ index 32d97cd5d..2b69be6ca 100644
          const char * val = getenv("GGML_METAL_GRAPH_DEBUG");
          res->debug_graph = val ? atoi(val) : 0;
      }
-@@ -187,10 +230,31 @@
+@@ -187,10 +228,31 @@
  }
  
  void ggml_metal_free(ggml_metal_t ctx) {
@@ -577,7 +575,7 @@ index 32d97cd5d..2b69be6ca 100644
              [ctx->cmd_bufs[i].obj release];
          }
      }
-@@ -221,11 +285,11 @@
+@@ -221,11 +283,11 @@
          }
      }
  
@@ -590,7 +588,7 @@ index 32d97cd5d..2b69be6ca 100644
  
      ggml_metal_device_event_free(ctx->dev, ctx->ev_cpy);
  
-@@ -241,10 +305,13 @@
+@@ -241,10 +303,13 @@
      if (ctx->cmd_buf_last) {
          [ctx->cmd_buf_last waitUntilCompleted];
          ctx->cmd_buf_last = nil;
@@ -604,7 +602,7 @@ index 32d97cd5d..2b69be6ca 100644
          const int n_cb = ctx->n_cb;
  
          for (int cb_idx = 0; cb_idx <= n_cb; ++cb_idx) {
-@@ -290,10 +357,17 @@
+@@ -290,10 +355,17 @@
              [cmd_buf release];
          }
  
@@ -622,7 +620,7 @@ index 32d97cd5d..2b69be6ca 100644
  static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_tensor * t) {
      if (!t) {
          return (struct ggml_metal_buffer_id) { nil, 0 };
-@@ -302,30 +376,104 @@
+@@ -302,30 +374,104 @@
      ggml_backend_buffer_t buffer = t->view_src ? t->view_src->buffer : t->buffer;
  
      return ggml_metal_buffer_get_id(buffer->context, t);
@@ -734,7 +732,7 @@ index 32d97cd5d..2b69be6ca 100644
  
          [encoder copyFromBuffer:buf_src
                     sourceOffset:0
-@@ -347,65 +495,391 @@
+@@ -347,65 +493,375 @@
          [cmd_buf retain];
      }
  }
@@ -864,9 +862,9 @@ index 32d97cd5d..2b69be6ca 100644
 +
 +            done += n;
 +        }
-     }
- }
- 
++    }
++}
++
 +static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
 +        ggml_metal_t ctx_src, ggml_metal_t ctx_dst) {
 +    struct ggml_metal_xdev_link * link = NULL;
@@ -928,11 +926,6 @@ index 32d97cd5d..2b69be6ca 100644
 +        if (link == NULL) {
 +            return false;
 +        }
-+        // A prior copy on this link faulted its command buffer; stay on the host
-+        // fallback for the rest of the session instead of retrying an unusable path.
-+        if (link->peer_probe < 0) {
-+            return false;
-+        }
 +
 +        if (link->peer_src != metal_src) {
 +            // Wait before replacing a remote view still used by the last blit.
@@ -955,6 +948,9 @@ index 32d97cd5d..2b69be6ca 100644
 +            id<MTLCommandBuffer> cmd_src = [ctx_src->queue commandBuffer];
 +            [cmd_src encodeSignalEvent:link->ev_ready value:seq];
 +            [cmd_src commit];
++            [ctx_src->cmd_bufs_ext addObject:cmd_src];
++            ctx_src->cmd_buf_last = cmd_src;
++            [cmd_src retain];
 +
 +            id<MTLCommandBuffer> cmd_dst = [ctx_dst->queue commandBuffer];
 +            [cmd_dst encodeWaitForEvent:link->ev_ready value:seq];
@@ -964,35 +960,21 @@ index 32d97cd5d..2b69be6ca 100644
 +            [encoder endEncoding];
 +            [cmd_dst encodeSignalEvent:link->ev_done value:seq];
 +            [cmd_dst commit];
-+
-+            // Probe the first copy synchronously: an unusable link fails here and
-+            // falls back to host staging, and the failed buffer is never enqueued
-+            // so it can't fault the backend later with no recovery.
-+            if (link->peer_probe == 0) {
-+                [cmd_dst waitUntilCompleted];
-+                if (cmd_dst.status != MTLCommandBufferStatusCompleted) {
-+                    link->peer_probe = -1;
-+                    return false;
-+                }
-+                link->peer_probe = 1;
-+            }
-+
-+            [ctx_src->cmd_bufs_ext addObject:cmd_src];
-+            ctx_src->cmd_buf_last = cmd_src;
-+            [cmd_src retain];
 +            [ctx_dst->cmd_bufs_ext addObject:cmd_dst];
 +            ctx_dst->cmd_buf_last = cmd_dst;
 +            [cmd_dst retain];
 +        }
 +
 +        if (!link->peer_logged) {
-+            GGML_LOG_INFO("%s: Infinity Fabric peer transfer enabled: %s -> %s (peer group %llu)\n",
-+                    __func__, dev_src.name.UTF8String, dev_dst.name.UTF8String,
++            // fprintf, not GGML_LOG_INFO, so the confirmation shows at the default
++            // log level like the SIMD-width line; still once per link, no per-copy cost.
++            fprintf(stderr, "ggml_metal: Infinity Fabric peer transfer enabled: %s -> %s (peer group %llu)\n",
++                    dev_src.name.UTF8String, dev_dst.name.UTF8String,
 +                    (unsigned long long) peer_group);
 +            link->peer_logged = true;
 +        }
 +        return true;
-+    }
+     }
 +#else
 +    GGML_UNUSED(ctx_src);
 +    GGML_UNUSED(ctx_dst);
@@ -1079,8 +1061,8 @@ index 32d97cd5d..2b69be6ca 100644
 +    }
 +
 +    return true;
-+}
-+
+ }
+ 
  bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst) {
 +    // A Metal blit can't reach a buffer owned by another device, so a multi-GPU layer
 +    // hand-off goes through host memory (GGML_METAL_CROSS_STAGING_DISABLE uses the generic copy).
@@ -1151,7 +1133,7 @@ index 32d97cd5d..2b69be6ca 100644
  
          [encoder copyFromBuffer:bid_src.metal
                     sourceOffset:bid_src.offs
-@@ -502,11 +976,11 @@
+@@ -502,11 +958,11 @@
                  }
              }
          }
@@ -1164,7 +1146,7 @@ index 32d97cd5d..2b69be6ca 100644
          // cmd_buf[n_cb]
          {
              id<MTLCommandBuffer> cmd_buf = [queue commandBufferWithUnretainedReferences];
-@@ -624,11 +1098,11 @@
+@@ -624,11 +1080,11 @@
      //printf("%s: graph optimize took %.3f ms\n", __func__, (ggml_time_us() - t_start) / 1000.0);
  }
  
@@ -1177,7 +1159,7 @@ index 32d97cd5d..2b69be6ca 100644
          ggml_metal_event_encode_signal(ev, cmd_buf);
  
          [cmd_buf commit];
-@@ -640,11 +1114,11 @@
+@@ -640,11 +1096,11 @@
      }
  }
  
