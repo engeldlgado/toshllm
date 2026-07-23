@@ -431,7 +431,7 @@ index abf4b06ed..d063f95e4 100644
  void             ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 32d97cd5d..c9fe1dc0c 100644
+index 32d97cd5d..edede7c01 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -16,10 +16,11 @@
@@ -446,7 +446,7 @@ index 32d97cd5d..c9fe1dc0c 100644
      id<MTLCommandBuffer> obj;
  };
  
-@@ -27,12 +28,37 @@ struct ggml_metal {
+@@ -27,12 +28,39 @@
      char name[128];
  
      ggml_metal_device_t  dev;
@@ -467,15 +467,17 @@ index 32d97cd5d..c9fe1dc0c 100644
 +
      ggml_metal_event_t ev_cpy; // for async copies
  
-+    // event-chained cross-device links (TOSH_MGPU_EVENTS=1): the hand-off rides
-+    // both queues through one host block, no CPU wait
++    // Synchronization and resources shared by both cross-device copy paths.
 +    struct ggml_metal_xdev_link {
 +        ggml_metal_device_t  src_dev;
 +        void *               host;
 +        size_t               cap;
 +        id<MTLBuffer>        wrap_src, wrap_dst;
++        // Retaining the source keeps its cached remote view valid.
++        id<MTLBuffer>        peer_src, peer_view;
 +        id<MTLSharedEvent>   ev_ready, ev_done;
 +        uint64_t             seq;
++        bool                 peer_logged;
 +    } xlinks[4];
 +    int n_xlinks;
 +
@@ -484,7 +486,7 @@ index 32d97cd5d..c9fe1dc0c 100644
      // additional, inference-time compiled pipelines
      ggml_metal_pipelines_t pipelines_ext;
  
-@@ -79,11 +105,11 @@ struct ggml_metal {
+@@ -79,11 +107,11 @@
      // error state - set when a command buffer fails during synchronize
      // once set, graph_compute will return GGML_STATUS_FAILED until the backend is recreated
      bool has_error;
@@ -497,7 +499,7 @@ index 32d97cd5d..c9fe1dc0c 100644
  #if TARGET_OS_OSX && !GGML_METAL_NDEBUG
      // Show all the Metal device instances in the system
      NSArray * devices = MTLCopyAllDevices();
-@@ -101,15 +127,23 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
+@@ -101,15 +129,23 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
      GGML_LOG_INFO("%s: picking default device: %s\n", __func__, [[device name] UTF8String]);
  
      // TODO: would it be better to have one queue for the backend and one queue for the device?
@@ -523,7 +525,7 @@ index 32d97cd5d..c9fe1dc0c 100644
      res->lib = ggml_metal_device_get_library(dev);
      if (res->lib == NULL) {
          GGML_LOG_WARN("%s: the device does not have a precompiled Metal library - this is unexpected\n", __func__);
-@@ -132,11 +166,16 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
+@@ -132,11 +168,16 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
      snprintf(res->name, sizeof(res->name), "%s", props_dev->name);
  
      res->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
@@ -541,7 +543,7 @@ index 32d97cd5d..c9fe1dc0c 100644
          const char * val = getenv("GGML_METAL_GRAPH_DEBUG");
          res->debug_graph = val ? atoi(val) : 0;
      }
-@@ -187,10 +226,29 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
+@@ -187,10 +228,31 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
  }
  
  void ggml_metal_free(ggml_metal_t ctx) {
@@ -561,6 +563,8 @@ index 32d97cd5d..c9fe1dc0c 100644
 +        }
 +        [ctx->xlinks[i].wrap_src release];
 +        [ctx->xlinks[i].wrap_dst release];
++        [ctx->xlinks[i].peer_view release];
++        [ctx->xlinks[i].peer_src release];
 +        [ctx->xlinks[i].ev_ready release];
 +        [ctx->xlinks[i].ev_done release];
 +        free(ctx->xlinks[i].host);
@@ -571,7 +575,7 @@ index 32d97cd5d..c9fe1dc0c 100644
              [ctx->cmd_bufs[i].obj release];
          }
      }
-@@ -221,11 +279,11 @@ void ggml_metal_free(ggml_metal_t ctx) {
+@@ -221,11 +283,11 @@ void ggml_metal_free(ggml_metal_t ctx) {
          }
      }
  
@@ -584,7 +588,7 @@ index 32d97cd5d..c9fe1dc0c 100644
  
      ggml_metal_device_event_free(ctx->dev, ctx->ev_cpy);
  
-@@ -241,10 +299,13 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -241,10 +303,13 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
      if (ctx->cmd_buf_last) {
          [ctx->cmd_buf_last waitUntilCompleted];
          ctx->cmd_buf_last = nil;
@@ -598,7 +602,7 @@ index 32d97cd5d..c9fe1dc0c 100644
          const int n_cb = ctx->n_cb;
  
          for (int cb_idx = 0; cb_idx <= n_cb; ++cb_idx) {
-@@ -290,10 +351,17 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -290,10 +355,17 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
              [cmd_buf release];
          }
  
@@ -616,7 +620,7 @@ index 32d97cd5d..c9fe1dc0c 100644
  static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_tensor * t) {
      if (!t) {
          return (struct ggml_metal_buffer_id) { nil, 0 };
-@@ -302,30 +370,104 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
+@@ -302,30 +374,104 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
      ggml_backend_buffer_t buffer = t->view_src ? t->view_src->buffer : t->buffer;
  
      return ggml_metal_buffer_get_id(buffer->context, t);
@@ -728,7 +732,7 @@ index 32d97cd5d..c9fe1dc0c 100644
  
          [encoder copyFromBuffer:buf_src
                     sourceOffset:0
-@@ -347,65 +489,254 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+@@ -347,65 +493,373 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
          [cmd_buf retain];
      }
  }
@@ -858,9 +862,126 @@ index 32d97cd5d..c9fe1dc0c 100644
 +
 +            done += n;
 +        }
++    }
++}
++
++static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
++        ggml_metal_t ctx_src, ggml_metal_t ctx_dst) {
++    struct ggml_metal_xdev_link * link = NULL;
++    for (int i = 0; i < ctx_dst->n_xlinks; i++) {
++        if (ctx_dst->xlinks[i].src_dev == ctx_src->dev) {
++            link = &ctx_dst->xlinks[i];
++            break;
++        }
++    }
++    if (link == NULL) {
++        if (ctx_dst->n_xlinks == 4) {
++            return NULL;
++        }
++        link = &ctx_dst->xlinks[ctx_dst->n_xlinks++];
++        link->src_dev = ctx_src->dev;
++        id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
++        id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
++        link->ev_ready = [dev_src newSharedEvent];
++        link->ev_done  = [dev_dst newSharedEvent];
++        if (link->ev_ready == nil || link->ev_done == nil) {
++            [link->ev_ready release];
++            [link->ev_done release];
++            memset(link, 0, sizeof(*link));
++            ctx_dst->n_xlinks--;
++            return NULL;
++        }
++    }
++
++    return link;
++}
++
++// Direct copy between GPUs in the same Metal peer group.
++static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
++                                     const struct ggml_tensor * src, struct ggml_tensor * dst) {
++#if TARGET_OS_OSX
++    if (@available(macOS 10.15, *)) {
++        id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
++        id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
++        const uint64_t peer_group = dev_src.peerGroupID;
++        if (peer_group == 0 || peer_group != dev_dst.peerGroupID) {
++            return false;
++        }
++
++        struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
++        struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
++        if (bid_src.metal == nil || bid_dst.metal == nil) {
++            return false;
++        }
++        id<MTLBuffer> metal_src = (id<MTLBuffer>) bid_src.metal;
++        id<MTLBuffer> metal_dst = (id<MTLBuffer>) bid_dst.metal;
++
++        const size_t size = ggml_nbytes(src);
++        if (bid_src.offs > metal_src.length || size > metal_src.length - bid_src.offs ||
++            bid_dst.offs > metal_dst.length || size > metal_dst.length - bid_dst.offs) {
++            return false;
++        }
++
++        struct ggml_metal_xdev_link * link = ggml_metal_xdev_link_get(ctx_src, ctx_dst);
++        if (link == NULL) {
++            return false;
++        }
++
++        if (link->peer_src != metal_src) {
++            // Wait before replacing a remote view still used by the last blit.
++            if (link->peer_view != nil && link->seq > 0 &&
++                ![link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000]) {
++                return false;
++            }
++
++            [link->peer_view release];
++            [link->peer_src release];
++            link->peer_view = [metal_src newRemoteBufferViewForDevice:dev_dst];
++            link->peer_src  = link->peer_view != nil ? [metal_src retain] : nil;
++            if (link->peer_view == nil) {
++                return false;
++            }
++        }
++
++        const uint64_t seq = ++link->seq;
++        @autoreleasepool {
++            id<MTLCommandBuffer> cmd_src = [ctx_src->queue commandBuffer];
++            [cmd_src encodeSignalEvent:link->ev_ready value:seq];
++            [cmd_src commit];
++            [ctx_src->cmd_bufs_ext addObject:cmd_src];
++            ctx_src->cmd_buf_last = cmd_src;
++            [cmd_src retain];
++
++            id<MTLCommandBuffer> cmd_dst = [ctx_dst->queue commandBuffer];
++            [cmd_dst encodeWaitForEvent:link->ev_ready value:seq];
++            id<MTLBlitCommandEncoder> encoder = [cmd_dst blitCommandEncoder];
++            [encoder copyFromBuffer:link->peer_view sourceOffset:bid_src.offs
++                           toBuffer:metal_dst destinationOffset:bid_dst.offs size:size];
++            [encoder endEncoding];
++            [cmd_dst encodeSignalEvent:link->ev_done value:seq];
++            [cmd_dst commit];
++            [ctx_dst->cmd_bufs_ext addObject:cmd_dst];
++            ctx_dst->cmd_buf_last = cmd_dst;
++            [cmd_dst retain];
++        }
++
++        if (!link->peer_logged) {
++            GGML_LOG_INFO("%s: Infinity Fabric peer transfer enabled: %s -> %s (peer group %llu)\n",
++                    __func__, dev_src.name.UTF8String, dev_dst.name.UTF8String,
++                    (unsigned long long) peer_group);
++            link->peer_logged = true;
++        }
++        return true;
      }
- }
- 
++#else
++    GGML_UNUSED(ctx_src);
++    GGML_UNUSED(ctx_dst);
++    GGML_UNUSED(src);
++    GGML_UNUSED(dst);
++#endif
++    return false;
++}
++
 +// event-chained hand-off: both blits share one host block and order through
 +// MTLSharedEvents, so neither GPU drains and the CPU never blocks
 +static bool ggml_metal_cpy_xdev_events(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
@@ -873,22 +994,12 @@ index 32d97cd5d..c9fe1dc0c 100644
 +
 +    const size_t size = ggml_nbytes(src);
 +
-+    struct ggml_metal_xdev_link * link = NULL;
-+    for (int i = 0; i < ctx_dst->n_xlinks; i++) {
-+        if (ctx_dst->xlinks[i].src_dev == ctx_src->dev) {
-+            link = &ctx_dst->xlinks[i];
-+            break;
-+        }
-+    }
++    struct ggml_metal_xdev_link * link = ggml_metal_xdev_link_get(ctx_src, ctx_dst);
 +    if (link == NULL) {
-+        if (ctx_dst->n_xlinks == 4) {
-+            return false;
-+        }
-+        link = &ctx_dst->xlinks[ctx_dst->n_xlinks++];
-+        link->src_dev = ctx_src->dev;
-+        link->ev_ready = [ggml_metal_device_get_obj(ctx_src->dev) newSharedEvent];
-+        link->ev_done  = [ggml_metal_device_get_obj(ctx_dst->dev) newSharedEvent];
-+        fprintf(stderr, "ggml_metal: cross-device hand-off via shared events (TOSH_MGPU_EVENTS)\n");
++        return false;
++    }
++    if (link->cap == 0) {
++        GGML_LOG_INFO("%s: cross-device hand-off via shared events and host staging (TOSH_MGPU_EVENTS)\n", __func__);
 +    }
 +
 +    if (link->cap < size) {
@@ -905,9 +1016,11 @@ index 32d97cd5d..c9fe1dc0c 100644
 +            link->cap  = 0;
 +            return false;
 +        }
-+        link->wrap_src = [ggml_metal_device_get_obj(ctx_src->dev) newBufferWithBytesNoCopy:link->host
++        id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
++        id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
++        link->wrap_src = [dev_src newBufferWithBytesNoCopy:link->host
 +                              length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
-+        link->wrap_dst = [ggml_metal_device_get_obj(ctx_dst->dev) newBufferWithBytesNoCopy:link->host
++        link->wrap_dst = [dev_dst newBufferWithBytesNoCopy:link->host
 +                              length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
 +        if (link->wrap_src == nil || link->wrap_dst == nil) {
 +            return false;
@@ -946,8 +1059,8 @@ index 32d97cd5d..c9fe1dc0c 100644
 +    }
 +
 +    return true;
-+}
-+
+ }
+ 
  bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst) {
 +    // A Metal blit can't reach a buffer owned by another device, so a multi-GPU layer
 +    // hand-off goes through host memory (GGML_METAL_CROSS_STAGING_DISABLE uses the generic copy).
@@ -962,13 +1075,23 @@ index 32d97cd5d..c9fe1dc0c 100644
 +            const char * v = getenv("TOSH_MGPU_EVENTS");
 +            use_events = (v && v[0] == '1') ? 1 : 0;
 +        }
++        // Infinity Fabric peer copy is opt-in until validated on bridged hardware:
++        // a success that silently returns wrong data has no fallback.
++        static int use_peer = -1;
++        if (use_peer < 0) {
++            const char * v = getenv("TOSH_MGPU_PEER");
++            use_peer = (v && v[0] == '1') ? 1 : 0;
++        }
 +        ggml_backend_buffer_t ebsrc = src->view_src ? src->view_src->buffer : src->buffer;
 +        ggml_backend_buffer_t ebdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
-+        if (use_events &&
-+            !ggml_metal_buffer_is_shared(ebsrc->context) &&
-+            !ggml_metal_buffer_is_shared(ebdst->context) &&
-+            ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst)) {
-+            return true;
++        if (!ggml_metal_buffer_is_shared(ebsrc->context) &&
++            !ggml_metal_buffer_is_shared(ebdst->context)) {
++            if (use_peer && ggml_metal_cpy_xdev_peer(ctx_src, ctx_dst, src, dst)) {
++                return true;
++            }
++            if (use_events && ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst)) {
++                return true;
++            }
 +        }
 +        // drain both GPUs: the source before reading it, the destination before
 +        // overwriting an input its in-flight graph may still be consuming
@@ -1008,7 +1131,7 @@ index 32d97cd5d..c9fe1dc0c 100644
  
          [encoder copyFromBuffer:bid_src.metal
                     sourceOffset:bid_src.offs
-@@ -502,11 +833,11 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -502,11 +950,11 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
                  }
              }
          }
@@ -1021,7 +1144,7 @@ index 32d97cd5d..c9fe1dc0c 100644
          // cmd_buf[n_cb]
          {
              id<MTLCommandBuffer> cmd_buf = [queue commandBufferWithUnretainedReferences];
-@@ -624,11 +955,11 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+@@ -624,11 +1072,11 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
      //printf("%s: graph optimize took %.3f ms\n", __func__, (ggml_time_us() - t_start) / 1000.0);
  }
  
@@ -1034,7 +1157,7 @@ index 32d97cd5d..c9fe1dc0c 100644
          ggml_metal_event_encode_signal(ev, cmd_buf);
  
          [cmd_buf commit];
-@@ -640,11 +971,11 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
+@@ -640,11 +1088,11 @@ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
      }
  }
  
@@ -1550,7 +1673,7 @@ index 80e47f2c2..8ed23e0a6 100644
  
      // a single global queue shared by all Metal backends
      // technically not needed for devices with unified memory, but enables discrete GPUs support
-@@ -531,10 +556,37 @@ struct ggml_metal_device {
+@@ -531,10 +556,37 @@ void ggml_metal_encoder_end_encoding(ggml_metal_encoder_t encoder) {
  
      struct ggml_metal_device_props props;
  
@@ -1812,7 +1935,7 @@ index 80e47f2c2..8ed23e0a6 100644
          dev->mtl_queue = nil;
      }
  
-@@ -944,10 +1176,101 @@ void * ggml_metal_device_get_obj(ggml_metal_device_t dev) {
+@@ -944,10 +1176,101 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
  
  void * ggml_metal_device_get_queue(ggml_metal_device_t dev) {
      return dev->mtl_queue;
