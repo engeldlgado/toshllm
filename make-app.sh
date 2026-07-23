@@ -68,14 +68,14 @@ cp Assets/test-ui/index.html "$APP/Contents/Resources/test-ui/"
 mkdir -p "$APP/Contents/Resources/rich-content/mermaid/dist" \
          "$APP/Contents/Resources/rich-content/katex/dist/fonts" \
          "$APP/Contents/Resources/rich-content/marked/lib"
-cp vendor/llama.cpp/tools/ui/node_modules/mermaid/dist/mermaid.min.js \
+cp Assets/rich-content/mermaid/dist/mermaid.min.js \
    "$APP/Contents/Resources/rich-content/mermaid/dist/"
-cp vendor/llama.cpp/tools/ui/node_modules/katex/dist/katex.min.js \
-   vendor/llama.cpp/tools/ui/node_modules/katex/dist/katex.min.css \
+cp Assets/rich-content/katex/dist/katex.min.js \
+   Assets/rich-content/katex/dist/katex.min.css \
    "$APP/Contents/Resources/rich-content/katex/dist/"
-cp vendor/llama.cpp/tools/ui/node_modules/katex/dist/fonts/* \
+cp Assets/rich-content/katex/dist/fonts/* \
    "$APP/Contents/Resources/rich-content/katex/dist/fonts/"
-cp vendor/llama.cpp/tools/ui/node_modules/marked/lib/marked.umd.js \
+cp Assets/rich-content/marked/lib/marked.umd.js \
    "$APP/Contents/Resources/rich-content/marked/lib/"
 
 # Community translation overlays (English-string -> translation). Optional:
