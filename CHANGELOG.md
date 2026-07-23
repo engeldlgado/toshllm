@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.83.1] - 2026-07-23
 
 ### Improved
 - **Multi-GPU layer splits can use Infinity Fabric Link (experimental, opt-in)**... with `TOSH_MGPU_PEER=1` and two AMD GPUs in the same Metal peer group, layer activations move directly between their private VRAM buffers instead of round-tripping through system RAM. Off by default while it is validated on bridged hardware.
