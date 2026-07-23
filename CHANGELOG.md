@@ -3,7 +3,7 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.83.4] - 2026-07-23
 
 ### Changed
 - **The Infinity Fabric peer transfer now prints a confirmation line in the log**... the "peer transfer enabled" line shows at the normal log level so you can verify the path engaged, and the experimental first-copy probe from 0.83.3 (never validated on bridged hardware) is removed so it cannot disable the copy on a transient fault.
