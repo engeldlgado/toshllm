@@ -686,13 +686,14 @@ final class ChatMessageTests: XCTestCase {
         XCTAssertFalse(RichText.containsInlineMath("A display block uses $$x$$"))
     }
 
-    func testSVGSanitizerRemovesActiveAndRemoteContent() {
+    func testSVGIsEncodedAsAnIsolatedImageResource() {
         let input = #"<svg onload="bad()"><foreignObject><iframe src="https://evil.test"></iframe></foreignObject><path style="fill:url(https://evil.test/x)"/><script>bad()</script></svg>"#
-        let output = RichContentSanitizer.svg(input)
-        XCTAssertFalse(output.localizedCaseInsensitiveContains("onload"))
-        XCTAssertFalse(output.localizedCaseInsensitiveContains("foreignObject"))
-        XCTAssertFalse(output.localizedCaseInsensitiveContains("https://"))
-        XCTAssertFalse(output.localizedCaseInsensitiveContains("<script"))
+        let output = RichContentIsolation.svgDataURL(input)
+        let prefix = "data:image/svg+xml;base64,"
+        XCTAssertTrue(output.hasPrefix(prefix))
+        XCTAssertFalse(output.contains("<svg"), "untrusted markup must not be injected into the host document")
+        let encoded = String(output.dropFirst(prefix.count))
+        XCTAssertEqual(Data(base64Encoded: encoded).flatMap { String(data: $0, encoding: .utf8) }, input)
     }
 
     func testThinkingBlockIsSeparated() {

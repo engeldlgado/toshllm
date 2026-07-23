@@ -243,9 +243,17 @@ struct RichWebView: NSViewRepresentable {
             </script>
             """
         case .svg:
-            let safe = RichContentSanitizer.svg(source)
-            let safeEncoded = (try? String(data: JSONEncoder().encode(safe), encoding: .utf8)) ?? "\"\""
-            payload = "<script>document.getElementById('content').innerHTML = \(safeEncoded);</script>"
+            // An SVG image document cannot execute active markup in the host page.
+            let imageURL = RichContentIsolation.svgDataURL(source)
+            let imageEncoded = (try? String(data: JSONEncoder().encode(imageURL), encoding: .utf8)) ?? "\"\""
+            payload = """
+            <script>
+            const image = document.createElement('img');
+            image.className = 'svg-content'; image.alt = 'SVG'; image.src = \(imageEncoded);
+            image.addEventListener('load', report); image.addEventListener('error', report);
+            document.getElementById('content').append(image);
+            </script>
+            """
         }
         let inline: Bool
         switch kind {
@@ -261,7 +269,8 @@ struct RichWebView: NSViewRepresentable {
         :root { color-scheme: light dark; } html,body { margin:0; background:transparent; overflow:auto; }
         body { padding:\(bodyPadding); font:14px -apple-system, BlinkMacSystemFont, sans-serif; color:CanvasText; }
         #content { min-width:\(minimumWidth); transform-origin:top left; overflow-wrap:anywhere; }
-        #content p { margin:0; } .inline-math { white-space:nowrap; } svg { max-width:none; height:auto; }
+        #content p { margin:0; } .inline-math { white-space:nowrap; }
+        svg, .svg-content { display:block; max-width:none; height:auto; }
         </style></head><body><div id="content"></div>
         <script>function report(){requestAnimationFrame(()=>webkit.messageHandlers.height.postMessage(document.documentElement.scrollHeight));}</script>
         \(payload)<script>report(); new ResizeObserver(report).observe(document.getElementById('content'));</script>
@@ -270,23 +279,8 @@ struct RichWebView: NSViewRepresentable {
     }
 }
 
-enum RichContentSanitizer {
-    static func svg(_ value: String) -> String {
-        var output = value.replacingOccurrences(
-            of: #"<script\b[^>]*>[\s\S]*?</script\s*>"#,
-            with: "", options: [.regularExpression, .caseInsensitive])
-        output = output.replacingOccurrences(
-            of: #"\son[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*')"#,
-            with: "", options: [.regularExpression, .caseInsensitive])
-        output = output.replacingOccurrences(
-            of: #"(?:href|xlink:href)\s*=\s*(?:\"(?:https?:|javascript:)[^\"]*\"|'(?:https?:|javascript:)[^']*')"#,
-            with: "", options: [.regularExpression, .caseInsensitive])
-        output = output.replacingOccurrences(
-            of: #"<(iframe|object|embed|foreignObject)\b[^>]*>[\s\S]*?</\1\s*>"#,
-            with: "", options: [.regularExpression, .caseInsensitive])
-        output = output.replacingOccurrences(
-            of: #"\s(?:src|style)\s*=\s*(?:\"[^\"]*(?:https?:|javascript:|url\s*\()[^\"]*\"|'[^']*(?:https?:|javascript:|url\s*\()[^']*')"#,
-            with: "", options: [.regularExpression, .caseInsensitive])
-        return output
+enum RichContentIsolation {
+    static func svgDataURL(_ value: String) -> String {
+        "data:image/svg+xml;base64," + Data(value.utf8).base64EncodedString()
     }
 }
