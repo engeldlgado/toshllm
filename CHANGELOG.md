@@ -3,6 +3,22 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.83.0] - 2026-07-22
+
+### Added
+- **The native chat was rebuilt to match the llama.cpp chat experience**... agent tools that read, edit and run files and commands with per-step permission, a sandboxed JavaScript tool, richer Markdown rendering, advanced chat settings, per-message metrics, conversation forking, and audio, video attachments.
+- **Model Context Protocol (MCP) support**... connect external MCP tool servers over HTTP/SSE or WebSocket (for example a web-search server) and the model can use their tools in chat, each call gated by permission.
+- **Voice dictation in chat**... the microphone button transcribes your speech straight into the message box on-device (Apple's Speech framework, nothing leaves the Mac), and now offers to dictate or record audio for the model depending on what the model supports.
+- **MoE experts adjust from the server panel**... raise or lower the CPU experts without opening Settings, on the main server and each added one; the control only appears for MoE models.
+
+### Improved
+- **The chat shows the model's real capabilities** (text, vision, audio, video) in the parameters panel, not only in router mode.
+- **Every advanced chat setting now carries bilingual help**, and the image-size field is clamped to a valid range.
+- **Videos warn about their token cost before sending**... a clip fills the context fast (~1,000 tokens per second at 1080p), and the estimate now accounts for its length and resolution.
+
+### Fixed
+- **A tools request that overflows the context no longer reports a bogus video error**... it now names the real cause and points at the context size.
+
 ## [0.82.8] - 2026-07-22
 
 ### Improved
