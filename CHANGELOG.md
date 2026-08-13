@@ -3,6 +3,11 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.83.23] - 2026-08-13
+
+### Fixed
+- **ToshLLM starts correctly on macOS 14 and 15 after the 0.83.22 engine update**... the bundled language and image engines now target macOS 14 explicitly instead of inheriting the macOS 26 build environment, and every shipped engine is checked before packaging so an incompatible deployment target cannot reach a release.
+
 ## [0.83.22] - 2026-08-13
 
 ### Added
