@@ -1,0 +1,68 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index fc075240b..396a2fbdf 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -2422,29 +2422,54 @@ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+         return 0;
+     }
+ 
+-    ggml_tensor * q = ctx->node(idx + 0);
+-    ggml_tensor * v = ctx->node(idx + 1);
+-    ggml_tensor * k = ctx->node(idx + 2);
++    // Identify the three consecutive MUL_MAT nodes by weight-name suffix, not
++    // position: llama.cpp's build_qkv() emits Q,K,V today, but no permutation
++    // is guaranteed, so the match must not depend on the emission order.
++    // Ends-with (not substring) so names like "*.attn_q.weight.extra" fail closed.
++    auto has_suffix = [](const char * name, const char * suffix) {
++        const size_t n = strlen(name), s = strlen(suffix);
++        return n >= s && strcmp(name + n - s, suffix) == 0;
++    };
++    ggml_tensor * q = nullptr;
++    ggml_tensor * v = nullptr;
++    ggml_tensor * k = nullptr;
++    for (int i = 0; i < 3; i++) {
++        ggml_tensor * n = ctx->node(idx + i);
++        if (n->op != GGML_OP_MUL_MAT) {
++            return 0;
++        }
++        const char * wname = ggml_get_name(n->src[0]);
++        if (has_suffix(wname, ".attn_q.weight")) {
++            q = n;
++        } else if (has_suffix(wname, ".attn_v.weight")) {
++            v = n;
++        } else if (has_suffix(wname, ".attn_k.weight")) {
++            k = n;
++        }
++    }
++    if (!q || !v || !k) {
++        return 0;
++    }
+ 
+     // Avoid false-positive graph fusion: these must be the three independent
+     // decode projections over exactly the same activation. The quant pattern is
+     // selected separately below so every segment keeps its GGUF representation.
+-    if (q->op != GGML_OP_MUL_MAT || v->op != GGML_OP_MUL_MAT || k->op != GGML_OP_MUL_MAT ||
+-        (q->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
++    // Single-token, single-plane decode only: the pipeline constants hardcode
++    // ne12 = r2 = r3 = 1, so batched planes fall back to the unfused path (q, v,
++    // k share src[1], checked below, so guarding one covers all three).
++    if ((q->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
+         (v->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
+         (k->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
+         q->src[1] != v->src[1] || q->src[1] != k->src[1] ||
+         q->src[1]->type != GGML_TYPE_F32 ||
+         q->src[1]->ne[1] != 1 || v->src[1]->ne[1] != 1 || k->src[1]->ne[1] != 1 ||
++        q->src[1]->ne[2] != 1 || q->src[1]->ne[3] != 1 ||
+         q->src[0]->ne[0] != q->src[1]->ne[0] ||
+         v->src[0]->ne[0] != v->src[1]->ne[0] ||
+         k->src[0]->ne[0] != k->src[1]->ne[0] ||
+         q->src[0]->ne[2] != 1 || q->src[0]->ne[3] != 1 ||
+         v->src[0]->ne[2] != 1 || v->src[0]->ne[3] != 1 ||
+-        k->src[0]->ne[2] != 1 || k->src[0]->ne[3] != 1 ||
+-        strstr(ggml_get_name(q->src[0]), ".attn_q.weight") == nullptr ||
+-        strstr(ggml_get_name(v->src[0]), ".attn_v.weight") == nullptr ||
+-        strstr(ggml_get_name(k->src[0]), ".attn_k.weight") == nullptr) {
++        k->src[0]->ne[2] != 1 || k->src[0]->ne[3] != 1) {
+         return 0;
+     }
+ 
