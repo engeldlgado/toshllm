@@ -31,10 +31,18 @@ struct LocalModel: Identifiable, Hashable {
         let fm = FileManager.default
         try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        let entries = files.map { url in
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        let entries: [GGUFFileEntry] = fm.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )?
+        .compactMap { item -> GGUFFileEntry? in
+            guard let url = item as? URL else { return nil }
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values?.isRegularFile == true else { return nil }
+            let size = values?.fileSize.map(Int64.init) ?? 0
             return GGUFFileEntry(path: url.path, sizeBytes: size)
-        }
+        } ?? []
         return GGUFFile.models(from: entries)
             .map { group in
                 let url = URL(fileURLWithPath: group.primaryPath)
