@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The fused QKV path now runs during generation.** Its matcher expected the projections in a different order, so the faster path was never selected; Gemma 3 4B with Turbo KV gains 1.7% on a Radeon RX 6700 XT. Thanks to [malzzz](https://github.com/engeldlgado/toshllm/pull/71) for the fix.
+
 ## [0.85.9] - 2026-08-26
 
 ### Added
