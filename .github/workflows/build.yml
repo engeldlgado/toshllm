@@ -3,20 +3,12 @@ name: Build & Release
 on:
   push:
     branches: [main, master]
-    # Skip the full macOS build for pushes that can't change the app or the DMG
-    # (docs, community translations and their tooling). Release tags (tags: v*)
-    # are matched separately and always build; workflow_dispatch is the manual
-    # fallback if a release ever needs a build by hand.
-    paths-ignore:
-      - "**.md"
-      - "Assets/lang/**"
-      - "scripts/check-translations.py"
-      - "scripts/translation-status.py"
-      - "scripts/sync-translations.py"
-      - ".github/workflows/translations.yml"
-      - ".github/workflows/codeql.yml"
-      - "LICENSE"
-      - ".gitignore"
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Package.swift"
+      - "Package.resolved"
+      - ".github/workflows/build.yml"
     tags: ["v*"]
   pull_request:
     branches: [main, master]
@@ -24,6 +16,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Direct pushes to main only run the unit tests — a fast gate. The full app +
@@ -33,6 +29,7 @@ jobs:
     if: github.event_name == 'push' && github.ref_type == 'branch'
     name: Unit tests
     runs-on: macos-26
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - run: swift test
@@ -44,6 +41,7 @@ jobs:
     if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
     name: Build ${{ matrix.variant }} (x86_64)
     runs-on: macos-26
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -55,8 +53,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect documentation-only PR
+        if: github.event_name == 'pull_request'
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -Ev '(^|/).*\.md$|^Assets/lang/|^scripts/(extract-strings|check-translations|translation-status|sync-translations)\.py$|^\.github/|^LICENSE$|^\.gitignore$' >/dev/null; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Cache engine builds
+        if: github.event_name != 'pull_request' || steps.scope.outputs.build == 'true'
         uses: actions/cache@v5
         with:
           path: vendor
@@ -64,19 +77,32 @@ jobs:
           key: engines-${{ matrix.variant }}-${{ hashFiles('patches/**/*.patch', 'scripts/build-engines.sh') }}
 
       - name: Run unit tests
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.scope.outputs.build == 'true'
         run: swift test
 
       - name: Build inference engines (x86_64)
-        run: ARCH=x86_64 ./scripts/build-engines.sh
+        if: github.event_name != 'pull_request' || steps.scope.outputs.build == 'true'
+        run: |
+          if [ ! -x vendor/llama.cpp/build-static/bin/llama-server ] || \
+             [ ! -f vendor/llama.cpp/build-static/bin/default.metallib ] || \
+             [ ! -x vendor/whisper.cpp/build-static/bin/whisper-cli ] || \
+             [ ! -f vendor/whisper.cpp/build-static/bin/default.metallib ] || \
+             [ ! -x vendor/stable-diffusion.cpp/build-static/bin/sd-cli ] || \
+             [ ! -f vendor/stable-diffusion.cpp/build-static/bin/default.metallib ]; then
+            ARCH=x86_64 ./scripts/build-engines.sh
+          else
+            echo "Using cached inference engines"
+          fi
 
       - name: Build app (x86_64)
+        if: github.event_name != 'pull_request' || steps.scope.outputs.build == 'true'
         run: TOSH_ARCH=x86_64 ./make-app.sh
 
       # Optional Developer ID signing + notarization. Runs only when the
       # repository secrets are configured; otherwise releases stay ad-hoc
       # signed and users must approve the app once in System Settings.
       - name: Sign and notarize (if secrets configured)
+        if: github.event_name != 'pull_request' || steps.scope.outputs.build == 'true'
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}

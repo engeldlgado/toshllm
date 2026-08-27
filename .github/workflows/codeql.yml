@@ -3,41 +3,35 @@ name: CodeQL
 on:
   push:
     branches: [main, master]
-    # Only analyze when something that affects the Swift build changes; docs and
-    # translations don't. The weekly schedule still gives a full baseline scan.
-    paths-ignore:
-      - "**.md"
-      - "Assets/lang/**"
-      - "scripts/check-translations.py"
-      - "scripts/translation-status.py"
-      - "scripts/sync-translations.py"
-      - ".github/workflows/translations.yml"
-      - ".github/workflows/build.yml"
-      - "LICENSE"
-      - ".gitignore"
+    paths:
+      - "Sources/**/*.swift"
+      - "Tests/**/*.swift"
+      - "Package.swift"
+      - "Package.resolved"
   pull_request:
     branches: [main, master]
-    paths-ignore:
-      - "**.md"
-      - "Assets/lang/**"
-      - "scripts/check-translations.py"
-      - "scripts/translation-status.py"
-      - "scripts/sync-translations.py"
-      - ".github/workflows/translations.yml"
-      - ".github/workflows/build.yml"
-      - "LICENSE"
-      - ".gitignore"
+    paths:
+      - "Sources/**/*.swift"
+      - "Tests/**/*.swift"
+      - "Package.swift"
+      - "Package.resolved"
   schedule:
     - cron: "30 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   security-events: write
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     name: Analyze Swift
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v6
