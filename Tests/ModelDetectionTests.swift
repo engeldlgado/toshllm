@@ -29,6 +29,80 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertTrue(fallback.isMoE, "Filename detection remains a fallback for unreadable files")
     }
 
+    func testOfficialOLMoEAndDeepSeekArchitecturesAreDetected() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        for architecture in ["olmoe", "deepseek", "deepseek2", "deepseek32", "deepseek4"] {
+            let url = dir.appendingPathComponent("\(architecture).gguf")
+            try writeGGUF(to: url, strings: ["general.architecture": architecture])
+            XCTAssertTrue(ServerSettings.modelIsMoE(at: url.path), architecture)
+        }
+
+        let explicitDense = dir.appendingPathComponent("deepseek-explicit-dense.gguf")
+        try writeGGUF(to: explicitDense,
+                      strings: ["general.architecture": "deepseek2"],
+                      uint32: ["deepseek2.expert_count": 0])
+        XCTAssertFalse(ServerSettings.modelIsMoE(at: explicitDense.path))
+    }
+
+    func testExpertCountAcceptsOfficialGGUFIntegerEncodings() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let uint64URL = dir.appendingPathComponent("olmoe-u64.gguf")
+        try writeGGUF(to: uint64URL, uint64: ["olmoe.expert_count": 64])
+        XCTAssertTrue(ServerSettings.modelIsMoE(at: uint64URL.path))
+        XCTAssertEqual(ServerSettings.ggufUInt32("expert_count", at: uint64URL.path), 64)
+
+        let int32URL = dir.appendingPathComponent("deepseek-i32.gguf")
+        try writeGGUF(to: int32URL, int32: ["deepseek2.expert_count": 256])
+        XCTAssertTrue(ServerSettings.modelIsMoE(at: int32URL.path))
+        XCTAssertEqual(ServerSettings.ggufUInt32("expert_count", at: int32URL.path), 256)
+    }
+
+    func testTraitWarmPublishesEachDetectedModel() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let olmoe = dir.appendingPathComponent("olmoe.gguf")
+        let deepseek = dir.appendingPathComponent("deepseek.gguf")
+        try writeGGUF(to: olmoe, uint32: ["olmoe.expert_count": 64])
+        try writeGGUF(to: deepseek, uint32: ["deepseek2.expert_count": 256])
+
+        ModelTraitsCache.invalidate()
+        let published = expectation(description: "traits published progressively")
+        published.expectedFulfillmentCount = 2
+        ModelTraitsCache.warm(paths: [olmoe.path, deepseek.path]) { published.fulfill() }
+        wait(for: [published], timeout: 2)
+        XCTAssertTrue(ModelTraitsCache.cached(for: olmoe.path)?.isMoE == true)
+        XCTAssertTrue(ModelTraitsCache.cached(for: deepseek.path)?.isMoE == true)
+    }
+
+    func testDynamicMoeReadsLayerTotalAndActiveExpertCounts() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("renamed-qwen.gguf")
+        try writeGGUF(to: url, uint32: [
+            "qwen35moe.block_count": 40,
+            "qwen35moe.expert_count": 256,
+            "qwen35moe.expert_used_count": 8,
+        ])
+
+        var settings = ServerSettings(
+            serverBinary: "/usr/bin/true", modelPath: url.path, port: 8080,
+            ngl: 99, ncmoe: 24, ctx: 16_384, threads: 6, flashAttn: "auto",
+            noMmap: true, jinja: true, vramReserveMB: 1_024, gpuIndex: -1,
+            extraArgs: "", cacheTypeK: "f16", cacheTypeV: "f16", mlock: false)
+        XCTAssertEqual(settings.dynamicMoeModelInfo,
+                       DynamicMoeModelInfo(layerCount: 40, expertCount: 256,
+                                           activeExpertCount: 8))
+
+        settings.dynamicMoeSlots = 300
+        XCTAssertEqual(settings.effectiveDynamicMoeSlots, 256)
+        settings.dynamicMoeSlots = 4
+        XCTAssertEqual(settings.effectiveDynamicMoeSlots, 8)
+    }
+
     func testBenchmarkFamilyTreatsValidArchitectureWithoutExpertsAsDense() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -145,6 +219,7 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertEqual(models[0].sizeBytes, 24)
         XCTAssertEqual(models[0].partURLs.count, 2)
         XCTAssertTrue(models[0].name.contains("00001-of-00002"))
+        XCTAssertEqual(GGUFFile.totalSize(at: models[0].url.path), 24)
     }
 
     func testEmbeddedNameKeepsFilenameSizeAndDropsRepositoryOwner() throws {
@@ -273,7 +348,9 @@ final class ModelDetectionTests: XCTestCase {
     private func writeGGUF(
         to url: URL,
         strings: [String: String] = [:],
-        uint32: [String: UInt32] = [:]
+        uint32: [String: UInt32] = [:],
+        uint64: [String: UInt64] = [:],
+        int32: [String: Int32] = [:]
     ) throws {
         var data = Data("GGUF".utf8)
         func appendUInt32(_ value: UInt32) {
@@ -289,7 +366,7 @@ final class ModelDetectionTests: XCTestCase {
 
         appendUInt32(3)
         appendUInt64(0)
-        appendUInt64(UInt64(strings.count + uint32.count))
+        appendUInt64(UInt64(strings.count + uint32.count + uint64.count + int32.count))
         for (key, value) in strings {
             appendString(key)
             appendUInt32(8)
@@ -299,6 +376,16 @@ final class ModelDetectionTests: XCTestCase {
             appendString(key)
             appendUInt32(4)
             appendUInt32(value)
+        }
+        for (key, value) in uint64 {
+            appendString(key)
+            appendUInt32(10)
+            appendUInt64(value)
+        }
+        for (key, value) in int32 {
+            appendString(key)
+            appendUInt32(5)
+            appendUInt32(UInt32(bitPattern: value))
         }
         try data.write(to: url)
     }

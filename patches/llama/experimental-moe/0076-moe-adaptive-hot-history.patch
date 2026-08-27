@@ -1,0 +1,123 @@
+diff --git a/tosh-moe/tosh-moe.h b/tosh-moe/tosh-moe.h
+--- a/tosh-moe/tosh-moe.h
++++ b/tosh-moe/tosh-moe.h
+@@ -120,5 +120,6 @@ void tosh_moe_cold_set(int il, const int32_t * cold_for, int n);
+ int  tosh_moe_cold_of(int il, int expert);
+ void tosh_moe_observe(const void * tensor, const int32_t * ids, int n);
++void tosh_moe_seen_seed(int il, const int32_t * experts, const uint32_t * counts, int n);
+ void tosh_moe_seen_dump(void);
+ const uint32_t * tosh_moe_seen_of(int il, int * n);
+ void tosh_moe_seen_clear(int il);
+diff --git a/tosh-moe/tosh-moe-cache.cpp b/tosh-moe/tosh-moe-cache.cpp
+--- a/tosh-moe/tosh-moe-cache.cpp
++++ b/tosh-moe/tosh-moe-cache.cpp
+@@ -327,6 +327,9 @@ void tosh_moe_seen_dump(void) {
+                 });
+                 fprintf(fp, "%d", kv.first);
+-                for (int i = 0; i < want && i < (int) order.size(); ++i) fprintf(fp, " %d", order[i]);
++                for (int i = 0; i < want && i < (int) order.size(); ++i) {
++                    const int e = order[i];
++                    fprintf(fp, " %d:%u", e, kv.second[e]);
++                }
+                 fputc('\n', fp);
+             }
+             const bool flushed = fflush(fp) == 0;
+@@ -344,6 +347,26 @@ void tosh_moe_seen_dump(void) {
+     }
+ }
+
++void tosh_moe_seen_seed(int il, const int32_t * experts, const uint32_t * counts, int n) {
++    auto & seen = g_seen[il];
++    if (seen.empty() || !std::all_of(seen.begin(), seen.end(), [](uint32_t value) { return value == 0; })) {
++        return;
++    }
++
++    uint32_t peak = 1;
++    for (int i = 0; i < n; ++i) peak = std::max(peak, counts[i]);
++
++    // Carry history forward with bounded weight. New routing can replace stale habits
++    // within a normal session, while short sessions no longer erase the accumulated map.
++    constexpr uint32_t history_peak = 32;
++    for (int i = 0; i < n; ++i) {
++        const int e = experts[i];
++        if (e < 0 || e >= (int) seen.size()) continue;
++        const uint64_t scaled = (uint64_t) counts[i]*history_peak + peak - 1;
++        seen[e] = std::max(1u, (uint32_t) (scaled/peak));
++    }
++}
++
+ void tosh_moe_unbind_all(void) {
+     tosh_moe_seen_dump();
+     g_bind.clear();
+diff --git a/tosh-moe/tosh-moe-fill.cpp b/tosh-moe/tosh-moe-fill.cpp
+--- a/tosh-moe/tosh-moe-fill.cpp
++++ b/tosh-moe/tosh-moe-fill.cpp
+@@ -10,8 +10,13 @@
+ #include <sstream>
+ #include <unordered_map>
+
+-static std::unordered_map<int, std::vector<int32_t>> load_hot_map() {
+-    std::unordered_map<int, std::vector<int32_t>> out;
++struct hot_history {
++    std::vector<int32_t> ids;
++    std::vector<uint32_t> counts;
++};
++
++static std::unordered_map<int, hot_history> load_hot_map() {
++    std::unordered_map<int, hot_history> out;
+     const char * path = getenv("TOSH_MOE_HOT_MAP");
+     if (!path) return out;
+     std::ifstream in(path);
+@@ -19,8 +24,28 @@ static std::unordered_map<int, std::vector<int32_t>> load_hot_map() {
+     while (std::getline(in, line)) {
+         std::istringstream row(line);
+-        int il = -1, e = -1;
++        int il = -1;
+         if (!(row >> il)) continue;
+-        while (row >> e) out[il].push_back(e);
++        std::string token;
++        bool legacy_ranking = true;
++        while (row >> token) {
++            const size_t colon = token.find(':');
++            legacy_ranking = legacy_ranking && colon == std::string::npos;
++            try {
++                const int e = std::stoi(token.substr(0, colon));
++                const uint32_t count = colon == std::string::npos ? 1u
++                    : (uint32_t) std::max(1, std::stoi(token.substr(colon + 1)));
++                out[il].ids.push_back(e);
++                out[il].counts.push_back(count);
++            } catch (...) {
++                out.erase(il);
++                break;
++            }
++        }
++        const auto found = out.find(il);
++        if (legacy_ranking && found != out.end()) {
++            auto & counts = found->second.counts;
++            for (size_t i = 0; i < counts.size(); ++i) counts[i] = (uint32_t) (counts.size() - i);
++        }
+     }
+     return out;
+ }
+@@ -55,10 +73,10 @@ void tosh_moe_seed_banks(void) {
+         const int il = tosh_moe_layer_of(slots);
+         const auto hit = hot_map.find(il);
+-        if (split_bank && hit != hot_map.end() && (int) hit->second.size() >= n_fixed) {
++        if (split_bank && hit != hot_map.end() && (int) hit->second.ids.size() >= n_fixed) {
+             std::vector<uint8_t> used(n_expert, 0);
+             bool valid = true;
+             for (int s = 0; s < n_fixed; ++s) {
+-                const int e = hit->second[s];
++                const int e = hit->second.ids[s];
+                 if (e < 0 || e >= n_expert || used[e]) { valid = false; break; }
+                 used[e] = 1;
+                 fixed_ids[s] = e;
+@@ -96,5 +114,8 @@ void tosh_moe_seed_banks(void) {
+         for (int e = 0; e < n_expert; ++e) if (!is_fixed[e]) cold_for[e] = cold++;
+         if (split_bank && il >= 0) {
++            if (hit != hot_map.end()) {
++                tosh_moe_seen_seed(il, hit->second.ids.data(), hit->second.counts.data(), (int) hit->second.ids.size());
++            }
+             tosh_moe_hot_set(il, fixed_ids.data(), n_fixed);
+             tosh_moe_cold_set(il, cold_for.data(), n_expert);
+         }

@@ -49,6 +49,10 @@ cp "$SWIFT_BIN" "$APP/Contents/MacOS/ToshLLM"
 LLAMA_STATIC="vendor/llama.cpp/build-static/bin"
 [ -x "$LLAMA_STATIC/llama-server" ] || LLAMA_STATIC="$HOME/dev/repositorios/llama.cpp/build-static/bin"
 if [ -x "$LLAMA_STATIC/llama-server" ]; then
+    if [ ! -f "$LLAMA_STATIC/default.metallib" ]; then
+        echo "ERROR: llama.cpp default.metallib is required; rebuild the engines" >&2
+        exit 1
+    fi
     mkdir -p "$APP/Contents/Resources/bin"
     # llama-perplexity ships so testers can run numeric A/Bs without building
     cp "$LLAMA_STATIC/llama-server" "$LLAMA_STATIC/llama-bench" "$LLAMA_STATIC/llama-perplexity" "$APP/Contents/Resources/bin/"
@@ -57,10 +61,7 @@ if [ -x "$LLAMA_STATIC/llama-server" ]; then
     if [ -f "$LLAMA_STATIC/test-backend-ops" ]; then
         cp "$LLAMA_STATIC/test-backend-ops" "$APP/Contents/Resources/bin/"
     fi
-    # Precompiled Metal library (loaded instead of compiling shaders at runtime;
-    # see ggml-metal-device.m). Optional: without it the engine still works,
-    # just slower to load. Must sit next to the binary.
-    [ -f "$LLAMA_STATIC/default.metallib" ] && cp "$LLAMA_STATIC/default.metallib" "$APP/Contents/Resources/bin/"
+    cp "$LLAMA_STATIC/default.metallib" "$APP/Contents/Resources/bin/"
     echo "bundled static llama-server/llama-bench from $LLAMA_STATIC"
 else
     echo "WARNING: engines not built; run ./scripts/build-engines.sh first"
@@ -109,10 +110,31 @@ fi
 # Image generation engine (stable-diffusion.cpp; optional)
 IMAGE_STATIC="vendor/stable-diffusion.cpp/build-static/bin"
 if [ -x "$IMAGE_STATIC/sd-cli" ]; then
+    if [ ! -f "$IMAGE_STATIC/default.metallib" ]; then
+        echo "ERROR: image-engine default.metallib is required; rebuild the engines" >&2
+        exit 1
+    fi
     mkdir -p "$APP/Contents/Resources/bin-image"
     cp "$IMAGE_STATIC/sd-cli" "$APP/Contents/Resources/bin-image/"
-    [ -f "$IMAGE_STATIC/default.metallib" ] && cp "$IMAGE_STATIC/default.metallib" "$APP/Contents/Resources/bin-image/"
+    cp "$IMAGE_STATIC/default.metallib" "$APP/Contents/Resources/bin-image/"
     echo "bundled image generation engine"
+fi
+
+WHISPER_STATIC="vendor/whisper.cpp/build-static/bin"
+if [ -x "$WHISPER_STATIC/whisper-cli" ]; then
+    if [ ! -x "$WHISPER_STATIC/whisper-server" ]; then
+        echo "ERROR: whisper-server is required for the always-loaded speech mode; rebuild the engines" >&2
+        exit 1
+    fi
+    if [ ! -f "$WHISPER_STATIC/default.metallib" ]; then
+        echo "ERROR: Whisper.cpp default.metallib is required; rebuild the engines" >&2
+        exit 1
+    fi
+    mkdir -p "$APP/Contents/Resources/bin-audio"
+    cp "$WHISPER_STATIC/whisper-cli" "$WHISPER_STATIC/whisper-server" \
+       "$APP/Contents/Resources/bin-audio/"
+    cp "$WHISPER_STATIC/default.metallib" "$APP/Contents/Resources/bin-audio/"
+    echo "bundled Whisper.cpp speech-to-text engine"
 fi
 
 cat > "$APP/Contents/Info.plist" <<EOF
@@ -138,9 +160,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>NSLocalNetworkUsageDescription</key>
     <string>ToshLLM can expose and advertise its local OpenAI-compatible API to devices on your trusted local network.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>ToshLLM records audio only when you press the microphone button, so you can send it to a local audio-capable model.</string>
+    <string>ToshLLM records audio only when you press the microphone button, for local Whisper transcription or an audio-capable model.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>ToshLLM transcribes your speech into the message field on your Mac when you use dictation from the microphone button.</string>
+    <string>ToshLLM uses Apple's on-device speech recognition only when you select Apple Dictation and press the microphone button.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_http._tcp.</string>
@@ -174,7 +196,7 @@ fi
 
 # a binary built for a newer macOS than the app's floor fails to launch on the testers'
 # systems with a dyld symbol error, and only there, so refuse to package it
-for exe in "$APP/Contents/Resources/bin/"* "$APP/Contents/Resources/bin-image/"*; do
+for exe in "$APP/Contents/Resources/bin/"* "$APP/Contents/Resources/bin-image/"* "$APP/Contents/Resources/bin-audio/"*; do
     [ -f "$exe" ] || continue
     case "$exe" in *.metallib) continue;; esac
     minos=$(otool -l "$exe" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/^ *minos/{print $2; exit}')
@@ -187,5 +209,6 @@ done
 
 [ -x "$APP/Contents/Resources/bin/llama-server" ] && codesign --force -s - "$APP/Contents/Resources/bin/"*
 [ -x "$APP/Contents/Resources/bin-image/sd-cli" ] && codesign --force -s - "$APP/Contents/Resources/bin-image/"*
+[ -x "$APP/Contents/Resources/bin-audio/whisper-cli" ] && codesign --force -s - "$APP/Contents/Resources/bin-audio/"*
 codesign --force -s - "$APP"
 echo "Done: $APP"

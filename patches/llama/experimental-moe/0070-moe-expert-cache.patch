@@ -1,0 +1,2295 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -124,16 +124,18 @@
+ option(LLAMA_SANITIZE_THREAD    "llama: enable thread sanitizer"    OFF)
+ option(LLAMA_SANITIZE_ADDRESS   "llama: enable address sanitizer"   OFF)
+ option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
+ 
+ # utils
+ option(LLAMA_BUILD_COMMON "llama: build common utils library" ${LLAMA_STANDALONE})
+ 
+ # extra artifacts
++option(TOSH_ENABLE_DYNAMIC_MOE "tosh: experimental MoE expert cache" OFF)
++
+ option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
+ option(LLAMA_BUILD_TOOLS     "llama: build tools"                                                                ${LLAMA_STANDALONE})
+ option(LLAMA_BUILD_EXAMPLES  "llama: build examples"                                                             ${LLAMA_STANDALONE})
+ option(LLAMA_BUILD_SERVER    "llama: build server example"                                                       ${LLAMA_STANDALONE})
+ option(LLAMA_BUILD_APP       "llama: build the unified binary"                                                   ${LLAMA_STANDALONE})
+ option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server"                                       ON)
+ option(LLAMA_USE_PREBUILT_UI "llama: use prebuilt UI from HF Bucket when available (requires LLAMA_BUILD_UI=ON)" ON)
+ 
+diff --git a/common/arg.cpp b/common/arg.cpp
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -257,16 +257,33 @@
+     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+         auto * dev = ggml_backend_dev_get(i);
+         auto * buft = ggml_backend_dev_buffer_type(dev);
+         if (buft) {
+             buft_list[ggml_backend_buft_name(buft)] = buft;
+         }
+     }
+ 
++    // a backend can offer more than its default one, and -ot is the only way to reach them
++    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
++        auto * dev = ggml_backend_dev_get(i);
++        auto * reg = ggml_backend_dev_backend_reg(dev);
++        if (!reg) {
++            continue;
++        }
++        auto fn = (ggml_backend_dev_get_extra_bufts_t)
++            ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_extra_bufts");
++        if (!fn) {
++            continue;
++        }
++        for (auto ** bufts = fn(dev); bufts && *bufts; ++bufts) {
++            buft_list[ggml_backend_buft_name(*bufts)] = *bufts;
++        }
++    }
++
+     for (const auto & override : string_split<std::string>(value, ',')) {
+         std::string::size_type pos = override.find('=');
+         if (pos == std::string::npos) {
+             throw std::invalid_argument("invalid value");
+         }
+         std::string tensor_name = override.substr(0, pos);
+         std::string buffer_type = override.substr(pos + 1);
+ 
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -940,16 +940,26 @@
+                 /* static */ std::map<std::string, ggml_backend_buffer_type_t> buft_list;
+                 if (buft_list.empty()) {
+                     // enumerate all the devices and add their buffer types to the list
+                     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+                         auto * dev = ggml_backend_dev_get(i);
+                         auto * buft = ggml_backend_dev_buffer_type(dev);
+                         if (buft) {
+                             buft_list[ggml_backend_buft_name(buft)] = buft;
++                        }
++
++                        // a backend can offer more than its default one
++                        auto * reg = ggml_backend_dev_backend_reg(dev);
++                        auto fn = reg ? (ggml_backend_dev_get_extra_bufts_t)
++                            ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_extra_bufts") : nullptr;
++                        if (fn) {
++                            for (auto ** bufts = fn(dev); bufts && *bufts; ++bufts) {
++                                buft_list[ggml_backend_buft_name(*bufts)] = *bufts;
++                            }
+                         }
+                     }
+                 }
+                 auto override_group_span_len = std::strcspn(value, ",");
+                 bool last_group = false;
+                 do {
+                     if (override_group_span_len == 0) {
+                         // Adds an empty override-tensors for an empty span
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -350,9 +350,15 @@
+     # Needs non-public ggml{,-backend}-impl.h
+     llama_build_and_test(test-alloc.cpp)
+ endif()
+ 
+ llama_build(test-export-graph-ops.cpp)
+ if (TARGET gguf-model-data)
+     target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)
+     target_compile_definitions(test-export-graph-ops PRIVATE LLAMA_HF_FETCH)
++endif()
++
++if (TOSH_ENABLE_DYNAMIC_MOE)
++    add_executable(test-tosh-moe-cache test-tosh-moe-cache.cpp ../tosh-moe/tosh-moe-cache.cpp)
++    target_include_directories(test-tosh-moe-cache PRIVATE ../tosh-moe)
++    add_test(NAME test-tosh-moe-cache COMMAND test-tosh-moe-cache)
+ endif()
+diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
+--- a/ggml/src/CMakeLists.txt
++++ b/ggml/src/CMakeLists.txt
+@@ -184,16 +184,20 @@
+ endif()
+ 
+ # ggml
+ 
+ if (GGML_BACKEND_DL AND NOT BUILD_SHARED_LIBS)
+     message(FATAL_ERROR "GGML_BACKEND_DL requires BUILD_SHARED_LIBS")
+ endif()
+ 
++if (TOSH_ENABLE_DYNAMIC_MOE)
++    set(TOSH_MOE_SOURCES ${CMAKE_SOURCE_DIR}/tosh-moe/tosh-moe-cache.cpp ${CMAKE_SOURCE_DIR}/tosh-moe/tosh-moe-fill.cpp)
++endif()
++
+ add_library(ggml-base
+             ../include/ggml.h
+             ../include/ggml-alloc.h
+             ../include/ggml-backend.h
+             ../include/ggml-cpp.h
+             ../include/ggml-opt.h
+             ../include/gguf.h
+             ggml.c
+@@ -202,18 +206,24 @@
+             ggml-backend.cpp
+             ggml-backend-meta.cpp
+             ggml-opt.cpp
+             ggml-threading.cpp
+             ggml-threading.h
+             ggml-quants.c
+             ggml-quants.h
+             ggml-turbo-quant.c
++            ${TOSH_MOE_SOURCES}
+             gguf.cpp)
+ 
++if (TOSH_ENABLE_DYNAMIC_MOE)
++    target_include_directories(ggml-base PUBLIC ${CMAKE_SOURCE_DIR}/tosh-moe)
++    target_compile_definitions(ggml-base PUBLIC TOSH_ENABLE_DYNAMIC_MOE)
++endif()
++
+ set_target_properties(ggml-base PROPERTIES
+     VERSION ${GGML_VERSION}
+     SOVERSION ${GGML_VERSION_MAJOR}
+ )
+ 
+ target_include_directories(ggml-base PRIVATE .)
+ if (GGML_BACKEND_DL)
+     target_compile_definitions(ggml-base PUBLIC GGML_BACKEND_DL)
+diff --git a/ggml/src/ggml-metal/CMakeLists.txt b/ggml/src/ggml-metal/CMakeLists.txt
+--- a/ggml/src/ggml-metal/CMakeLists.txt
++++ b/ggml/src/ggml-metal/CMakeLists.txt
+@@ -34,28 +34,35 @@
+ 
+     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/autogenerated")
+ 
+     # merge ggml-common.h and ggml-metal.metal into a single file
+     set(METALLIB_EMBED_ASM        "${CMAKE_CURRENT_BINARY_DIR}/autogenerated/ggml-metal-embed.s")
+     set(METALLIB_SOURCE_EMBED     "${CMAKE_CURRENT_BINARY_DIR}/autogenerated/ggml-metal-embed.metal")
+     set(METALLIB_SOURCE_EMBED_TMP "${CMAKE_CURRENT_BINARY_DIR}/autogenerated/ggml-metal-embed.metal.tmp")
+ 
++    # the expert cache kernels ride along in the same library; /dev/null when it is off
++    set(TOSH_METAL_EXTRA /dev/null)
++    if (TOSH_ENABLE_DYNAMIC_MOE)
++        set(TOSH_METAL_EXTRA "${CMAKE_SOURCE_DIR}/tosh-moe/tosh-moe-lru.metal")
++    endif()
++
+     add_custom_command(
+         OUTPUT "${METALLIB_EMBED_ASM}"
+         COMMAND echo "Embedding Metal library"
+         COMMAND sed -e "/__embed_ggml-common.h__/r ${METALLIB_COMMON}"       -e "/__embed_ggml-common.h__/d"         < "${METALLIB_SOURCE}"           > "${METALLIB_SOURCE_EMBED_TMP}"
+         COMMAND sed -e "/\#include \"ggml-metal-impl.h\"/r ${METALLIB_IMPL}" -e "/\#include \"ggml-metal-impl.h\"/d" < "${METALLIB_SOURCE_EMBED_TMP}" > "${METALLIB_SOURCE_EMBED}"
++        COMMAND cat "${TOSH_METAL_EXTRA}"                       >> "${METALLIB_SOURCE_EMBED}"
+         COMMAND echo ".section __DATA,__ggml_metallib"          >  "${METALLIB_EMBED_ASM}"
+         COMMAND echo ".globl _ggml_metallib_start"              >> "${METALLIB_EMBED_ASM}"
+         COMMAND echo "_ggml_metallib_start:"                    >> "${METALLIB_EMBED_ASM}"
+         COMMAND echo .incbin "\"${METALLIB_SOURCE_EMBED}\""     >> "${METALLIB_EMBED_ASM}"
+         COMMAND echo ".globl _ggml_metallib_end"                >> "${METALLIB_EMBED_ASM}"
+         COMMAND echo "_ggml_metallib_end:"                      >> "${METALLIB_EMBED_ASM}"
+-        DEPENDS ../ggml-common.h ggml-metal.metal ggml-metal-impl.h
++        DEPENDS ../ggml-common.h ggml-metal.metal ggml-metal-impl.h "${TOSH_METAL_EXTRA}"
+         COMMENT "Generate assembly for embedded Metal library"
+         VERBATIM
+     )
+ 
+     target_sources(ggml-metal PRIVATE "${METALLIB_EMBED_ASM}")
+ else()
+     # copy metal files to bin directory
+     configure_file(../ggml-common.h  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ggml-common.h     COPYONLY)
+@@ -117,8 +124,13 @@
+             WORLD_READ
+         DESTINATION ${CMAKE_INSTALL_BINDIR})
+ 
+         install(
+             FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/default.metallib
+             DESTINATION ${CMAKE_INSTALL_BINDIR}
+         )
+ endif()
++
++if (TOSH_ENABLE_DYNAMIC_MOE)
++    target_include_directories(ggml-metal PRIVATE ${CMAKE_SOURCE_DIR}/tosh-moe)
++    target_compile_definitions(ggml-metal PRIVATE TOSH_ENABLE_DYNAMIC_MOE)
++endif()
+diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
+--- a/src/llama-model-loader.h
++++ b/src/llama-model-loader.h
+@@ -42,16 +42,23 @@
+                 throw std::runtime_error(format("tensor '%s' not found in the model", ggml_get_name(tensor)));
+             }
+ 
+             offs = gguf_get_data_offset(gguf_ctx) + gguf_get_tensor_offset(gguf_ctx, tensor_idx);
+             if (offs + ggml_nbytes(tensor) < offs || offs + ggml_nbytes(tensor) > file->size()) {
+                 throw std::runtime_error(format("tensor '%s' data is not within the file bounds, model is corrupted or incomplete", ggml_get_name(tensor)));
+             }
+         }
++
++        // for tensors that are not in the file but read a slice of one that is
++        llama_tensor_weight(const llama_file * file, uint16_t idx, size_t offs, ggml_tensor * tensor) : idx(idx), offs(offs), tensor(tensor) {
++            if (offs + ggml_nbytes(tensor) < offs || offs + ggml_nbytes(tensor) > file->size()) {
++                throw std::runtime_error(format("tensor '%s' data is not within the file bounds", ggml_get_name(tensor)));
++            }
++        }
+     };
+ 
+     // custom comparator to sort weights more nicely by layer
+     struct weight_name_comparer {
+         bool operator()(const std::string & a, const std::string & b) const {
+             int a_layer = -1;
+             int b_layer = -1;
+             sscanf(a.c_str(), "blk.%d.", &a_layer);
+@@ -115,13 +122,16 @@
+         }
+     };
+ 
+     std::map<ggml_backend_buffer_type_t, ggml_context_ptr, ggml_backend_buft_comparator> ctx_map;
++
++    // The three expert banks of a layer share one cache state during this load.
++    std::map<int, ggml_tensor *> tosh_moe_state_of_layer;
+ 
+     // track tensors that had to be moved for debugging:
+     size_t n_tensors_moved = 0;
+     std::string first_tensor_moved_name;
+     std::string first_tensor_moved_type_name;
+     ggml_backend_buffer_type_t first_moved_from_buft = nullptr;
+     ggml_backend_buffer_type_t first_moved_to_buft = nullptr;
+ 
+     llama_model_loader(
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -1,10 +1,24 @@
+ #include "llama-model-loader.h"
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++#include "tosh-moe.h"
++#else
++static inline int          tosh_moe_slots_want(void)                     { return 0; }
++static inline void         tosh_moe_bind(const void *, const void *)     {}
++static inline void         tosh_moe_unbind_all(void)                     {}
++static inline void         tosh_moe_layer_set(const void *, int, int)    {}
++static inline void         tosh_moe_bind_state(const void *, const void *) {}
++static inline void         tosh_moe_set_stage(const void *)                {}
++static inline const void * tosh_moe_stage(void)                          { return nullptr; }
++static inline const void * tosh_moe_host_buft(void)                       { return nullptr; }
++static inline int          tosh_moe_state_ints(int, int, int)             { return 0; }
++#endif
++
+ #include "ggml-alloc.h"
+ #include "ggml.h"
+ #include "gguf.h"
+ #include "llama-hparams.h"
+ #include "llama.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -533,16 +547,20 @@
+         FILE * file,
+         llama_load_mode load_mode,
+         bool check_tensors,
+         bool no_alloc,
+         bool load_mtp,
+         const llama_model_kv_override * param_overrides_p,
+         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p)
+         : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
++    // the bindings are keyed by tensor pointer, so a previous model's entries have to go or a
++    // freed address can be reused and match the wrong bank
++    tosh_moe_unbind_all();
++
+     int trace = 0;
+     if (getenv("LLAMA_TRACE")) {
+         trace = atoi(getenv("LLAMA_TRACE"));
+     }
+ 
+     if (param_overrides_p != nullptr) {
+         for (const struct llama_model_kv_override * p = param_overrides_p; p->key[0] != 0; p++) {
+             kv_overrides.insert({std::string(p->key), *p});
+@@ -1070,16 +1088,17 @@
+         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
+     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
+         auto it = ctx_map.find(buft);
+         if (it == ctx_map.end()) {
+             // one ggml context per buffer type
+             int max_n_tensors = n_tensors;
+             max_n_tensors += 1;                   // duplicated output tensor
+             max_n_tensors += hparams.n_layer()*2; // duplicated rope freq tensors
++            max_n_tensors += hparams.n_layer()*3; // expert slot banks
+             if (files.empty()) {
+                 max_n_tensors += hparams.n_layer()*256; // this should be well above what any model actually uses
+             }
+             const size_t ctx_size = ggml_tensor_overhead()*max_n_tensors;
+ 
+             ggml_init_params params = {
+                 /*.mem_size   =*/ ctx_size,
+                 /*.mem_buffer =*/ NULL,
+@@ -1309,17 +1328,89 @@
+     if (flags & TENSOR_DUPLICATED) {
+         ggml_tensor * t = ggml_get_tensor(ctx, tn.str().c_str());
+         if (t) {
+             return t;
+         }
+     }
+ 
+     const bool duplicated = flags & TENSOR_DUPLICATED;
++
++    // An expert bank the user placed in host memory gets a bank of device slots beside it,
++    // plus the small i32 state the cache kernels keep between steps. The graph reads the
++    // slots; the host bank is only ever touched by the fetch.
++    const int n_slots = tosh_moe_slots_want();
++    if (n_slots > 0 && !duplicated && ne.size() == 3 && t_meta.ne[2] >= n_slots &&
++        (const void *) buft == tosh_moe_host_buft() &&
++        std::string(ggml_get_name(&t_meta)).find("_exps.weight") != std::string::npos) {
++        const int64_t n_exp = t_meta.ne[2];
++
++        ggml_backend_buffer_type_t buft_dev = ggml_backend_dev_buffer_type(ggml_backend_buft_get_device(buft));
++
++        // A CPU-owned bank lets the existing scheduler build real host -> Metal prefetch
++        // splits for wide batches. Decode still wraps these stable pages for direct GPU fetch.
++        ggml_context * host_ctx = ctx;
++        if (getenv("TOSH_MOE_CPU_BANK") != nullptr) {
++            host_ctx = ctx_for_buft(ggml_backend_cpu_buffer_type());
++        }
++        ggml_tensor * host = ggml_dup_tensor(host_ctx, &t_meta);
++        ggml_set_name(host, ggml_get_name(&t_meta));
++
++        ggml_tensor slots_meta = t_meta;
++        slots_meta.ne[2] = n_slots;
++
++        const std::string slots_name = std::string(ggml_get_name(&t_meta)) + ".slots";
++        ggml_tensor * slots = ggml_dup_tensor(ctx_for_buft(buft_dev), &slots_meta);
++        ggml_set_name(slots, slots_name.c_str());
++
++        const int max_fetch = n_slots;
++        const int n_state   = tosh_moe_state_ints((int) n_exp, n_slots, max_fetch);
++
++        ggml_tensor state_meta = {};
++        state_meta.type  = GGML_TYPE_I32;
++        state_meta.ne[0] = n_state;
++        state_meta.ne[1] = state_meta.ne[2] = state_meta.ne[3] = 1;
++        state_meta.nb[0] = ggml_type_size(GGML_TYPE_I32);
++        state_meta.nb[1] = state_meta.nb[2] = state_meta.nb[3] = state_meta.nb[0]*n_state;
+ 
++        int il = -1;
++        sscanf(ggml_get_name(&t_meta), "blk.%d.", &il);
++
++        // the banks of a layer share one routing, so they share the state the pick keeps
++        ggml_tensor * state = il >= 0 && tosh_moe_state_of_layer.count(il) ? tosh_moe_state_of_layer[il] : nullptr;
++        if (!state) {
++            const std::string state_name = std::string(ggml_get_name(&t_meta)) + ".state";
++            state = ggml_dup_tensor(ctx_for_buft(buft_dev), &state_meta);
++            ggml_set_name(state, state_name.c_str());
++            if (il >= 0) {
++                tosh_moe_state_of_layer[il] = state;
++            }
++        }
++
++        tosh_moe_bind(slots, host);
++        tosh_moe_bind_state(slots, state);
++
++        // one scratch the size of the widest bank, reused by every layer: a batch too wide for
++        // the cache copies its bank here in one go and reads it from the device. The registry
++        // is the source of truth, not a local static, which would survive into the next load.
++        const ggml_tensor * have = (const ggml_tensor *) tosh_moe_stage();
++        if (!have || ggml_nbytes(have) < ggml_nbytes(&t_meta)) {
++            ggml_tensor * stage = ggml_dup_tensor(ctx_for_buft(buft_dev), &t_meta);
++            ggml_set_name(stage, "tosh.moe.stage");
++            tosh_moe_set_stage(stage);
++        }
++        if (il >= 0) {
++            tosh_moe_layer_set(slots, il, (int) n_exp);
++        }
++
++        n_created++;
++
++        return slots;
++    }
++
+     struct ggml_tensor * tensor = ggml_dup_tensor(ctx, &t_meta);
+     ggml_set_name(tensor, ggml_get_name(&t_meta));
+ 
+     if (duplicated) {
+         size_data += ggml_nbytes(&t_meta);
+     } else {
+         n_created++;
+     }
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1,9 +1,17 @@
+ #include "llama-model.h"
++
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++#include "tosh-moe.h"
++#else
++static inline void tosh_moe_seed_banks(void) {}
++static inline const void * tosh_moe_host_buft(void) { return nullptr; }
++static inline int tosh_moe_slots_want(void) { return 0; }
++#endif
+ 
+ #include "llama-arch.h"
+ #include "llama-ext.h"
+ #include "llama-hparams.h"
+ #include "llama-impl.h"
+ #include "llama-mmap.h"
+ #include "llama-cparams.h"
+ #include "llama-model-loader.h"
+@@ -27,6 +35,7 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <cfloat>
++#include <cstdlib>
+ #include <cstdint>
+ #include <cstring>
+ #include <cmath>
+@@ -1592,26 +1601,33 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+         if (!dev) {
+             // FIXME: workaround for CPU backend buft having a NULL device
+             dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+             if (!dev) {
+                 throw std::runtime_error(format("%s: no CPU backend found", __func__));
+             }
+         }
+         ggml_backend_dev_props props;
+         ggml_backend_dev_get_props(dev, &props);
+         bool buffer_from_host_ptr_supported = props.caps.buffer_from_host_ptr;
+         bool is_default_buft = buft == ggml_backend_dev_buffer_type(dev);
+ 
++        // Directly mapping the cold bank can save physical RAM, but on discrete GPUs it may
++        // cause severe paging under random expert traffic. Keep it as an internal experiment;
++        // the fast default remains the allocated/pinned host bank.
++        const bool is_bank_buft = (const void *) buft == tosh_moe_host_buft();
++        const bool map_bank     = tosh_moe_slots_want() > 0 && getenv("TOSH_MOE_MMAP_BANK") != nullptr;
++        const bool map_this     = map_bank ? is_bank_buft : is_default_buft;
++
+         std::vector<ggml_backend_buffer_ptr> bufs;
+-        if (ml.use_mmap && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
++        if (ml.use_mmap && use_mmap_buffer && buffer_from_host_ptr_supported && map_this) {
+             GGML_ASSERT(!ml.no_alloc);
+             for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
+                 // only the mmap region containing the tensors in the model is mapped to the backend buffer
+                 // this is important for metal with apple silicon: if the entire model could be mapped to a metal buffer,
+                 //     then we could just use metal for all layers
+                 // this allows using partial offloading when the model size exceeds the metal buffer size, but not the RAM size
+                 void * addr = nullptr;
+                 size_t first, last; // NOLINT
+                 ml.get_mapping_range(&first, &last, &addr, idx, ctx);
+                 if (first >= last) {
+                     continue;
+                 }
+@@ -1689,16 +1705,18 @@
+ 
+     // load tensor data
+     for (auto & [ctx, buf_map] : ctx_buf_maps) {
+         if (!ml.load_all_data(ctx, buf_map, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
+             return false;
+         }
+     }
+ 
++    tosh_moe_seed_banks();
++
+     if (use_mmap_buffer) {
+         for (auto & mapping : ml.mappings) {
+             pimpl->mappings.emplace_back(std::move(mapping));
+         }
+     }
+ 
+     return true;
+ }
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1,10 +1,22 @@
+ #include "llama-graph.h"
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++#include "tosh-moe.h"
++static inline ggml_tensor * tosh_moe_bank_of(ggml_tensor * t) {
++    return t ? (ggml_tensor *) tosh_moe_bank_ptr(t) : t;
++}
++#else
++static inline const void * tosh_moe_state_of(const void *) { return nullptr; }
++static inline const void * tosh_moe_ram_of(const void *)   { return nullptr; }
++static inline int tosh_moe_ids_room(int) { return 0; }
++static inline ggml_tensor * tosh_moe_bank_of(ggml_tensor * t) { return t; }
++#endif
++
+ #include "llama-impl.h"
+ #include "llama-model.h"
+ #include "llama-batch.h"
+ #include "llama-cparams.h"
+ #include "llama-sampler.h"
+ 
+ #include "llama-kv-cache.h"
+ #include "llama-kv-cache-iswa.h"
+@@ -2042,17 +2054,44 @@
+         probs = ggml_reshape_3d(ctx0, probs, 1, hparams.n_expert, n_tokens);
+     } else {
+         probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
+     }
+ 
+     ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
+     cb(weights, "ffn_moe_weights", il);
+ 
++    // Every expert the batch routes to has to get a slot: the pick leaves the ones over the
++    // bank marked -1 and nothing downstream can run them. A bank of every expert always fits.
++    ggml_tensor * moe_first = gate_up_exps ? gate_up_exps : gate_exps;
++    bool moe_cached = tosh_moe_state_of(moe_first) != nullptr;
++    if (moe_cached) {
++        // the backend writes the remapped routing into a fixed slice of the cache state, so a
++        // batch whose ids do not fit there stays on the plain path
++        ggml_tensor * bank = (ggml_tensor *) tosh_moe_ram_of(moe_first);
++        const int64_t need = (selected_experts->ne[1] - 1)*(int64_t) (selected_experts->nb[1]/sizeof(int32_t))
++            + selected_experts->ne[0];
++        moe_cached = bank && need <= tosh_moe_ids_room((int) bank->ne[2]);
++    }
++    if (moe_cached) {
++        ggml_tensor * bank = (ggml_tensor *) tosh_moe_ram_of(moe_first);
++        const bool whole_bank = bank && moe_first->ne[2] >= bank->ne[2];
++        moe_cached = whole_bank ||
++            n_tokens*n_expert_used <= moe_first->ne[2];
++    }
+ 
++    ggml_tensor * expert_ids = selected_experts;
++    if (!moe_cached) {
++        gate_up_exps = tosh_moe_bank_of(gate_up_exps);
++        gate_exps    = tosh_moe_bank_of(gate_exps);
++        up_exps      = tosh_moe_bank_of(up_exps);
++        down_exps    = tosh_moe_bank_of(down_exps);
++    }
++
++
+     if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
+         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+         weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
+         weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+         cb(weights, "ffn_moe_weights_softmax", il);
+     }
+ 
+     if (norm_w) {
+@@ -2087,17 +2126,17 @@
+         cb(cur, "ffn_moe_weighted", il);
+     }
+ 
+     ggml_tensor * up = nullptr;
+     ggml_tensor * experts = nullptr;
+ 
+     if (gate_up_exps) {
+         // merged gate_up path: one mul_mat_id, then split into gate and up views
+-        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
++        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, expert_ids, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
+         cb(gate_up, "ffn_moe_gate_up", il);
+ 
+         if (up_exps_s) {
+             cb(gate_up, "ffn_moe_gate_up_scaled", il);
+         }
+ 
+         if (gate_up_exps_b) {
+             gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, selected_experts);
+@@ -2106,30 +2145,30 @@
+ 
+         const int64_t n_ff = gate_up->ne[0] / 2;
+         cur = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
+         cb(cur, "ffn_moe_gate", il);
+         up  = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff * gate_up->nb[0]);
+         cb(up, "ffn_moe_up", il);
+     } else {
+         // separate gate and up path
+-        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
++        up = build_lora_mm_id(up_exps, cur, expert_ids, up_exps_s); // [n_ff, n_expert_used, n_tokens]
+         cb(up, "ffn_moe_up", il);
+ 
+         if (up_exps_s) {
+             cb(up, "ffn_moe_up_scaled", il);
+         }
+ 
+         if (up_exps_b) {
+             up = ggml_add_id(ctx0, up, up_exps_b, selected_experts);
+             cb(up, "ffn_moe_up_biased", il);
+         }
+ 
+         if (gate_exps) {
+-            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
++            cur = build_lora_mm_id(gate_exps, cur, expert_ids, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
+             cb(cur, "ffn_moe_gate", il);
+         } else {
+             cur = up;
+         }
+ 
+         if (gate_exps_s) {
+             cb(cur, "ffn_moe_gate_scaled", il);
+         }
+@@ -2223,17 +2262,17 @@
+                 cur = ggml_relu(ctx0, cur);
+                 cur = ggml_sqr(ctx0, cur);
+                 cb(cur, "ffn_moe_relu_sqr", il);
+             } break;
+         default:
+             GGML_ABORT("fatal error");
+     }
+ 
+-    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
++    experts = build_lora_mm_id(down_exps, cur, expert_ids, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+     cb(experts, "ffn_moe_down", il);
+ 
+     if (down_exps_s) {
+         cb(experts, "ffn_moe_down_scaled", il);
+     }
+ 
+     if (down_exps_b) {
+         experts = ggml_add_id(ctx0, experts, down_exps_b, selected_experts);
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -568,16 +568,31 @@
+     uint64_t nb11;
+     uint64_t nb12;
+     int32_t  ne0;
+     int32_t  ne1;
+     uint64_t nb1;
+     int32_t  nr0;
+ } ggml_metal_kargs_mul_mv_id;
+ 
++typedef struct {
++    int32_t n_used;
++    int32_t n_tokens;
++    int32_t stride;
++    int32_t n_expert;
++    int32_t n_slots;
++    int32_t max_fetch;
++} ggml_metal_kargs_moe_lru;
++
++typedef struct {
++    uint32_t row_u4;
++    int32_t  max_fetch;
++    int32_t  n_chunks;
++} ggml_metal_kargs_moe_fetch;
++
+ // NORM
+ // RMS_NORM
+ typedef struct {
+     int32_t  ne00;
+     int32_t  ne00_t;
+     uint64_t nb1;
+     uint64_t nb2;
+     uint64_t nb3;
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -271,16 +271,20 @@
+     // Apple Silicon and AMD RDNA report 32; AMD GCN/Vega report 64. The Metal
+     // kernels assume 32, so a non-32 width signals a wave64 device.
+     int simd_width;
+ 
+     bool has_bfloat;
+     bool has_tensor;
+     bool use_residency_sets;
+     bool use_shared_buffers;
++
++    // host-resident weights on a discrete GPU: only the buffer type that asks for it, so the
++    // rest of the model stays in VRAM
++    bool use_host_buffers;
+ 
+     bool supports_gpu_family_apple7;
+ 
+     enum ggml_metal_device_id device_id;
+ 
+     int op_offload_min_batch_size;
+ };
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1,14 +1,21 @@
+ #import "ggml-metal-device.h"
+ 
+ #import "ggml-impl.h"
+ #import "ggml-backend-impl.h"
+ #import "ggml-metal-impl.h"
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++#import "tosh-moe.h"
++#else
++enum { TOSH_MOE_OFF = 0 };
++static inline int tosh_moe_mode(void) { return TOSH_MOE_OFF; }
++#endif
++
+ #include <Foundation/Foundation.h>
+ 
+ #include <Metal/Metal.h>
+ 
+ #include <stdatomic.h>
+ #include <unistd.h>
+ 
+ #ifndef TARGET_OS_VISION
+@@ -1087,16 +1094,20 @@
+ #endif
+             if (getenv("GGML_METAL_SHARED_BUFFERS_DISABLE") != NULL) {
+                 dev->props.use_shared_buffers = false;
+             }
+             if (getenv("GGML_METAL_SHARED_BUFFERS_ENABLE") != NULL) {
+                 dev->props.use_shared_buffers = true;
+             }
+ 
++            // the expert cache keeps weights in host memory the GPU can read; without unified
++            // memory that is a different decision from making every buffer shared
++            dev->props.use_host_buffers = !dev->props.use_shared_buffers && tosh_moe_mode() != TOSH_MOE_OFF;
++
+             dev->props.supports_gpu_family_apple7 = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
+ 
+             dev->props.device_id = ggml_metal_device_id_parse([[dev->mtl_device name] UTF8String]);
+ 
+             dev->props.op_offload_min_batch_size  = getenv("GGML_OP_OFFLOAD_MIN_BATCH") ? atoi(getenv("GGML_OP_OFFLOAD_MIN_BATCH")) : 32;
+ 
+             dev->props.max_buffer_size            = dev->mtl_device.maxBufferLength;
+ 
+@@ -1165,16 +1176,17 @@
+ 
+             GGML_LOG_INFO("%s: simdgroup reduction   = %s\n", __func__, dev->props.has_simdgroup_reduction ? "true" : "false");
+             GGML_LOG_INFO("%s: simdgroup matrix mul. = %s\n", __func__, dev->props.has_simdgroup_mm        ? "true" : "false");
+             GGML_LOG_INFO("%s: has unified memory    = %s\n", __func__, dev->props.has_unified_memory      ? "true" : "false");
+             GGML_LOG_INFO("%s: has bfloat            = %s\n", __func__, dev->props.has_bfloat              ? "true" : "false");
+             GGML_LOG_INFO("%s: has tensor            = %s\n", __func__, dev->props.has_tensor              ? "true" : "false");
+             GGML_LOG_INFO("%s: use residency sets    = %s\n", __func__, dev->props.use_residency_sets      ? "true" : "false");
+             GGML_LOG_INFO("%s: use shared buffers    = %s\n", __func__, dev->props.use_shared_buffers      ? "true" : "false");
++            GGML_LOG_INFO("%s: use host buffers      = %s\n", __func__, dev->props.use_host_buffers        ? "true" : "false");
+ 
+ #if TARGET_OS_OSX || (TARGET_OS_IOS && __clang_major__ >= 15)
+             if (@available(macOS 10.12, iOS 16.0, *)) {
+                 GGML_LOG_INFO("%s: recommendedMaxWorkingSetSize  = %8.2f MB\n", __func__, dev->props.max_working_set_size / 1e6);
+             }
+ #endif
+         }
+     }
+@@ -1293,24 +1305,38 @@ void * ggml_metal_device_wrap_host(ggml_metal_device_t dev, const void * data, s
+         }
+     }
+ 
+-    size_t limit = dev->props.max_working_set_size*7/8;
++    // A no-copy host buffer only makes already allocated system-RAM pages addressable by Metal;
++    // it does not make them private VRAM residents. recommendedMaxWorkingSetSize is therefore the
++    // wrong ceiling: on a discrete GPU it rejects the exact oversized models this cache exists to
++    // serve. The device's maximum *single buffer* size is the real structural constraint. Keep the
++    // aggregate limit only as an explicit laboratory/debug override.
++    if (len > dev->props.max_buffer_size) {
++        [dev->wrap_lock unlock];
++        return NULL;
++    }
++
+     const char * limit_mb = getenv("GGML_METAL_HOST_WRAP_LIMIT_MB");
+     if (limit_mb != NULL) {
+-        limit = (size_t) strtoull(limit_mb, NULL, 10)*1024*1024;
+-    }
+-    if (len > limit || dev->host_wrap_bytes > limit - len) {
+-        [dev->wrap_lock unlock];
+-        return NULL;
++        const size_t limit = (size_t) strtoull(limit_mb, NULL, 10)*1024*1024;
++        if (len > limit || dev->host_wrap_bytes > limit - len) {
++            [dev->wrap_lock unlock];
++            return NULL;
++        }
+     }
+ 
+     id<MTLBuffer> buf = [dev->mtl_device newBufferWithBytesNoCopy:(void *) base
+                                                            length:len
+                                                           options:MTLResourceStorageModeShared
+                                                       deallocator:nil];
+     if (buf == nil) {
+         [dev->wrap_lock unlock];
+         return NULL;
+     }
++
++    if (len >= (size_t) 1024*1024*1024) {
++        GGML_LOG_INFO("%s: mapped %.2f GiB of existing host RAM as one Metal buffer (not VRAM)\n",
++                __func__, (double) len/(1024.0*1024.0*1024.0));
++    }
+ 
+     if (dev->n_host_wraps == GGML_METAL_HOST_WRAP_MAX) {
+         // evict the oldest entry; in-flight command buffers retain the resource
+@@ -2164,17 +2190,17 @@
+ 
+     size_t size_aligned = size;
+     if ((size_aligned % size_page) != 0) {
+         size_aligned += (size_page - (size_aligned % size_page));
+     }
+ 
+     const struct ggml_metal_device_props * props_dev = ggml_metal_device_get_props(dev);
+ 
+-    shared = shared && props_dev->use_shared_buffers;
++    shared = shared && (props_dev->use_shared_buffers || props_dev->use_host_buffers);
+ 
+     // allocate shared buffer if the device supports it and it is required by the buffer type
+     if (shared) {
+         res->all_data = ggml_metal_host_malloc(size_aligned);
+         res->is_shared = true;
+     } else {
+         // use virtual address
+         res->all_data = (void *) atomic_fetch_add_explicit(&dev->addr_virt, size_aligned, memory_order_relaxed);
+@@ -2186,17 +2212,20 @@
+ 
+     res->n_buffers = 1;
+ 
+     if (res->all_data != NULL) {
+         res->buffers[0].size  = size;
+         res->buffers[0].metal = nil;
+ 
+         if (size_aligned > 0) {
+-            if (props_dev->use_shared_buffers && shared) {
++            // `shared` already carries the device's answer plus the host-buffer opt-in, and
++            // taking the device flag again here wrapped host memory in a private buffer: the
++            // writes landed in one place and the GPU read the other
++            if (shared) {
+                 res->buffers[0].metal = [res->dev->mtl_device newBufferWithBytesNoCopy:res->all_data
+                                                                   length:size_aligned
+                                                                  options:MTLResourceStorageModeShared
+                                                              deallocator:nil];
+             } else {
+                 res->buffers[0].metal = [res->dev->mtl_device newBufferWithLength:size_aligned options:MTLResourceStorageModePrivate];
+             }
+         }
+diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+--- a/ggml/src/ggml-metal/ggml-metal.cpp
++++ b/ggml/src/ggml-metal/ggml-metal.cpp
+@@ -1,14 +1,20 @@
+ #include "ggml-metal.h"
+ 
+ #include "ggml-impl.h"
+ #include "ggml-backend-impl.h"
+ 
+ #include "ggml-metal-device.h"
++
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++#include "tosh-moe.h"
++#else
++static inline void tosh_moe_set_host_buft(const void *) {}
++#endif
+ #include "ggml-metal-context.h"
+ #include "ggml-metal-ops.h"
+ 
+ #include <mutex>
+ #include <string>
+ 
+ #define GGML_METAL_NAME "MTL"
+ #define GGML_METAL_MAX_DEVICES 16
+@@ -323,16 +329,21 @@
+                     /* .get_alloc_size   = */ ggml_backend_metal_buffer_type_shared_get_alloc_size,
+                     /* .is_host          = */ ggml_backend_metal_buffer_type_shared_is_host,
+                 },
+                 /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_metal_reg(), i),
+                 /* .context = */ raw_ctx,
+             };
+ 
+             bufts.emplace_back(buft);
++
++            // the loader needs to recognise the host-resident type wherever it shows up
++            if (i == 0) {
++                tosh_moe_set_host_buft(&bufts.back());
++            }
+         }
+ 
+         initialized = true;
+     }
+ 
+     return &bufts[device];
+ }
+ 
+@@ -1105,17 +1116,39 @@
+         GGML_ASSERT(ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j],
+                                                           tensors[j_src], tensors[j], prefer_events,
+                                                           /*hold_dst =*/ false));
+     }
+ 
+     return true;
+ }
+ 
++// the shared buffer type is host-resident on a discrete GPU when the expert cache asks for
++// it, so offer it by name and let -ot place the expert banks there
++static ggml_backend_buffer_type_t * ggml_backend_metal_device_get_extra_bufts(ggml_backend_dev_t device) {
++    ggml_metal_device_t ctx_dev = (ggml_metal_device_t) device->context;
++
++    static std::vector<ggml_backend_buffer_type_t> bufts;
++    static bool initialized = false;
++    if (!initialized) {
++        initialized = true;
++        if (ggml_metal_device_get_props(ctx_dev)->use_host_buffers) {
++            bufts.push_back(ggml_backend_metal_buffer_type_shared(0));
++        }
++        bufts.push_back(nullptr);
++    }
++
++    return bufts.data();
++}
++
+ static void * ggml_backend_metal_get_proc_address(ggml_backend_reg_t reg, const char * name) {
++    if (strcmp(name, "ggml_backend_dev_get_extra_bufts") == 0) {
++        ggml_backend_dev_get_extra_bufts_t fct = ggml_backend_metal_device_get_extra_bufts;
++        return (void *)fct;
++    }
+     if (strcmp(name, "ggml_backend_get_features") == 0) {
+         return (void *)ggml_backend_metal_get_features;
+     }
+     if (strcmp(name, "ggml_backend_comm_init") == 0) {
+         return (void *)ggml_backend_metal_comm_init;
+     }
+     if (strcmp(name, "ggml_backend_comm_free") == 0) {
+         return (void *)ggml_backend_metal_comm_free;
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -1,10 +1,20 @@
+ #include "ggml-metal-ops.h"
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++#include "tosh-moe.h"
++#else
++static inline const void * tosh_moe_state_of(const void *) { return nullptr; }
++static inline const void * tosh_moe_ram_of(const void *)   { return nullptr; }
++static inline const void * tosh_moe_slots_of(const void *) { return nullptr; }
++static inline const void * tosh_moe_stage(void)            { return nullptr; }
++static inline bool tosh_moe_should_route(const void *, int) { return false; }
++#endif
++
+ #include "ggml.h"
+ #include "ggml-impl.h"
+ #include "ggml-backend-impl.h"
+ 
+ #include "ggml-metal-impl.h"
+ #include "ggml-metal-common.h"
+ #include "ggml-metal-device.h"
+ 
+@@ -25,7 +35,37 @@ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
+ 
+     return ggml_metal_buffer_get_id(ctx, t);
+ }
++
++static ggml_metal_buffer_id ggml_metal_get_host_buffer_id(
++        ggml_metal_device_t dev, const ggml_tensor * t) {
++    ggml_backend_buffer_t buffer = t->view_src ? t->view_src->buffer : t->buffer;
++
++    // The canonical CPU buffer type intentionally has no device pointer in ggml. Detect the
++    // property we actually need instead: whether the storage is host-addressable.
++    if (!ggml_backend_buffer_is_host(buffer)) {
++        return ggml_metal_get_buffer_id(t);
++    }
++
++    // Wrap the whole CPU allocation once. The expert tensors are slices of this allocation;
++    // mapping them independently duplicates address ranges and eventually exhausts Metal's
++    // resource table on large models.
++    void * const base = ggml_backend_buffer_get_base(buffer);
++    const size_t size = ggml_backend_buffer_get_size(buffer);
++    const size_t off  = (const char *) t->data - (const char *) base;
++
++    size_t offs = 0;
++    void * metal = ggml_metal_device_wrap_host(dev, base, size, &offs);
++    if (metal == nullptr) {
++        // A driver can reject a single allocation larger than maxBufferLength. Keep a bounded
++        // compatibility fallback for smaller tensors; never mistake this for a VRAM budget.
++        metal = ggml_metal_device_wrap_host(dev, t->data, ggml_nbytes(t), &offs);
++        GGML_ASSERT(metal != nullptr && "failed to wrap the Dynamic MoE CPU bank for Metal");
++        return { metal, offs };
++    }
++
++    return { metal, offs + off };
++}
+ 
+ struct ggml_metal_op {
+     ggml_metal_op(
+         ggml_metal_device_t dev,
+@@ -2951,16 +2975,133 @@
+     ggml_metal_buffer_id bid_src0 = ggml_metal_get_buffer_id(op->src[0]);
+     ggml_metal_buffer_id bid_src1 = ggml_metal_get_buffer_id(op->src[1]);
+     ggml_metal_buffer_id bid_src2 = ggml_metal_get_buffer_id(op->src[2]);
+     ggml_metal_buffer_id bid_dst  = ggml_metal_get_buffer_id(op);
+ 
+     const uint32_t r2 = 1;
+     const uint32_t r3 = 1;
+ 
++    // A cached bank: pick the experts and pull in what is missing before the matmul reads the
++    // slots. Both run on this encoder, so the routing never goes back to the host.
++    // A bank handed over whole, because the batch was too wide for the cache: copy it to the
++    // scratch first. Reading experts scattered from host memory is what makes prefill crawl.
++    // Only banks of small rows gain: those are read scattered from host and the copy makes them
++    // contiguous. A bank of few, large rows already reads well and the copy is pure extra traffic.
++    static const size_t stage_row_max = []() {
++        const char * s = getenv("TOSH_MOE_STAGE_ROW_KIB");
++        return (size_t) (s ? atoi(s) : 1024) << 10;
++    }();
++
++    if (const ggml_tensor * stage = (const ggml_tensor *) (tosh_moe_slots_of(op->src[0]) ? tosh_moe_stage() : nullptr)) {
++        if (ggml_nbytes(op->src[0]) <= ggml_nbytes(stage) && nb02 <= stage_row_max) {
++            const uint32_t n_u4 = (uint32_t) (ggml_nbytes(op->src[0])/16);
++
++            auto ps = ggml_metal_library_compile_pipeline(lib, "tosh_moe_stage", "tosh_moe_stage", nullptr);
++
++            ggml_metal_encoder_set_pipeline(enc, ps);
++            ggml_metal_encoder_set_bytes (enc, (void *) &n_u4, sizeof(n_u4), 0);
++            ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(stage), 1);
++            ggml_metal_encoder_set_buffer(enc, bid_src0, 2);
++            ggml_metal_encoder_dispatch_threadgroups(enc, 512, 1, 1, 256, 1, 1);
++
++            ggml_metal_op_concurrency_reset(ctx);
++
++            bid_src0 = ggml_metal_get_buffer_id(stage);
++        }
++    }
++
++    if (const ggml_tensor * state = (const ggml_tensor *) tosh_moe_state_of(op->src[0])) {
++        // the graph only routes a batch here when its remapped ids fit the state
++        GGML_ASSERT((int64_t) (ne21 - 1)*(int64_t) (nb21/sizeof(int32_t)) + ne20 <=
++                tosh_moe_ids_room((int) ((const ggml_tensor *) tosh_moe_ram_of(op->src[0]))->ne[2]));
++        const ggml_tensor * host = (const ggml_tensor *) tosh_moe_ram_of(op->src[0]);
++
++        const int n_expert  = (int) host->ne[2];
++        const int n_slots   = (int) ne02;
++        const int max_fetch = n_slots;
++
++        const ggml_metal_buffer_id bid_state = ggml_metal_get_buffer_id(state);
++        const size_t i32 = sizeof(int32_t);
++
++        if (tosh_moe_should_route(op->src[0], idx)) {
++            ggml_metal_kargs_moe_lru la = {
++                /*.n_used   =*/ (int32_t) ne20,
++                /*.n_tokens =*/ (int32_t) ne21,
++                /*.stride   =*/ (int32_t) (nb21/sizeof(int32_t)),
++                /*.n_expert =*/ n_expert,
++                /*.n_slots  =*/ n_slots,
++                /*.max_fetch=*/ max_fetch,
++            };
++
++            auto pl = ggml_metal_library_compile_pipeline(lib, "tosh_moe_lru", "tosh_moe_lru", nullptr);
++
++            ggml_metal_encoder_set_pipeline(enc, pl);
++            ggml_metal_encoder_set_bytes (enc, &la, sizeof(la), 0);
++            ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(op->src[2]), 1);
++            ggml_metal_buffer_id b = bid_state;
++            b.offs = bid_state.offs + tosh_moe_off_slot_for_id(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 2);
++            b.offs = bid_state.offs + tosh_moe_off_id_of_slot(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 3);
++            b.offs = bid_state.offs + tosh_moe_off_usage(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 4);
++            b.offs = bid_state.offs + tosh_moe_off_step(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 5);
++            b.offs = bid_state.offs + tosh_moe_off_evict(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 6);
++            b.offs = bid_state.offs + tosh_moe_off_src(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 7);
++            b.offs = bid_state.offs + tosh_moe_off_n_indices(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 8);
++            b.offs = bid_state.offs + tosh_moe_off_ids(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 9);
++            ggml_metal_encoder_set_threadgroup_memory_size(enc, (2*n_expert + 512)*i32, 0);
++            ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, 256, 1, 1);
++
++            ggml_metal_op_concurrency_reset(ctx);
++        }
++
++        // a whole expert is megabytes: one threadgroup per row leaves the device idle
++        static const int n_chunks = []() {
++            const char * s = getenv("TOSH_MOE_FETCH_CHUNKS");
++            const int v = s ? atoi(s) : 16;
++            return v > 0 ? v : 1;
++        }();
++
++        ggml_metal_kargs_moe_fetch fa = {
++            /*.row_u4    =*/ (uint32_t) (nb02/16),
++            /*.max_fetch =*/ max_fetch,
++            /*.n_chunks  =*/ n_chunks,
++        };
++
++        auto pf = ggml_metal_library_compile_pipeline(lib, "tosh_moe_fetch", "tosh_moe_fetch", nullptr);
++
++        ggml_metal_buffer_id b = bid_state;
++        ggml_metal_encoder_set_pipeline(enc, pf);
++        ggml_metal_encoder_set_bytes (enc, &fa, sizeof(fa), 0);
++        ggml_metal_encoder_set_buffer(enc, bid_src0, 1);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_host_buffer_id(ctx->dev, host), 2);
++        b.offs = bid_state.offs + tosh_moe_off_evict(n_expert, n_slots, max_fetch)*i32;
++        ggml_metal_encoder_set_buffer(enc, b, 3);
++        b.offs = bid_state.offs + tosh_moe_off_src(n_expert, n_slots, max_fetch)*i32;
++        ggml_metal_encoder_set_buffer(enc, b, 4);
++        b.offs = bid_state.offs + tosh_moe_off_n_indices(n_expert, n_slots, max_fetch)*i32;
++        ggml_metal_encoder_set_buffer(enc, b, 5);
++        ggml_metal_encoder_dispatch_threadgroups(enc, max_fetch*n_chunks, 1, 1, 256, 1, 1);
++
++        ggml_metal_op_concurrency_reset(ctx);
++
++        static const bool raw_ids = getenv("TOSH_MOE_RAW_IDS") != nullptr;
++        if (!raw_ids) {
++            bid_src2 = bid_state;
++            bid_src2.offs = bid_state.offs + tosh_moe_off_ids(n_expert, n_slots, max_fetch)*i32;
++        }
++    }
++
+     // find the break-even point where the matrix-matrix kernel becomes more efficient compared
+     // to the matrix-vector kernel
+     // ne20 = n_used_experts
+     // ne21 = n_rows (batch size)
+     const int ne21_mm_id_min = 32;
+ 
+     // escape hatch: revert wave64 MoE prefill to the mat-vec route
+     const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
+diff --git a/tosh-moe/tosh-moe.h b/tosh-moe/tosh-moe.h
+new file mode 100644
+--- /dev/null
++++ b/tosh-moe/tosh-moe.h
+@@ -0,0 +1,138 @@
++// Experimental MoE expert cache: maps an expert to a physical slot, nothing else.
++// RAM keeps every expert, so an eviction only drops a copy. The unit is a whole expert of a
++// layer, all of its tensors together, because a partial one cannot run.
++
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct tosh_moe_cache;
++
++// n_slots is per layer.
++struct tosh_moe_cache * tosh_moe_cache_init(int n_layer, int n_expert, int n_slots);
++void                    tosh_moe_cache_free(struct tosh_moe_cache * c);
++
++// Slot of an expert, or -1. Leaves the state alone so a caller can plan before committing.
++int tosh_moe_cache_find(const struct tosh_moe_cache * c, int il, int expert);
++
++// Pin a resident expert for this step: not evictable, and its recency moves to now.
++int tosh_moe_cache_hold(struct tosh_moe_cache * c, int il, int expert);
++
++// Give an expert a slot, evicting the least recently used one that is not held, and hold it.
++// Returns -1 when every slot of the layer is held; the caller has to run it elsewhere.
++int tosh_moe_cache_admit(struct tosh_moe_cache * c, int il, int expert, int * out_evicted);
++
++// Ends the step: releases every hold and advances the recency clock.
++void tosh_moe_cache_step(struct tosh_moe_cache * c);
++
++// False on the first broken invariant, naming it in `why`.
++bool tosh_moe_cache_check(const struct tosh_moe_cache * c, const char ** why);
++
++struct tosh_moe_cache_stats {
++    uint64_t steps;
++    uint64_t lookups;
++    uint64_t hits;
++    uint64_t admits;
++    uint64_t evictions;
++    uint64_t starved;   // refused because every slot was held
++};
++
++void tosh_moe_cache_stats_get(const struct tosh_moe_cache * c, struct tosh_moe_cache_stats * out);
++
++enum tosh_moe_mode {
++    TOSH_MOE_OFF = 0,
++    TOSH_MOE_CACHE,    // every expert on the device, a miss is filled before it runs
++    TOSH_MOE_HYBRID,   // the device runs what it holds, the host runs the rest
++};
++
++enum tosh_moe_mode tosh_moe_mode(void);
++
++// The backend registers which of its buffer types keeps weights in host memory, so the
++// loader can tell a bank the user placed there from one that landed in VRAM.
++void         tosh_moe_set_host_buft(const void * buft);
++const void * tosh_moe_host_buft(void);
++
++// Layout of the per-layer cache state, packed in one i32 tensor so the kernels can bind it
++// at offsets instead of needing seven buffers of their own.
++// Widest batch whose remapped routing still fits the state. The ids are padded to one entry
++// per expert, so the room needed is tokens times experts, not tokens times experts used.
++#define TOSH_MOE_MAX_TOKENS 512
++
++static inline int tosh_moe_ids_room(int n_expert) {
++    return TOSH_MOE_MAX_TOKENS*n_expert;
++}
++
++static inline int tosh_moe_state_ints(int n_expert, int n_slots, int max_fetch) {
++    return n_expert + 2*n_slots + 2 + 2*max_fetch + tosh_moe_ids_room(n_expert);
++}
++static inline int tosh_moe_off_slot_for_id(int n_expert, int n_slots, int max_fetch) { (void) n_expert; (void) n_slots; (void) max_fetch; return 0; }
++static inline int tosh_moe_off_id_of_slot (int n_expert, int n_slots, int max_fetch) { (void) n_slots; (void) max_fetch; return n_expert; }
++static inline int tosh_moe_off_usage      (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return n_expert + n_slots; }
++static inline int tosh_moe_off_step       (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return n_expert + 2*n_slots; }
++static inline int tosh_moe_off_n_indices  (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return n_expert + 2*n_slots + 1; }
++static inline int tosh_moe_off_evict      (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return n_expert + 2*n_slots + 2; }
++static inline int tosh_moe_off_src        (int n_expert, int n_slots, int max_fetch) { return n_expert + 2*n_slots + 2 + max_fetch; }
++static inline int tosh_moe_off_ids        (int n_expert, int n_slots, int max_fetch) { return n_expert + 2*n_slots + 2 + 2*max_fetch; }
++
++// Slots per expert bank, 0 when the cache is off.
++int tosh_moe_slots_want(void);
++
++// Ties a bank of VRAM slots to the weights that stay in RAM. Keys are ggml tensors, kept as
++// void so this stays independent of ggml.
++void         tosh_moe_bind(const void * slots, const void * ram);
++const void * tosh_moe_ram_of(const void * slots);
++
++// The other way round, for the paths that are handed the bank itself.
++const void * tosh_moe_slots_of(const void * bank);
++
++// One scratch in VRAM, the size of a single layer's bank, reused by every layer: a wide batch
++// copies the bank there in one contiguous read and computes from the device.
++void         tosh_moe_set_stage(const void * stage);
++const void * tosh_moe_stage(void);
++
++// The bank itself when the tensor is a set of slots, otherwise the tensor unchanged.
++static inline void * tosh_moe_bank_ptr(void * slots) {
++    const void * host = tosh_moe_ram_of(slots);
++#ifdef __cplusplus
++    return host ? const_cast<void *>(host) : slots;
++#else
++    return host ? (void *) host : slots;
++#endif
++}
++void         tosh_moe_unbind_all(void);
++
++void tosh_moe_layer_set(const void * tensor, int il, int n_expert);
++int  tosh_moe_layer_of(const void * tensor);
++const uint32_t * tosh_moe_seen_of(int il, int * n);
++void tosh_moe_seen_clear(int il);
++
++void         tosh_moe_bind_state(const void * slots, const void * state);
++
++// The banks of a layer share one routing, so the pick runs once per layer and the fetch once
++// per bank. True on the first bank of the layer this pass reaches: node indices climb within
++// a pass, so one that does not climb means a new pass has started.
++bool tosh_moe_should_route(const void * slots, int node_idx);
++const void * tosh_moe_state_of(const void * slots);
++
++int  tosh_moe_bind_count(void);
++void tosh_moe_bind_at(int i, const void ** slots, const void ** ram);
++
++// Residency of one bank: table[expert] is its slot, or -1 when it is not on the device. The
++// device path computes the experts that have a slot and the host path the rest, so the two
++// together cover every expert exactly once. Keyed by either tensor of the bank.
++// Seeds every bank once the weights are in: the first slots take the first experts and the
++// last slot is left at zero, which is where the table sends an expert the device does not hold.
++void tosh_moe_seed_banks(void);
++
++
++const int32_t * tosh_moe_table_of(const void * tensor, int * n_expert);
++void            tosh_moe_table_set(const void * slots, const int32_t * table, int n_expert);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/tosh-moe/tosh-moe-cache.cpp b/tosh-moe/tosh-moe-cache.cpp
+new file mode 100644
+--- /dev/null
++++ b/tosh-moe/tosh-moe-cache.cpp
+@@ -0,0 +1,436 @@
++#include "tosh-moe.h"
++
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++// Allocated once: a step must not allocate, or a long session creeps upwards.
++struct tosh_moe_cache {
++    int n_layer = 0;
++    int n_expert = 0;
++    int n_slots = 0;
++
++    uint64_t tick = 1;   // advances once per step
++
++    std::vector<int32_t>  slot_of;    // [layer][expert] -> slot, or -1
++    std::vector<int32_t>  expert_of;  // [layer][slot]   -> expert, or -1
++    std::vector<uint64_t> used_at;    // [layer][slot]   -> tick of last use
++    std::vector<uint64_t> held_at;    // [layer][slot]   -> tick it is held for, 0 when free
++
++    tosh_moe_cache_stats stats = {};
++};
++
++static inline size_t idx_e(const tosh_moe_cache * c, int il, int expert) {
++    return (size_t) il*c->n_expert + expert;
++}
++
++static inline size_t idx_s(const tosh_moe_cache * c, int il, int slot) {
++    return (size_t) il*c->n_slots + slot;
++}
++
++struct tosh_moe_cache * tosh_moe_cache_init(int n_layer, int n_expert, int n_slots) {
++    if (n_layer <= 0 || n_expert <= 0 || n_slots <= 0 || n_slots > n_expert) {
++        return nullptr;
++    }
++
++    auto * c = new tosh_moe_cache();
++
++    c->n_layer  = n_layer;
++    c->n_expert = n_expert;
++    c->n_slots  = n_slots;
++
++    c->slot_of  .assign((size_t) n_layer*n_expert, -1);
++    c->expert_of.assign((size_t) n_layer*n_slots,  -1);
++    c->used_at  .assign((size_t) n_layer*n_slots,   0);
++    c->held_at  .assign((size_t) n_layer*n_slots,   0);
++
++    return c;
++}
++
++void tosh_moe_cache_free(struct tosh_moe_cache * c) {
++    delete c;
++}
++
++int tosh_moe_cache_find(const struct tosh_moe_cache * c, int il, int expert) {
++    if (!c || il < 0 || il >= c->n_layer || expert < 0 || expert >= c->n_expert) {
++        return -1;
++    }
++
++    return c->slot_of[idx_e(c, il, expert)];
++}
++
++int tosh_moe_cache_hold(struct tosh_moe_cache * c, int il, int expert) {
++    if (!c || il < 0 || il >= c->n_layer || expert < 0 || expert >= c->n_expert) {
++        return -1;
++    }
++
++    c->stats.lookups++;
++
++    const int slot = c->slot_of[idx_e(c, il, expert)];
++    if (slot < 0) {
++        return -1;
++    }
++
++    c->stats.hits++;
++
++    c->used_at[idx_s(c, il, slot)] = c->tick;
++    c->held_at[idx_s(c, il, slot)] = c->tick;
++
++    return slot;
++}
++
++int tosh_moe_cache_admit(struct tosh_moe_cache * c, int il, int expert, int * out_evicted) {
++    if (out_evicted) {
++        *out_evicted = -1;
++    }
++
++    if (!c || il < 0 || il >= c->n_layer || expert < 0 || expert >= c->n_expert) {
++        return -1;
++    }
++
++    // admitting a resident expert again would give it a second slot
++    const int cur = c->slot_of[idx_e(c, il, expert)];
++    if (cur >= 0) {
++        return tosh_moe_cache_hold(c, il, expert);
++    }
++
++    // a free slot first, then the least recently used one that nothing holds
++    int victim = -1;
++    for (int s = 0; s < c->n_slots; s++) {
++        if (c->expert_of[idx_s(c, il, s)] < 0) {
++            victim = s;
++            break;
++        }
++    }
++
++    if (victim < 0) {
++        for (int s = 0; s < c->n_slots; s++) {
++            if (c->held_at[idx_s(c, il, s)] == c->tick) {
++                continue;   // in use this step
++            }
++            if (victim < 0 || c->used_at[idx_s(c, il, s)] < c->used_at[idx_s(c, il, victim)]) {
++                victim = s;
++            }
++        }
++    }
++
++    if (victim < 0) {
++        c->stats.starved++;
++        return -1;
++    }
++
++    const int old = c->expert_of[idx_s(c, il, victim)];
++    if (old >= 0) {
++        c->slot_of[idx_e(c, il, old)] = -1;
++        c->stats.evictions++;
++        if (out_evicted) {
++            *out_evicted = old;
++        }
++    }
++
++    c->expert_of[idx_s(c, il, victim)] = expert;
++    c->slot_of  [idx_e(c, il, expert)] = victim;
++    c->used_at  [idx_s(c, il, victim)] = c->tick;
++    c->held_at  [idx_s(c, il, victim)] = c->tick;
++
++    c->stats.admits++;
++
++    return victim;
++}
++
++void tosh_moe_cache_step(struct tosh_moe_cache * c) {
++    if (!c) {
++        return;
++    }
++
++    // holds carry the tick they were taken on, so the clock releases them all at once
++    c->tick++;
++    c->stats.steps++;
++}
++
++bool tosh_moe_cache_check(const struct tosh_moe_cache * c, const char ** why) {
++    const auto fail = [&](const char * msg) {
++        if (why) {
++            *why = msg;
++        }
++        return false;
++    };
++
++    if (!c) {
++        return fail("no cache");
++    }
++
++    for (int il = 0; il < c->n_layer; il++) {
++        for (int e = 0; e < c->n_expert; e++) {
++            const int s = c->slot_of[idx_e(c, il, e)];
++            if (s == -1) {
++                continue;
++            }
++            if (s < 0 || s >= c->n_slots) {
++                return fail("an expert points outside the slot range");
++            }
++            if (c->expert_of[idx_s(c, il, s)] != e) {
++                return fail("an expert points at a slot that does not point back");
++            }
++        }
++
++        for (int s = 0; s < c->n_slots; s++) {
++            const int e = c->expert_of[idx_s(c, il, s)];
++            if (e == -1) {
++                continue;
++            }
++            if (e < 0 || e >= c->n_expert) {
++                return fail("a slot points outside the expert range");
++            }
++            if (c->slot_of[idx_e(c, il, e)] != s) {
++                return fail("a slot holds an expert that lives somewhere else");
++            }
++            if (c->held_at[idx_s(c, il, s)] > c->tick) {
++                return fail("a slot is held for a step that has not happened");
++            }
++        }
++    }
++
++    return true;
++}
++
++void tosh_moe_cache_stats_get(const struct tosh_moe_cache * c, struct tosh_moe_cache_stats * out) {
++    if (!c || !out) {
++        return;
++    }
++
++    *out = c->stats;
++}
++
++#include <algorithm>
++#include <unordered_map>
++
++enum tosh_moe_mode tosh_moe_mode(void) {
++    static const enum tosh_moe_mode m = []() {
++        const char * s = getenv("TOSH_MOE_MODE");
++        if (!s || strcmp(s, "off") == 0) {
++            return TOSH_MOE_OFF;
++        }
++        if (strcmp(s, "cache") == 0) {
++            return TOSH_MOE_CACHE;
++        }
++        if (strcmp(s, "hybrid") == 0) {
++            return TOSH_MOE_HYBRID;
++        }
++        return TOSH_MOE_OFF;
++    }();
++
++    return m;
++}
++
++int tosh_moe_slots_want(void) {
++    static const int n = []() {
++        if (tosh_moe_mode() == TOSH_MOE_OFF) {
++            return 0;
++        }
++        const char * s = getenv("TOSH_MOE_SLOTS");
++        const int v = s ? atoi(s) : 0;
++        return v > 0 ? v : 0;
++    }();
++
++    return n;
++}
++
++// keyed by pointer, so it has to be dropped when a model goes away or a later load can hit a
++// freed tensor that happens to land on the same address
++static std::unordered_map<const void *, const void *> g_bind;
++static std::unordered_map<const void *, const void *> g_slots_of;
++static const void * g_stage;
++
++static void tosh_moe_tables_clear(void);
++static void tosh_moe_layers_clear(void);
++static void tosh_moe_rounds_clear(void);
++static void tosh_moe_state_clear(void);
++
++void tosh_moe_bind(const void * slots, const void * ram) {
++    g_bind[slots] = ram;
++    g_slots_of[ram] = slots;
++}
++
++const void * tosh_moe_ram_of(const void * slots) {
++    const auto it = g_bind.find(slots);
++    return it == g_bind.end() ? nullptr : it->second;
++}
++
++void tosh_moe_unbind_all(void) {
++    g_bind.clear();
++    g_slots_of.clear();
++    g_stage = nullptr;
++    tosh_moe_state_clear();
++    tosh_moe_layers_clear();
++    tosh_moe_tables_clear();
++}
++
++struct tosh_moe_table {
++    std::vector<int32_t> slot_of;
++};
++
++static std::unordered_map<const void *, tosh_moe_table> g_tables;
++
++void tosh_moe_table_set(const void * slots, const int32_t * table, int n_expert) {
++    auto & t = g_tables[slots];
++    t.slot_of.assign(table, table + n_expert);
++
++    // reachable from the RAM twin as well, so the host path finds it without another lookup
++    const void * ram = tosh_moe_ram_of(slots);
++    if (ram) {
++        g_tables[ram].slot_of = t.slot_of;
++    }
++}
++
++const int32_t * tosh_moe_table_of(const void * tensor, int * n_expert) {
++    const auto it = g_tables.find(tensor);
++    if (it == g_tables.end() || it->second.slot_of.empty()) {
++        return nullptr;
++    }
++
++    if (n_expert) {
++        *n_expert = (int) it->second.slot_of.size();
++    }
++
++    return it->second.slot_of.data();
++}
++
++static void tosh_moe_tables_clear(void) {
++    g_tables.clear();
++}
++
++// A bank belongs to a layer, and the three of a layer move together: an expert that is only
++// half resident cannot run.
++static std::unordered_map<const void *, int> g_layer_of;
++static std::unordered_map<int, std::vector<uint32_t>> g_seen;   // layer -> uses per expert
++
++void tosh_moe_layer_set(const void * tensor, int il, int n_expert) {
++    g_layer_of[tensor] = il;
++
++    auto & v = g_seen[il];
++    if ((int) v.size() < n_expert) {
++        v.assign(n_expert, 0);
++    }
++}
++
++int tosh_moe_layer_of(const void * tensor) {
++    const auto it = g_layer_of.find(tensor);
++    return it == g_layer_of.end() ? -1 : it->second;
++}
++
++void tosh_moe_observe(const void * tensor, const int32_t * ids, int n) {
++    const int il = tosh_moe_layer_of(tensor);
++    if (il < 0) {
++        return;
++    }
++
++    auto & v = g_seen[il];
++    for (int i = 0; i < n; i++) {
++        const int32_t e = ids[i];
++        if (e >= 0 && e < (int32_t) v.size()) {
++            v[e]++;
++        }
++    }
++}
++
++const uint32_t * tosh_moe_seen_of(int il, int * n) {
++    const auto it = g_seen.find(il);
++    if (it == g_seen.end()) {
++        return nullptr;
++    }
++    if (n) {
++        *n = (int) it->second.size();
++    }
++    return it->second.data();
++}
++
++void tosh_moe_seen_clear(int il) {
++    const auto it = g_seen.find(il);
++    if (it != g_seen.end()) {
++        std::fill(it->second.begin(), it->second.end(), 0u);
++    }
++}
++
++int tosh_moe_bind_count(void) {
++    return (int) g_bind.size();
++}
++
++void tosh_moe_bind_at(int i, const void ** slots, const void ** ram) {
++    int k = 0;
++    for (const auto & kv : g_bind) {
++        if (k++ != i) {
++            continue;
++        }
++        if (slots) { *slots = kv.first;  }
++        if (ram)   { *ram   = kv.second; }
++        return;
++    }
++}
++
++
++static void tosh_moe_layers_clear(void) {
++    g_layer_of.clear();
++    g_seen.clear();
++    tosh_moe_rounds_clear();
++}
++
++static const void * g_host_buft = nullptr;
++
++void tosh_moe_set_host_buft(const void * buft) {
++    g_host_buft = buft;
++}
++
++const void * tosh_moe_host_buft(void) {
++    return g_host_buft;
++}
++
++static std::unordered_map<const void *, const void *> g_state;
++
++void tosh_moe_bind_state(const void * slots, const void * state) {
++    g_state[slots] = state;
++}
++
++const void * tosh_moe_state_of(const void * slots) {
++    const auto it = g_state.find(slots);
++    return it == g_state.end() ? nullptr : it->second;
++}
++
++
++static void tosh_moe_state_clear(void) {
++    g_state.clear();
++}
++
++static std::unordered_map<int, int> g_round;      // layer -> last node index seen
++
++bool tosh_moe_should_route(const void * slots, int node_idx) {
++    const int il = tosh_moe_layer_of(slots);
++    if (il < 0) {
++        return false;
++    }
++
++    const auto it = g_round.find(il);
++    const bool first = it == g_round.end() || node_idx <= it->second;
++
++    g_round[il] = node_idx;
++
++    return first;
++}
++
++
++static void tosh_moe_rounds_clear(void) {
++    g_round.clear();
++}
++
++const void * tosh_moe_slots_of(const void * bank) {
++    const auto it = g_slots_of.find(bank);
++    return it == g_slots_of.end() ? nullptr : it->second;
++}
++
++void tosh_moe_set_stage(const void * stage) {
++    g_stage = stage;
++}
++
++const void * tosh_moe_stage(void) {
++    return g_stage;
++}
+diff --git a/tosh-moe/tosh-moe-fill.cpp b/tosh-moe/tosh-moe-fill.cpp
+new file mode 100644
+--- /dev/null
++++ b/tosh-moe/tosh-moe-fill.cpp
+@@ -0,0 +1,59 @@
++#include "tosh-moe.h"
++
++#include "ggml.h"
++#include "ggml-backend.h"
++#include "ggml-impl.h"
++
++#include <vector>
++
++// Every slot starts empty: the kernels expect -1 for "nowhere" and a zero clock.
++void tosh_moe_seed_banks(void) {
++    const int n = tosh_moe_bind_count();
++
++    std::vector<int32_t> init;
++
++    for (int i = 0; i < n; i++) {
++        const void * sv = nullptr;
++        const void * hv = nullptr;
++        tosh_moe_bind_at(i, &sv, &hv);
++
++        auto * slots = (ggml_tensor *) sv;
++        auto * host  = (ggml_tensor *) hv;
++        auto * state = (ggml_tensor *) tosh_moe_state_of(sv);
++        if (!slots || !host || !state || !state->buffer) {
++            GGML_LOG_WARN("%s: an expert bank has no state, the cache stays off for it\n", __func__);
++            continue;
++        }
++
++        const int n_expert  = (int) host->ne[2];
++        const int n_slots   = (int) slots->ne[2];
++        const int max_fetch = n_slots;
++
++        init.assign(tosh_moe_state_ints(n_expert, n_slots, max_fetch), 0);
++
++        for (int e = 0; e < n_expert; e++) {
++            init[tosh_moe_off_slot_for_id(n_expert, n_slots, max_fetch) + e] = -1;
++        }
++        for (int s = 0; s < n_slots; s++) {
++            init[tosh_moe_off_id_of_slot(n_expert, n_slots, max_fetch) + s] = -1;
++        }
++
++        // A CPU-owned bank is consumed through the scheduler's prefetch path during wide
++        // batches. Do not seed it through Metal's partial tensor-set path: the first decode
++        // token fills all K slots anyway, and avoiding the eager seed also avoids invalid
++        // range lookups on discrete-GPU model buffers.
++        const bool cpu_bank = getenv("TOSH_MOE_CPU_BANK") != nullptr;
++
++        // start with the first experts already in, so a fresh cache is not one big miss
++        if (!cpu_bank && getenv("TOSH_MOE_NO_SEED") == nullptr) {
++            const size_t row = host->nb[2];
++            for (int s = 0; s < n_slots && s < n_expert; s++) {
++                ggml_backend_tensor_set(slots, (const char *) host->data + (size_t) s*row, (size_t) s*row, row);
++                init[tosh_moe_off_slot_for_id(n_expert, n_slots, max_fetch) + s] = s;
++                init[tosh_moe_off_id_of_slot(n_expert, n_slots, max_fetch) + s] = s;
++            }
++        }
++
++        ggml_backend_tensor_set(state, init.data(), 0, init.size()*sizeof(int32_t));
++    }
++}
+diff --git a/tosh-moe/tosh-moe-lru.metal b/tosh-moe/tosh-moe-lru.metal
+new file mode 100644
+--- /dev/null
++++ b/tosh-moe/tosh-moe-lru.metal
+@@ -0,0 +1,210 @@
++#include <metal_stdlib>
++using namespace metal;
++
++// Timestamp LRU over a bank of slots, one threadgroup, no host involvement: the routing
++// arrives as expert ids and leaves as slot ids, or -1 for an expert this step will not
++// fetch. Fixed shapes, so it can sit inside a captured graph.
++struct tosh_lru_args {
++    int32_t n_used;      // experts per token
++    int32_t n_tokens;
++    int32_t stride;      // ints between one token's ids and the next, which is not n_used
++    int32_t n_expert;
++    int32_t n_slots;
++    int32_t max_fetch;   // cap per step; the rest stay non-resident
++};
++
++kernel void tosh_moe_lru(
++        constant tosh_lru_args & args         [[buffer(0)]],
++        device const int32_t   * ids          [[buffer(1)]],   // the routing, untouched
++        device   int32_t       * ids_out      [[buffer(9)]],   // the same, as slots
++        device   int32_t       * slot_for_id  [[buffer(2)]],
++        device   int32_t       * id_of_slot   [[buffer(3)]],
++        device   int32_t       * usage        [[buffer(4)]],
++        device   int32_t       * step         [[buffer(5)]],
++        device   int32_t       * evict_slots  [[buffer(6)]],
++        device   int32_t       * src_indices  [[buffer(7)]],
++        device   int32_t       * n_indices    [[buffer(8)]],
++        threadgroup int32_t    * shm          [[threadgroup(0)]],
++        uint tid  [[thread_position_in_threadgroup]],
++        uint ntg  [[threads_per_threadgroup]]) {
++
++    threadgroup int32_t * active  = shm;                    // n_expert
++    threadgroup int32_t * missing = shm + args.n_expert;     // n_expert
++    threadgroup int32_t * red     = missing + args.n_expert; // 2*ntg, for the argmin
++
++    int32_t now = 0;
++    if (tid == 0) {
++        now = *step + 1;
++        *step = now;
++        *n_indices = 0;
++    }
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++    now = *step;
++
++    // which experts this step wants, and which of those are not here
++    for (uint e = tid; e < (uint) args.n_expert; e += ntg) {
++        active[e]  = 0;
++        missing[e] = 0;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    const uint n_active = (uint) (args.n_used*args.n_tokens);
++    for (uint i = tid; i < n_active; i += ntg) {
++        const uint t = i / (uint) args.n_used;
++        const uint k = i % (uint) args.n_used;
++        const int32_t e = ids[t*(uint) args.stride + k];
++        if (e >= 0 && e < args.n_expert) {
++            active[e] = 1;
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    for (uint e = tid; e < (uint) args.n_expert; e += ntg) {
++        if (active[e] == 0) {
++            continue;
++        }
++        const int32_t s = slot_for_id[e];
++        if (s >= 0) {
++            usage[s] = now;    // a hit keeps its place
++        } else {
++            missing[e] = 1;
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++
++    // Serial over the fetches, which depend on each other, but the search for the least
++    // recently used slot is a threadgroup reduction: on a big bank it is thousands of
++    // comparisons and one thread would walk them alone.
++    threadgroup int32_t * best_u = red;              // ntg
++    threadgroup int32_t * best_s = red + 256;        // ntg
++
++    int32_t fetched = 0;
++    for (int32_t e = 0; e < args.n_expert && fetched < args.max_fetch; e++) {
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        if (missing[e] == 0) {
++            continue;
++        }
++
++        int32_t mine_u = INT_MAX;
++        int32_t mine_s = -1;
++        for (uint sl = tid; sl < (uint) args.n_slots; sl += ntg) {
++            const int32_t owner = id_of_slot[sl];
++            if (owner >= 0 && owner < args.n_expert && active[owner] != 0) {
++                continue;          // in use this step
++            }
++            const int32_t u = usage[sl];
++            if (mine_s < 0 || u < mine_u) {
++                mine_u = u;
++                mine_s = (int32_t) sl;
++            }
++        }
++        best_u[tid] = mine_u;
++        best_s[tid] = mine_s;
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        for (uint span = ntg/2; span > 0; span >>= 1) {
++            if (tid < span) {
++                const int32_t os = best_s[tid + span];
++                // ties go to the lower slot, so the result does not depend on the split
++                if (os >= 0 && (best_s[tid] < 0 || best_u[tid + span] < best_u[tid] ||
++                        (best_u[tid + span] == best_u[tid] && os < best_s[tid]))) {
++                    best_u[tid] = best_u[tid + span];
++                    best_s[tid] = os;
++                }
++            }
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++        }
++
++        const int32_t victim = best_s[0];
++        if (victim < 0) {
++            break;                 // every slot is needed this step
++        }
++
++        if (tid == 0) {
++            const int32_t old = id_of_slot[victim];
++            if (old >= 0 && old < args.n_expert) {
++                slot_for_id[old] = -1;
++            }
++
++            id_of_slot[victim]   = e;
++            slot_for_id[e]       = victim;
++            usage[victim]        = now;
++            evict_slots[fetched] = victim;
++            src_indices[fetched] = e;
++        }
++        fetched++;
++    }
++
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++    if (tid == 0) {
++        *n_indices = fetched;
++    }
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++
++    // the routing is left alone; the slots go to their own place, because the ids are also
++    // what the router's weights are gathered with
++    for (uint i = tid; i < n_active; i += ntg) {
++        const uint t = i / (uint) args.n_used;
++        const uint k = i % (uint) args.n_used;
++        const uint o = t*(uint) args.stride + k;
++        const int32_t e = ids[o];
++        ids_out[o] = (e >= 0 && e < args.n_expert) ? slot_for_id[e] : -1;
++    }
++
++}
++
++// Brings the rows the LRU just scheduled from the host bank into their slots. Only the
++// missing ones travel, so the window the device touches stays small no matter how big the
++// bank is.
++struct tosh_fetch_args {
++    uint32_t row_u4;     // row size in uint4 units
++    int32_t  max_fetch;
++    int32_t  n_chunks;   // threadgroups per row: one is far too few for a whole expert
++};
++
++kernel void tosh_moe_fetch(
++        constant tosh_fetch_args & args        [[buffer(0)]],
++        device       uint4       * slots       [[buffer(1)]],
++        device const uint4       * host        [[buffer(2)]],
++        device const int32_t     * evict_slots [[buffer(3)]],
++        device const int32_t     * src_indices [[buffer(4)]],
++        device const int32_t     * n_indices   [[buffer(5)]],
++        uint tgpig [[threadgroup_position_in_grid]],
++        uint tid   [[thread_position_in_threadgroup]],
++        uint ntg   [[threads_per_threadgroup]]) {
++
++    const int32_t i     = (int32_t) (tgpig / (uint) args.n_chunks);
++    const uint    chunk = tgpig % (uint) args.n_chunks;
++    if (i >= *n_indices) {
++        return;
++    }
++
++    const int32_t dst = evict_slots[i];
++    const int32_t src = src_indices[i];
++    if (dst < 0 || src < 0) {
++        return;
++    }
++
++    device       uint4 * d = slots + (uint64_t) dst*args.row_u4;
++    device const uint4 * s = host  + (uint64_t) src*args.row_u4;
++
++    for (uint j = chunk*ntg + tid; j < args.row_u4; j += ntg*(uint) args.n_chunks) {
++        d[j] = s[j];
++    }
++}
++
++// Copies a whole bank from the host into the scratch in one contiguous pass, which is what a
++// batch too wide for the cache needs: reading the experts scattered from host costs far more.
++kernel void tosh_moe_stage(
++        constant uint32_t    & n_u4  [[buffer(0)]],
++        device       uint4   * dst   [[buffer(1)]],
++        device const uint4   * src   [[buffer(2)]],
++        uint tgpig [[threadgroup_position_in_grid]],
++        uint tid   [[thread_position_in_threadgroup]],
++        uint ntg   [[threads_per_threadgroup]],
++        uint ntgs  [[threadgroups_per_grid]]) {
++
++    for (uint i = tgpig*ntg + tid; i < n_u4; i += ntg*ntgs) {
++        dst[i] = src[i];
++    }
++}
+diff --git a/tests/test-tosh-moe-cache.cpp b/tests/test-tosh-moe-cache.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/test-tosh-moe-cache.cpp
+@@ -0,0 +1,299 @@
++#include "tosh-moe.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++#include <set>
++#include <vector>
++
++#include <mach/mach.h>
++
++// resident bytes, to catch a cache that allocates per step
++static size_t rss_now() {
++    mach_task_basic_info info;
++    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
++    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t) &info, &count) != KERN_SUCCESS) {
++        return 0;
++    }
++    return info.resident_size;
++}
++
++static int g_fail = 0;
++
++static void check(bool ok, const char * what) {
++    if (!ok) {
++        printf("  FAIL %s\n", what);
++        g_fail++;
++    }
++}
++
++// Favours a few experts: uniform routing hides the cache, one hot expert flatters it.
++struct zipf_router {
++    std::mt19937 rng;
++    std::vector<double> cdf;
++
++    zipf_router(int n_expert, double s, uint32_t seed) : rng(seed) {
++        double sum = 0.0;
++        cdf.resize(n_expert);
++        for (int i = 0; i < n_expert; i++) {
++            sum += 1.0/pow(i + 1, s);
++            cdf[i] = sum;
++        }
++        for (auto & v : cdf) {
++            v /= sum;
++        }
++    }
++
++    int draw() {
++        const double u = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
++        for (size_t i = 0; i < cdf.size(); i++) {
++            if (u <= cdf[i]) {
++                return (int) i;
++            }
++        }
++        return (int) cdf.size() - 1;
++    }
++
++    void draw_set(int k, std::vector<int> & out) {
++        out.clear();
++        while ((int) out.size() < k) {
++            const int e = draw();
++            bool dup = false;
++            for (int x : out) {
++                dup = dup || x == e;
++            }
++            if (!dup) {
++                out.push_back(e);
++            }
++        }
++    }
++};
++
++static void test_rejects_nonsense() {
++    printf("argumentos invalidos\n");
++
++    check(tosh_moe_cache_init( 0, 32,  8) == nullptr, "acepta 0 capas");
++    check(tosh_moe_cache_init(24,  0,  8) == nullptr, "acepta 0 expertos");
++    check(tosh_moe_cache_init(24, 32,  0) == nullptr, "acepta 0 ranuras");
++    check(tosh_moe_cache_init(24, 32, 33) == nullptr, "acepta mas ranuras que expertos");
++
++    tosh_moe_cache * c = tosh_moe_cache_init(2, 8, 4);
++    check(c != nullptr, "rechaza argumentos validos");
++
++    check(tosh_moe_cache_find(c, -1, 0) == -1, "acepta una capa negativa");
++    check(tosh_moe_cache_find(c,  2, 0) == -1, "acepta una capa fuera de rango");
++    check(tosh_moe_cache_find(c,  0, 8) == -1, "acepta un experto fuera de rango");
++    check(tosh_moe_cache_hold(c,  0, 8) == -1, "fija un experto fuera de rango");
++    check(tosh_moe_cache_admit(c, 0, 8, nullptr) == -1, "admite un experto fuera de rango");
++
++    tosh_moe_cache_free(c);
++}
++
++static void test_one_slot_one_expert() {
++    printf("un experto, una ranura\n");
++
++    const int n_layer = 3, n_expert = 16, n_slots = 4;
++    tosh_moe_cache * c = tosh_moe_cache_init(n_layer, n_expert, n_slots);
++
++    // admitting the same expert twice must not give it a second slot
++    const int a = tosh_moe_cache_admit(c, 0, 5, nullptr);
++    const int b = tosh_moe_cache_admit(c, 0, 5, nullptr);
++    check(a >= 0 && a == b, "un experto ocupa dos ranuras");
++
++    // the same expert id in another layer is a different expert
++    const int d = tosh_moe_cache_admit(c, 1, 5, nullptr);
++    check(d >= 0, "no admite el mismo id en otra capa");
++    check(tosh_moe_cache_find(c, 0, 5) == a, "la capa 1 movio a la capa 0");
++
++    const char * why = nullptr;
++    check(tosh_moe_cache_check(c, &why), why ? why : "invariantes rotas");
++
++    tosh_moe_cache_free(c);
++}
++
++static void test_held_slots_survive() {
++    printf("una ranura en uso no se expulsa\n");
++
++    const int n_slots = 4;
++    tosh_moe_cache * c = tosh_moe_cache_init(1, 32, n_slots);
++
++    // fill every slot and hold all of them within one step
++    std::vector<int> slots;
++    for (int e = 0; e < n_slots; e++) {
++        slots.push_back(tosh_moe_cache_admit(c, 0, e, nullptr));
++    }
++
++    // a NEW expert cannot displace anything: every slot is in use this step
++    int evicted = -2;
++    const int s = tosh_moe_cache_admit(c, 0, 20, &evicted);
++    check(s == -1, "expulso una ranura en uso");
++    check(evicted == -1, "informo de una expulsion que no ocurrio");
++
++    for (int e = 0; e < n_slots; e++) {
++        check(tosh_moe_cache_find(c, 0, e) == slots[e], "un experto fijado cambio de ranura");
++    }
++
++    // once the step ends the holds are gone and the same admission works
++    tosh_moe_cache_step(c);
++    check(tosh_moe_cache_admit(c, 0, 31, &evicted) >= 0, "no admite tras terminar el paso");
++    check(evicted >= 0, "no informo de la expulsion");
++
++    const char * why = nullptr;
++    check(tosh_moe_cache_check(c, &why), why ? why : "invariantes rotas");
++
++    tosh_moe_cache_free(c);
++}
++
++static void test_evicts_least_recent() {
++    printf("expulsa la menos usada\n");
++
++    tosh_moe_cache * c = tosh_moe_cache_init(1, 8, 3);
++
++    tosh_moe_cache_admit(c, 0, 0, nullptr); tosh_moe_cache_step(c);
++    tosh_moe_cache_admit(c, 0, 1, nullptr); tosh_moe_cache_step(c);
++    tosh_moe_cache_admit(c, 0, 2, nullptr); tosh_moe_cache_step(c);
++
++    // touch 0 so that 1 becomes the oldest
++    tosh_moe_cache_hold(c, 0, 0);
++    tosh_moe_cache_step(c);
++
++    int evicted = -1;
++    tosh_moe_cache_admit(c, 0, 3, &evicted);
++    check(evicted == 1, "expulso la equivocada");
++
++    tosh_moe_cache_free(c);
++}
++
++// Long session of routing churn, invariants checked along the way.
++static void test_long_session() {
++    printf("sesion larga con ruteo realista\n");
++
++    const int n_layer = 24, n_expert = 32, n_used = 4, n_slots = 8;
++    const int n_steps = 20000;
++
++    tosh_moe_cache * c = tosh_moe_cache_init(n_layer, n_expert, n_slots);
++    zipf_router router(n_expert, 1.1, 1234);
++
++    std::vector<int> pick;
++    std::vector<int> slots_this_step;
++
++    // let the vectors reach their final size before the baseline
++    for (int warm = 0; warm < 64; warm++) {
++        for (int il = 0; il < n_layer; il++) {
++            router.draw_set(n_used, pick);
++            for (int e : pick) {
++                if (tosh_moe_cache_hold(c, il, e) < 0) {
++                    tosh_moe_cache_admit(c, il, e, nullptr);
++                }
++            }
++        }
++        tosh_moe_cache_step(c);
++    }
++    const size_t rss0 = rss_now();
++
++    for (int step = 0; step < n_steps; step++) {
++        for (int il = 0; il < n_layer; il++) {
++            router.draw_set(n_used, pick);
++
++            slots_this_step.clear();
++
++            for (int e : pick) {
++                int slot = tosh_moe_cache_hold(c, il, e);
++                if (slot < 0) {
++                    slot = tosh_moe_cache_admit(c, il, e, nullptr);
++                }
++
++                // n_slots >= n_used, so a step can always place every expert it selected
++                if (slot < 0) {
++                    check(false, "se quedo sin ranuras con n_slots >= n_used");
++                    break;
++                }
++
++                // two experts of the same step must never share a slot
++                for (int s : slots_this_step) {
++                    if (s == slot) {
++                        check(false, "dos expertos del mismo paso comparten ranura");
++                    }
++                }
++                slots_this_step.push_back(slot);
++
++                check(tosh_moe_cache_find(c, il, e) == slot, "la tabla no coincide con lo devuelto");
++            }
++        }
++
++        tosh_moe_cache_step(c);
++
++        if ((step % 97) == 0) {
++            const char * why = nullptr;
++            if (!tosh_moe_cache_check(c, &why)) {
++                check(false, why ? why : "invariantes rotas");
++                break;
++            }
++        }
++    }
++
++    const char * why = nullptr;
++    check(tosh_moe_cache_check(c, &why), why ? why : "invariantes rotas al final");
++
++    const size_t rss1 = rss_now();
++    printf("  memoria residente: %.2f MiB antes, %.2f MiB despues de %d pasos\n",
++            rss0/1048576.0, rss1/1048576.0, n_steps);
++    check(rss0 == 0 || rss1 <= rss0 + (256u << 10), "la memoria crece con los pasos");
++
++    tosh_moe_cache_stats stats = {};
++    tosh_moe_cache_stats_get(c, &stats);
++
++    const double hit = stats.lookups ? 100.0*stats.hits/stats.lookups : 0.0;
++    printf("  %llu pasos, %llu consultas, acierto %.1f%%, %llu admisiones, %llu expulsiones, %llu sin ranura\n",
++            (unsigned long long) stats.steps, (unsigned long long) stats.lookups, hit,
++            (unsigned long long) stats.admits, (unsigned long long) stats.evictions,
++            (unsigned long long) stats.starved);
++
++    check(stats.starved == 0, "hubo pasos sin ranura disponible");
++    check(stats.evictions + (uint64_t) n_layer*n_slots >= stats.admits, "mas admisiones que ranuras y expulsiones");
++
++    tosh_moe_cache_free(c);
++}
++
++// A cache the size of the bank must never evict.
++static void test_full_cache_never_evicts() {
++    printf("caché del tamaño del banco\n");
++
++    const int n_expert = 16;
++    tosh_moe_cache * c = tosh_moe_cache_init(1, n_expert, n_expert);
++    zipf_router router(n_expert, 0.8, 99);
++
++    std::vector<int> pick;
++    for (int step = 0; step < 5000; step++) {
++        router.draw_set(4, pick);
++        for (int e : pick) {
++            if (tosh_moe_cache_hold(c, 0, e) < 0) {
++                tosh_moe_cache_admit(c, 0, e, nullptr);
++            }
++        }
++        tosh_moe_cache_step(c);
++    }
++
++    tosh_moe_cache_stats stats = {};
++    tosh_moe_cache_stats_get(c, &stats);
++    check(stats.evictions == 0, "expulso con sitio de sobra");
++    check(stats.admits <= (uint64_t) n_expert, "admitio un experto dos veces");
++
++    tosh_moe_cache_free(c);
++}
++
++int main() {
++    printf("tosh-moe: expert cache\n\n");
++
++    test_rejects_nonsense();
++    test_one_slot_one_expert();
++    test_held_slots_survive();
++    test_evicts_least_recent();
++    test_full_cache_never_evicts();
++    test_long_session();
++
++    printf("\n%s\n", g_fail == 0 ? "todo correcto" : "HAY FALLOS");
++
++    return g_fail == 0 ? 0 : 1;
++}

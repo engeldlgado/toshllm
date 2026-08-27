@@ -1837,10 +1837,12 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    func exportText(_ c: Conversation) -> String {
-        c.messages.map { m in
-            let who = m.role == "user" ? "## Tú" : "## Asistente"
-            return "\(who)\n\n\(m.role == "assistant" ? m.parts.body : m.content)"
+    func exportText(_ c: Conversation, _ loc: Localizer) -> String {
+        let user = loc.t("Tú", "You")
+        let assistant = loc.t("Asistente", "Assistant")
+        return c.messages.map { m in
+            let who = m.role == "user" ? user : assistant
+            return "## \(who)\n\n\(m.role == "assistant" ? m.parts.body : m.content)"
         }.joined(separator: "\n\n---\n\n")
     }
 
@@ -1944,7 +1946,13 @@ struct NativeChatView: View {
     @State private var images: [String] = []   // attached images as data URIs (vision models)
     @State private var attachError: String?
     @State private var ocrPending = 0
+    @State private var transcriptionPending = 0
+    @State private var transcriptionQueue: [PendingSpeechTranscription] = []
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
+    @AppStorage(SettingsKeys.gpuIndex) private var gpuIndex = -1
+    @AppStorage(SettingsKeys.whisperModel) private var whisperModelID = WhisperModel.recommendedID
+    @AppStorage(SettingsKeys.speechInputMethod) private var speechInputMethodRaw = ""
+    @AppStorage(SettingsKeys.whisperLoadPolicy) private var whisperLoadPolicyRaw = WhisperLoadPolicy.onDemand.rawValue
     @State private var showSystem = false
     @State private var promptConversation: Conversation?
     @State private var promptProject: ChatProject?
@@ -1965,8 +1973,10 @@ struct NativeChatView: View {
     @State private var showMCPBrowser = false
     @State private var showAttachments = false
     @State private var showTools = false
+    @State private var showVoiceOptions = false
     @StateObject private var audioRecorder = AudioRecorderController()
-    @StateObject private var dictation = SpeechDictationController()
+    @StateObject private var dictation = SpeechDictationController.shared
+    @StateObject private var appleDictation = AppleSpeechDictationController.shared
     @State private var dictationBase = ""
     @State private var previewAttachment: ChatAttachment?
     @State private var availableTools: [BuiltinToolInfo] = []
@@ -1978,6 +1988,15 @@ struct NativeChatView: View {
 
     private var maxTokenOptions: [Int] {
         [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072].filter { $0 <= contextLimit }
+    }
+
+    private var whisperLoadPolicy: WhisperLoadPolicy {
+        WhisperLoadPolicy(rawValue: whisperLoadPolicyRaw) ?? .onDemand
+    }
+
+    private var whisperResidencyTaskID: String {
+        let model = WhisperModel.model(id: whisperModelID)
+        return "\(whisperLoadPolicyRaw)-\(whisperModelID)-\(gpuIndex)-\(models.whisperModelInstalled(model))-\(String(describing: server.state))"
     }
 
     private var maxTokensIsLarge: Bool {
@@ -2084,11 +2103,22 @@ struct NativeChatView: View {
                 saveDraftNow(for: oldID)
                 loadDraft(for: newID)
             }
+            .onChange(of: server.state) { _, state in
+                switch state {
+                case .stopped, .failed:
+                    stopSpeechSubsystem()
+                case .starting, .running:
+                    break
+                }
+            }
             .task(id: "\(chat.currentID?.uuidString ?? "")-\(String(describing: server.state))") {
                 await refreshAvailableTools()
             }
             .task(id: capabilityTaskID) {
                 await refreshModelModalities()
+            }
+            .task(id: whisperResidencyTaskID) {
+                configureWhisperResidency()
             }
             .sheet(item: $promptConversation) { c in
                 PromptEditorSheet(
@@ -2589,6 +2619,14 @@ struct NativeChatView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let status = dictation.statusText {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(status)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if let attachError {
                 Label(attachError, systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.red)
@@ -2607,11 +2645,17 @@ struct NativeChatView: View {
         }
         .onChange(of: attachments) { scheduleDraftSave() }
         .onChange(of: images) { scheduleDraftSave() }
-        .alert(loc.t("Problema con la voz", "Voice problem"),
+            .alert(loc.t("Problema con la voz", "Voice problem"),
                isPresented: Binding(
-                   get: { audioRecorder.error != nil || dictation.error != nil },
-                   set: { if !$0 { audioRecorder.error = nil; dictation.error = nil } })) {
-        } message: { Text(audioRecorder.error ?? dictation.error ?? "") }
+                   get: { audioRecorder.error != nil || dictation.error != nil || appleDictation.error != nil },
+                   set: {
+                       if !$0 {
+                           audioRecorder.error = nil
+                           dictation.error = nil
+                           appleDictation.error = nil
+                       }
+                   })) {
+        } message: { Text(audioRecorder.error ?? dictation.error ?? appleDictation.error ?? "") }
     }
 
     private var composerRow: some View {
@@ -2686,7 +2730,8 @@ struct NativeChatView: View {
     }
 
     private var canSend: Bool {
-        ocrPending == 0 && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ocrPending == 0 && transcriptionPending == 0
+            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty || !images.isEmpty)
     }
 
@@ -3111,52 +3156,161 @@ struct NativeChatView: View {
         .frame(width: 240)
     }
 
-    @ViewBuilder
     private var voiceButton: some View {
-        if dictation.isDictating || audioRecorder.isRecording {
-            Button(action: stopVoice) {
-                ComposerCircleLabel(
-                    title: dictation.isDictating
-                        ? loc.t("Detener dictado", "Stop dictation")
-                        : loc.t("Detener grabación", "Stop recording"),
-                    systemImage: "stop.fill", active: true)
+        Button(action: primaryVoiceAction) {
+            ComposerCircleLabel(
+                title: voiceButtonTitle,
+                systemImage: dictation.isTranscribing ? "xmark"
+                    : (dictation.isDictating || appleDictation.isDictating || audioRecorder.isRecording)
+                    ? "stop.fill" : "mic.fill",
+                active: dictation.isTranscribing || dictation.isDictating
+                    || appleDictation.isDictating || audioRecorder.isRecording)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .popover(isPresented: $showVoiceOptions, arrowEdge: .top) {
+            VoiceInputOptionsView(
+                methodRaw: $speechInputMethodRaw,
+                loadPolicyRaw: $whisperLoadPolicyRaw,
+                whisperModelID: $whisperModelID,
+                dismiss: { showVoiceOptions = false })
+                .environmentObject(loc)
+                .environmentObject(models)
+        }
+        .contextMenu { voiceContextMenu }
+        .help(voiceButtonHelp)
+    }
+
+    @ViewBuilder
+    private var voiceContextMenu: some View {
+        Picker(loc.t("Método del micrófono", "Microphone method"), selection: $speechInputMethodRaw) {
+            Text(loc.t("Dictado de Apple", "Apple Dictation")).tag(SpeechInputMethod.apple.rawValue)
+            Text("Whisper.cpp · GPU").tag(SpeechInputMethod.whisper.rawValue)
+        }
+
+        if speechInputMethodRaw == SpeechInputMethod.whisper.rawValue {
+            let selected = WhisperModel.model(id: whisperModelID)
+            Picker(loc.t("Carga de Whisper", "Whisper loading"), selection: $whisperLoadPolicyRaw) {
+                Text(loc.t("Bajo demanda", "On demand")).tag(WhisperLoadPolicy.onDemand.rawValue)
+                Text(loc.t("Siempre cargado", "Always loaded")).tag(WhisperLoadPolicy.alwaysLoaded.rawValue)
             }
-            .buttonStyle(.plain)
-            .help(dictation.isDictating
-                  ? loc.t("Escuchando… toca para detener", "Listening… tap to stop")
-                  : loc.t("Detener (\(Int(audioRecorder.duration)) s)", "Stop (\(Int(audioRecorder.duration)) s)"))
-        } else if audioAvailable {
-            Menu {
-                Button(action: startDictation) {
-                    Label(loc.t("Dictar a texto", "Dictate to text"), systemImage: "mic")
+            Menu(loc.t("Modelo Whisper", "Whisper model"), systemImage: "waveform.badge.magnifyingglass") {
+                Picker(loc.t("Modelo Whisper", "Whisper model"), selection: $whisperModelID) {
+                    ForEach(WhisperModel.catalog) { model in
+                        Text("\(model.name) · \(model.sizeMB) MB").tag(model.id)
+                    }
                 }
-                Button(action: startRecording) {
-                    Label(loc.t("Grabar para el modelo", "Record for the model"), systemImage: "waveform")
+            }
+            if dictation.isModelKeptLoaded {
+                Label(loc.t("Modelo listo en la GPU", "Model ready on the GPU"),
+                      systemImage: "memorychip.fill")
+                Button(loc.t("Detener y liberar Whisper", "Stop and unload Whisper"),
+                       systemImage: "stop.circle") {
+                    dictation.shutdown()
                 }
-            } label: {
-                ComposerCircleLabel(title: loc.t("Voz", "Voice"), systemImage: "mic.fill")
             }
-            .menuStyle(.button)
-            .menuIndicator(.hidden)
-            .buttonStyle(.plain)
-            .fixedSize()
-            .help(loc.t("Voz: dictar a texto o grabar audio para el modelo",
-                        "Voice: dictate to text or record audio for the model"))
-        } else {
-            Button(action: startDictation) {
-                ComposerCircleLabel(title: loc.t("Dictar a texto", "Dictate to text"),
-                                    systemImage: "mic.fill")
+            if !models.whisperModelInstalled(selected) {
+                if let download = models.whisperDownload(selected) {
+                    if download.error != nil {
+                        Button(loc.t("Reintentar descarga", "Retry download"),
+                               systemImage: "arrow.clockwise") {
+                            models.retryWhisperDownload(download)
+                        }
+                    } else if download.phase == .paused {
+                        Button(loc.t("Reanudar descarga", "Resume download"),
+                               systemImage: "arrow.down.circle", action: download.resume)
+                    } else {
+                        Label(loc.t("Descargando \(selected.name)…", "Downloading \(selected.name)…"),
+                              systemImage: "arrow.down.circle")
+                    }
+                } else {
+                    Button(loc.t("Descargar \(selected.name)", "Download \(selected.name)"),
+                           systemImage: "arrow.down.circle") {
+                        models.downloadWhisperModel(selected)
+                    }
+                }
             }
-            .buttonStyle(.plain)
-            .help(loc.t("Dictar a texto (en el dispositivo)", "Dictate to text (on-device)"))
+        }
+
+        Divider()
+        Button(loc.t("Mostrar opciones de voz…", "Show voice options…"),
+               systemImage: "slider.horizontal.3") {
+            showVoiceOptions = true
+        }
+        if audioAvailable {
+            Button(loc.t("Grabar para el modelo", "Record for the model"),
+                   systemImage: "waveform", action: startRecording)
         }
     }
 
-    private func startDictation() {
+    private var voiceButtonTitle: String {
+        if dictation.isTranscribing { return loc.t("Cancelar transcripción", "Cancel transcription") }
+        if dictation.isDictating { return loc.t("Transcribir", "Transcribe") }
+        if appleDictation.isDictating { return loc.t("Detener dictado", "Stop dictation") }
+        if audioRecorder.isRecording { return loc.t("Detener grabación", "Stop recording") }
+        return loc.t("Voz", "Voice")
+    }
+
+    private var voiceButtonHelp: String {
+        if dictation.isTranscribing {
+            return loc.t("Whisper.cpp está transcribiendo en la GPU; clic para cancelar.",
+                         "Whisper.cpp is transcribing on the GPU; click to cancel.")
+        }
+        if dictation.isDictating {
+            return loc.t("Escuchando con Whisper… clic para transcribir.",
+                         "Listening with Whisper… click to transcribe.")
+        }
+        if appleDictation.isDictating {
+            return loc.t("Dictado de Apple activo; clic para detener.",
+                         "Apple Dictation is active; click to stop.")
+        }
+        if speechInputMethodRaw.isEmpty {
+            return loc.t("Configura la entrada de voz. Después: clic para dictar, clic derecho para cambiar.",
+                         "Set up voice input. Then: click to dictate, right-click to change it.")
+        }
+        return loc.t("Clic para dictar; clic derecho para método, modelo y carga.",
+                     "Click to dictate; right-click for method, model, and loading.")
+    }
+
+    private func primaryVoiceAction() {
+        if dictation.isDictating || dictation.isTranscribing
+            || appleDictation.isDictating || audioRecorder.isRecording {
+            stopVoice()
+            return
+        }
+        guard let method = SpeechInputMethod(rawValue: speechInputMethodRaw) else {
+            showVoiceOptions = true
+            return
+        }
+        switch method {
+        case .apple: startAppleDictation()
+        case .whisper: startWhisperDictation()
+        }
+    }
+
+    private func prepareDictationBase() {
         attachError = nil
         let base = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         dictationBase = base.isEmpty ? "" : base + " "
-        dictation.toggle { draft = dictationBase + $0 }
+    }
+
+    private func startAppleDictation() {
+        prepareDictationBase()
+        appleDictation.toggle { draft = dictationBase + $0 }
+    }
+
+    private func startWhisperDictation() {
+        prepareDictationBase()
+        let model = WhisperModel.model(id: whisperModelID)
+        guard models.whisperModelInstalled(model) else {
+            showVoiceOptions = true
+            return
+        }
+        dictation.toggle(modelURL: model.url(in: models.whisperDirectory),
+                         gpuIndex: gpuIndex,
+                         loadPolicy: whisperLoadPolicy) {
+            draft = dictationBase + $0
+        }
     }
 
     private func startRecording() {
@@ -3165,8 +3319,45 @@ struct NativeChatView: View {
     }
 
     private func stopVoice() {
-        if dictation.isDictating { dictation.stop() }
+        if dictation.isDictating {
+            let model = WhisperModel.model(id: whisperModelID)
+            dictation.toggle(modelURL: model.url(in: models.whisperDirectory),
+                             gpuIndex: gpuIndex,
+                             loadPolicy: whisperLoadPolicy) {
+                draft = dictationBase + $0
+            }
+        } else if dictation.isTranscribing {
+            dictation.cancel()
+        }
+        if appleDictation.isDictating { appleDictation.stop() }
         if audioRecorder.isRecording { audioRecorder.toggle { attachments.append($0) } }
+    }
+
+    private func configureWhisperResidency() {
+        guard whisperLoadPolicy == .alwaysLoaded else {
+            dictation.unloadPersistentModel()
+            return
+        }
+        // Do not reload Whisper after an explicit engine stop.
+        guard server.state == .starting || server.state == .running else {
+            dictation.unloadPersistentModel()
+            return
+        }
+        let model = WhisperModel.model(id: whisperModelID)
+        guard models.whisperModelInstalled(model) else { return }
+        dictation.preload(modelURL: model.url(in: models.whisperDirectory), gpuIndex: gpuIndex)
+    }
+
+    private func stopSpeechSubsystem() {
+        let pendingAttachmentIDs = Set(transcriptionQueue.map(\.attachmentID))
+        transcriptionQueue.removeAll()
+        transcriptionPending = 0
+        attachments.removeAll { pendingAttachmentIDs.contains($0.id) }
+        dictation.shutdown()
+        appleDictation.shutdown()
+        if audioRecorder.isRecording {
+            audioRecorder.cancel()
+        }
     }
 
     private var toolsButton: some View {
@@ -3473,31 +3664,41 @@ struct NativeChatView: View {
         var errors: [String] = []
         for url in urls {
             let name = url.lastPathComponent
+            let ext = (name as NSString).pathExtension.lowercased()
+
+            if ["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "mp4", "mov", "webm", "mkv"].contains(ext) {
+                // Microphone dictation cannot advance the file queue.
+                if (dictation.isDictating || dictation.isTranscribing || appleDictation.isDictating),
+                   transcriptionPending == 0 {
+                    errors.append(loc.t("\(name): termina primero el dictado del micrófono",
+                                        "\(name): finish microphone dictation first"))
+                    continue
+                }
+                let model = WhisperModel.model(id: whisperModelID)
+                guard models.whisperModelInstalled(model) else {
+                    models.downloadWhisperModel(model)
+                    errors.append(loc.t("\(name): descarga primero \(model.name) para transcribirlo",
+                                        "\(name): download \(model.name) first to transcribe it"))
+                    continue
+                }
+                let pendingID = UUID()
+                attachments.append(ChatAttachment(
+                    id: pendingID, name: name,
+                    content: loc.t("(transcribiendo localmente con Whisper.cpp…)",
+                                   "(transcribing locally with Whisper.cpp…)")))
+                transcriptionQueue.append(PendingSpeechTranscription(
+                    id: UUID(), fileURL: url, modelURL: model.url(in: models.whisperDirectory),
+                    attachmentID: pendingID, name: name))
+                transcriptionPending += 1
+                startNextFileTranscription()
+                continue
+            }
+
             guard let data = try? Data(contentsOf: url) else {
                 errors.append(loc.t("\(name): no se pudo leer", "\(name): couldn't read it")); continue
             }
             guard data.count <= Self.maxAttachBytes else {
                 errors.append(loc.t("\(name): demasiado grande (máx 40 MB)", "\(name): too large (max 40 MB)")); continue
-            }
-
-            let ext = (name as NSString).pathExtension.lowercased()
-
-            if ["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "mp4", "mov", "webm", "mkv"].contains(ext) {
-                let mime = UTType(filenameExtension: ext)?.preferredMIMEType
-                    ?? (["mp4", "mov", "webm", "mkv"].contains(ext) ? "video/\(ext)" : "audio/\(ext)")
-                let kind = mime.hasPrefix("video/") ? "video" : "audio"
-                guard kind == "video" ? videoAvailable : audioAvailable else {
-                    errors.append(kind == "video"
-                        ? loc.t("\(name): el modelo actual no admite video", "\(name): the current model doesn't support video")
-                        : loc.t("\(name): el modelo actual no admite audio", "\(name): the current model doesn't support audio"))
-                    continue
-                }
-                let uri = "data:\(mime);base64," + data.base64EncodedString()
-                let attachment = ChatAttachment(name: name, content: "", mimeType: mime,
-                                                dataURI: uri, byteCount: data.count)
-                attachments.append(attachment)
-                if kind == "video" { loadVideoDuration(url: url, attachmentID: attachment.id) }
-                continue
             }
 
             // Images → vision (only if the loaded model has a multimodal projector).
@@ -3577,6 +3778,41 @@ struct NativeChatView: View {
             attachments.append(ChatAttachment(name: name, content: text))
         }
         attachError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+    }
+
+    private func startNextFileTranscription() {
+        guard !dictation.isTranscribing, !dictation.isDictating, !appleDictation.isDictating,
+              let pending = transcriptionQueue.first else { return }
+        dictation.transcribe(fileURL: pending.fileURL,
+                             modelURL: pending.modelURL,
+                             gpuIndex: gpuIndex,
+                             loadPolicy: whisperLoadPolicy) { transcript in
+            completeFileTranscription(pending, transcript: transcript)
+        } onFailure: {
+            failFileTranscription(pending)
+        }
+    }
+
+    private func completeFileTranscription(_ pending: PendingSpeechTranscription,
+                                           transcript: String) {
+        transcriptionQueue.removeAll { $0.id == pending.id }
+        transcriptionPending = max(0, transcriptionPending - 1)
+        if let idx = attachments.firstIndex(where: { $0.id == pending.attachmentID }) {
+            let clipped = transcript.count > Self.maxAttachChars
+                ? String(transcript.prefix(Self.maxAttachChars))
+                    + loc.t("\n\n[…transcripción truncada…]", "\n\n[…transcript truncated…]")
+                : transcript
+            attachments[idx].content = loc.t("[Transcripción local — \(pending.name)]\n\n",
+                                             "[Local transcript — \(pending.name)]\n\n") + clipped
+        }
+        startNextFileTranscription()
+    }
+
+    private func failFileTranscription(_ pending: PendingSpeechTranscription) {
+        transcriptionQueue.removeAll { $0.id == pending.id }
+        transcriptionPending = max(0, transcriptionPending - 1)
+        attachments.removeAll { $0.id == pending.attachmentID }
+        startNextFileTranscription()
     }
 
     /// Decode a file as text, trying UTF-8/UTF-16, then a single-byte encoding
@@ -4217,14 +4453,14 @@ struct ConversationListView: View {
             Divider()
             Button(loc.t("Copiar conversación", "Copy conversation")) {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(chat.exportText(c), forType: .string)
+                NSPasteboard.general.setString(chat.exportText(c, loc), forType: .string)
             }
             Button(loc.t("Exportar a Markdown…", "Export to Markdown…")) {
                 let panel = NSSavePanel()
                 panel.nameFieldStringValue = chat.displayTitle(c)
                     .replacingOccurrences(of: "/", with: "-") + ".md"
                 if panel.runModal() == .OK, let url = panel.url {
-                    try? chat.exportText(c).write(to: url, atomically: true, encoding: .utf8)
+                    try? chat.exportText(c, loc).write(to: url, atomically: true, encoding: .utf8)
                 }
             }
             Button(loc.t("Eliminar", "Delete"), role: .destructive) { chat.delete(c) }

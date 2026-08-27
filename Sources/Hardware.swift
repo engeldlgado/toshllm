@@ -40,6 +40,24 @@ struct HardwareInfo {
             .compactMap { members[$0]?.sorted { $0.index < $1.index } }
     }
 
+    /// One entry per GPU model present, with how many physical cards it took.
+    static func modelGroups(of gpus: [GPUDevice]) -> [GPUModelGroup] {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        var vram: [String: Int] = [:]
+        for gpu in gpus {
+            if counts[gpu.name] == nil { order.append(gpu.name) }
+            counts[gpu.name, default: 0] += 1
+            vram[gpu.name] = gpu.vramGB
+        }
+        return order.map { name in
+            let dies = GPUModelGroup.diesPerCard(name)
+            let count = counts[name] ?? 1
+            return GPUModelGroup(name: name, cards: (count + dies - 1) / dies,
+                                 gpus: count, vramGB: vram[name] ?? 0)
+        }
+    }
+
     static func detect() -> HardwareInfo {
         func sysctlString(_ name: String) -> String {
             var size = 0
@@ -368,6 +386,20 @@ enum Estimator {
         // GQA f16 heuristic when the geometry is unreadable
         let perK = spec.paramsB >= 25 ? 0.10 : spec.paramsB >= 12 ? 0.08 : 0.05
         return perK * Double(ctx) / 1024
+    }
+}
+
+/// A model row of the GPU listing: how many cards, and how many GPUs they expose.
+struct GPUModelGroup {
+    let name: String
+    let cards: Int
+    let gpus: Int
+    let vramGB: Int
+
+    /// A Duo holds two GPUs behind one name, so counting Metal devices doubles the
+    /// cards. The name is the only thing that tells them apart.
+    static func diesPerCard(_ name: String) -> Int {
+        name.range(of: "duo", options: .caseInsensitive) != nil ? 2 : 1
     }
 }
 

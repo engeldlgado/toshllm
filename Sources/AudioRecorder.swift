@@ -72,4 +72,15 @@ final class AudioRecorderController: ObservableObject {
                               dataURI: "data:audio/wav;base64," + data.base64EncodedString(),
                               byteCount: data.count)
     }
+
+    func cancel() {
+        recorder?.stop()
+        recorder = nil
+        ticker?.cancel()
+        ticker = nil
+        isRecording = false
+        duration = 0
+        if let outputURL { try? FileManager.default.removeItem(at: outputURL) }
+        outputURL = nil
+    }
 }

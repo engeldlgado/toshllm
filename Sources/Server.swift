@@ -20,9 +20,52 @@ struct GPUDevice: Identifiable, Hashable {
     /// the other members when it has one.
     var peerGroupID: UInt64 = 0
     var peerCount: Int = 0
+    /// Metal exposes bf16 only from the Metal 3 family up; older cards abort on a bf16 weight.
+    var supportsBF16: Bool = true
     var id: Int { index }
     /// Rounded, since Metal reports a working set a little off the nominal size.
     var vramGB: Int { Int((Double(vramMB) / 1024).rounded()) }
+}
+
+enum DynamicMoeAutoRoute: Equatable {
+    case cache
+    case normalDense
+    case normalFitsVRAM
+    case normalInsufficientRAM
+    case normalUnsupportedGPU
+    case normalMissingModel
+    case normalSplitOrRouter
+    case normalMissingMetadata
+    case normalInsufficientVRAM
+    case normalNoCacheBenefit
+    case normalOversizedHostBank
+}
+
+struct DynamicMoeModelInfo: Equatable {
+    let layerCount: Int
+    let expertCount: Int
+    let activeExpertCount: Int
+}
+
+struct DynamicMoeSlotPlan: Equatable {
+    let model: DynamicMoeModelInfo
+    /// Smallest cache that can hold every expert selected by one decoded token.
+    let minimumSlots: Int
+    /// Largest valid K for this architecture, regardless of memory pressure.
+    let maximumSlots: Int
+    /// Largest K estimated to fit after fixed weights, runtime and transfer buffers.
+    let recommendedMaximumSlots: Int
+    let automaticSlots: Int
+    let estimatedBytesPerSlot: UInt64
+    let estimatedFixedVRAMBytes: UInt64
+
+    func clamped(_ slots: Int) -> Int {
+        min(max(slots, minimumSlots), maximumSlots)
+    }
+
+    func estimatedVRAMBytes(slots: Int) -> UInt64 {
+        estimatedFixedVRAMBytes + UInt64(clamped(slots)) * estimatedBytesPerSlot
+    }
 }
 
 struct ServerSettings {
@@ -76,6 +119,12 @@ struct ServerSettings {
     /// (GGML_SCHED_PREFETCH_EXPERTS) and keep CPU experts unpacked so their
     /// matmuls can offload (GGML_CPU_NO_REPACK).
     var prefetchExperts: Bool = true
+    /// Experimental bounded-VRAM expert cache. Compiled into the bundled engine,
+    /// but completely inert unless this persisted user choice is enabled.
+    var dynamicMoe: Bool = false
+    var dynamicMoeSlots: Int = 8
+    var dynamicMoePrefetch: Int = 4
+    var dynamicMoePolicy: String = "cache" // cache | auto
     /// Router mode (`--models-preset`): one process auto-loads/unloads whichever
     /// model a request's "model" field names, instead of the fixed `modelPath`.
     var routerMode: Bool = false
@@ -178,6 +227,7 @@ struct ServerSettings {
     }
 
     static let defaultFaAmd = true
+    static let dynamicMoeTensorOverride = #"\.ffn_(up|down|gate|gate_up)_(ch|)exps=MTL0"#
     static let kvCacheTypes = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl", "turbo4", "turbo3"]
 
     var usesTurboKV: Bool {
@@ -207,12 +257,17 @@ struct ServerSettings {
             "--host", localNetworkDiscovery ? "0.0.0.0" : "127.0.0.1",
             "--port", String(port),
         ]
-        if ncmoe > 0 { args += ["--n-cpu-moe", String(ncmoe)] }
-        if let mode = Self.loadMode(noMmap: noMmap, mlock: mlock) { args += ["--load-mode", mode] }
+        if !effectiveDynamicMoe && ncmoe > 0 { args += ["--n-cpu-moe", String(ncmoe)] }
+        let mode = effectiveDynamicMoe ? "mlock" : Self.loadMode(noMmap: noMmap, mlock: mlock)
+        if let mode { args += ["--load-mode", mode] }
+        if effectiveDynamicMoe {
+            args += ["-ot", Self.dynamicMoeTensorOverride]
+        }
         // A sibling projector lets the model read images, and needs --jinja.
         let mmproj = loadVision ? Self.mmprojPath(forModel: modelPath) : nil
         if let mmproj {
             args += ["--mmproj", mmproj]
+            if Self.projectorNeedsCPU(mmproj) { args.append("--no-mmproj-offload") }
             if imageMaxTokens > 0 { args += ["--image-max-tokens", String(imageMaxTokens)] }
         }
         if jinja || mmproj != nil { args.append("--jinja") }
@@ -244,16 +299,20 @@ struct ServerSettings {
         if reasoningInline { args += ["--reasoning-format", "none"] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         // A compatible downloaded DFlash draft takes precedence over embedded MTP.
-        if let selection = dflashSelection(modelPath: modelPath, ncmoe: ncmoe) {
-            // Quantize the draft's KV cache: it doubles KV pressure at high ctx, and
-            // q8_0 halves that footprint at no measurable quality cost for a draft.
-            args += ["-md", selection.draft, "--spec-type", "draft-dflash",
-                     "-ngld", String(selection.ngld),
-                     "-ctkd", "q8_0", "-ctvd", "q8_0"]
-        } else if let draft = Self.mtpDraftPath(forModel: modelPath) {
-            args += ["-md", draft, "--spec-type", "draft-mtp"]
-        } else if Self.modelHasMTP(at: modelPath) {
-            args += ["--spec-type", "draft-mtp"]
+        // Speculation decodes several tokens at once and the expert cache only has slots
+        // for one token's experts, so the two cannot run together.
+        if !effectiveDynamicMoe {
+            if let selection = dflashSelection(modelPath: modelPath, ncmoe: ncmoe) {
+                // Quantize the draft's KV cache: it doubles KV pressure at high ctx, and
+                // q8_0 halves that footprint at no measurable quality cost for a draft.
+                args += ["-md", selection.draft, "--spec-type", "draft-dflash",
+                         "-ngld", String(selection.ngld),
+                         "-ctkd", "q8_0", "-ctvd", "q8_0"]
+            } else if let draft = Self.mtpDraftPath(forModel: modelPath) {
+                args += ["-md", draft, "--spec-type", "draft-mtp"]
+            } else if Self.modelHasMTP(at: modelPath) {
+                args += ["--spec-type", "draft-mtp"]
+            }
         }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
         args += extraArgTokens.cli
@@ -345,11 +404,12 @@ struct ServerSettings {
                                           reserveMB: vramReserveMB)
             var lines = ["[\(alias)]", "model = \(path)", "n-gpu-layers = \(ngl)",
                          "ctx-size = \(modelCtx)", "threads = \(threads)", "flash-attn = \(faValue)"]
-            if let ncmoe = ncmoeByPath[path], ncmoe > 0 { lines.append("n-cpu-moe = \(ncmoe)") }
+            if !effectiveDynamicMoe, let ncmoe = ncmoeByPath[path], ncmoe > 0 { lines.append("n-cpu-moe = \(ncmoe)") }
             if let mode = Self.loadMode(noMmap: noMmap, mlock: mlock) { lines.append("load-mode = \(mode)") }
             let mmproj = loadVision ? Self.mmprojPath(forModel: path) : nil
             if let mmproj {
                 lines.append("mmproj = \(mmproj)")
+                if Self.projectorNeedsCPU(mmproj) { lines.append("mmproj-offload = false") }
                 if imageMaxTokens > 0 { lines.append("image-max-tokens = \(imageMaxTokens)") }
             }
             if jinja || mmproj != nil { lines.append("jinja = true") }
@@ -367,7 +427,9 @@ struct ServerSettings {
                 lines.append("slot-save-path = \(slotDir.path)")
             }
             if reasoningInline { lines.append("reasoning-format = none") }
-            if let selection = dflashSelection(modelPath: path, ncmoe: ncmoeByPath[path] ?? 0) {
+            if effectiveDynamicMoe {
+                // see the speculation note in arguments(): it does not mix with the cache
+            } else if let selection = dflashSelection(modelPath: path, ncmoe: ncmoeByPath[path] ?? 0) {
                 lines.append("model-draft = \(selection.draft)")
                 lines.append("spec-type = draft-dflash")
                 lines.append("gpu-layers-draft = \(selection.ngld)")
@@ -412,9 +474,11 @@ struct ServerSettings {
         // the prompt speed.
         var args = ["-m", modelPath, "-ngl", String(ngl), "-r", "2",
                     "-p", String(benchPPClamped), "-n", String(benchTGClamped)]
-        if let mode = Self.loadMode(noMmap: noMmap, mlock: mlock) { args += ["--load-mode", mode] }
+        let mode = effectiveDynamicMoe ? "mlock" : Self.loadMode(noMmap: noMmap, mlock: mlock)
+        if let mode { args += ["--load-mode", mode] }
         if benchDepthClamped > 0 { args += ["-d", String(benchDepthClamped)] }
-        if ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
+        if !effectiveDynamicMoe && ncmoe > 0 { args += ["-ncmoe", String(ncmoe)] }
+        if effectiveDynamicMoe { args += ["-ot", Self.dynamicMoeTensorOverride] }
         if cacheTypeK != "f16" { args += ["-ctk", cacheTypeK] }
         if cacheTypeV != "f16" { args += ["-ctv", cacheTypeV] }
         if kvNeedsFlashAttention || flashAttn == "on" {
@@ -502,7 +566,30 @@ struct ServerSettings {
         if mgpuEvents && isSplitting { env["TOSH_MGPU_EVENTS"] = "1" }
         // Router mode has no single ncmoe (it's per-model, in the INI); the envs are
         // no-ops for dense models anyway.
-        if prefetchExperts && (ncmoe > 0 || routerMode) {
+        if effectiveDynamicMoe {
+            env["TOSH_MOE_MODE"] = "cache"
+            if dynamicMoePolicy == "auto" { env["TOSH_MOE_AUTO"] = "1" }
+            env["TOSH_MOE_SLOTS"] = String(effectiveDynamicMoeSlots)
+            env["TOSH_MOE_CPU_BANK"] = "1"
+            env["GGML_SCHED_PREFETCH_EXPERTS"] = String(effectiveDynamicMoePrefetch)
+            env["GGML_METAL_NCB"] = "8"
+            if dynamicMoeExecutionRoute == .split {
+                let profile = dynamicMoeOptimizationProfile
+                env["TOSH_MOE_SPLIT_BANK"] = "1"
+                env["TOSH_MOE_SPLIT_RING"] = String(profile?.ringSlots ?? max(8, dynamicMoeModelInfo?.activeExpertCount ?? 1))
+                env["TOSH_MOE_BOUNDED_STAGE"] = "1"
+                env["TOSH_MOE_BOUNDED_STAGE_FORCE"] = "1"
+                env["TOSH_MOE_DOUBLE_BUFFER"] = "1"
+                if let mapPath = profile?.hotMapPath,
+                   FileManager.default.fileExists(atPath: mapPath) {
+                    env["TOSH_MOE_HOT_MAP"] = mapPath
+                    env["TOSH_MOE_HOT_MAP_OUT"] = mapPath
+                    if let experts = dynamicMoeModelInfo?.expertCount {
+                        env["TOSH_MOE_HOT_MAP_K"] = String(experts)
+                    }
+                }
+            }
+        } else if prefetchExperts && (ncmoe > 0 || routerMode) {
             // At/above the measured cliff the prefetch overlap collapses and stalls the
             // GPU, so stay below it. Router mode has no single ncmoe to compare.
             let cliff = Self.recalledPrefetchCliff(forModel: modelPath)
@@ -514,6 +601,12 @@ struct ServerSettings {
         // KEY=VALUE tokens from Extra arguments become env vars (e.g. the GCN/Vega
         // wave64 safe-mode flag). Applied last so the user can override the above.
         for (k, v) in extraArgTokens.env { env[k] = v }
+        // K is structural: a value larger than the GGUF's expert dimension makes
+        // the backend skip cache creation. Keep the model-derived/clamped value even
+        // when an old Extra arguments recipe still contains TOSH_MOE_SLOTS.
+        if effectiveDynamicMoe {
+            env["TOSH_MOE_SLOTS"] = String(effectiveDynamicMoeSlots)
+        }
         return env.compactMapValues { $0 }
     }
 
@@ -602,6 +695,10 @@ struct ServerSettings {
             specMTP: bool(SettingsKeys.specMTP, false),
             faAmd: bool(SettingsKeys.faAmd, defaultFaAmd),
             prefetchExperts: bool(SettingsKeys.prefetchExperts, true),
+            dynamicMoe: bool(SettingsKeys.dynamicMoe, false),
+            dynamicMoeSlots: int(SettingsKeys.dynamicMoeSlots, 8),
+            dynamicMoePrefetch: int(SettingsKeys.dynamicMoePrefetch, 4),
+            dynamicMoePolicy: d.string(forKey: SettingsKeys.dynamicMoePolicy) ?? "cache",
             routerMode: bool(SettingsKeys.routerMode, false),
             routerModelsMax: int(SettingsKeys.routerModelsMax, 1),
             persistCache: bool(SettingsKeys.persistCache, false),
@@ -656,6 +753,176 @@ struct ServerSettings {
     /// normal Flash Attention when this is off.
     var effectiveFaAmd: Bool {
         faAmd
+    }
+
+    /// Router presets load models independently and cannot carry the per-tensor
+    /// override required by this prototype, so keep the experiment fixed-model only.
+    var dynamicMoeUIUnlocked: Bool { extraArgTokens.env["TOSH_MOE_UI"] == "1" }
+    var dynamicMoeGPU: GPUDevice? {
+        let selected = ServerController.availableGPUs().filter { selectedGPUIndices.contains($0.index) }
+        return selected.max { $0.vramMB < $1.vramMB }
+    }
+    var dynamicMoeOptimizationProfile: DynamicMoeOptimizationProfile? {
+        DynamicMoeProfileStore.load(modelPath: modelPath, gpu: dynamicMoeGPU)
+    }
+    var dynamicMoeExecutionRoute: DynamicMoeExecutionRoute {
+        if dynamicMoePolicy == "auto", let profile = dynamicMoeOptimizationProfile {
+            return profile.route
+        }
+        guard let size = GGUFFile.totalSize(at: modelPath), let gpu = dynamicMoeGPU else {
+            return .direct
+        }
+        return Self.dynamicMoeHostBankFitsDirectMetal(modelBytes: size, gpuVRAMMB: gpu.vramMB)
+            ? .direct : .split
+    }
+    var dynamicMoeAutoRoute: DynamicMoeAutoRoute {
+        guard !modelPath.isEmpty, let size = GGUFFile.totalSize(at: modelPath) else {
+            return .normalMissingModel
+        }
+        let gpu = dynamicMoeGPU
+        if dynamicMoeOptimizationProfile != nil, !isSplitting, !routerMode {
+            return .cache
+        }
+        let base = Self.resolveDynamicMoeAuto(
+            isMoE: Self.modelIsMoE(at: modelPath),
+            modelBytes: size,
+            gpuVRAMMB: gpu?.vramMB ?? 0,
+            reserveMB: vramReserveMB,
+            physicalRAMBytes: ProcessInfo.processInfo.physicalMemory,
+            hasDiscreteGPU: gpu?.isIntegrated == false,
+            splitOrRouter: isSplitting || routerMode)
+        guard base == .cache else { return base }
+        guard let info = dynamicMoeModelInfo else { return .normalMissingMetadata }
+        guard info.activeExpertCount < info.expertCount else { return .normalNoCacheBenefit }
+        guard dynamicMoeSlotPlan(prefetch: 4) != nil else { return .normalInsufficientVRAM }
+        return .cache
+    }
+    var effectiveDynamicMoe: Bool {
+        guard dynamicMoe && dynamicMoeUIUnlocked,
+              Self.modelIsMoE(at: modelPath), dynamicMoeModelInfo != nil else { return false }
+        if dynamicMoePolicy == "auto" { return dynamicMoeAutoRoute == .cache }
+        return !routerMode && !isSplitting
+    }
+    var effectiveDynamicMoeSlots: Int {
+        if dynamicMoePolicy == "auto" {
+            if let profile = dynamicMoeOptimizationProfile { return profile.slots }
+            return dynamicMoeSlotPlan(prefetch: 4)?.automaticSlots ?? 0
+        }
+        if let info = dynamicMoeModelInfo {
+            let minimum = min(max(info.activeExpertCount, 1), info.expertCount)
+            return min(max(dynamicMoeSlots, minimum), info.expertCount)
+        }
+        return min(max(dynamicMoeSlots, 1), 256)
+    }
+    var effectiveDynamicMoePrefetch: Int {
+        if dynamicMoePolicy == "auto", let profile = dynamicMoeOptimizationProfile {
+            return profile.prefetch
+        }
+        return dynamicMoePolicy == "auto" ? 4 : min(max(dynamicMoePrefetch, 0), 16)
+    }
+
+    var dynamicMoeModelInfo: DynamicMoeModelInfo? {
+        let layers = Int(Self.ggufUInt32("block_count", at: modelPath) ?? 0)
+        let experts = Int(Self.ggufUInt32("expert_count", at: modelPath) ?? 0)
+        let active = Int(Self.ggufUInt32("expert_used_count", at: modelPath) ?? 0)
+        guard layers > 0, experts > 0, active > 0, active <= experts else { return nil }
+        return DynamicMoeModelInfo(layerCount: layers, expertCount: experts,
+                                   activeExpertCount: active)
+    }
+
+    func dynamicMoeSlotPlan(prefetch: Int? = nil) -> DynamicMoeSlotPlan? {
+        guard let info = dynamicMoeModelInfo,
+              let size = GGUFFile.totalSize(at: modelPath) else {
+            return nil
+        }
+        let selected = ServerController.availableGPUs().filter { selectedGPUIndices.contains($0.index) }
+        guard let gpu = selected.max(by: { $0.vramMB < $1.vramMB }), !gpu.isIntegrated else { return nil }
+        return Self.resolveDynamicMoeSlots(
+            modelBytes: size, model: info, gpuVRAMMB: gpu.vramMB,
+            reserveMB: vramReserveMB, prefetch: prefetch ?? effectiveDynamicMoePrefetch)
+    }
+
+    static func resolveDynamicMoeSlots(
+        modelBytes: UInt64,
+        model: DynamicMoeModelInfo,
+        gpuVRAMMB: Int,
+        reserveMB: Int,
+        prefetch: Int
+    ) -> DynamicMoeSlotPlan? {
+        guard modelBytes > 0, model.layerCount > 0, model.expertCount > 0,
+              model.activeExpertCount > 0, model.activeExpertCount <= model.expertCount,
+              gpuVRAMMB > reserveMB else { return nil }
+
+        let mib = UInt64(1024 * 1024)
+        let gib = UInt64(1024) * mib
+        // The 1.3 GiB shared/non-MoE estimate is the same conservative split used by
+        // ToshLLM's ncmoe planner. The remainder is the quantized expert pool.
+        let sharedBytes = min(modelBytes, UInt64(Double(gib) * 1.3))
+        let expertBytes = modelBytes - sharedBytes
+        guard expertBytes > 0 else { return nil }
+        let bytesPerSlot = max(UInt64(1),
+            UInt64(ceil(Double(expertBytes) / Double(model.expertCount))))
+
+        // One full widest bank is staging; each prefetch slot can hold another. A
+        // gate_up bank is approximately 2/3 of one layer's three expert matrices.
+        let widestBankBytes = UInt64(ceil(
+            Double(expertBytes) / Double(model.layerCount) * (2.0 / 3.0)))
+        let transferBuffers = widestBankBytes * UInt64(max(0, min(prefetch, 16)) + 1)
+        let runtimeBytes = UInt64(512) * mib
+        let fixedBytes = sharedBytes + runtimeBytes + transferBuffers
+        let availableBytes = UInt64(max(0, gpuVRAMMB - reserveMB)) * mib
+        let budgetSlots = availableBytes > fixedBytes
+            ? Int((availableBytes - fixedBytes) / bytesPerSlot) : 0
+        let recommendedMaximum = min(model.expertCount, max(0, budgetSlots))
+        guard recommendedMaximum >= model.activeExpertCount else { return nil }
+
+        return DynamicMoeSlotPlan(
+            model: model,
+            minimumSlots: model.activeExpertCount,
+            maximumSlots: model.expertCount,
+            recommendedMaximumSlots: recommendedMaximum,
+            automaticSlots: model.activeExpertCount,
+            estimatedBytesPerSlot: bytesPerSlot,
+            estimatedFixedVRAMBytes: fixedBytes)
+    }
+
+    static func resolveDynamicMoeAuto(
+        isMoE: Bool,
+        modelBytes: UInt64,
+        gpuVRAMMB: Int,
+        reserveMB: Int,
+        physicalRAMBytes: UInt64,
+        hasDiscreteGPU: Bool,
+        splitOrRouter: Bool
+    ) -> DynamicMoeAutoRoute {
+        guard !splitOrRouter else { return .normalSplitOrRouter }
+        guard isMoE else { return .normalDense }
+        guard modelBytes > 0 else { return .normalMissingModel }
+        guard hasDiscreteGPU, gpuVRAMMB > 0 else { return .normalUnsupportedGPU }
+
+        // Besides the user's reserve, leave 512 MiB for compute/KV allocations. A GGUF
+        // that fits below this line gains nothing from duplicating its expert bank in RAM.
+        let mib = UInt64(1024 * 1024)
+        let usableVRAM = UInt64(max(0, gpuVRAMMB - reserveMB - 512)) * mib
+        guard modelBytes > usableVRAM else { return .normalFitsVRAM }
+
+        // Dynamic MoE pins the quantized expert bank. Keep the model plus 25% and 4 GiB
+        // for the OS/app/KV; if total RAM cannot provide that, normal ncmoe is safer.
+        let ramHeadroom = max(modelBytes / 4, UInt64(4) * 1024 * 1024 * 1024)
+        guard physicalRAMBytes >= modelBytes + ramHeadroom else { return .normalInsufficientRAM }
+        return .cache
+    }
+
+    /// The current decode kernel directly binds the complete host expert pool to Metal. On a
+    /// discrete GPU, measured banks larger than the device working set can stall the driver even
+    /// when system RAM and swap are healthy. Auto stays on the validated side of that boundary;
+    /// private Manual mode remains available for developing a bounded staging implementation.
+    static func dynamicMoeHostBankFitsDirectMetal(modelBytes: UInt64, gpuVRAMMB: Int) -> Bool {
+        guard modelBytes > 0, gpuVRAMMB > 0 else { return false }
+        let mib = UInt64(1024 * 1024)
+        let sharedBytes = min(modelBytes, UInt64(Double(UInt64(1024) * mib) * 1.3))
+        let estimatedExpertBytes = modelBytes - sharedBytes
+        return estimatedExpertBytes <= UInt64(gpuVRAMMB) * mib
     }
 
     /// Resolves DFlash against the same physical GPU selection and memory reserve
@@ -827,7 +1094,7 @@ struct ServerSettings {
     /// True when the model is a Mixture-of-Experts (GGUF `<arch>.expert_count` > 0).
     /// Gates the `--n-cpu-moe` control, which a dense model ignores.
     nonisolated static func modelIsMoE(at path: String) -> Bool {
-        (ggufUInt32("expert_count", at: path) ?? 0) > 0
+        GGUFMetadataCache.metadata(at: path)?.isMoE ?? false
     }
 
     /// Remembers the ncmoe the user settled on for a MoE model, so selecting
@@ -940,6 +1207,14 @@ struct ServerSettings {
     nonisolated static func activeDflashDraft(forModel modelPath: String) -> String? {
         guard dflashEnabled(forModel: modelPath) else { return nil }
         return dflashDraftPath(forModel: modelPath)
+    }
+
+    /// A bf16 projector aborts the engine on a card without the Metal 3 family: the loader
+    /// puts the weight in device memory and the scheduler then refuses to run it there.
+    /// Keeping the tower on the CPU costs image-encode time and keeps vision working.
+    nonisolated static func projectorNeedsCPU(_ mmproj: String) -> Bool {
+        guard GGUFMetadataCache.tensorFlags(at: mmproj).hasBF16Tensor else { return false }
+        return ServerController.availableGPUs().contains { !$0.isIntegrated && !$0.supportsBF16 }
     }
 
     nonisolated static func mmprojPath(forModel modelPath: String) -> String? {
@@ -1196,7 +1471,8 @@ final class ServerController: ObservableObject {
                       isExternal: dev.location == .external,
                       isIntegrated: dev.isLowPower,
                       peerGroupID: dev.peerGroupID,
-                      peerCount: Int(dev.peerCount))
+                      peerCount: Int(dev.peerCount),
+                      supportsBF16: dev.supportsFamily(.metal3))
         }
     }
 
@@ -1318,6 +1594,11 @@ final class ServerController: ObservableObject {
                        "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES", "GGML_METAL_DEVICE_LIST",
                        "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD",
                        "GGML_SCHED_PREFETCH_EXPERTS", "GGML_CPU_NO_REPACK",
+                       "TOSH_MOE_UI", "TOSH_MOE_MODE", "TOSH_MOE_SLOTS", "TOSH_MOE_CPU_BANK",
+                       "TOSH_MOE_SPLIT_BANK", "TOSH_MOE_SPLIT_RING", "TOSH_MOE_BOUNDED_STAGE",
+                       "TOSH_MOE_BOUNDED_STAGE_FORCE", "TOSH_MOE_DOUBLE_BUFFER", "TOSH_MOE_HOT_MAP",
+                       "TOSH_MOE_HOT_MAP_OUT", "TOSH_MOE_HOT_MAP_K",
+                       "GGML_METAL_NCB",
                        "TOSH_MGPU_PEER", "TOSH_MGPU_PEER_DISABLE", "TOSH_MGPU_EVENTS"]
         let env = settings.environment
         // Include user-provided environment variables in diagnostic logs.
@@ -1325,6 +1606,9 @@ final class ServerController: ObservableObject {
         let envLine = (envKeys + userKeys)
             .compactMap { k in env[k].map { "\(k)=\($0)" } }
             .joined(separator: " ")
+        let moeLine = settings.effectiveDynamicMoe
+            ? "ncmoe=0 dynamic-moe=K\(settings.effectiveDynamicMoeSlots)"
+            : "ncmoe=\(settings.ncmoe)"
         var gpuSel = settings.multiGPU ? "split-all" : (settings.gpuIndex >= 0 ? "index \(settings.gpuIndex)" : "default (macOS picks)")
         if settings.isSplitting { gpuSel += " · split-mode \(settings.effectiveSplitMode)" }
         return """
@@ -1335,7 +1619,7 @@ final class ServerController: ObservableObject {
          GPUs detected:
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
-         settings: ngl=\(settings.ngl) ncmoe=\(settings.ncmoe) ctx=\(settings.ctx) fa=\(settings.flashAttn) ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV) cacheRAM=\(settings.cacheRAM)
+         settings: ngl=\(settings.ngl) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn) ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV) cacheRAM=\(settings.cacheRAM)
          dflash : \(settings.routerMode ? "per-model router plan" : settings.dflashPlanSummary)
          env: \(envLine)
          args: \(redact(settings.arguments).joined(separator: " "))
@@ -1456,8 +1740,15 @@ final class ServerController: ObservableObject {
         if tail.contains("quantized v cache") {
             return "El KV cuantizado requiere Flash Attention: activa el kernel AMD o usa FA estándar / quantized KV requires Flash Attention: enable the AMD kernel or use standard FA"
         }
-        if tail.contains("nextn") || tail.contains("draft-mtp") || tail.contains("mtp") {
-            return "Este modelo no trae cabezal MTP: desactiva 'Aceleración MTP' o descarga la variante -MTP- / model has no MTP head: disable 'MTP acceleration' or download the -MTP- variant"
+        // The tensor named in the abort says whether it is the projector or the model itself.
+        if tail.contains("pre-allocated tensor") && tail.contains("cannot run the operation") {
+            return tail.contains("pre-allocated tensor (v.")
+                ? "El proyector de visión usa un formato que esta tarjeta no ejecuta (normalmente BF16): descarga el mmproj en F16 / the vision projector uses a format this card cannot run (usually BF16): download the F16 mmproj"
+                : "Un tensor del modelo usa un formato que esta tarjeta no ejecuta (normalmente BF16): usa un GGUF en F16 o cuantizado / a model tensor uses a format this card cannot run (usually BF16): use an F16 or quantized GGUF"
+        }
+        // The engine's own wording. Matching a bare "mtp" also matched every file named -MTP-.
+        if tail.contains("doesn't contain mtp layers") || tail.contains("failed to create mtp context") {
+            return "Este modelo no trae cabezal MTP: descarga la variante -MTP- / model has no MTP head: download the -MTP- variant"
         }
         if tail.contains("invalid ggml type") || tail.contains("should be in [0,") {
             return "Cuantización no soportada por el motor (formato de un fork, p. ej. Prism ML): usa un GGUF con quant estándar (Q4_K_M, Q8_0, Q2_0_g64…) / quantization not supported by the engine (a fork's format, e.g. Prism ML): use a GGUF with a standard quant (Q4_K_M, Q8_0, Q2_0_g64…)"
@@ -1496,6 +1787,9 @@ final class ServerController: ObservableObject {
     }
 
     func stop() {
+        AudioStudioController.shared.shutdown()
+        SpeechDictationController.shared.shutdown()
+        AppleSpeechDictationController.shared.shutdown()
         healthTask?.cancel()
         dflashMemoryTask?.cancel()
         activeDflashModelPath = nil
@@ -1537,6 +1831,9 @@ final class ServerController: ObservableObject {
     /// Quitting: the engine must be signalled inline, since a detached task does
     /// not outlive the process.
     func stopImmediately() {
+        AudioStudioController.shared.shutdown()
+        SpeechDictationController.shared.shutdown()
+        AppleSpeechDictationController.shared.shutdown()
         healthTask?.cancel()
         dflashMemoryTask?.cancel()
         activeDflashModelPath = nil

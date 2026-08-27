@@ -1,0 +1,500 @@
+--- old/ggml/src/ggml-metal/ggml-metal.metal
++++ new/ggml/src/ggml-metal/ggml-metal.metal
+@@ -37,16 +37,41 @@
+ #undef GGML_METAL_HAS_BF16
+ #endif
+ 
+ #if defined(GGML_METAL_HAS_BF16)
+ typedef matrix<bfloat, 4, 4> bfloat4x4;
+ typedef matrix<bfloat, 2, 4> bfloat2x4;
+ #endif
+ 
++// bf16 on cards where Metal has no bfloat type: the same 16 bits, widened by hand. The
++// exponent is already f32's, so the conversion is a shift and nothing is approximated.
++struct bf16e {
++    ushort b;
++    bf16e() thread = default;
++    bf16e(float f) thread {
++        const uint u = as_type<uint>(f);
++        b = (ushort) ((u + 0x7fff + ((u >> 16) & 1)) >> 16); // round to nearest even
++    }
++    inline operator float() const thread   { return as_type<float>((uint) b << 16); }
++    inline operator float() const device   { return as_type<float>((uint) b << 16); }
++    inline operator float() const constant { return as_type<float>((uint) b << 16); }
++};
++
++struct bf16e4 {
++    ushort4 b;
++    inline operator float4() const thread   { return as_type<float4>(uint4(b) << 16); }
++    inline operator float4() const device   { return as_type<float4>(uint4(b) << 16); }
++    inline operator float4() const constant { return as_type<float4>(uint4(b) << 16); }
++};
++
++struct bf16e4x4 {
++    ushort4 b[4];
++};
++
+ #define QK_NL 16
+ 
+ constexpr constant static float kvalues_iq4nl_f[16] = {
+     -127.f, -104.f, -83.f, -65.f, -49.f, -35.f, -22.f, -10.f, 1.f, 13.f, 25.f, 38.f, 53.f, 69.f, 89.f, 113.f
+ };
+ 
+ constexpr constant static float kvalues_mxfp4_f[16] = {
+     0, .5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f, -0, -.5f, -1.f, -1.5f, -2.f, -3.f, -4.f, -6.f
+@@ -116,16 +141,32 @@
+ 
+ template <typename type4>
+ void dequantize_bf16_t4(device const bfloat4 * src, short il, thread type4 & reg) {
+     reg = (type4)(*(src));
+ }
+ #endif
+ 
+ template <typename type4x4>
++void dequantize_bf16e(device const bf16e4x4 * src, short il, thread type4x4 & reg) {
++    FOR_UNROLL (short i = 0; i < 4; ++i) {
++        const float4 f = as_type<float4>(uint4(src->b[i]) << 16);
++        reg[i][0] = f.x;
++        reg[i][1] = f.y;
++        reg[i][2] = f.z;
++        reg[i][3] = f.w;
++    }
++}
++
++template <typename type4>
++void dequantize_bf16e_t4(device const bf16e4 * src, short il, thread type4 & reg) {
++    reg = (type4) as_type<float4>(uint4(src->b) << 16);
++}
++
++template <typename type4x4>
+ void dequantize_q1_0(device const block_q1_0 * xb, short il, thread type4x4 & reg) {
+     device const uint8_t * qs = xb->qs;
+     const float d = xb->d;
+     const float neg_d = -d;
+ 
+     const int byte_offset = il * 2;  // il*16 bits = il*2 bytes
+     const uint8_t b0 = qs[byte_offset];
+     const uint8_t b1 = qs[byte_offset + 1];
+@@ -4684,16 +4725,20 @@
+ template [[host_name("kernel_mul_mv_ext_f16_f32_r1_5")]]    kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, half4,        4,  dequantize_f16_t4>;
+ 
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mv_ext_bf16_f32_r1_2")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, bfloat4,      4,  dequantize_bf16_t4>;
+ template [[host_name("kernel_mul_mv_ext_bf16_f32_r1_3")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, bfloat4,      4,  dequantize_bf16_t4>;
+ template [[host_name("kernel_mul_mv_ext_bf16_f32_r1_4")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, bfloat4,      4,  dequantize_bf16_t4>;
+ template [[host_name("kernel_mul_mv_ext_bf16_f32_r1_5")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, bfloat4,      4,  dequantize_bf16_t4>;
+ #endif
++template [[host_name("kernel_mul_mv_ext_bf16e_f32_r1_2")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, bf16e4,       4,  dequantize_bf16e_t4>;
++template [[host_name("kernel_mul_mv_ext_bf16e_f32_r1_3")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, bf16e4,       4,  dequantize_bf16e_t4>;
++template [[host_name("kernel_mul_mv_ext_bf16e_f32_r1_4")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, bf16e4,       4,  dequantize_bf16e_t4>;
++template [[host_name("kernel_mul_mv_ext_bf16e_f32_r1_5")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, bf16e4,       4,  dequantize_bf16e_t4>;
+ 
+ template [[host_name("kernel_mul_mv_ext_q1_0_f32_r1_2")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, block_q1_0,   128, dequantize_q1_0_t4>;
+ template [[host_name("kernel_mul_mv_ext_q1_0_f32_r1_3")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, block_q1_0,   128, dequantize_q1_0_t4>;
+ template [[host_name("kernel_mul_mv_ext_q1_0_f32_r1_4")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, block_q1_0,   128, dequantize_q1_0_t4>;
+ template [[host_name("kernel_mul_mv_ext_q1_0_f32_r1_5")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_q1_0,   128, dequantize_q1_0_t4>;
+ 
+ template [[host_name("kernel_mul_mv_ext_q2_0_f32_r1_2")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, block_q2_0,    64, dequantize_q2_0_t4>;
+ template [[host_name("kernel_mul_mv_ext_q2_0_f32_r1_3")]]   kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, block_q2_0,    64, dequantize_q2_0_t4>;
+@@ -4900,16 +4945,17 @@
+ 
+ template [[host_name("kernel_mul_mv_f32_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<float, float>;
+ template [[host_name("kernel_mul_mv_f16_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  float>;
+ template [[host_name("kernel_mul_mv_f16_f16")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  half>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mv_bf16_f32")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, float>;
+ template [[host_name("kernel_mul_mv_bf16_bf16")]] kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, bfloat>;
+ #endif
++template [[host_name("kernel_mul_mv_bf16e_f32")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<bf16e, float>;
+ 
+ template<typename T0, typename T04, typename T1, typename T14, short NR0, typename args_t>
+ void kernel_mul_mv_t_t_4_impl(
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+@@ -5027,16 +5073,17 @@
+ 
+ template [[host_name("kernel_mul_mv_f32_f32_4")]]   kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<float, float4, float, float4>;
+ template [[host_name("kernel_mul_mv_f16_f32_4")]]   kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<half,  half4,  float, float4>;
+ template [[host_name("kernel_mul_mv_f16_f16_4")]]   kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<half,  half4,  half,  half4>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mv_bf16_f32_4")]]  kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<bfloat, bfloat4, float,  float4>;
+ template [[host_name("kernel_mul_mv_bf16_bf16_4")]] kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<bfloat, bfloat4, bfloat, bfloat4>;
+ #endif
++template [[host_name("kernel_mul_mv_bf16e_f32_4")]]  kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<bf16e, bf16e4, float,  float4>;
+ 
+ template<typename T0, typename T1, typename args_t>
+ void kernel_mul_mv_t_t_short_impl(
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         uint3  tgpig,
+@@ -5092,16 +5139,17 @@
+ 
+ template [[host_name("kernel_mul_mv_f32_f32_short")]]  kernel mul_mv_t_t_short_t kernel_mul_mv_t_t_short<float, float>;
+ template [[host_name("kernel_mul_mv_f16_f32_short")]]  kernel mul_mv_t_t_short_t kernel_mul_mv_t_t_short<half,  float>;
+ template [[host_name("kernel_mul_mv_f16_f16_short")]]  kernel mul_mv_t_t_short_t kernel_mul_mv_t_t_short<half,  half>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mv_bf16_f32_short")]]  kernel mul_mv_t_t_short_t kernel_mul_mv_t_t_short<bfloat, float>;
+ template [[host_name("kernel_mul_mv_bf16_bf16_short")]] kernel mul_mv_t_t_short_t kernel_mul_mv_t_t_short<bfloat, bfloat>;
+ #endif
++template [[host_name("kernel_mul_mv_bf16e_f32_short")]]  kernel mul_mv_t_t_short_t kernel_mul_mv_t_t_short<bf16e, float>;
+ 
+ constant bool FC_rope_is_imrope [[function_constant(FC_ROPE + 0)]];
+ constant bool FC_rope_is_back   [[function_constant(FC_ROPE + 1)]];
+ 
+ static float rope_yarn_ramp(const float low, const float high, const int i0) {
+     const float y = (i0 / 2 - low) / max(0.001f, high - low);
+     return 1.0f - min(1.0f, max(0.0f, y));
+ }
+@@ -9762,37 +9810,41 @@
+ template [[host_name("kernel_cpy_contig_f32_f32")]]   kernel kernel_cpy_t kernel_cpy_contig_t_t<float,   float>;
+ template [[host_name("kernel_cpy_contig_f32_f16")]]   kernel kernel_cpy_t kernel_cpy_contig_t_t<float,   half>;
+ template [[host_name("kernel_cpy_contig_f32_i32")]]   kernel kernel_cpy_t kernel_cpy_contig_t_t<float,   int32_t>;
+ template [[host_name("kernel_cpy_contig_i32_f32")]]   kernel kernel_cpy_t kernel_cpy_contig_t_t<int32_t, float>;
+ template [[host_name("kernel_cpy_contig_i32_i32")]]   kernel kernel_cpy_t kernel_cpy_contig_t_t<int32_t, int32_t>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_cpy_contig_f32_bf16")]]  kernel kernel_cpy_t kernel_cpy_contig_t_t<float,   bfloat>;
+ #endif
++template [[host_name("kernel_cpy_contig_f32_bf16e")]]  kernel kernel_cpy_t kernel_cpy_contig_t_t<float,   bf16e>;
+ template [[host_name("kernel_cpy_contig_f16_f32")]]   kernel kernel_cpy_t kernel_cpy_contig_t_t<half,    float>;
+ template [[host_name("kernel_cpy_contig_f16_f16")]]   kernel kernel_cpy_t kernel_cpy_contig_t_t<half,    half>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_cpy_contig_bf16_f32")]]  kernel kernel_cpy_t kernel_cpy_contig_t_t<bfloat,  float>;
+ template [[host_name("kernel_cpy_contig_bf16_bf16")]] kernel kernel_cpy_t kernel_cpy_contig_t_t<bfloat,  bfloat>;
+ #endif
++template [[host_name("kernel_cpy_contig_bf16e_f32")]]  kernel kernel_cpy_t kernel_cpy_contig_t_t<bf16e,   float>;
+ 
+ template [[host_name("kernel_cpy_f32_f32")]]   kernel kernel_cpy_t kernel_cpy_t_t<float,   float>;
+ template [[host_name("kernel_cpy_f32_f16")]]   kernel kernel_cpy_t kernel_cpy_t_t<float,   half>;
+ template [[host_name("kernel_cpy_f32_i32")]]   kernel kernel_cpy_t kernel_cpy_t_t<float,   int32_t>;
+ template [[host_name("kernel_cpy_i32_f32")]]   kernel kernel_cpy_t kernel_cpy_t_t<int32_t, float>;
+ template [[host_name("kernel_cpy_i32_i32")]]   kernel kernel_cpy_t kernel_cpy_t_t<int32_t, int32_t>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_cpy_f32_bf16")]]  kernel kernel_cpy_t kernel_cpy_t_t<float,   bfloat>;
+ #endif
++template [[host_name("kernel_cpy_f32_bf16e")]]  kernel kernel_cpy_t kernel_cpy_t_t<float,   bf16e>;
+ template [[host_name("kernel_cpy_f16_f32")]]   kernel kernel_cpy_t kernel_cpy_t_t<half,    float>;
+ template [[host_name("kernel_cpy_f16_f16")]]   kernel kernel_cpy_t kernel_cpy_t_t<half,    half>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_cpy_bf16_f32")]]  kernel kernel_cpy_t kernel_cpy_t_t<bfloat,  float>;
+ template [[host_name("kernel_cpy_bf16_bf16")]] kernel kernel_cpy_t kernel_cpy_t_t<bfloat,  bfloat>;
+ #endif
++template [[host_name("kernel_cpy_bf16e_f32")]]  kernel kernel_cpy_t kernel_cpy_t_t<bf16e,   float>;
+ 
+ template<short QK,
+          typename block_q,
+          void (*quantize_func)(device const float *, device block_q &)>
+ kernel void kernel_cpy_f32_q(
+         constant ggml_metal_kargs_cpy & args,
+         device const char * src0,
+         device char * dst,
+@@ -12428,16 +12480,17 @@
+ typedef decltype(kernel_get_rows_f<float, float>) get_rows_f_t;
+ 
+ template [[host_name("kernel_get_rows_f32")]]  kernel get_rows_f_t kernel_get_rows_f<float, float>;
+ template [[host_name("kernel_get_rows_f16")]]  kernel get_rows_f_t kernel_get_rows_f<half,  float>;
+ template [[host_name("kernel_get_rows_i32")]]  kernel get_rows_f_t kernel_get_rows_f<int32_t, int32_t>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_get_rows_bf16")]] kernel get_rows_f_t kernel_get_rows_f<bfloat, float>;
+ #endif
++template [[host_name("kernel_get_rows_bf16e")]] kernel get_rows_f_t kernel_get_rows_f<bf16e, float>;
+ 
+ typedef decltype(kernel_get_rows_q<block_q4_0, 2, dequantize_q4_0>) get_rows_q_t;
+ 
+ template [[host_name("kernel_get_rows_q1_0")]]    kernel get_rows_q_t kernel_get_rows_q<block_q1_0,    8, dequantize_q1_0>;
+ template [[host_name("kernel_get_rows_q2_0")]]    kernel get_rows_q_t kernel_get_rows_q<block_q2_0,    4, dequantize_q2_0>;
+ template [[host_name("kernel_get_rows_q4_0")]]    kernel get_rows_q_t kernel_get_rows_q<block_q4_0,    2, dequantize_q4_0>;
+ template [[host_name("kernel_get_rows_q4_1")]]    kernel get_rows_q_t kernel_get_rows_q<block_q4_1,    2, dequantize_q4_1>;
+ template [[host_name("kernel_get_rows_q5_0")]]    kernel get_rows_q_t kernel_get_rows_q<block_q5_0,    2, dequantize_q5_0>;
+@@ -14281,16 +14334,17 @@
+ template [[host_name("kernel_mul_mm_iq1_s_f32_w")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq1_s,   QK_NL, dequantize_iq1_s,   float,  float4x4,  float, float2x4, 8>;
+ template [[host_name("kernel_mul_mm_q4_K_f32_w")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_K,    QK_NL, dequantize_q4_K,    float,  float4x4,  float, float2x4, 8>;
+ 
+ template [[host_name("kernel_mul_mm_f32_f32")]]     kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   float4x4,      1,     dequantize_f32,     float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_f16_f32")]]     kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   half4x4,       1,     dequantize_f16,     half,   half4x4,   float, float2x4>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mm_bf16_f32")]]    kernel mul_mm_t kernel_mul_mm<bfloat, bfloat4x4, simdgroup_bfloat8x8, bfloat, bfloat2x4, simdgroup_bfloat8x8, bfloat4x4,     1,     dequantize_bf16,    bfloat, bfloat4x4, float, float2x4>;
+ #endif
++template [[host_name("kernel_mul_mm_bf16e_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   bf16e4x4,      1,     dequantize_bf16e,   float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_q1_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q1_0,    8,     dequantize_q1_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_q2_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_0,    4,     dequantize_q2_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_q4_1_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_1,    2,     dequantize_q4_1,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_q5_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_0,    2,     dequantize_q5_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_q5_1_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_1,    2,     dequantize_q5_1,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_q8_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q8_0,    2,     dequantize_q8_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_mxfp4_f32")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  float, float2x4>;
+@@ -14342,16 +14396,17 @@
+ 
+ typedef decltype(kernel_mul_mm_id<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_id;
+ 
+ template [[host_name("kernel_mul_mm_id_f32_f32")]]     kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   float4x4,      1,     dequantize_f32,     float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_f16_f32")]]     kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   half4x4,       1,     dequantize_f16,     half,   half4x4,   float, float2x4>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mm_id_bf16_f32")]]    kernel mul_mm_id kernel_mul_mm_id<bfloat, bfloat4x4, simdgroup_bfloat8x8, bfloat, bfloat2x4, simdgroup_bfloat8x8, bfloat4x4,     1,     dequantize_bf16,    bfloat, bfloat4x4, float, float2x4>;
+ #endif
++template [[host_name("kernel_mul_mm_id_bf16e_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   bf16e4x4,      1,     dequantize_bf16e,   float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q1_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q1_0,    8,     dequantize_q1_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q2_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_0,    4,     dequantize_q2_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q4_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q4_1_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_1,    2,     dequantize_q4_1,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q5_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_0,    2,     dequantize_q5_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q5_1_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_1,    2,     dequantize_q5_1,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q8_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q8_0,    2,     dequantize_q8_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_mxfp4_f32")]]   kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  float, float2x4>;
+@@ -14540,21 +14595,23 @@
+ 
+ typedef decltype(kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<float, float4, float, float4>>>) kernel_mul_mv_id_4_t;
+ 
+ template [[host_name("kernel_mul_mv_id_f32_f32")]]     kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<float, float>>>;
+ template [[host_name("kernel_mul_mv_id_f16_f32")]]     kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<half,  float>>>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mv_id_bf16_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<bfloat, float>>>;
+ #endif
++template [[host_name("kernel_mul_mv_id_bf16e_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<bf16e, float>>>;
+ template [[host_name("kernel_mul_mv_id_f32_f32_4")]]   kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<float, float4, float, float4>>>;
+ template [[host_name("kernel_mul_mv_id_f16_f32_4")]]   kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<half,  half4,  float, float4>>>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mv_id_bf16_f32_4")]]  kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<bfloat, bfloat4, float, float4>>>;
+ #endif
++template [[host_name("kernel_mul_mv_id_bf16e_f32_4")]]  kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<bf16e, bf16e4, float, float4>>>;
+ 
+ template [[host_name("kernel_mul_mv_id_q8_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q8_0_f32_impl<N_R0_Q8_0>>>;
+ 
+ template [[host_name("kernel_mul_mv_id_q1_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q1_0_f32_impl<N_R0_Q1_0>>>;
+ template [[host_name("kernel_mul_mv_id_q2_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q2_0_f32_impl<N_R0_Q2_0>>>;
+ template [[host_name("kernel_mul_mv_id_q4_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0>>>;
+ template [[host_name("kernel_mul_mv_id_q4_1_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q4_1, N_R0_Q4_1>>>;
+ template [[host_name("kernel_mul_mv_id_q5_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q5_0, N_R0_Q5_0>>>;
+--- old/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ new/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -73,23 +73,53 @@
+     snprintf(name, 256, "%s", base);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+     }
+ 
+     return res;
++}
++
++// bf16 read as raw bits and widened by hand. Cards without the Metal 3 family have no bfloat
++// at all, and the ones that do have no arithmetic for it either, so the manual path is also
++// the faster one wherever the simdgroup matrix unit is missing.
++static bool ggml_metal_bf16_manual(ggml_metal_library_t lib) {
++    const struct ggml_metal_device_props * props =
++        ggml_metal_device_get_props(ggml_metal_library_get_device(lib));
++
++    // escape hatch for the A/B; a card with no bfloat has no other path
++    static const bool off = getenv("TOSH_BF16_MANUAL_DISABLE") != nullptr;
++
++    return !props->has_bfloat || (!props->has_simdgroup_mm && !off);
++}
++
++static const char * ggml_metal_tname(ggml_metal_library_t lib, ggml_type t) {
++    if (t == GGML_TYPE_BF16 && ggml_metal_bf16_manual(lib)) {
++        return "bf16e";
++    }
++
++    return ggml_type_name(t);
++}
++
++// Only the pairs the manual kernels are instantiated for: bf16 weights against f32.
++static const char * ggml_metal_tname_pair(ggml_metal_library_t lib, ggml_type t, ggml_type other) {
++    if (t == GGML_TYPE_BF16 && other == GGML_TYPE_F32) {
++        return ggml_metal_tname(lib, t);
++    }
++
++    return ggml_type_name(t);
+ }
+ 
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_cpy(ggml_metal_library_t lib, ggml_type tsrc, ggml_type tdst, bool contig) {
+     char base[256];
+     char name[256];
+ 
+-    snprintf(base, 256, "kernel_cpy_%s%s_%s", contig ? "contig_" : "", ggml_type_name(tsrc), ggml_type_name(tdst));
++    snprintf(base, 256, "kernel_cpy_%s%s_%s", contig ? "contig_" : "", ggml_metal_tname_pair(lib, tsrc, tdst), ggml_metal_tname_pair(lib, tdst, tsrc));
+     snprintf(name, 256, "%s", base);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+     }
+ 
+     return res;
+@@ -144,17 +174,17 @@
+ 
+     return res;
+ }
+ 
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_get_rows(ggml_metal_library_t lib, ggml_type tsrc) {
+     char base[256];
+     char name[256];
+ 
+-    snprintf(base, 256, "kernel_get_rows_%s", ggml_type_name(tsrc));
++    snprintf(base, 256, "kernel_get_rows_%s", ggml_metal_tname(lib, tsrc));
+     snprintf(name, 256, "%s", base);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+     }
+ 
+     return res;
+@@ -783,17 +813,17 @@
+         getenv("TOSH_EXT_LDS_DISABLE") == nullptr &&
+         nr0 > 1 && r1ptg >= 3;
+ 
+     if (!no_raw && tsrc0 == GGML_TYPE_Q4_K) {
+         snprintf(tname, sizeof(tname), use_lds ? "%s_raw_lds" : "%s_raw", ggml_type_name(tsrc0));
+     } else if (!no_raw && is_khdr) {
+         snprintf(tname, sizeof(tname), "%s_hdr", ggml_type_name(tsrc0));
+     } else {
+-        snprintf(tname, sizeof(tname), "%s", ggml_type_name(tsrc0));
++        snprintf(tname, sizeof(tname), "%s", ggml_metal_tname(lib, tsrc0));
+     }
+ 
+     if (nr0 > 1) {
+         snprintf(base, 256, "kernel_mul_mv_ext_%s_%s_r1_%d_nr0_%d", tname, ggml_type_name(tsrc1), r1ptg, nr0);
+     } else {
+         snprintf(base, 256, "kernel_mul_mv_ext_%s_%s_r1_%d", tname, ggml_type_name(tsrc1), r1ptg);
+     }
+     snprintf(name, 256, "%s_nsg=%d_nxpsg=%d_ne12=%d_r2=%d_r3=%d", base, nsg, nxpsg, ne12, r2, r3);
+@@ -932,17 +962,17 @@
+         }
+     }
+ 
+     // attention matmuls read a permuted KV cache view and can exceed half range in the packed
+     // accumulator; bfloat has no native arithmetic here, so float is faster for it too
+     const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
+                          getenv("TOSH_MM_ACC_F32_DISABLE") == nullptr;
+ 
+-    snprintf(base, 256, "kernel_mul_mm_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), wide ? "_w" : "");
++    snprintf(base, 256, "kernel_mul_mm_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "");
+     snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d",
+              base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual + 2*narrow, use_mm_double_buffer, acc_f32);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_bool(cv, narrow, FC_MUL_MM + 7);
+@@ -1234,17 +1264,17 @@
+         }
+     }
+ 
+     // q6_K's 210-byte block leaves the compiler assuming byte alignment, so it reads its quant
+     // arrays a byte at a time; an even stride lets the kernel read them two bytes at a time
+     const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
+                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
+ 
+-    snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), suffix);
++    snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
+     snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d", base, nsg, ne12, r2, r3, nw, row4);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, (int16_t) ne12, FC_MUL_MV + 2);
+@@ -1338,17 +1368,17 @@
+             case GGML_TYPE_IQ1_M:
+             case GGML_TYPE_IQ2_XXS:
+             case GGML_TYPE_IQ2_XS:
+             case GGML_TYPE_IQ3_XXS: break;
+             default: wide = false; break;
+         }
+     }
+ 
+-    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), wide ? "_w" : "");
++    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "");
+     snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d", base, bc_inp, use_mm_manual, acc_f32);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_bool(cv, bc_inp,        FC_MUL_MM + 0);
+         ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
+@@ -1558,17 +1588,17 @@
+         if (helper) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float)*nr0; }
+         else if (sr) { nw = (int16_t) props_id->simd_width; }
+         else if (lut) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float); }
+     }
+ 
+     const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
+                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
+ 
+-    snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), suffix);
++    snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
+     snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d", base, nsg, nw, row4);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg, FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 2);
+--- old/ggml/src/ggml-metal/ggml-metal-device.m
++++ new/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1451,24 +1451,49 @@
+ 
+ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_tensor * op) {
+     const bool has_simdgroup_mm        = dev->props.has_simdgroup_mm;
+     const bool has_simdgroup_reduction = dev->props.has_simdgroup_reduction;
+     const bool use_mm_manual           = dev->props.use_mm_manual;
+     const bool wave64_decode           = dev->props.wave64_decode;
+     const bool has_bfloat              = dev->props.has_bfloat;
+ 
++    // No bfloat in Metal: bf16 runs on the kernels that widen the raw bits by hand, and only
++    // the ops that have one. Anything else has to stay off the device, weights included: a
++    // pre-allocated tensor the scheduler cannot place aborts the whole load.
+     if (!has_bfloat) {
+-        if (op->type == GGML_TYPE_BF16) {
+-            return false;
++        bool bf16 = op->type == GGML_TYPE_BF16;
++        for (size_t i = 0, n = 3; i < n; ++i) {
++            bf16 = bf16 || (op->src[i] != NULL && op->src[i]->type == GGML_TYPE_BF16);
+         }
+ 
+-        for (size_t i = 0, n = 3; i < n; ++i) {
+-            if (op->src[i] != NULL && op->src[i]->type == GGML_TYPE_BF16) {
+-                return false;
++        if (bf16) {
++            switch (op->op) {
++                case GGML_OP_NONE:
++                case GGML_OP_RESHAPE:
++                case GGML_OP_VIEW:
++                case GGML_OP_PERMUTE:
++                case GGML_OP_TRANSPOSE:
++                    return true;
++                case GGML_OP_GET_ROWS:
++                    return op->src[0]->type == GGML_TYPE_BF16 && op->type == GGML_TYPE_F32;
++                case GGML_OP_MUL_MAT:
++                case GGML_OP_MUL_MAT_ID:
++                    // the emulated set covers bf16 weights against f32 activations
++                    if (op->src[0]->type != GGML_TYPE_BF16 || op->src[1]->type != GGML_TYPE_F32) {
++                        return false;
++                    }
++                    break;
++                case GGML_OP_CPY:
++                case GGML_OP_CONT:
++                case GGML_OP_DUP:
++                    return (op->src[0]->type == GGML_TYPE_F32  && op->type == GGML_TYPE_BF16) ||
++                           (op->src[0]->type == GGML_TYPE_BF16 && op->type == GGML_TYPE_F32);
++                default:
++                    return false;
+             }
+         }
+     }
+ 
+     switch (op->op) {
+         case GGML_OP_SCALE:
+         case GGML_OP_FILL:
+         case GGML_OP_CLAMP:

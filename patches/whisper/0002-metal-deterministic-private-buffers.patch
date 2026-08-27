@@ -1,0 +1,32 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -171,11 +171,9 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+
+     res->use_fusion      = getenv("GGML_METAL_FUSION_DISABLE") == nil;
+
+-    // discrete GPUs (AMD) corrupt their output with a concurrent encoder: the driver does
+-    // not honour the memory barrier. GGML_METAL_CONCURRENCY_ENABLE forces it back on to test.
+-    res->use_concurrency = props_dev->has_unified_memory
+-        ? getenv("GGML_METAL_CONCURRENCY_DISABLE") == nil
+-        : getenv("GGML_METAL_CONCURRENCY_ENABLE")  != nil;
++    // Match ToshLLM's deterministic Metal policy across every engine.
++    // Concurrency is intentionally not configurable.
++    res->use_concurrency = false;
+
+     {
+         const char * val = getenv("GGML_METAL_GRAPH_DEBUG");
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1063,10 +1063,6 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
+ #endif
+
+             dev->props.use_shared_buffers = dev->props.has_unified_memory;
+-#if TARGET_OS_OSX
+-            // In case of eGPU, shared memory may be preferable.
+-            dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
+-#endif
+             if (getenv("GGML_METAL_SHARED_BUFFERS_DISABLE") != NULL) {
+                 dev->props.use_shared_buffers = false;
+             }

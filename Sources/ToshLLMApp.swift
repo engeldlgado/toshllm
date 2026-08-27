@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler {
             ServerManager.shared.stopAllImmediately()
+            SpeechDictationController.shared.shutdown()
+            AppleSpeechDictationController.shared.shutdown()
+            AudioStudioController.shared.shutdown()
             NSApp.terminate(nil)
         }
         source.resume()
@@ -26,6 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ServerManager.shared.stopAllImmediately()
+        SpeechDictationController.shared.shutdown()
+        AppleSpeechDictationController.shared.shutdown()
+        AudioStudioController.shared.shutdown()
         ImageGenPool.cleanupOutputsIfEnabled()
     }
 }

@@ -19,6 +19,10 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.serverBinary) private var serverBinary = ""
     @AppStorage(SettingsKeys.faAmd) private var faAmd = ServerSettings.defaultFaAmd
     @AppStorage(SettingsKeys.prefetchExperts) private var prefetchExperts = true
+    @AppStorage(SettingsKeys.dynamicMoe) private var dynamicMoe = false
+    @AppStorage(SettingsKeys.dynamicMoeSlots) private var dynamicMoeSlots = 8
+    @AppStorage(SettingsKeys.dynamicMoePrefetch) private var dynamicMoePrefetch = 4
+    @AppStorage(SettingsKeys.dynamicMoePolicy) private var dynamicMoePolicy = "cache"
     @AppStorage(SettingsKeys.persistCache) private var persistCache = false
     @AppStorage(SettingsKeys.port) private var port = 8080
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
@@ -117,6 +121,8 @@ struct SettingsView: View {
         ServerSettings.mmprojPath(forModel: modelPath) != nil
     }
     private var splitSelection: [Int] { ServerSettings.gpuList(fromCSV: gpuListCSV) }
+    /// macOS exposes the bridge nowhere else: linked GPUs share a Metal peer group.
+    private var hasPeerLink: Bool { !hardware.peerGroups.isEmpty }
     private func toggleSplitGPU(_ i: Int) {
         var sel = Set(splitSelection)
         if sel.contains(i) { sel.remove(i) } else { sel.insert(i) }
@@ -124,6 +130,82 @@ struct SettingsView: View {
     }
     private var kvNeedsFlashAttention: Bool { cacheTypeK != "f16" || cacheTypeV != "f16" }
     private var amdFlashActive: Bool { faAmd }
+    private var dynamicMoeUIUnlocked: Bool {
+        ShellWords.split(extraArgs).contains("TOSH_MOE_UI=1")
+    }
+    private var dynamicMoeAutoRoute: DynamicMoeAutoRoute {
+        ServerSettings.fromDefaults().dynamicMoeAutoRoute
+    }
+    private var dynamicMoeModelInfo: DynamicMoeModelInfo? {
+        ServerSettings.fromDefaults().dynamicMoeModelInfo
+    }
+    private var dynamicMoeProfile: DynamicMoeOptimizationProfile? {
+        ServerSettings.fromDefaults().dynamicMoeOptimizationProfile
+    }
+    private var dynamicMoeSlotPlan: DynamicMoeSlotPlan? {
+        ServerSettings.fromDefaults().dynamicMoeSlotPlan()
+    }
+    private var effectiveDynamicMoeSlots: Int {
+        ServerSettings.fromDefaults().effectiveDynamicMoeSlots
+    }
+    private var dynamicMoeSlotBinding: Binding<Int> {
+        Binding(
+            get: { effectiveDynamicMoeSlots },
+            set: { v in
+                guard let info = dynamicMoeModelInfo else { dynamicMoeSlots = v; return }
+                let floor = min(max(info.activeExpertCount, 1), info.expertCount)
+                dynamicMoeSlots = min(max(v, floor), info.expertCount)
+            })
+    }
+    private func gibLabel(_ bytes: UInt64) -> String {
+        String(format: "%.2f GiB", Double(bytes) / 1_073_741_824)
+    }
+    private var dynamicMoeIsEffective: Bool {
+        dynamicMoe && dynamicMoeUIUnlocked
+            && (dynamicMoePolicy != "auto" || dynamicMoeAutoRoute == .cache)
+    }
+    private var dynamicMoeAutoMessage: String {
+        switch dynamicMoeAutoRoute {
+        case .cache:
+            if let profile = dynamicMoeProfile {
+                return profile.route == .split
+                    ? loc.t("Auto usa el perfil optimizado dividido K\(profile.slots) + ring\(profile.ringSlots). El mapa seguirá adaptándose durante el uso.",
+                            "Auto uses the optimized split profile K\(profile.slots) + ring\(profile.ringSlots). The map keeps adapting during use.")
+                    : loc.t("Auto usa el perfil directo K\(profile.slots), porque el banco de expertos cabe en la ventana Metal.",
+                            "Auto uses the direct K\(profile.slots) profile because the expert bank fits in the Metal window.")
+            }
+            return loc.t("Auto eligió caché dinámica: el modelo no cabe con margen en VRAM y hay RAM suficiente.",
+                         "Auto selected dynamic cache: the model does not fit in VRAM with headroom and enough RAM is available.")
+        case .normalDense:
+            return loc.t("Auto eligió normal: el modelo no es MoE.", "Auto selected normal: the model is not MoE.")
+        case .normalFitsVRAM:
+            return loc.t("Auto eligió normal: el modelo cabe en VRAM con el margen configurado.",
+                  "Auto selected normal: the model fits in VRAM with the configured headroom.")
+        case .normalInsufficientRAM:
+            return loc.t("Auto eligió normal: no hay RAM física suficiente para fijar el banco de expertos.",
+                  "Auto selected normal: there is not enough physical RAM to pin the expert bank.")
+        case .normalUnsupportedGPU:
+            return loc.t("Auto eligió normal: se necesita una GPU discreta compatible.",
+                  "Auto selected normal: a compatible discrete GPU is required.")
+        case .normalMissingModel:
+            return loc.t("Auto espera un modelo válido para decidir.", "Auto is waiting for a valid model before deciding.")
+        case .normalSplitOrRouter:
+            return loc.t("Auto eligió normal: Dynamic MoE aún no admite split ni router.",
+                  "Auto selected normal: Dynamic MoE does not support split or router yet.")
+        case .normalMissingMetadata:
+            return loc.t("Auto eligió normal: el GGUF no declara capas, expertos totales y expertos activos.",
+                  "Auto selected normal: the GGUF does not declare layers, total experts, and active experts.")
+        case .normalInsufficientVRAM:
+            return loc.t("Auto eligió normal: ni la caché mínima de expertos cabe con los márgenes configurados.",
+                  "Auto selected normal: even the minimum expert cache does not fit with the configured headroom.")
+        case .normalNoCacheBenefit:
+            return loc.t("Auto eligió normal: todos los expertos de la capa están activos y la caché no reduciría VRAM.",
+                  "Auto selected normal: every expert in the layer is active, so the cache would not reduce VRAM.")
+        case .normalOversizedHostBank:
+            return loc.t("Auto eligió normal: el banco de expertos supera la ventana Metal validada para esta GPU.",
+                  "Auto selected normal: the expert bank exceeds the validated Metal window for this GPU.")
+        }
+    }
 
     private var engineSelection: Binding<String> {
         Binding(
@@ -135,6 +217,7 @@ struct SettingsView: View {
                     faAmd = ServerSettings.defaultFaAmd
                 } else {
                     faAmd = false
+                    dynamicMoe = false
                 }
             })
     }
@@ -330,6 +413,8 @@ struct SettingsView: View {
                 }
             }
 
+            SpeechModelsSettingsSection()
+
             Section(loc.t("Perfiles", "Profiles")) {
                 HStack {
                     TextField(loc.t("Nombre del perfil (p. ej. Código, Chat rápido)",
@@ -432,9 +517,15 @@ struct SettingsView: View {
                                         "Hands data from one GPU to the other without draining both queues on every copy. It changes nothing when splitting by layers; when splitting by tensors it is most of the generation speed (measured +59% on two GPUs). Turn it off only to diagnose."))
                         Toggle(loc.t("Infinity Fabric Link entre GPUs (experimental)",
                                      "Infinity Fabric Link between GPUs (experimental)"), isOn: $mgpuPeer)
+                            .disabled(!hasPeerLink)
                             .infoTip(loc.t("Si dos GPUs del reparto comparten un puente Infinity Fabric (las dos mitades de una W6800X Duo o Vega II Duo), copia las activaciones directamente entre ellas en vez de pasar por la RAM del sistema. Acelera el procesamiento del prompt. Repartiendo por tensores se usa solo donde gana, leyendo el prompt, y el traspaso rápido se queda con la generación. Si el equipo no lo soporta, la copia vuelve sola al método seguro.",
                                         "If two GPUs in the split share an Infinity Fabric bridge (the two halves of a W6800X Duo or Vega II Duo, or two cards joined by the external bridge), copies activations directly between them instead of through system RAM. Speeds up prompt processing. When splitting by tensors it is used only where it wins, reading the prompt, and the fast hand-off keeps generation. If the machine doesn't support it, the copy falls back to the safe path on its own."))
-                        if mgpuPeer && splitMode != "tensor" {
+                        if !hasPeerLink {
+                            Label(loc.t("No se detecta ningún puente entre estas GPUs, así que no hay nada que activar. Metal las pondría en un mismo grupo de pares si lo hubiera.",
+                                        "No bridge is detected between these GPUs, so there is nothing to turn on. Metal would put them in the same peer group if there were one."),
+                                  systemImage: "info.circle")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if mgpuPeer && splitMode != "tensor" {
                             Label(loc.t("Con reparto por capas no hace nada: el puente acelera la reducción que solo existe repartiendo por tensores.",
                                         "With a layer split it does nothing: the bridge speeds up the reduction that only exists when splitting by tensors."),
                                   systemImage: "info.circle")
@@ -463,9 +554,87 @@ struct SettingsView: View {
                             ncmoe = v
                             ServerSettings.rememberNcmoe(v, forModel: modelPath)
                         }), in: 0...99)
-                    .disabled(!modelIsMoE)
                     .infoTip(loc.t("Solo modelos MoE: capas cuyos 'expertos' viven en RAM y los procesa el CPU. Se ajusta solo al elegir modelo; súbelo si la VRAM se satura, bájalo si te sobra. (Deshabilitado en modelos densos, donde el motor lo ignora.)",
                                 "MoE models only: layers whose 'experts' live in RAM and run on the CPU. Auto-set when picking a model; raise if VRAM saturates, lower if you have headroom. (Disabled on dense models, where the engine ignores it.)"))
+                    .disabled(!modelIsMoE || dynamicMoeIsEffective)
+                if engineSelection.wrappedValue != "custom" && dynamicMoeUIUnlocked {
+                    Toggle(loc.t("Dynamic MoE (experimental)", "Dynamic MoE (experimental)"),
+                           isOn: $dynamicMoe)
+                        .disabled(!modelIsMoE)
+                        .infoTip(loc.t("Mantiene todos los expertos cuantizados en RAM y una caché pequeña en VRAM. Está apagado por defecto. Al activarlo usa ncmoe 1, mlock y el override Metal requeridos; desactívalo para volver al camino normal con el mismo binario.",
+                                    "Keeps all quantized experts in RAM and a small cache in VRAM. It is off by default. Enabling it applies ncmoe 1, mlock, and the required Metal override; turn it off to return to the normal path with the same binary."))
+                    if dynamicMoe {
+                        Picker(loc.t("Política", "Policy"), selection: $dynamicMoePolicy) {
+                            Text(loc.t("Automática", "Automatic")).tag("auto")
+                            Text(loc.t("Caché manual", "Manual cache")).tag("cache")
+                        }
+                        .infoTip(loc.t("Auto reutiliza el perfil medido por Optimizar dMoE. Puede elegir la ruta directa cuando el banco cabe o la ruta dividida para modelos grandes. Sin perfil usa una configuración conservadora; Caché manual permite experimentar.",
+                                    "Auto reuses the profile measured by Optimize dMoE. It can choose the direct route when the bank fits or the split route for large models. Without a profile it uses a conservative configuration; Manual cache remains available for experiments."))
+                        if dynamicMoePolicy == "auto" {
+                            Label(dynamicMoeAutoMessage,
+                                  systemImage: dynamicMoeAutoRoute == .cache ? "bolt.horizontal.fill" : "checkmark.shield")
+                                .font(.caption)
+                                .foregroundStyle(dynamicMoeAutoRoute == .cache ? .orange : .secondary)
+                            if dynamicMoeAutoRoute == .cache, let plan = dynamicMoeSlotPlan {
+                                Label(loc.t("Auto usa K\(plan.automaticSlots) de \(plan.maximumSlots) expertos por capa (top-\(plan.minimumSlots)); estimado \(gibLabel(plan.estimatedVRAMBytes(slots: plan.automaticSlots))) de VRAM.",
+                                            "Auto uses K\(plan.automaticSlots) of \(plan.maximumSlots) experts per layer (top-\(plan.minimumSlots)); estimated \(gibLabel(plan.estimatedVRAMBytes(slots: plan.automaticSlots))) VRAM."),
+                                      systemImage: "memorychip")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        } else {
+                            if let info = dynamicMoeModelInfo {
+                                HStack {
+                                    Text(loc.t("Ranuras en VRAM (K, de \(info.expertCount))",
+                                               "VRAM slots (K, of \(info.expertCount))"))
+                                    Spacer()
+                                    TextField("", value: dynamicMoeSlotBinding,
+                                              format: .number.grouping(.never))
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 64)
+                                        .multilineTextAlignment(.trailing)
+                                    Stepper("", value: dynamicMoeSlotBinding,
+                                            in: info.activeExpertCount...info.expertCount)
+                                        .labelsHidden()
+                                }
+                                    .infoTip(loc.t("K es por capa. El mínimo es el número de expertos activos por token (top-\(info.activeExpertCount)) y el máximo es el total real del GGUF (\(info.expertCount)).",
+                                                        "K is per layer. The minimum is the experts active per token (top-\(info.activeExpertCount)); the maximum is the GGUF's real total (\(info.expertCount))."))
+                                if let plan = dynamicMoeSlotPlan {
+                                    let overBudget = effectiveDynamicMoeSlots > plan.recommendedMaximumSlots
+                                    Label(loc.t("Estimación: \(gibLabel(plan.estimatedVRAMBytes(slots: effectiveDynamicMoeSlots))) · máximo recomendado K\(plan.recommendedMaximumSlots).",
+                                                "Estimate: \(gibLabel(plan.estimatedVRAMBytes(slots: effectiveDynamicMoeSlots))) · recommended maximum K\(plan.recommendedMaximumSlots)."),
+                                          systemImage: overBudget ? "exclamationmark.triangle.fill" : "memorychip")
+                                        .font(.caption)
+                                        .foregroundStyle(overBudget ? .orange : .secondary)
+                                } else {
+                                    Label(loc.t("La caché mínima top-\(info.activeExpertCount) supera el presupuesto estimado; el modo manual permite probarla, pero puede agotar la VRAM.",
+                                                "The minimum top-\(info.activeExpertCount) cache exceeds the estimated budget; manual mode still allows testing it, but it may exhaust VRAM."),
+                                          systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
+                            } else {
+                                Label(loc.t("Este GGUF no declara los metadatos necesarios para calcular K de forma segura.",
+                                            "This GGUF does not declare the metadata needed to calculate K safely."),
+                                      systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption).foregroundStyle(.orange)
+                            }
+                            Picker(loc.t("Prefetch de Dynamic MoE", "Dynamic MoE prefetch"),
+                                   selection: $dynamicMoePrefetch) {
+                                ForEach([0, 1, 2, 3, 4, 5, 6, 8, 12, 16], id: \.self) { value in
+                                    Text("\(value)").tag(value)
+                                }
+                            }
+                            .infoTip(loc.t("Número de bancos anticipados durante el prompt. Cuatro fue el óptimo medido para K8; los demás valores sirven para repetir el barrido desde Benchmarks.",
+                                        "Number of banks prefetched during prompt processing. Four was the measured optimum for K8; the other values let you repeat the sweep from Benchmarks."))
+                        }
+                        Label(dynamicMoePolicy == "auto"
+                                ? loc.t("Auto: perfil medido y adaptación continua", "Auto: measured profile with continuous adaptation")
+                                : loc.t("Configuración efectiva: cache · mlock · NCB8",
+                                        "Effective configuration: cache · mlock · NCB8"),
+                              systemImage: "flask.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
                 Stepper(loc.t("Reserva de VRAM: \(vramReserve) MB", "VRAM reserve: \(vramReserve) MB"),
                         value: $vramReserve, in: 256...4096, step: 256)
                     .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. 1024 MB es un margen seguro.",
@@ -677,8 +846,8 @@ struct SettingsView: View {
                                 "Serves /v1/embeddings for RAG clients (e.g. Obsidian Copilot), which otherwise get a 501 error. Note: llama-server dedicates the process to embeddings, so enable it with an embedding model; to keep chatting, add a second server on Home with this option."))
                 TextField(loc.t("Argumentos extra", "Extra arguments"), text: $extraArgs)
                     .font(.system(.caption, design: .monospaced))
-                    .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios (para opciones que la app no expone). Un token con forma CLAVE=VALOR se aplica como variable de entorno del motor, no como argumento. Ej.: en tarjetas AMD GCN/Vega (Vega 56/64, RX 580, Radeon VII) que dan texto corrupto, escribe GGML_METAL_WAVE64_SAFEMODE=1 para forzar salida coherente (más lento).",
-                                "Additional llama-server arguments, space-separated (for options the app doesn't expose). A token shaped like KEY=VALUE is applied as an engine environment variable instead of an argument. E.g. on AMD GCN/Vega cards (Vega 56/64, RX 580, Radeon VII) that produce garbled text, type GGML_METAL_WAVE64_SAFEMODE=1 to force coherent output (slower)."))
+                    .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios. Un token CLAVE=VALOR se aplica como variable de entorno. Para mostrar la configuración privada de Dynamic MoE escribe TOSH_MOE_UI=1. En tarjetas GCN/Vega con texto corrupto, GGML_METAL_WAVE64_SAFEMODE=1 fuerza la ruta segura.",
+                                "Additional llama-server arguments, space-separated. A KEY=VALUE token is applied as an environment variable. To reveal the private Dynamic MoE settings, enter TOSH_MOE_UI=1. On GCN/Vega cards with corrupted text, GGML_METAL_WAVE64_SAFEMODE=1 forces the safe path."))
                 Text(loc.t("Los cambios se aplican al reiniciar el servidor.",
                            "Changes take effect when the server restarts."))
                     .font(.caption).foregroundStyle(.secondary)

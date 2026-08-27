@@ -239,7 +239,7 @@ final class SearchStore: ObservableObject {
         request.setValue("bytes=0-\(headerProbeBytes - 1)", forHTTPHeaderField: "Range")
         guard let (data, _) = try? await URLSession.shared.data(for: request),
               let metadata = GGUFMetadataCache.parse(from: data) else { return nil }
-        return (metadata.uint32(forSuffix: "expert_count") ?? 0) > 0
+        return metadata.isMoE
     }
 
     /// Generous: measured GGUFs put expert_count ~1.5 KB in.

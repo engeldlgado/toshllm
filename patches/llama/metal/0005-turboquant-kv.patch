@@ -111,6 +111,30 @@
  )
  
  target_include_directories(ggml-base PRIVATE .)
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -981,16 +981,21 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
+             case GGML_OP_GATED_LINEAR_ATTN:
+             case GGML_OP_RWKV_WKV7:
+             case GGML_OP_SOLVE_TRI: {
+                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+             } break;
+             case GGML_OP_GATED_DELTA_NET: {
+                 split_state = handle_gated_delta_net(src_ss);
+             } break;
++            case GGML_OP_TURBO_WHT: {
++                // the rotation stays inside each group of a row, so rows split but ne0 cannot
++                GGML_ASSERT(tensor->src[1] == nullptr || src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED);
++                split_state = handle_per_row(src_ss);
++            } break;
+             case GGML_OP_DSV4_HC_COMB:
+             case GGML_OP_DSV4_HC_PRE:
+             case GGML_OP_DSV4_HC_POST: {
+                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+             } break;
+             case GGML_OP_UNARY: {
+                 split_state = handle_generic(src_ss, /*scalar_only =*/ false);
+             } break;
 --- a/ggml/src/ggml-common.h
 +++ b/ggml/src/ggml-common.h
 @@ -281,17 +281,106 @@

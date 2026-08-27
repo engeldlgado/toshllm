@@ -1,0 +1,505 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 906ee2896..f6b5ebdfd 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -7,6 +7,10 @@
+ #import "ggml-metal-common.h"
+ #import "ggml-metal-ops.h"
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++#include "tosh-moe.h"
++#endif
++
+ #import <Foundation/Foundation.h>
+ 
+ #import <Metal/Metal.h>
+@@ -44,6 +48,18 @@ struct ggml_metal {
+     int prefetch_stage_count;
+     int prefetch_stage_cur;
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++    struct tosh_moe_cache * bounded_moe_cache;
++    int bounded_moe_layers;
++    int bounded_moe_experts;
++    int bounded_moe_slots;
++    id<MTLBuffer> bounded_moe_ids_readback;
++    id<MTLBuffer> bounded_moe_ids_remapped;
++    id<MTLBuffer> bounded_moe_expert_stage;
++    size_t bounded_moe_ids_cap;
++    size_t bounded_moe_stage_cap;
++#endif
++
+     ggml_metal_event_t ev_cpy; // for async copies
+ 
+     // Synchronization and resources shared by both cross-device copy paths.
+@@ -350,6 +366,13 @@ void ggml_metal_free(ggml_metal_t ctx) {
+         [ctx->prefetch_stages[i] release];
+     }
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++    tosh_moe_cache_free(ctx->bounded_moe_cache);
++    [ctx->bounded_moe_ids_readback release];
++    [ctx->bounded_moe_ids_remapped release];
++    [ctx->bounded_moe_expert_stage release];
++#endif
++
+     for (int i = 0; i < ctx->n_xlinks; ++i) {
+         if (ctx->xlinks[i].seq > 0) {
+             [ctx->xlinks[i].ev_done waitUntilSignaledValue:ctx->xlinks[i].seq timeoutMS:10000];
+@@ -1153,6 +1176,341 @@ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, co
+     return true;
+ }
+ 
++static bool ggml_metal_moe_encode_range(
++        ggml_metal_t ctx, struct ggml_cgraph * gf, id<MTLCommandBuffer> cmd_buf, int start, int end) {
++    if (start >= end) {
++        return true;
++    }
++
++    ggml_metal_op_t ctx_op = ggml_metal_op_init(
++        ctx->dev, (ggml_metal_cmd_buf_t) cmd_buf, gf, start, end,
++        ctx->use_fusion, false, false, ctx->debug_graph, ctx->debug_fusion);
++
++    for (int idx = 0; idx < ggml_metal_op_n_nodes(ctx_op); ++idx) {
++        const int res = ggml_metal_op_encode(ctx_op, idx);
++        if (res == 0) {
++            ggml_metal_op_free(ctx_op);
++            return false;
++        }
++        idx += res - 1;
++    }
++    ggml_metal_op_free(ctx_op);
++    return true;
++}
++
++static bool ggml_metal_moe_finish(id<MTLCommandBuffer> cmd_buf) {
++    [cmd_buf commit];
++    [cmd_buf waitUntilCompleted];
++    if ([cmd_buf status] == MTLCommandBufferStatusCompleted) {
++        return true;
++    }
++    GGML_LOG_ERROR("%s: bounded Dynamic MoE command failed with status %d: %s\n",
++        __func__, (int) [cmd_buf status],
++        [cmd_buf status] == MTLCommandBufferStatusError ? [[cmd_buf error].localizedDescription UTF8String] : "unknown");
++    return false;
++}
++
++// Correctness-first implementation of the bounded staging design. The small router IDs cross
++// to the CPU once per layer; only the selected expert rows are then copied into shared staging
++// and blitted into private K slots. No command ever receives a Metal view of the complete bank.
++static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, struct ggml_cgraph * gf) {
++    int first = -1;
++    for (int i = 0; i < gf->n_nodes; ++i) {
++        if (ggml_metal_op_cached_moe_layer(gf->nodes[i]) >= 0) {
++            first = i;
++            break;
++        }
++    }
++    if (first < 0) {
++        return GGML_STATUS_FAILED;
++    }
++
++    id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
++    id<MTLBuffer> ids_readback = ctx->bounded_moe_ids_readback;
++    id<MTLBuffer> ids_remapped = ctx->bounded_moe_ids_remapped;
++    id<MTLBuffer> expert_stage = ctx->bounded_moe_expert_stage;
++    size_t ids_cap = ctx->bounded_moe_ids_cap;
++    size_t stage_cap = ctx->bounded_moe_stage_cap;
++    enum ggml_status result = GGML_STATUS_SUCCESS;
++
++    // Run through the first router and bring back only its compact IDs.
++    const struct ggml_tensor * ids = gf->nodes[first]->src[2];
++    size_t ids_size = ggml_nbytes(ids);
++    if (ids_size > ids_cap) {
++        [ids_readback release];
++        [ids_remapped release];
++        ids_cap = MAX(ids_size, (size_t) 4);
++        ids_readback = [device newBufferWithLength:ids_cap options:MTLResourceStorageModeShared];
++        ids_remapped = [device newBufferWithLength:ids_cap options:MTLResourceStorageModeShared];
++        if (ids_readback == nil || ids_remapped == nil) {
++            [ids_readback release];
++            [ids_remapped release];
++            ids_readback = ids_remapped = nil;
++            ctx->bounded_moe_ids_readback = nil;
++            ctx->bounded_moe_ids_remapped = nil;
++            ctx->bounded_moe_ids_cap = 0;
++            result = GGML_STATUS_ALLOC_FAILED;
++            goto done;
++        }
++        ctx->bounded_moe_ids_readback = ids_readback;
++        ctx->bounded_moe_ids_remapped = ids_remapped;
++        ctx->bounded_moe_ids_cap = ids_cap;
++    }
++
++    @autoreleasepool {
++        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
++        ggml_metal_encode_pending_waits(ctx, cmd);
++        if (!ggml_metal_moe_encode_range(ctx, gf, cmd, 0, first)) {
++            result = GGML_STATUS_FAILED;
++        } else {
++            const struct ggml_metal_buffer_id src = ggml_metal_get_buffer_id(ids);
++            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
++            [blit copyFromBuffer:(__bridge id<MTLBuffer>) src.metal sourceOffset:src.offs
++                        toBuffer:ids_readback destinationOffset:0 size:ids_size];
++            [blit endEncoding];
++            if (!ggml_metal_moe_finish(cmd)) {
++                result = GGML_STATUS_FAILED;
++            }
++        }
++    }
++    if (result != GGML_STATUS_SUCCESS) {
++        goto done;
++    }
++
++    while (first < gf->n_nodes) {
++        const int layer = ggml_metal_op_cached_moe_layer(gf->nodes[first]);
++        if (layer < 0) {
++            break;
++        }
++
++        int end = gf->n_nodes;
++        int next_first = -1;
++        for (int i = first + 1; i < gf->n_nodes; ++i) {
++            const int il = ggml_metal_op_cached_moe_layer(gf->nodes[i]);
++            if (il >= 0 && il != layer) {
++                end = i;
++                next_first = i;
++                break;
++            }
++        }
++
++        ids = gf->nodes[first]->src[2];
++        ids_size = ggml_nbytes(ids);
++        if (ids_size > ids_cap) {
++            [ids_readback release];
++            [ids_remapped release];
++            ids_cap = ids_size;
++            ids_readback = [device newBufferWithLength:ids_cap options:MTLResourceStorageModeShared];
++            ids_remapped = [device newBufferWithLength:ids_cap options:MTLResourceStorageModeShared];
++            if (ids_readback == nil || ids_remapped == nil) {
++                [ids_readback release];
++                [ids_remapped release];
++                ids_readback = ids_remapped = nil;
++                ctx->bounded_moe_ids_readback = nil;
++                ctx->bounded_moe_ids_remapped = nil;
++                ctx->bounded_moe_ids_cap = 0;
++                result = GGML_STATUS_ALLOC_FAILED;
++                goto done;
++            }
++            ctx->bounded_moe_ids_readback = ids_readback;
++            ctx->bounded_moe_ids_remapped = ids_remapped;
++            ctx->bounded_moe_ids_cap = ids_cap;
++        }
++
++        memcpy([ids_remapped contents], [ids_readback contents], ids_size);
++
++        const struct ggml_tensor * first_host = ggml_metal_op_cached_moe_host(gf->nodes[first]);
++        if (first_host == NULL) {
++            result = GGML_STATUS_FAILED;
++            goto done;
++        }
++        const int n_expert = (int) first_host->ne[2];
++        const int n_slots = (int) gf->nodes[first]->src[0]->ne[2];
++        int32_t * slot_of = malloc((size_t) n_expert*sizeof(int32_t));
++        int32_t * miss_expert = malloc((size_t) n_slots*sizeof(int32_t));
++        int32_t * miss_slot = malloc((size_t) n_slots*sizeof(int32_t));
++        if (slot_of == NULL || miss_expert == NULL || miss_slot == NULL) {
++            free(slot_of);
++            free(miss_expert);
++            free(miss_slot);
++            result = GGML_STATUS_ALLOC_FAILED;
++            goto done;
++        }
++        for (int e = 0; e < n_expert; ++e) {
++            slot_of[e] = -1;
++        }
++
++        if (ctx->bounded_moe_cache == NULL || ctx->bounded_moe_experts != n_expert ||
++            ctx->bounded_moe_slots != n_slots) {
++            int n_layer = layer + 1;
++            for (int i = first; i < gf->n_nodes; ++i) {
++                n_layer = MAX(n_layer, ggml_metal_op_cached_moe_layer(gf->nodes[i]) + 1);
++            }
++            tosh_moe_cache_free(ctx->bounded_moe_cache);
++            ctx->bounded_moe_cache = tosh_moe_cache_init(n_layer, n_expert, n_slots);
++            ctx->bounded_moe_layers = n_layer;
++            ctx->bounded_moe_experts = n_expert;
++            ctx->bounded_moe_slots = n_slots;
++            if (ctx->bounded_moe_cache == NULL) {
++                free(slot_of);
++                free(miss_expert);
++                free(miss_slot);
++                result = GGML_STATUS_ALLOC_FAILED;
++                goto done;
++            }
++        }
++
++        int n_selected = 0;
++        int n_miss = 0;
++        bool ids_ok = true;
++        for (int64_t i3 = 0; i3 < ids->ne[3]; ++i3) {
++            for (int64_t i2 = 0; i2 < ids->ne[2]; ++i2) {
++                for (int64_t i1 = 0; i1 < ids->ne[1]; ++i1) {
++                    for (int64_t i0 = 0; i0 < ids->ne[0]; ++i0) {
++                        const size_t off = (size_t) i0*ids->nb[0] + (size_t) i1*ids->nb[1] +
++                                           (size_t) i2*ids->nb[2] + (size_t) i3*ids->nb[3];
++                        const int32_t e = *(const int32_t *) ((const uint8_t *) [ids_readback contents] + off);
++                        if (e < 0) {
++                            continue;
++                        }
++                        if (e >= n_expert) {
++                            ids_ok = false;
++                            continue;
++                        }
++                        if (slot_of[e] < 0) {
++                            if (n_selected >= n_slots) {
++                                ids_ok = false;
++                                continue;
++                            }
++                            int slot = tosh_moe_cache_hold(ctx->bounded_moe_cache, layer, e);
++                            if (slot < 0) {
++                                int evicted = -1;
++                                slot = tosh_moe_cache_admit(ctx->bounded_moe_cache, layer, e, &evicted);
++                                if (slot >= 0) {
++                                    miss_expert[n_miss] = e;
++                                    miss_slot[n_miss] = slot;
++                                    n_miss++;
++                                }
++                            }
++                            if (slot < 0) {
++                                ids_ok = false;
++                                continue;
++                            }
++                            slot_of[e] = slot;
++                            n_selected++;
++                        }
++                        *(int32_t *) ((uint8_t *) [ids_remapped contents] + off) = slot_of[e];
++                    }
++                }
++            }
++        }
++        if (!ids_ok) {
++            free(slot_of);
++            free(miss_expert);
++            free(miss_slot);
++            result = GGML_STATUS_FAILED;
++            goto done;
++        }
++
++        size_t stage_need = 0;
++        for (int i = first; i < end; ++i) {
++            if (ggml_metal_op_cached_moe_layer(gf->nodes[i]) == layer) {
++                const struct ggml_tensor * host = ggml_metal_op_cached_moe_host(gf->nodes[i]);
++                stage_need = (stage_need + 255) & ~(size_t) 255;
++                stage_need += (size_t) n_miss*host->nb[2];
++            }
++        }
++        if (stage_need > stage_cap) {
++            [expert_stage release];
++            stage_cap = MAX(stage_need, (size_t) 4);
++            expert_stage = [device newBufferWithLength:stage_cap options:MTLResourceStorageModeShared];
++            if (expert_stage == nil) {
++                ctx->bounded_moe_expert_stage = nil;
++                ctx->bounded_moe_stage_cap = 0;
++                free(slot_of);
++                free(miss_expert);
++                free(miss_slot);
++                result = GGML_STATUS_ALLOC_FAILED;
++                goto done;
++            }
++            ctx->bounded_moe_expert_stage = expert_stage;
++            ctx->bounded_moe_stage_cap = stage_cap;
++        }
++
++        size_t stage_off = 0;
++        @autoreleasepool {
++            id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
++            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
++
++            const struct ggml_metal_buffer_id remapped_bid = {
++                (__bridge void *) ids_remapped, 0
++            };
++            for (int i = first; i < end; ++i) {
++                struct ggml_tensor * op = gf->nodes[i];
++                if (ggml_metal_op_cached_moe_layer(op) != layer) {
++                    continue;
++                }
++                const struct ggml_tensor * host = ggml_metal_op_cached_moe_host(op);
++                const size_t row = host->nb[2];
++                stage_off = (stage_off + 255) & ~(size_t) 255;
++                for (int m = 0; m < n_miss; ++m) {
++                    memcpy((uint8_t *) [expert_stage contents] + stage_off + (size_t) m*row,
++                           (const uint8_t *) host->data + (size_t) miss_expert[m]*host->nb[2], row);
++                }
++                const struct ggml_metal_buffer_id dst = ggml_metal_get_buffer_id(op->src[0]);
++                for (int m = 0; m < n_miss; ++m) {
++                    [blit copyFromBuffer:expert_stage sourceOffset:stage_off + (size_t) m*row
++                                toBuffer:(__bridge id<MTLBuffer>) dst.metal
++                       destinationOffset:dst.offs + (size_t) miss_slot[m]*op->src[0]->nb[2] size:row];
++                }
++                stage_off += (size_t) n_miss*row;
++                ggml_metal_op_cached_moe_ids_set(op->src[0], remapped_bid);
++            }
++            [blit endEncoding];
++
++            if (!ggml_metal_moe_encode_range(ctx, gf, cmd, first, end)) {
++                result = GGML_STATUS_FAILED;
++            } else if (next_first >= 0) {
++                const struct ggml_tensor * next_ids = gf->nodes[next_first]->src[2];
++                const size_t next_size = ggml_nbytes(next_ids);
++                if (next_size > ids_cap) {
++                    result = GGML_STATUS_FAILED;
++                } else {
++                    const struct ggml_metal_buffer_id src = ggml_metal_get_buffer_id(next_ids);
++                    id<MTLBlitCommandEncoder> read = [cmd blitCommandEncoder];
++                    [read copyFromBuffer:(__bridge id<MTLBuffer>) src.metal sourceOffset:src.offs
++                                toBuffer:ids_readback destinationOffset:0 size:next_size];
++                    [read endEncoding];
++                }
++            }
++            if (result == GGML_STATUS_SUCCESS && !ggml_metal_moe_finish(cmd)) {
++                result = GGML_STATUS_FAILED;
++            }
++        }
++        ggml_metal_op_cached_moe_ids_clear();
++        free(slot_of);
++        free(miss_expert);
++        free(miss_slot);
++        if (result != GGML_STATUS_SUCCESS) {
++            goto done;
++        }
++
++        if (ctx->abort_callback && ctx->abort_callback(ctx->abort_callback_data)) {
++            result = GGML_STATUS_ABORTED;
++            goto done;
++        }
++        first = next_first >= 0 ? next_first : gf->n_nodes;
++    }
++
++done:
++    if (ctx->bounded_moe_cache != NULL) {
++        tosh_moe_cache_step(ctx->bounded_moe_cache);
++    }
++    ggml_metal_op_cached_moe_ids_clear();
++    ctx->cmd_buf_last = nil;
++    return result;
++}
++
+ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+     // command buffers run in commit order, so a held one has to go in before this graph
+     ggml_metal_cmd_buf_hold_flush(ctx);
+@@ -1162,6 +1520,21 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         return GGML_STATUS_FAILED;
+     }
+ 
++    bool staged_moe = false;
++    if (getenv("TOSH_MOE_BOUNDED_STAGE") != NULL) {
++        for (int i = 0; i < gf->n_nodes && !staged_moe; ++i) {
++            staged_moe = ggml_metal_op_cached_moe_layer(gf->nodes[i]) >= 0;
++        }
++    }
++    if (staged_moe) {
++        static bool logged = false;
++        if (!logged) {
++            GGML_LOG_WARN("%s: Dynamic MoE bounded selected-expert staging active (sequential)\n", __func__);
++            logged = true;
++        }
++        return ggml_metal_graph_compute_moe_staged(ctx, gf);
++    }
++
+     // number of nodes encoded by the main thread (empirically determined)
+     const int n_main = MAX(64, 0.1*gf->n_nodes);
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index d4669fe91..18bee79d2 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -24,6 +24,9 @@ static inline bool tosh_moe_should_route(const void *, int) { return false; }
+ #include <cstring>
+ #include <limits>
+ #include <cmath>
++#include <unordered_map>
++
++static std::unordered_map<const ggml_tensor *, ggml_metal_buffer_id> g_tosh_moe_staged_ids;
+ 
+ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
+     if (!t) {
+@@ -67,6 +70,47 @@ static ggml_metal_buffer_id ggml_metal_get_host_buffer_id(
+     return { metal, offs + off };
+ }
+ 
++int ggml_metal_op_cached_moe_layer(const ggml_tensor * op) {
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++    if (op && op->op == GGML_OP_MUL_MAT_ID && op->src[0] && tosh_moe_state_of(op->src[0])) {
++        const int registered = tosh_moe_layer_of(op->src[0]);
++        if (registered >= 0) {
++            return registered;
++        }
++
++        // Graph construction can hand Metal an alias of the registered slots tensor. The
++        // state association above proves this is a cached bank; recover the layer from the
++        // stable GGUF tensor name so window partitioning does not silently stay disabled.
++        int il = -1;
++        if (sscanf(op->src[0]->name, "blk.%d.", &il) == 1) {
++            return il;
++        }
++    }
++#else
++    (void) op;
++#endif
++    return -1;
++}
++
++const ggml_tensor * ggml_metal_op_cached_moe_host(const ggml_tensor * op) {
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++    if (ggml_metal_op_cached_moe_layer(op) >= 0) {
++        return (const ggml_tensor *) tosh_moe_ram_of(op->src[0]);
++    }
++#else
++    (void) op;
++#endif
++    return nullptr;
++}
++
++void ggml_metal_op_cached_moe_ids_set(const ggml_tensor * slots, ggml_metal_buffer_id ids) {
++    g_tosh_moe_staged_ids[slots] = ids;
++}
++
++void ggml_metal_op_cached_moe_ids_clear(void) {
++    g_tosh_moe_staged_ids.clear();
++}
++
+ struct ggml_metal_op {
+     ggml_metal_op(
+         ggml_metal_device_t dev,
+@@ -3025,7 +3069,12 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+         }
+     }
+ 
+-    if (const ggml_tensor * state = (const ggml_tensor *) tosh_moe_state_of(op->src[0])) {
++    const auto staged_ids = g_tosh_moe_staged_ids.find(op->src[0]);
++    if (staged_ids != g_tosh_moe_staged_ids.end()) {
++        // The bounded host path has already copied only the selected expert rows into these
++        // private slots. Its compact shared ID buffer names the physical slots directly.
++        bid_src2 = staged_ids->second;
++    } else if (const ggml_tensor * state = (const ggml_tensor *) tosh_moe_state_of(op->src[0])) {
+         // the graph only routes a batch here when its remapped ids fit the state
+         GGML_ASSERT((int64_t) (ne21 - 1)*(int64_t) (nb21/sizeof(int32_t)) + ne20 <=
+                 tosh_moe_ids_room((int) ((const ggml_tensor *) tosh_moe_ram_of(op->src[0]))->ne[2]));
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
+index 153b6bf0c..ce591303d 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.h
++++ b/ggml/src/ggml-metal/ggml-metal-ops.h
+@@ -26,6 +26,12 @@ int ggml_metal_op_n_nodes(ggml_metal_op_t ctx);
+ 
+ int ggml_metal_op_encode(ggml_metal_op_t ctx, int idx);
+ 
++// Returns the Dynamic MoE layer for a cached expert op, or -1 for every normal op.
++int  ggml_metal_op_cached_moe_layer(const struct ggml_tensor * op);
++const struct ggml_tensor * ggml_metal_op_cached_moe_host(const struct ggml_tensor * op);
++void ggml_metal_op_cached_moe_ids_set(const struct ggml_tensor * slots, struct ggml_metal_buffer_id ids);
++void ggml_metal_op_cached_moe_ids_clear(void);
++
+ //
+ // available ops:
+ //

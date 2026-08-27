@@ -51,7 +51,8 @@ struct ImageControls: View {
 
     private func pickCustomModel() {
         let panel = NSOpenPanel()
-        panel.allowedFileTypes = ["pth", "safetensors", "bin"]
+        panel.allowedContentTypes = ["pth", "safetensors", "bin"]
+            .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url { upscalerCustom = url.path }
     }

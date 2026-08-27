@@ -13,7 +13,7 @@ struct LocalModel: Identifiable, Hashable {
     var sizeGB: String { String(format: "%.1f GB", Double(sizeBytes) / 1_073_741_824) }
     var isMoE: Bool {
         if let metadata = GGUFMetadataCache.metadata(at: url.path) {
-            return (metadata.uint32(forSuffix: "expert_count") ?? 0) > 0
+            return metadata.isMoE
         }
         return ModelName.looksMoE(name)
     }
@@ -349,7 +349,16 @@ final class ModelStore: ObservableObject {
 
     /// Scan the folder up front so the list is populated as soon as the app
     /// launches, independent of which window or tab appears first.
-    init() { refresh() }
+    init() {
+        // Keep Base selected for existing installs.
+        if UserDefaults.standard.object(forKey: SettingsKeys.whisperModel) == nil {
+            let legacy = whisperDirectory.appendingPathComponent("ggml-base.bin")
+            if FileManager.default.fileExists(atPath: legacy.path) {
+                UserDefaults.standard.set("base", forKey: SettingsKeys.whisperModel)
+            }
+        }
+        refresh()
+    }
 
     /// The fixed default location, used when the user hasn't picked a custom folder.
     nonisolated static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("models")
@@ -365,6 +374,73 @@ final class ModelStore: ObservableObject {
     /// A subfolder so they never appear in the LLM model list, which scans only the
     /// top level.
     var imagenDirectory: URL { directory.appendingPathComponent("imagen", isDirectory: true) }
+
+    var whisperDirectory: URL { directory.appendingPathComponent("whisper", isDirectory: true) }
+
+    var selectedWhisperModel: WhisperModel {
+        let id = UserDefaults.standard.string(forKey: SettingsKeys.whisperModel)
+            ?? WhisperModel.recommendedID
+        return WhisperModel.model(id: id)
+    }
+
+    func downloadWhisperModel(_ model: WhisperModel? = nil) {
+        let model = model ?? selectedWhisperModel
+        guard let remote = URL(string: model.downloadURL) else { return }
+        let dir = whisperDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let destination = model.url(in: dir)
+        guard !FileManager.default.fileExists(atPath: destination.path),
+              !downloads.contains(where: { $0.destination == destination && $0.error == nil }) else { return }
+        let item = DownloadItem(remote: remote, destination: destination)
+        item.onFinish = { [weak self] in self?.objectWillChange.send() }
+        downloads.append(item)
+    }
+
+    func whisperDownload(_ model: WhisperModel? = nil) -> DownloadItem? {
+        let destination = (model ?? selectedWhisperModel).url(in: whisperDirectory)
+        return downloads.last { $0.destination == destination && !$0.finished }
+    }
+
+    func whisperModelInstalled(_ model: WhisperModel? = nil) -> Bool {
+        FileManager.default.fileExists(atPath: (model ?? selectedWhisperModel).url(in: whisperDirectory).path)
+    }
+
+    var selectedWhisperModelURL: URL {
+        selectedWhisperModel.url(in: whisperDirectory)
+    }
+
+    func retryWhisperDownload(_ item: DownloadItem) {
+        let model = WhisperModel.catalog.first { $0.url(in: whisperDirectory) == item.destination }
+        downloads.removeAll { $0.id == item.id }
+        downloadWhisperModel(model)
+    }
+
+    var whisperVADURL: URL {
+        WhisperVADModel.url(in: whisperDirectory)
+    }
+
+    var whisperVADInstalled: Bool {
+        FileManager.default.fileExists(atPath: whisperVADURL.path)
+    }
+
+    func downloadWhisperVAD() {
+        guard let remote = URL(string: WhisperVADModel.downloadURL) else { return }
+        try? FileManager.default.createDirectory(at: whisperDirectory, withIntermediateDirectories: true)
+        guard !whisperVADInstalled,
+              !downloads.contains(where: { $0.destination == whisperVADURL && $0.error == nil }) else { return }
+        let item = DownloadItem(remote: remote, destination: whisperVADURL)
+        item.onFinish = { [weak self] in self?.objectWillChange.send() }
+        downloads.append(item)
+    }
+
+    func whisperVADDownload() -> DownloadItem? {
+        downloads.last { $0.destination == whisperVADURL && !$0.finished }
+    }
+
+    func retryWhisperVADDownload(_ item: DownloadItem) {
+        downloads.removeAll { $0.id == item.id }
+        downloadWhisperVAD()
+    }
 
     /// Download an image-gen component into the `imagen/` subfolder under its fixed
     /// name. Reuses the resumable transfer used for models; skips the projector

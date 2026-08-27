@@ -9,6 +9,8 @@ struct BenchResult: Codable, Identifiable {
     let date: Date
     let model: String
     let ncmoe: Int
+    /// Cache slots per layer when the run used Dynamic MoE; nil on every other run.
+    var dmoeK: Int?
     let pp: Double
     let tg: Double
     // optional for backward compatibility with older saved results
@@ -54,7 +56,11 @@ struct BenchResult: Codable, Identifiable {
         if let ppN, let tgN, ppN != 512 || tgN != 128 { parts.append("pp\(ppN)/tg\(tgN)") }
         if let depth, depth > 0 { parts.append("d\(depth)") }
         if let accept { parts.append("MTP \(Int((accept * 100).rounded()))%") }
-        if ncmoe > 0 { parts.append("ncmoe \(ncmoe)") }
+        if let dmoeK, dmoeK > 0 {
+            parts.append("dMoE K\(dmoeK)")
+        } else if ncmoe > 0 {
+            parts.append("ncmoe \(ncmoe)")
+        }
         if let ctk, ctk != "f16" { parts.append("K:\(ctk)") }
         if let ctv, ctv != "f16" { parts.append("V:\(ctv)") }
         if let faLabel { parts.append(faLabel) }
@@ -92,6 +98,10 @@ final class BenchmarkController: ObservableObject {
     @Published var sweepStatus = ""
     @Published var sweepBest: Int?
     @Published var sweepSamples: [SweepSample] = []
+    @Published var optimizingDynamicMoe = false
+    @Published var dynamicMoeOptimizationStatus: DynamicMoeOptimizationState = .idle
+    @Published var dynamicMoeOptimizationProfile: DynamicMoeOptimizationProfile?
+    @Published var dynamicMoeOptimizationSamples: [DynamicMoeOptimizationSample] = []
 
     private var process: Process?
     private let storeKey = "benchHistory"
@@ -113,7 +123,7 @@ final class BenchmarkController: ObservableObject {
         === ToshLLM benchmark · \(Date().formatted(.iso8601)) ===
         model:  \(model)
         GPU:    \(settings.gpuLabel)
-        engine: \(settings.engineTag)\(settings.ncmoe > 0 ? " · ncmoe \(settings.ncmoe)" : "") · K:\(settings.cacheTypeK) V:\(settings.cacheTypeV)
+        engine: \(settings.engineTag)\(settings.effectiveDynamicMoe ? " · dMoE K\(settings.effectiveDynamicMoeSlots)" : settings.ncmoe > 0 ? " · ncmoe \(settings.ncmoe)" : "") · K:\(settings.cacheTypeK) V:\(settings.cacheTypeV)
         FA:     \(settings.benchmarkFlashAttentionLabel)
         args:   \(settings.benchmarkArguments.joined(separator: " "))
         =========================
@@ -251,7 +261,8 @@ final class BenchmarkController: ObservableObject {
             let accept = reps.compactMap(\.accept).last
             let name = URL(fileURLWithPath: s.modelPath).lastPathComponent
             let engine = s.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
-            history.insert(BenchResult(date: .now, model: name, ncmoe: s.ncmoe, pp: pp, tg: tg,
+            history.insert(BenchResult(date: .now, model: name, ncmoe: s.ncmoe,
+                                       dmoeK: s.effectiveDynamicMoe ? s.effectiveDynamicMoeSlots : nil, pp: pp, tg: tg,
                                        ctk: s.cacheTypeK, ctv: s.cacheTypeV, engine: engine,
                                        fa: s.benchmarkFlashAttentionRoute,
                                        gpu: s.gpuLabel, peer: s.mgpuPeer && s.isSplitting, profile: base.makeProfile(name: name),
@@ -332,7 +343,8 @@ final class BenchmarkController: ObservableObject {
         if let pp = speed(ppTest), let tg = speed(tgTest) {
             let name = URL(fileURLWithPath: settings.modelPath).lastPathComponent
             let engine = settings.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
-            history.insert(BenchResult(date: .now, model: name, ncmoe: settings.ncmoe, pp: pp, tg: tg,
+            history.insert(BenchResult(date: .now, model: name, ncmoe: settings.ncmoe,
+                                       dmoeK: settings.effectiveDynamicMoe ? settings.effectiveDynamicMoeSlots : nil, pp: pp, tg: tg,
                                        ctk: settings.cacheTypeK, ctv: settings.cacheTypeV, engine: engine,
                                        fa: settings.benchmarkFlashAttentionRoute,
                                        gpu: settings.gpuLabel, peer: settings.mgpuPeer && settings.isSplitting, profile: settings.makeProfile(name: name),
@@ -349,7 +361,11 @@ final class BenchmarkController: ObservableObject {
 
     /// Runs llama-bench to completion and returns the parsed speeds plus, when the
     /// verbose load log is present, the fraction of device VRAM the run occupied.
-    private func runOnce(settings: ServerSettings, extraArgs: [String] = []) async -> (pp: Double, tg: Double, vram: Double?)? {
+    private func runOnce(
+        settings: ServerSettings,
+        extraArgs: [String] = [],
+        environmentOverrides: [String: String?] = [:]
+    ) async -> (pp: Double, tg: Double, vram: Double?)? {
         let benchPath = URL(fileURLWithPath: settings.serverBinary)
             .deletingLastPathComponent().appendingPathComponent("llama-bench").path
         guard FileManager.default.fileExists(atPath: benchPath) else { return nil }
@@ -357,7 +373,11 @@ final class BenchmarkController: ObservableObject {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: benchPath)
         p.arguments = settings.benchmarkArguments + extraArgs
-        p.environment = settings.environment
+        var environment = settings.environment
+        for (key, value) in environmentOverrides {
+            if let value { environment[key] = value } else { environment.removeValue(forKey: key) }
+        }
+        p.environment = environment
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("toshllm-sweep-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: outputURL.path, contents: nil),
@@ -426,6 +446,268 @@ final class BenchmarkController: ObservableObject {
         let preferred = lowestSafe + margin
         guard let cliff else { return preferred }
         return max(lowestSafe, min(preferred, cliff - 1))
+    }
+
+    nonisolated static func dynamicMoeCandidateSlots(model: DynamicMoeModelInfo, maximum: Int) -> [Int] {
+        let cacheGoal = max(model.activeExpertCount, model.expertCount * 3 / 10)
+        let upper = min(max(maximum, model.activeExpertCount), cacheGoal)
+        return Set([
+            model.activeExpertCount,
+            max(model.activeExpertCount, model.expertCount / 16),
+            max(model.activeExpertCount, model.expertCount / 8),
+            max(model.activeExpertCount, model.expertCount / 4),
+            upper,
+        ])
+        .map { min(max($0, model.activeExpertCount), upper) }
+        .sorted()
+    }
+
+    func optimizeDynamicMoe(settings base: ServerSettings) {
+        guard !running, !sweeping, !optimizingDynamicMoe,
+              base.dynamicMoeUIUnlocked,
+              let model = base.dynamicMoeModelInfo,
+              let gpu = base.dynamicMoeGPU,
+              let modelBytes = GGUFFile.totalSize(at: base.modelPath),
+              let fingerprint = DynamicMoeProfileStore.modelFingerprint(path: base.modelPath) else {
+            dynamicMoeOptimizationStatus = .cannotOptimize
+            return
+        }
+
+        optimizingDynamicMoe = true
+        dynamicMoeOptimizationProfile = nil
+        dynamicMoeOptimizationSamples = []
+
+        Task {
+            defer {
+                optimizingDynamicMoe = false
+                process = nil
+                fileLog.prune()
+            }
+
+            var referenceSettings = base
+            referenceSettings.dynamicMoe = false
+            referenceSettings.benchPP = 512
+            referenceSettings.benchTG = 128
+            referenceSettings.benchDepth = 0
+            dynamicMoeOptimizationStatus = .measuringBaseline
+            guard let baseline = await runOnce(settings: referenceSettings) else {
+                dynamicMoeOptimizationStatus = .baselineFailed
+                return
+            }
+
+            let directFits = ServerSettings.dynamicMoeHostBankFitsDirectMetal(
+                modelBytes: modelBytes, gpuVRAMMB: gpu.vramMB)
+            if directFits {
+                var direct = base
+                direct.dynamicMoe = true
+                direct.dynamicMoePolicy = "cache"
+                direct.dynamicMoeSlots = min(max(model.activeExpertCount, base.dynamicMoeSlots), model.expertCount)
+                direct.dynamicMoePrefetch = 0
+                direct.benchPP = 512
+                direct.benchTG = 128
+                direct.benchDepth = 0
+                dynamicMoeOptimizationStatus = .testingDirect(slots: direct.dynamicMoeSlots)
+                let clearSplit: [String: String?] = [
+                    "TOSH_MOE_SPLIT_BANK": nil,
+                    "TOSH_MOE_SPLIT_RING": nil,
+                    "TOSH_MOE_BOUNDED_STAGE": nil,
+                    "TOSH_MOE_BOUNDED_STAGE_FORCE": nil,
+                    "TOSH_MOE_DOUBLE_BUFFER": nil,
+                    "TOSH_MOE_HOT_MAP": nil,
+                ]
+                if let result = await runOnce(settings: direct, environmentOverrides: clearSplit) {
+                    dynamicMoeOptimizationSamples.append(DynamicMoeOptimizationSample(
+                        route: .direct, slots: direct.dynamicMoeSlots,
+                        prefetch: 0,
+                        pp: result.pp, tg: result.tg, estimatedVRAMFraction: result.vram))
+                    if result.tg >= baseline.tg * 0.90 {
+                        let profile = DynamicMoeOptimizationProfile(
+                            version: DynamicMoeOptimizationProfile.currentVersion,
+                            modelFingerprint: fingerprint,
+                            modelName: URL(fileURLWithPath: base.modelPath).lastPathComponent,
+                            gpuName: gpu.name, gpuVRAMMB: gpu.vramMB,
+                            route: .direct, slots: direct.dynamicMoeSlots,
+                            ringSlots: 0, prefetch: 0, hotMapPath: nil,
+                            promptTokensPerSecond: result.pp,
+                            generationTokensPerSecond: result.tg,
+                            baselinePromptTokensPerSecond: baseline.pp,
+                            baselineGenerationTokensPerSecond: baseline.tg,
+                            estimatedVRAMFraction: result.vram, createdAt: .now)
+                        do {
+                            try DynamicMoeProfileStore.save(profile, gpu: gpu)
+                            dynamicMoeOptimizationProfile = profile
+                            activateDynamicMoeProfile(modelPath: base.modelPath)
+                            dynamicMoeOptimizationStatus = .optimizedDirect(slots: profile.slots)
+                        } catch {
+                            dynamicMoeOptimizationStatus = .saveFailed(message: error.localizedDescription)
+                        }
+                        return
+                    }
+                }
+            }
+
+            guard let mapURL = DynamicMoeProfileStore.hotMapURL(modelPath: base.modelPath) else {
+                dynamicMoeOptimizationStatus = .mapCreationFailed
+                return
+            }
+            try? FileManager.default.removeItem(at: mapURL)
+
+            var calibration = base
+            calibration.dynamicMoe = true
+            calibration.dynamicMoePolicy = "cache"
+            calibration.dynamicMoeSlots = model.activeExpertCount
+            calibration.dynamicMoePrefetch = 0
+            calibration.benchPP = 512
+            calibration.benchTG = 128
+            calibration.benchDepth = 0
+            let ring = max(8, model.activeExpertCount)
+            dynamicMoeOptimizationStatus = .learningExperts
+            let calibrationEnvironment: [String: String?] = [
+                "TOSH_MOE_SPLIT_BANK": "1",
+                "TOSH_MOE_SPLIT_RING": String(ring),
+                "TOSH_MOE_BOUNDED_STAGE": "1",
+                "TOSH_MOE_BOUNDED_STAGE_FORCE": "1",
+                "TOSH_MOE_DOUBLE_BUFFER": nil,
+                "TOSH_MOE_HOT_MAP": nil,
+                "TOSH_MOE_HOT_MAP_OUT": mapURL.path,
+                "TOSH_MOE_HOT_MAP_K": String(model.expertCount),
+            ]
+            guard await runOnce(settings: calibration, environmentOverrides: calibrationEnvironment) != nil,
+                  Self.dynamicMoeHotMapIsValid(mapURL, expertCount: model.expertCount) else {
+                dynamicMoeOptimizationStatus = .invalidMap
+                return
+            }
+
+            let plan = base.dynamicMoeSlotPlan(prefetch: 0)
+            let maximum = plan?.recommendedMaximumSlots
+                ?? max(model.activeExpertCount, model.expertCount / 4)
+            let candidates = Self.dynamicMoeCandidateSlots(model: model, maximum: maximum)
+            var measured: [(slots: Int, pp: Double, tg: Double, vram: Double?)] = []
+            for slots in candidates {
+                guard optimizingDynamicMoe else { return }
+                var candidate = base
+                candidate.dynamicMoe = true
+                candidate.dynamicMoePolicy = "cache"
+                candidate.dynamicMoeSlots = slots
+                candidate.dynamicMoePrefetch = 0
+                candidate.benchPP = 512
+                candidate.benchTG = 128
+                candidate.benchDepth = 0
+                dynamicMoeOptimizationStatus = .testingSplit(slots: slots)
+                let splitEnvironment: [String: String?] = [
+                    "TOSH_MOE_SPLIT_BANK": "1",
+                    "TOSH_MOE_SPLIT_RING": String(ring),
+                    "TOSH_MOE_BOUNDED_STAGE": "1",
+                    "TOSH_MOE_BOUNDED_STAGE_FORCE": "1",
+                    "TOSH_MOE_DOUBLE_BUFFER": "1",
+                    "TOSH_MOE_HOT_MAP": mapURL.path,
+                    "TOSH_MOE_HOT_MAP_OUT": nil,
+                    "TOSH_MOE_HOT_MAP_K": nil,
+                ]
+                guard let result = await runOnce(settings: candidate, environmentOverrides: splitEnvironment) else { continue }
+                let estimatedVRAM = plan.map {
+                    Double($0.estimatedVRAMBytes(slots: slots)) / Double(max(1, gpu.vramMB) * 1024 * 1024)
+                }
+                measured.append((slots, result.pp, result.tg, estimatedVRAM))
+                dynamicMoeOptimizationSamples.append(DynamicMoeOptimizationSample(
+                    route: .split, slots: slots, prefetch: 0, pp: result.pp, tg: result.tg,
+                    estimatedVRAMFraction: estimatedVRAM))
+            }
+
+            guard !measured.isEmpty else {
+                dynamicMoeOptimizationStatus = .noSweepResults
+                return
+            }
+            let targetTG = baseline.tg * 0.95
+            let chosenSlots = measured
+                .filter { $0.tg >= targetTG }
+                .min { lhs, rhs in lhs.slots == rhs.slots ? lhs.pp > rhs.pp : lhs.slots < rhs.slots }
+                ?? measured.max { lhs, rhs in lhs.tg == rhs.tg ? lhs.pp < rhs.pp : lhs.tg < rhs.tg }!
+            var chosen = chosenSlots
+            var chosenPrefetch = 0
+
+            for prefetch in [1, 2, 4] {
+                guard optimizingDynamicMoe else { return }
+                var candidate = base
+                candidate.dynamicMoe = true
+                candidate.dynamicMoePolicy = "cache"
+                candidate.dynamicMoeSlots = chosenSlots.slots
+                candidate.dynamicMoePrefetch = prefetch
+                candidate.benchPP = 512
+                candidate.benchTG = 128
+                candidate.benchDepth = 0
+                dynamicMoeOptimizationStatus = .tuningPrefetch(prefetch)
+                let environment: [String: String?] = [
+                    "TOSH_MOE_SPLIT_BANK": "1",
+                    "TOSH_MOE_SPLIT_RING": String(ring),
+                    "TOSH_MOE_BOUNDED_STAGE": "1",
+                    "TOSH_MOE_BOUNDED_STAGE_FORCE": "1",
+                    "TOSH_MOE_DOUBLE_BUFFER": "1",
+                    "TOSH_MOE_HOT_MAP": mapURL.path,
+                    "TOSH_MOE_HOT_MAP_OUT": nil,
+                    "TOSH_MOE_HOT_MAP_K": nil,
+                    "GGML_SCHED_PREFETCH_EXPERTS": String(prefetch),
+                ]
+                guard let result = await runOnce(settings: candidate, environmentOverrides: environment) else { continue }
+                dynamicMoeOptimizationSamples.append(DynamicMoeOptimizationSample(
+                    route: .split, slots: chosenSlots.slots, prefetch: prefetch,
+                    pp: result.pp, tg: result.tg, estimatedVRAMFraction: chosenSlots.vram))
+                if result.tg >= chosenSlots.tg * 0.97, result.pp > chosen.pp {
+                    chosen = (slots: chosenSlots.slots, pp: result.pp, tg: result.tg, vram: chosenSlots.vram)
+                    chosenPrefetch = prefetch
+                }
+            }
+            let profile = DynamicMoeOptimizationProfile(
+                version: DynamicMoeOptimizationProfile.currentVersion,
+                modelFingerprint: fingerprint,
+                modelName: URL(fileURLWithPath: base.modelPath).lastPathComponent,
+                gpuName: gpu.name, gpuVRAMMB: gpu.vramMB,
+                route: .split, slots: chosen.slots, ringSlots: ring, prefetch: chosenPrefetch,
+                hotMapPath: mapURL.path,
+                promptTokensPerSecond: chosen.pp,
+                generationTokensPerSecond: chosen.tg,
+                baselinePromptTokensPerSecond: baseline.pp,
+                baselineGenerationTokensPerSecond: baseline.tg,
+                estimatedVRAMFraction: chosen.vram, createdAt: .now)
+            do {
+                try DynamicMoeProfileStore.save(profile, gpu: gpu)
+                dynamicMoeOptimizationProfile = profile
+                activateDynamicMoeProfile(modelPath: base.modelPath)
+                dynamicMoeOptimizationStatus = .optimizedSplit(
+                    slots: profile.slots, ringSlots: profile.ringSlots)
+            } catch {
+                dynamicMoeOptimizationStatus = .saveFailed(message: error.localizedDescription)
+            }
+        }
+    }
+
+    func cancelDynamicMoeOptimization() {
+        process?.terminate()
+        optimizingDynamicMoe = false
+        dynamicMoeOptimizationStatus = .cancelled
+    }
+
+    func activateDynamicMoeProfile(modelPath: String) {
+        let defaults = UserDefaults.standard
+        defaults.set(modelPath, forKey: SettingsKeys.modelPath)
+        defaults.set(true, forKey: SettingsKeys.dynamicMoe)
+        defaults.set("auto", forKey: SettingsKeys.dynamicMoePolicy)
+    }
+
+    nonisolated static func dynamicMoeHotMapIsValid(_ url: URL, expertCount: Int) -> Bool {
+        guard expertCount > 0,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        let rows = text.split(separator: "\n")
+        guard !rows.isEmpty else { return false }
+        return rows.allSatisfy { row in
+            let fields = row.split(separator: " ")
+            guard fields.count == expertCount + 1, Int(fields[0]) != nil else { return false }
+            let experts = fields.dropFirst().compactMap { field in
+                Int(field.split(separator: ":", maxSplits: 1)[0])
+            }
+            guard experts.count == expertCount else { return false }
+            return Set(experts).count == expertCount && experts.allSatisfy { 0..<expertCount ~= $0 }
+        }
     }
 
     /// Finds the best `--n-cpu-moe` and the prefetch cliff: walks ncmoe down until
@@ -576,7 +858,8 @@ final class BenchmarkController: ObservableObject {
     func recordShared(cfg: ServerSettings, pp: Double, tg: Double) {
         let name = URL(fileURLWithPath: cfg.modelPath).lastPathComponent
         let engine = cfg.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
-        history.insert(BenchResult(date: .now, model: name, ncmoe: cfg.ncmoe, pp: pp, tg: tg,
+        history.insert(BenchResult(date: .now, model: name, ncmoe: cfg.ncmoe,
+                                       dmoeK: cfg.effectiveDynamicMoe ? cfg.effectiveDynamicMoeSlots : nil, pp: pp, tg: tg,
                                    ctk: cfg.cacheTypeK, ctv: cfg.cacheTypeV, engine: engine,
                                    fa: cfg.benchmarkFlashAttentionRoute,
                                    gpu: cfg.gpuLabel, peer: cfg.mgpuPeer && cfg.isSplitting, profile: cfg.makeProfile(name: name),

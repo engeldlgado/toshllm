@@ -1,0 +1,186 @@
+--- old/tools/llama-bench/llama-bench.cpp
++++ new/tools/llama-bench/llama-bench.cpp
+@@ -1448,16 +1448,30 @@
+                 /* .fit_min_ctx           = */ fpc,
+             };
+             instances.push_back(instance);
+         }
+     }
+     // clang-format on
+ 
+     return instances;
++}
++
++// Dynamic MoE: the run is decided by how many expert slots the card holds, so the report says
++// that instead of the CPU-expert count and the tensor override, which are fixed while it is on.
++static int tosh_bench_moe_slots() {
++    const char * mode  = getenv("TOSH_MOE_MODE");
++    const char * slots = getenv("TOSH_MOE_SLOTS");
++    if (!mode || !slots || strcmp(mode, "off") == 0) {
++        return 0;
++    }
++
++    const int n = atoi(slots);
++
++    return n > 0 ? n : 0;
+ }
+ 
+ struct test {
+     static const std::string build_commit;
+     static const int         build_number;
+     const std::string        cpu_info;
+     const std::string        gpu_info;
+     std::string              model_filename;
+@@ -1469,16 +1483,17 @@
+     int                      n_threads;
+     std::string              cpu_mask;
+     bool                     cpu_strict;
+     int                      poll;
+     ggml_type                type_k;
+     ggml_type                type_v;
+     int                      n_gpu_layers;
+     int                      n_cpu_moe;
++    int                      dmoe_k;
+     llama_split_mode         split_mode;
+     llama_load_mode          load_mode;
+     int                      main_gpu;
+     bool                     no_kv_offload;
+     llama_flash_attn_type    flash_attn;
+     std::vector<ggml_backend_dev_t> devices;
+     std::vector<float>       tensor_split;
+     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
+@@ -1508,16 +1523,17 @@
+         n_threads      = inst.n_threads;
+         cpu_mask       = inst.cpu_mask;
+         cpu_strict     = inst.cpu_strict;
+         poll           = inst.poll;
+         type_k         = inst.type_k;
+         type_v         = inst.type_v;
+         n_gpu_layers   = inst.n_gpu_layers;
+         n_cpu_moe      = inst.n_cpu_moe;
++        dmoe_k         = tosh_bench_moe_slots();
+         split_mode     = inst.split_mode;
+         load_mode      = inst.load_mode;
+         main_gpu       = inst.main_gpu;
+         no_kv_offload  = inst.no_kv_offload;
+         flash_attn     = inst.flash_attn;
+         devices        = inst.devices;
+         tensor_split   = inst.tensor_split;
+         tensor_buft_overrides = inst.tensor_buft_overrides;
+@@ -1575,33 +1591,34 @@
+         return backends.empty() ? "CPU" : join(backends, ",");
+     }
+ 
+     static const std::vector<std::string> & get_fields() {
+         static const std::vector<std::string> fields = {
+             "build_commit",   "build_number",   "cpu_info",      "gpu_info",       "backends",
+             "model_filename", "model_type",     "model_size",    "model_n_params", "n_batch",
+             "n_ubatch",       "n_threads",      "cpu_mask",      "cpu_strict",     "poll",
+-            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "split_mode",
++            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "dmoe_k",
++            "split_mode",
+             "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
+             "tensor_buft_overrides",            "load_mode",     "embeddings",
+             "no_op_offload",  "no_host",        "fit_target",    "fit_min_ctx",
+             "n_prompt",       "n_gen",          "n_depth",
+             "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts"
+         };
+         return fields;
+     }
+ 
+     enum field_type { STRING, BOOL, INT, FLOAT };
+ 
+     static field_type get_field_type(const std::string & field) {
+         if (field == "build_number" || field == "n_batch" || field == "n_ubatch" || field == "n_threads" ||
+             field == "poll" || field == "model_size" || field == "model_n_params" || field == "n_gpu_layers" ||
+             field == "main_gpu" || field == "n_prompt" || field == "n_gen" || field == "n_depth" || field == "avg_ns" ||
+-            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" ||
++            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" || field == "dmoe_k" ||
+             field == "fit_target" || field == "fit_min_ctx" || field == "flash_attn") {
+             return INT;
+         }
+         if (field == "f16_kv" || field == "no_kv_offload" || field == "cpu_strict" ||
+             field == "embeddings" || field == "no_host") {
+             return BOOL;
+         }
+         if (field == "avg_ts" || field == "stddev_ts") {
+@@ -1664,16 +1681,17 @@
+                                             std::to_string(n_threads),
+                                             cpu_mask,
+                                             std::to_string(cpu_strict),
+                                             std::to_string(poll),
+                                             ggml_type_name(type_k),
+                                             ggml_type_name(type_v),
+                                             std::to_string(n_gpu_layers),
+                                             std::to_string(n_cpu_moe),
++                                            std::to_string(dmoe_k),
+                                             split_mode_str(split_mode),
+                                             std::to_string(main_gpu),
+                                             std::to_string(no_kv_offload),
+                                             std::to_string((int) flash_attn),
+                                             devices_to_string(devices),
+                                             tensor_split_str,
+                                             tensor_buft_overrides_str,
+                                             llama_load_mode_name(load_mode),
+@@ -1913,16 +1931,19 @@
+         if (field == "devices") {
+             return "dev";
+         }
+         if (field == "tensor_split") {
+             return "ts";
+         }
+         if (field == "tensor_buft_overrides") {
+             return "ot";
++        }
++        if (field == "dmoe_k") {
++            return "K";
+         }
+         if (field == "fit_target") {
+             return "fitt";
+         }
+         if (field == "fit_min_ctx") {
+             return "fitc";
+         }
+         return field;
+@@ -1935,17 +1956,20 @@
+         fields.emplace_back("params");
+         fields.emplace_back("backend");
+         bool is_cpu_backend = test::get_backend().find("CPU") != std::string::npos ||
+                               test::get_backend().find("BLAS") != std::string::npos ||
+                               test::get_backend().find("ZenDNN") != std::string::npos;
+         if (!is_cpu_backend) {
+             fields.emplace_back("n_gpu_layers");
+         }
+-        if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
++        const int dmoe_k = tosh_bench_moe_slots();
++        if (dmoe_k > 0) {
++            fields.emplace_back("dmoe_k");
++        } else if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
+             fields.emplace_back("n_cpu_moe");
+         }
+         if (params.n_threads.size() > 1 || params.n_threads != cmd_params_defaults.n_threads || is_cpu_backend) {
+             fields.emplace_back("n_threads");
+         }
+         if (params.cpu_mask.size() > 1 || params.cpu_mask != cmd_params_defaults.cpu_mask) {
+             fields.emplace_back("cpu_mask");
+         }
+@@ -1980,17 +2004,18 @@
+             fields.emplace_back("flash_attn");
+         }
+         if (params.devices.size() > 1 || params.devices != cmd_params_defaults.devices) {
+             fields.emplace_back("devices");
+         }
+         if (params.tensor_split.size() > 1 || params.tensor_split != cmd_params_defaults.tensor_split) {
+             fields.emplace_back("tensor_split");
+         }
+-        if (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides)) {
++        if (dmoe_k == 0 &&
++            (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides))) {
+             fields.emplace_back("tensor_buft_overrides");
+         }
+         if (params.load_mode.size() > 1 || params.load_mode != cmd_params_defaults.load_mode) {
+             fields.emplace_back("load_mode");
+         }
+         if (params.embeddings.size() > 1 || params.embeddings != cmd_params_defaults.embeddings) {
+             fields.emplace_back("embeddings");
+         }

@@ -25,7 +25,7 @@ enum SettingsAnchor: Hashable {
 }
 
 /// Top-level mode of the main window: the chat, or the image studio.
-enum MainMode: String { case chat, images, video }
+enum MainMode: String { case chat, images, video, audio }
 
 struct ChatMainView: View {
     @EnvironmentObject var server: ServerController
@@ -46,6 +46,7 @@ struct ChatMainView: View {
     // halves of the split view drive the same runs.
     @StateObject private var imageGenPool = ImageGenPool()
     @StateObject private var videoGen = VideoGenerator()
+    @StateObject private var audioStudio = AudioStudioController.shared
     @StateObject private var upscaler = ImageUpscaler()
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
     @AppStorage(SettingsKeys.chatFontScale) private var chatFontScale = 1.0
@@ -59,6 +60,8 @@ struct ChatMainView: View {
                     ImageControls(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
                 } else if mode == .video {
                     VideoControls(gen: videoGen).transition(.opacity)
+                } else if mode == .audio {
+                    AudioControls(studio: audioStudio).transition(.opacity)
                 } else {
                     ConversationListView().transition(.opacity)
                 }
@@ -69,6 +72,8 @@ struct ChatMainView: View {
                     ImageCanvas(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
                 } else if mode == .video {
                     VideoCanvas(gen: videoGen).transition(.opacity)
+                } else if mode == .audio {
+                    AudioCanvas(studio: audioStudio).transition(.opacity)
                 } else {
                     chatDetail.transition(.opacity)
                 }
@@ -87,9 +92,7 @@ struct ChatMainView: View {
                 .opacity(0)
         }
         .navigationTitle("ToshLLM")
-        .navigationSubtitle(mode == .images
-                            ? loc.t("Imágenes · Experimental", "Images · Experimental")
-                            : stateSubtitle)
+        .navigationSubtitle(modeSubtitle)
         .toolbar {
             ToolbarItem(placement: .principal) { modePicker }
             toolbarActions
@@ -139,10 +142,11 @@ struct ChatMainView: View {
             Label(loc.t("Chat", "Chat"), systemImage: "bubble.left.and.bubble.right").tag(MainMode.chat)
             Label(loc.t("Imágenes", "Images"), systemImage: "photo.on.rectangle.angled").tag(MainMode.images)
             Label(loc.t("Vídeo", "Video"), systemImage: "film").tag(MainMode.video)
+            Label("Audio", systemImage: "waveform").tag(MainMode.audio)
         }
         .pickerStyle(.segmented).labelStyle(.titleAndIcon).fixedSize()
-        .help(loc.t("Cambia entre el chat y la generación de imágenes.",
-                    "Switch between chat and image generation."))
+        .help(loc.t("Cambia entre chat, imágenes, vídeo y audio.",
+                    "Switch between chat, images, video, and audio."))
     }
 
     /// Web chat, config and the optional update badge. The web link only applies
@@ -166,7 +170,7 @@ struct ChatMainView: View {
             Button {
                 NSWorkspace.shared.open(server.webChatURL)
             } label: { Image(systemName: "safari") }
-                .disabled(server.state != .running || mode == .images)
+                .disabled(server.state != .running || mode != .chat)
                 .iconHelp(loc.t("Abrir el chat web en el navegador", "Open the web chat in the browser"))
             Button {
                 openControl()
@@ -275,6 +279,15 @@ struct ChatMainView: View {
         case .starting: return loc.t("Cargando modelo…", "Loading model…")
         case .failed: return loc.t("Error — revisa Configuración", "Error — see Configuration")
         case .stopped: return loc.t("Servidor detenido", "Server stopped")
+        }
+    }
+
+    private var modeSubtitle: String {
+        switch mode {
+        case .chat: stateSubtitle
+        case .images: loc.t("Imágenes · Experimental", "Images · Experimental")
+        case .video: loc.t("Vídeo · Experimental", "Video · Experimental")
+        case .audio: loc.t("Audio · Whisper GPU", "Audio · Whisper GPU")
         }
     }
 }

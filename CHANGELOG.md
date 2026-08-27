@@ -3,6 +3,40 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.85.9] - 2026-08-26
+
+### Added
+
+- **Audio is now a full workspace beside Chat, Images and Video.** Whisper.cpp transcribes microphone, audio and video on the Radeon; projects preserve editable original and translated tracks, synchronized playback, calibrated Silero VAD, recovery, subtitle exports and captioned MOV copies. Feature requested by [playexit](https://github.com/engeldlgado/toshllm/issues/73).
+- **Audio can translate with Whisper or the loaded chat model.** Chat translation resumes without rerunning Whisper and uses an explicit model, neighboring context, prior terminology and a glossary to keep segments consistent.
+
+### Improved
+
+- **The Italian localization now covers the complete interface.** All current UI strings are translated instead of falling back to English.
+
+### Fixed
+
+- **The server log says what Dynamic MoE actually ran with.** It printed the MoE-on-CPU value you had saved while the cache was running with a different one; it now reports the cache and its slots, and stops passing a CPU-expert count the cache does not use.
+
+## [0.85.8] - 2026-08-24
+
+### Added
+- **Dynamic MoE, a private experiment that runs a MoE model on far less video memory** by keeping every expert in system RAM and a small cache of slots on the card. It is off by default and hidden for internal testing; a 35B in Q2_K_XL ran on 2.78 GiB against the 6 GiB its usual setting needs, and generated faster. Read the [what it is and when it pays](https://github.com/engeldlgado/toshllm#dynamic-moe-bounded-vram-expert-cache-private-experiment) section first, especially the RAM it asks for in exchange.
+
+### Improved
+- **Models in BF16 read prompts about 30% faster.** 722 → 949 tokens per second on a 4B and 5211 → 6807 on a 0.6B, with generation speed and answers unchanged. Measured on a Radeon RX 6700 XT.
+
+### Fixed
+- **A model or projector in BF16 no longer stops the engine on cards that lack BF16.** The load aborted before ever reaching the chat; those weights now run on the card like any other format. Reported by [Slice](https://www.insanelymac.com/forum/profile/112217-slice/).
+
+- **Conversations exported to Markdown are labelled in the language you picked.** The two headings the file writes were always in Spanish. Reported by [guylough](https://github.com/engeldlgado/toshllm/issues/70).
+
+- **Two Duo cards no longer read as four cards.** A Duo puts two GPUs behind one name, so the machine card counted devices and doubled them; it now says two cards and four GPUs. Reported by [chafey](https://github.com/engeldlgado/toshllm/issues/67).
+
+- **The Infinity Fabric Link switch is only offered when there is a link.** It could be turned on with nothing bridged, which read as if the app had found a bridge. Reported by [chafey](https://github.com/engeldlgado/toshllm/issues/67).
+
+- **TurboQuant cache types no longer stop the server when the model is split by tensors.** The split path did not know how to divide the rotation TurboQuant applies to attention, and the engine aborted while loading. Reported by [chafey](https://github.com/engeldlgado/toshllm/issues/69).
+
 ## [0.85.7] - 2026-08-22
 
 ### Improved

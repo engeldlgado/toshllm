@@ -43,7 +43,7 @@ It opens, detects your hardware, and recommends models that will actually run we
 
 - **Native chat** — multiple persistent conversations, full Markdown with code-copy, regenerate, system prompt, live tokens/sec, file attachments, conversation forking and per-message metrics
 - **Agent tools and MCP** — the model can read, edit and run files and commands with per-step permission, run JavaScript in a sandbox, and use tools from external Model Context Protocol servers you connect
-- **Voice dictation** — the microphone button transcribes straight into the message box on-device (Apple's Speech framework); nothing leaves the Mac
+- **GPU speech and subtitle studio** — Whisper.cpp transcribes microphone dictation into one clean paragraph, while the Audio workspace can disable Silero VAD, use Whisper.cpp's native defaults or tune it with calibrated profiles, previews audio or video with a synchronized editable transcript, preserves recoverable original and translated tracks, keeps Chat translation consistent with context and a glossary, and exports SRT, VTT, TXT, JSON or a captioned MOV; nothing leaves the Mac
 - **Vision** — attach images (or paste a screenshot with Cmd+V) and vision-capable models describe them; the matching projector (`mmproj`) is paired automatically
 - **Image generation (beta)** — a local text-to-image studio (stable-diffusion.cpp on the same AMD Metal stack): text-to-image and image-to-image, with a model catalog sized to your VRAM, a live preview of the image forming, and an **upscaler** that takes your own photos too (x2/x4, batches, and a drag-to-compare view)
 - **Model manager** — a curated catalog with **per-model VRAM/RAM estimates for *your* hardware**, plus Hugging Face browsing sorted by trending, downloads, likes or last update, downloads with live progress, and a flag when a repo re-publishes a model you already have
@@ -169,6 +169,116 @@ cd toshllm
 The AMD patch lives in [`patches/`](patches/) — chunked staging transfers for Metal drivers that cap host-visible allocations (also covering the asynchronous tensor read path that MTP exercises, which previously aborted mid-generation), plus a persistent staging buffer that keeps long generations from slowly drowning the AMD driver (see the [research note](#persistent-staging-flat-sustained-generation)). The other key stability setting (`GGML_METAL_CONCURRENCY_DISABLE`) is already supported upstream and the app sets it automatically.
 
 ## Research: AMD GPUs on Metal
+
+### Dynamic MoE: bounded-VRAM expert cache (private experiment)
+
+`--n-cpu-moe` and ToshLLM's Dynamic MoE solve the same capacity problem in two different ways. Both keep llama.cpp, GGUF and the normal graph; Dynamic MoE is compiled into the bundled engine but is **off at runtime and hidden from the UI by default** while its model coverage is measured.
+
+The experiment targets systems whose discrete GPU cannot hold the complete MoE model in VRAM, but which have substantial free system RAM. Its goal is to keep only the active expert working set in limited VRAM, use host RAM as the complete expert bank, and approach the normal prompt-processing and generation performance of a more GPU-resident `ncmoe` configuration while consuming materially less VRAM. It does not benefit a model that already fits completely in VRAM, and it trades that VRAM reduction for higher RAM use and PCIe traffic.
+
+The design is an independent llama.cpp/Metal implementation inspired by the publicly documented [FreeToken architecture](https://github.com/FlashML-org/FreeToken) and [paper](https://arxiv.org/abs/2608.16157). ToshLLM does not vendor or link the FreeToken runtime or source code. FreeToken is distributed under Apache-2.0; if its source is incorporated in the future, its license, notices and modification requirements must be retained.
+
+> **RAM warning:** Dynamic MoE reduces **VRAM** by keeping the full quantized model addressable in host **RAM**. Budget approximately `model size + max(25% of model size, 4 GiB)` as memory available to the engine, in addition to enough memory for macOS and other applications. For example, an 11.44 GiB GGUF needs about 15.44 GiB available to Dynamic MoE, so a 32 GB system is the practical minimum for this class of model. If this headroom is unavailable, Automatic mode rejects Dynamic MoE and returns to normal `ncmoe` instead of relying on swap.
+
+#### How to enable it
+
+1. Select the bundled engine and a MoE GGUF.
+2. In **Settings → Extra arguments**, add `TOSH_MOE_UI=1`.
+3. The private **Dynamic MoE (experimental)** panel appears. Turn it on.
+4. Open **Benchmarks** and press **Optimize dMoE**. ToshLLM measures normal execution, learns a complete expert ranking, sweeps K, then tunes prompt prefetch without accepting more than a 3% TG regression at the chosen K.
+5. The resulting **Automatic** profile is activated for the integrated chat. **Manual cache** remains available to vary K and prefetch by hand.
+
+`TOSH_MOE_UI=1` only reveals the controls. Removing it, turning Dynamic MoE off, selecting a custom engine, or letting Auto reject the configuration returns the same binary to unmodified llama.cpp execution. The feature is not yet used by router or multi-GPU mode.
+
+#### The normal `ncmoe` architecture
+
+Let:
+
+- `L` = transformer/MoE layer count (`*.block_count` in the GGUF);
+- `E` = total experts in each MoE layer (`*.expert_count`);
+- `A` = experts selected per token, or top-k (`*.expert_used_count`);
+- `W` = total GGUF weight bytes;
+- `Wshared` = attention, embeddings and other non-expert weights;
+- `Wexp = max(W - Wshared, 0)` = the complete quantized expert pool;
+- `V` = physical VRAM and `R` = the configured VRAM reserve;
+- `C` and `KV` = compute buffers and KV cache.
+
+Normal llama.cpp places whole expert banks statically. With `N = --n-cpu-moe`, approximately `N/L` of the expert pool is processed from host RAM and the rest remains GPU-resident:
+
+```text
+VRAMncmoe ≈ Wshared + Wexp × (1 - N/L) + C + KV
+RAMncmoe  ≈ Wexp × N/L + host overhead
+```
+
+The first capacity estimate is therefore:
+
+```text
+Bexpert_gpu = max(0, V - R - Wshared - C - KV)
+N ≈ ceil(L × max(0, Wexp - Bexpert_gpu) / Wexp)
+```
+
+ToshLLM uses that estimate when a model is selected, then the benchmark's **Find optimum** sweep measures nearby `ncmoe` values because PCIe bandwidth, CPU memory bandwidth, quantization and the driver's real allocations cannot be inferred exactly from the file. Raising `ncmoe` saves VRAM but makes more active experts use the CPU path; lowering it does the reverse. `ncmoe 0` means no MoE layers are deliberately assigned to CPU and is only viable when the complete placement fits.
+
+#### The Dynamic MoE architecture
+
+Dynamic MoE keeps the complete quantized expert bank addressable in RAM, but gives every MoE layer only `K` reusable expert slots in VRAM. A GPU-resident LRU table maps `(layer, expert)` to a slot; selected experts already present execute immediately. Routing and slot IDs stay on the GPU, so decode does not round-trip through the CPU just to make a cache decision.
+
+There are two execution routes. **Direct** maps the stable host expert bank once and preserves the high-performance implementation already validated when that bank fits Metal's practical window. **Split** keeps K fixed experts per layer in private VRAM, stores the remaining quantized rows in RAM, and exposes only a small `ring` of cold rows plus bounded full-bank staging buffers to Metal. This removes the former requirement to wrap a 10–17 GiB expert allocation as one Metal resource and allows oversized Q4 models to run without copying the complete expert pool into VRAM.
+
+The router remains exact in both routes: every GGUF expert is available and the model still selects the same top-A experts for every token. The optimizer records a complete per-layer histogram as `expert:count`; future loads normalize the historical counts to a bounded prior, then add new observations. This means repeated representative use improves the initial resident ranking, short sessions cannot erase the profile, and a changed workload can still overtake stale history. It is cache adaptation, not model training, and performance eventually stabilizes when the routing distribution stabilizes.
+
+K is **per layer**, not a global model count, and its valid interval comes from that model's GGUF:
+
+```text
+A ≤ K ≤ E
+```
+
+This is why K114 is valid for Qwen3.6-35B-A3B (`L=40, E=256, A=8`), but invalid for GPT-OSS 20B (`L=24, E=32, A=4`) and OLMoE (`L=16, E=64, A=8`). The panel now reads those values instead of offering a fixed list. If a saved K114 is applied to GPT-OSS 20B, runtime clamps it to K32; it can never silently request more slots than the tensor actually has.
+
+One slot represents one expert across every MoE layer, so its first-order byte cost is:
+
+```text
+bytes_per_K ≈ Wexp / E
+```
+
+For the UI's conservative VRAM estimate ToshLLM uses the same `Wshared ≈ min(W, 1.3 GiB)` split as its ncmoe planner. The widest per-layer bank is estimated from the fused gate/up tensors, and one such bank is reserved for staging plus one for every prefetch slot `P`:
+
+```text
+Wstage ≈ (2/3) × Wexp / L
+Wfixed ≈ Wshared + 512 MiB + (P + 1) × Wstage
+Kbudget = floor((V - R - Wfixed) / (Wexp / E))
+Krecommended = min(E, Kbudget)
+VRAMdynamic(K) ≈ Wfixed + K × (Wexp / E)
+```
+
+The manual control permits every architecturally valid integer from `A` through `E`, while showing a warning above `Krecommended`; that warning is an estimate, not a prohibition, so unusual hardware can still be measured. Before a profile exists, Automatic mode starts conservatively at the smallest useful cache:
+
+```text
+Kauto = A
+```
+
+That is K8 for Qwen3.6/OLMoE and K4 for GPT-OSS 20B—not a hard-coded K8. **Optimize dMoE** then tests model-derived values between A and the estimated VRAM limit, saves the smallest K reaching at least 95% of the normal TG reference when possible, and tunes prefetch 0/1/2/4 for PP. The profile is keyed by GGUF fingerprint and physical GPU, so changing models or GPUs never silently reuses an unrelated ranking. Auto activates the cache only when `A < E`, a discrete single GPU is selected, and physical RAM can hold `W` plus `max(25% of W, 4 GiB)` of headroom; otherwise it falls back before launch to normal `ncmoe` execution.
+
+The memory trade is deliberate:
+
+```text
+RAMdynamic  ≈ W + max(0.25 × W, 4 GiB) headroom
+VRAMdynamic ≈ bounded by K instead of by a fixed number of whole MoE layers
+```
+
+The reference system was the development machine: **RX 6700 XT 12 GB**, Core i5-10400 (6c/12t), 32 GB DDR4 and macOS, running Qwen3.6-35B-A3B Q2_K_XL (11.44 GiB, `L=40`, `E=256`, `A=8`). In the short `pp256`/`tg128` sweep, using the same model and binary for every row:
+
+| Mode | Approx. VRAM during PP | VRAM saved vs `ncmoe 24` | Host RAM footprint | pp256 (t/s) | tg128 (t/s) |
+|---|---:|---:|---:|---:|---:|
+| Dynamic K8, all 40 layers, prefetch 4 | **2.78 GiB** | **~54%** | ~10.5 GiB† | 299.28 ± 1.09 | **32.44 ± 0.45** |
+| 8 complete resident layers + K8 on 32 layers | 4.67 GiB | ~22% | ~10.5 GiB† | 346.56 ± 1.57 | **37.14 ± 0.54** |
+| Normal `ncmoe 24` control | ~6 GiB | baseline | 6.6–6.7 GiB† | **352.98 ± 5.09** | ~22–24.5 |
+
+The K8 configuration therefore saved approximately 54% of VRAM against the roughly 6 GiB `ncmoe 24` control and generated faster, while prompt processing remained the main optimization target. The resident-layer alternative saved approximately 22% of VRAM and recovered about 98.2% of the locally reproduced `ncmoe 24` prompt rate, but exists as an optional higher-VRAM trade-off rather than the minimum-VRAM goal.
+
+K8 does not mean that only 8 of the model's 256 experts exist or that the cache uses half of some fixed capacity. It means **8 reusable VRAM slots per MoE layer**, exactly matching this model's top-8 active experts; all 256 experts per layer remain available from the complete host-RAM bank.
+
+† The `pp256`/`tg128` speeds and VRAM values were captured together in the short sweep. Physical RAM was captured in a separate matched-context audit on the same RX 6700 XT: 10.5 GiB for the complete Dynamic MoE host-bank route and 6.6–6.7 GiB for `ncmoe 24`. Changing K changes the number of VRAM slots, not the complete host bank, so the Dynamic RAM figure is the expected K8-class footprint, but direct K8 RSS was not recorded in that short sweep and is not claimed as an independently measured K8 value. These figures are specific to this model and hardware, not a promise for every MoE.
 
 ### Flash Attention (decode)
 
@@ -352,6 +462,7 @@ Casi todas las herramientas de LLM locales en macOS apuntan a Apple Silicon; los
 - **Chat nativo** — conversaciones persistentes, Markdown completo con copiar código, regenerar, prompt de sistema, tokens/seg en vivo, adjuntar archivos, bifurcar conversaciones y métricas por mensaje
 - **Herramientas de agente y MCP** — el modelo puede leer, editar y ejecutar archivos y comandos con permiso paso a paso, correr JavaScript en un sandbox y usar herramientas de servidores MCP externos que conectes
 - **Dictado por voz** — el botón de micrófono transcribe directo al cuadro de mensaje en el propio Mac (framework Speech de Apple); nada sale del equipo
+- **Estudio de audio y subtítulos en GPU** — Whisper.cpp transcribe audio o vídeo, muestra y sigue el segmento activo durante la reproducción, conserva proyectos recuperables con original y traducción, mantiene términos consistentes mediante contexto y glosario, permite editar y comparar ambas pistas, prueba VAD en una muestra y exporta SRT, VTT, TXT, JSON o una copia MOV subtitulada
 - **Visión** — adjunta imágenes (o pega una captura con Cmd+V) y los modelos con visión las describen; el proyector (`mmproj`) se empareja solo
 - **Generación de imágenes (beta)** — estudio local de texto-a-imagen (stable-diffusion.cpp sobre el mismo stack Metal AMD): texto-a-imagen e imagen-a-imagen, con catálogo ajustado a tu VRAM, vista previa de la imagen formándose y un **escalador** que también acepta tus fotos (×2/×4, por lotes, y comparador con deslizador)
 - **Gestor de modelos** — catálogo curado con **estimaciones de VRAM/RAM para *tu* equipo**, explorador de Hugging Face ordenable por tendencia, descargas, favoritos o última actualización, descargas con progreso y aviso cuando un repositorio vuelve a publicar un modelo que ya tienes

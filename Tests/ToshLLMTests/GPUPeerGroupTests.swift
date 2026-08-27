@@ -47,6 +47,47 @@ final class GPUPeerGroupTests: XCTestCase {
         XCTAssertTrue(HardwareInfo.peerGroups(of: lonely).isEmpty)
     }
 
+    /// The reporter's machine: two Duo cards, four Metal devices, one name.
+    func testDuoCardsCountAsOneCardEach() {
+        let twoDuos = (0..<4).map {
+            GPUDevice(index: $0, name: "AMD Radeon Pro Vega II Duo", vramMB: 32_736)
+        }
+        let groups = HardwareInfo.modelGroups(of: twoDuos)
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups[0].cards, 2)
+        XCTAssertEqual(groups[0].gpus, 4)
+        XCTAssertEqual(groups[0].vramGB, 32)
+    }
+
+    func testNonDuoCardsAreOneGPUEach() {
+        let groups = HardwareInfo.modelGroups(of: [
+            GPUDevice(index: 0, name: "AMD Radeon PRO W6800X", vramMB: 32_752),
+            GPUDevice(index: 1, name: "AMD Radeon PRO W6800X", vramMB: 32_752),
+        ])
+        XCTAssertEqual(groups[0].cards, 2)
+        XCTAssertEqual(groups[0].gpus, 2)
+    }
+
+    /// Mixed machines keep one row per model, in the order Metal listed them.
+    func testModelGroupsKeepEnumerationOrder() {
+        let groups = HardwareInfo.modelGroups(of: ninePack)
+        XCTAssertEqual(groups.map(\.name), [
+            "AMD Radeon Pro 580",
+            "AMD Radeon Pro Vega II Duo",
+            "AMD Radeon PRO W6800X",
+            "AMD Radeon PRO W6800",
+            "AMD Radeon PRO W6800X Duo",
+        ])
+        XCTAssertEqual(groups.map(\.cards), [1, 1, 1, 1, 2])
+        XCTAssertEqual(groups.map(\.gpus),  [1, 2, 1, 1, 4])
+    }
+
+    /// A Duo with one die disabled is still a card, not half of one.
+    func testOddDieCountRoundsUpToAWholeCard() {
+        let lone = [GPUDevice(index: 0, name: "AMD Radeon Pro Vega II Duo", vramMB: 32_736)]
+        XCTAssertEqual(HardwareInfo.modelGroups(of: lone)[0].cards, 1)
+    }
+
     func testVramRoundsToTheNearestGigabyte() {
         XCTAssertEqual(GPUDevice(index: 0, name: "RX 6700 XT", vramMB: 12_272).vramGB, 12)
         XCTAssertEqual(GPUDevice(index: 0, name: "Vega II Duo", vramMB: 32_736).vramGB, 32)

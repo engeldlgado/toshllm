@@ -60,6 +60,33 @@ enum GGUFFile {
         return singles
     }
 
+    /// Total bytes of a model, including every sibling shard when `path` is the
+    /// first `-00001-of-N` file. Falls back to the single file for normal GGUFs.
+    static func totalSize(at path: String) -> UInt64? {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        if shardInfo(url.path) == nil {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let size = (attributes[.size] as? NSNumber)?.uint64Value else { return nil }
+            return size
+        }
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: url.deletingLastPathComponent(),
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]) else { return nil }
+        let entries = files.compactMap { file -> GGUFFileEntry? in
+            guard file.pathExtension.lowercased() == "gguf",
+                  let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
+                  let size = values.fileSize else { return nil }
+            return GGUFFileEntry(path: file.standardizedFileURL.path, sizeBytes: Int64(size))
+        }
+        if let model = models(from: entries).first(where: {
+            $0.primaryPath == url.path || $0.paths.contains(url.path)
+        }) {
+            return UInt64(max(0, model.sizeBytes))
+        }
+        return nil
+    }
+
     static func isProjector(_ path: String) -> Bool {
         path.lowercased().contains("mmproj")
     }

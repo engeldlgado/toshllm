@@ -1,0 +1,65 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 3267f7717..2bca4c4f0 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1520,20 +1520,56 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph
+         return GGML_STATUS_FAILED;
+     }
+ 
+     bool staged_moe = false;
+-    if (getenv("TOSH_MOE_BOUNDED_STAGE") != NULL) {
+-        for (int i = 0; i < gf->n_nodes && !staged_moe; ++i) {
+-            staged_moe = ggml_metal_op_cached_moe_layer(gf->nodes[i]) >= 0;
++    const char * bounded_env = getenv("TOSH_MOE_BOUNDED_STAGE");
++    const bool bounded_requested = bounded_env != NULL && strcmp(bounded_env, "0") != 0;
++    const char * force_env = getenv("TOSH_MOE_BOUNDED_STAGE_FORCE");
++    const bool bounded_forced = force_env != NULL && strcmp(force_env, "0") != 0;
++    size_t bounded_bank_size = 0;
++    size_t bounded_threshold = 0;
++    if (bounded_requested || bounded_forced) {
++        for (int i = 0; i < gf->n_nodes; ++i) {
++            const struct ggml_tensor * host = ggml_metal_op_cached_moe_host(gf->nodes[i]);
++            if (host == NULL) {
++                continue;
++            }
++            ggml_backend_buffer_t buffer = host->view_src ? host->view_src->buffer : host->buffer;
++            bounded_bank_size = ggml_backend_buffer_get_size(buffer);
++
++            const struct ggml_metal_device_props * props = ggml_metal_device_get_props(ctx->dev);
++            // Leave headroom for the resident non-MoE weights, slots and graph scratch. On
++            // the RX 6700 XT this separates the 9.61 GiB Q2 bank from the 12.58/16.88 GiB
++            // Q4 banks which Metal cannot safely wrap as one host resource.
++            bounded_threshold = props->max_working_set_size*7/8;
++            const char * threshold_mb = getenv("TOSH_MOE_BOUNDED_STAGE_THRESHOLD_MB");
++            if (threshold_mb != NULL) {
++                const unsigned long long value = strtoull(threshold_mb, NULL, 10);
++                if (value > 0 && value <= SIZE_MAX/(1024ULL*1024ULL)) {
++                    bounded_threshold = (size_t) value*1024ULL*1024ULL;
++                }
++            }
++            staged_moe = bounded_forced || bounded_bank_size > bounded_threshold;
++            break;
+         }
+     }
+     if (staged_moe) {
+         static bool logged = false;
+         if (!logged) {
+-            GGML_LOG_WARN("%s: Dynamic MoE bounded selected-expert staging active (sequential)\n", __func__);
++            GGML_LOG_WARN("%s: Dynamic MoE bounded staging active: bank %.2f GiB, threshold %.2f GiB%s\n",
++                __func__, bounded_bank_size/(1024.0*1024.0*1024.0),
++                bounded_threshold/(1024.0*1024.0*1024.0), bounded_forced ? " (forced)" : "");
+             logged = true;
+         }
+         return ggml_metal_graph_compute_moe_staged(ctx, gf);
++    } else if (bounded_requested && bounded_bank_size > 0) {
++        static bool logged_fast = false;
++        if (!logged_fast) {
++            GGML_LOG_INFO("%s: Dynamic MoE bank %.2f GiB is below the %.2f GiB bounded threshold; keeping the fast cache path\n",
++                __func__, bounded_bank_size/(1024.0*1024.0*1024.0),
++                bounded_threshold/(1024.0*1024.0*1024.0));
++            logged_fast = true;
++        }
+     }
+ 
+     // number of nodes encoded by the main thread (empirically determined)
+     const int n_main = MAX(64, 0.1*gf->n_nodes);

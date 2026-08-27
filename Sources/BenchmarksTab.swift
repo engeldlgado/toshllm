@@ -26,7 +26,7 @@ struct BenchmarksView: View {
     @AppStorage(SettingsKeys.benchAdvanced) private var benchAdvanced = false
 
     private var gpus: [GPUDevice] { ServerController.availableGPUs() }
-    private var busy: Bool { bench.running || bench.sweeping }
+    private var busy: Bool { bench.running || bench.sweeping || bench.optimizingDynamicMoe }
 
     var body: some View {
         ScrollView {
@@ -81,6 +81,11 @@ struct BenchmarksView: View {
             }
         }
         .animation(.spring(duration: 0.3), value: appliedToast)
+        .onChange(of: bench.dynamicMoeOptimizationProfile?.modelFingerprint) { _, fingerprint in
+            guard fingerprint != nil else { return }
+            cfg.dynamicMoe = true
+            cfg.dynamicMoePolicy = "auto"
+        }
     }
 
     // MARK: run card
@@ -92,6 +97,20 @@ struct BenchmarksView: View {
 
     private var isMoEModel: Bool {
         !cfg.modelPath.isEmpty && ServerSettings.modelIsMoE(at: cfg.modelPath)
+    }
+
+    /// K is per layer and bounded by the model: at least the experts a token uses,
+    /// at most the ones the GGUF really has.
+    private var dmoeSlotRange: ClosedRange<Int> {
+        guard let info = cfg.dynamicMoeModelInfo else { return 1...256 }
+        return min(max(info.activeExpertCount, 1), info.expertCount)...info.expertCount
+    }
+    private var dmoeSlotBinding: Binding<Int> {
+        Binding(get: { cfg.effectiveDynamicMoeSlots },
+                set: { v in
+                    let r = dmoeSlotRange
+                    cfg.dynamicMoeSlots = min(max(v, r.lowerBound), r.upperBound)
+                })
     }
 
     /// Model picker binding that seeds ncmoe on selection: the remembered or
@@ -211,7 +230,18 @@ struct BenchmarksView: View {
                             .help(loc.t("GPU(s) del benchmark: una fija esa GPU, varias reparten el modelo entre ellas; 'Predeterminada' deja que macOS elija. Se registra en el resultado.",
                                         "Benchmark GPU(s): one pins that GPU, several split the model across them; 'Default' lets macOS pick. It's recorded in the result."))
                         }
-                        if isMoEModel {
+                        if isMoEModel && cfg.effectiveDynamicMoe {
+                            field(loc.t("Ranuras dMoE", "dMoE slots")) {
+                                HStack(spacing: 6) {
+                                    TextField("", value: dmoeSlotBinding, format: .number.grouping(.never))
+                                        .textFieldStyle(.roundedBorder).frame(width: 52)
+                                        .multilineTextAlignment(.trailing)
+                                    Stepper("", value: dmoeSlotBinding, in: dmoeSlotRange).labelsHidden()
+                                }
+                            }
+                            .help(loc.t("K por capa: cuántos expertos caben en la caché de VRAM. Es lo que decide esta corrida, así que barrerlo aquí es la forma de encontrar el que más rinde.",
+                                        "K per layer: how many experts fit in the VRAM cache. It is what decides this run, so sweeping it here is how you find the one that pays best."))
+                        } else if isMoEModel {
                             field(loc.t("MoE en CPU", "MoE on CPU")) {
                                 HStack(spacing: 6) {
                                     Text("\(cfg.ncmoe)").font(.body.weight(.semibold).monospacedDigit())
@@ -269,6 +299,14 @@ struct BenchmarksView: View {
                     sweepProgress
                 }
 
+                if bench.optimizingDynamicMoe || bench.dynamicMoeOptimizationStatus != .idle {
+                    DynamicMoeOptimizationStatusView(
+                        running: bench.optimizingDynamicMoe,
+                        status: bench.dynamicMoeOptimizationStatus,
+                        profile: bench.dynamicMoeOptimizationProfile,
+                        samples: bench.dynamicMoeOptimizationSamples)
+                }
+
                 Divider().opacity(0.35)
 
                 // Effective configuration — the exact run that produces the result.
@@ -276,7 +314,11 @@ struct BenchmarksView: View {
                     chip("pp\(cfg.benchPPClamped)/tg\(cfg.benchTGClamped)",
                          active: cfg.benchPPClamped != 512 || cfg.benchTGClamped != 128)
                     if cfg.benchDepthClamped > 0 { chip("d\(cfg.benchDepthClamped)", active: true) }
-                    chip("ncmoe \(cfg.ncmoe)", active: cfg.ncmoe > 0)
+                    if cfg.effectiveDynamicMoe {
+                        chip("dMoE K\(cfg.effectiveDynamicMoeSlots)", active: true)
+                    } else {
+                        chip("ncmoe \(cfg.ncmoe)", active: cfg.ncmoe > 0)
+                    }
                     chip("K:\(cfg.cacheTypeK)", active: cfg.cacheTypeK != "f16")
                     chip("V:\(cfg.cacheTypeV)", active: cfg.cacheTypeV != "f16")
                     chip(engineName, active: cfg.serverBinary != ServerSettings.defaultBinary)
@@ -309,19 +351,38 @@ struct BenchmarksView: View {
 
     @ViewBuilder private var actionButtons: some View {
         HStack(spacing: 10) {
-            if bench.running || bench.sweeping {
+            if bench.running || bench.sweeping || bench.optimizingDynamicMoe {
                 ProgressView().controlSize(.small)
-                if bench.sweeping {
+                if bench.optimizingDynamicMoe {
+                    Text(bench.dynamicMoeOptimizationStatus.localized(using: loc))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button(loc.t("Cancelar", "Cancel"), role: .destructive,
+                           action: bench.cancelDynamicMoeOptimization)
+                } else if bench.sweeping {
                     Text(bench.sweepStatus).font(.caption).foregroundStyle(.secondary)
                     Button(loc.t("Cancelar", "Cancel"), role: .destructive) { bench.cancelSweep() }
                 } else {
                     Button(loc.t("Cancelar", "Cancel"), role: .destructive) { bench.cancel() }
                 }
             } else {
+                if isMoEModel && cfg.dynamicMoeUIUnlocked {
+                    Button {
+                        rememberWorkload()
+                        bench.optimizeDynamicMoe(settings: cfg)
+                    } label: {
+                        Label(loc.t("Optimizar dMoE", "Optimize dMoE"), systemImage: "gearshape.2.fill")
+                    }
+                    .disabled(cfg.modelPath.isEmpty || cfg.serverBinary != ServerSettings.defaultBinary
+                              || server.state == .running || server.state == .starting)
+                    .help(loc.t("Genera un mapa completo de expertos, compara la ruta directa y la dividida, barre K y activa automáticamente el mejor perfil para este modelo y GPU.",
+                                "Builds a complete expert map, compares direct and split routes, sweeps K, and automatically activates the best profile for this model and GPU."))
+                }
                 Button { rememberWorkload(); bench.sweep(settings: cfg) } label: {
                     Label(loc.t("Buscar óptimo", "Find optimum"), systemImage: "scope")
                 }
-                .disabled(cfg.modelPath.isEmpty || cfg.ncmoe == 0 || server.state == .running || server.state == .starting)
+                .disabled(cfg.modelPath.isEmpty || cfg.ncmoe == 0 || cfg.effectiveDynamicMoe
+                          || server.state == .running || server.state == .starting)
                 .help(loc.t("Solo modelos MoE: busca el ncmoe mínimo seguro y recomienda tres pasos por encima para dejar margen de VRAM. Muestra cada medición temporalmente y solo guarda el óptimo.",
                             "MoE models only: finds the lowest safe ncmoe and recommends three steps above it for VRAM headroom. Shows each measurement temporarily and saves only the optimum."))
                 Button { rememberWorkload(); bench.runReal(settings: cfg) } label: {

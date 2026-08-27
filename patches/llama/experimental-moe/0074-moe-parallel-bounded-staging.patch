@@ -1,0 +1,39 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1213,5 +1213,10 @@ static bool ggml_metal_moe_finish(id<MTLCommandBuffer> cmd_buf) {
+ // and blitted into private K slots. No command ever receives a Metal view of the complete bank.
+ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, struct ggml_cgraph * gf) {
++    int copy_workers = 4;
++    const char * copy_workers_env = getenv("TOSH_MOE_BOUNDED_COPY_WORKERS");
++    if (copy_workers_env != NULL) {
++        copy_workers = MAX(1, MIN(8, atoi(copy_workers_env)));
++    }
+     int first = -1;
+     for (int i = 0; i < gf->n_nodes; ++i) {
+         if (ggml_metal_op_cached_moe_layer(gf->nodes[i]) >= 0) {
+@@ -1453,9 +1458,21 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, s
+                 const struct ggml_tensor * host = ggml_metal_op_cached_moe_host(op);
+                 const size_t row = host->nb[2];
+                 stage_off = (stage_off + 255) & ~(size_t) 255;
+-                for (int m = 0; m < n_miss; ++m) {
+-                    memcpy((uint8_t *) [expert_stage contents] + stage_off + (size_t) m*row,
+-                           (const uint8_t *) host->data + (size_t) miss_expert[m]*host->nb[2], row);
++                if (copy_workers > 1 && n_miss > 1) {
++                    const int workers = MIN(copy_workers, n_miss);
++                    uint8_t * stage_ptr = (uint8_t *) [expert_stage contents] + stage_off;
++                    const uint8_t * host_ptr = (const uint8_t *) host->data;
++                    dispatch_apply((size_t) workers, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(size_t worker) {
++                        for (int m = (int) worker; m < n_miss; m += workers) {
++                            memcpy(stage_ptr + (size_t) m*row,
++                                   host_ptr + (size_t) miss_expert[m]*host->nb[2], row);
++                        }
++                    });
++                } else {
++                    for (int m = 0; m < n_miss; ++m) {
++                        memcpy((uint8_t *) [expert_stage contents] + stage_off + (size_t) m*row,
++                               (const uint8_t *) host->data + (size_t) miss_expert[m]*host->nb[2], row);
++                    }
+                 }
+                 const struct ggml_metal_buffer_id dst = ggml_metal_get_buffer_id(op->src[0]);
+                 for (int m = 0; m < n_miss; ++m) {

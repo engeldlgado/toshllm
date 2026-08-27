@@ -481,20 +481,13 @@ struct MachineCard: View {
     }
 
     private var gpuModelRows: [String] {
-        let gpus = machine.splitEligibleGPUs
-        var order: [String] = []
-        var counts: [String: Int] = [:]
-        var vram: [String: Int] = [:]
-        for gpu in gpus {
-            if counts[gpu.name] == nil { order.append(gpu.name) }
-            counts[gpu.name, default: 0] += 1
-            vram[gpu.name] = gpu.vramGB
-        }
-        return order.map { name -> String in
-            let count = counts[name] ?? 1, gb = vram[name] ?? 0
-            return count == 1
-                ? "\(name) · \(gb) GB"
-                : loc.t("\(count) × \(name) · \(gb) GB c/u", "\(count) × \(name) · \(gb) GB each")
+        HardwareInfo.modelGroups(of: machine.splitEligibleGPUs).map { g in
+            let head = g.cards == 1 ? g.name : "\(g.cards) × \(g.name)"
+            // A Duo is one card with two GPUs, so the card count alone hides half of them.
+            let dies = g.gpus == g.cards ? "" : " · \(g.gpus) GPUs"
+            if g.cards == 1 && g.gpus == 1 { return "\(head) · \(g.vramGB) GB" }
+            return loc.t("\(head)\(dies) · \(g.vramGB) GB c/u",
+                         "\(head)\(dies) · \(g.vramGB) GB each")
         }
     }
 

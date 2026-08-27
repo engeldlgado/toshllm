@@ -19,6 +19,25 @@ enum SettingsKeys {
     static let serverBinary = "serverBinary"
     static let modelPath = "modelPath"
     static let modelsDir = "modelsDir"
+    static let whisperModel = "whisperModel"
+    static let speechInputMethod = "speechInputMethod"
+    static let whisperLoadPolicy = "whisperLoadPolicy"
+    static let audioOperation = "audioOperation"
+    static let audioLanguage = "audioLanguage"
+    static let audioTargetLanguage = "audioTargetLanguage"
+    static let audioExportFormat = "audioExportFormat"
+    static let audioFollowTranscript = "audioFollowTranscript"
+    static let audioTranscriptMode = "audioTranscriptMode"
+    static let audioExportTrack = "audioExportTrack"
+    static let audioGlossary = "audioGlossary"
+    static let audioTranslationModel = "audioTranslationModel"
+    static let audioVADMode = "audioVADMode"
+    static let audioVADProfile = "audioVADProfile"
+    static let audioVADThreshold = "audioVADThreshold"
+    static let audioVADMinSpeechMS = "audioVADMinSpeechMS"
+    static let audioVADMinSilenceMS = "audioVADMinSilenceMS"
+    static let audioVADMaxSpeechSeconds = "audioVADMaxSpeechSeconds"
+    static let audioVADSpeechPadMS = "audioVADSpeechPadMS"
     /// Persisted (model, projector) pairs that failed to load, so a bad mmproj
     /// isn't auto-attached again.
     static let incompatibleMmproj = "incompatibleMmproj"
@@ -68,6 +87,10 @@ enum SettingsKeys {
     static let specMTP = "specMTP"
     static let faAmd = "faAmd"
     static let prefetchExperts = "prefetchExperts"
+    static let dynamicMoe = "dynamicMoe"
+    static let dynamicMoeSlots = "dynamicMoeSlots"
+    static let dynamicMoePrefetch = "dynamicMoePrefetch"
+    static let dynamicMoePolicy = "dynamicMoePolicy"
     static let routerMode = "routerMode"
     static let routerModelsMax = "routerModelsMax"
     /// Alias of the model the native chat targets in router mode. A runtime
@@ -184,9 +207,16 @@ enum SettingsKeys {
     /// live outside UserDefaults and are untouched.
     static let resettableOptionKeys = [
         serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja,
-        vramReserve, gpuIndex, gpuList, extraArgs, embeddings, agentToolsEnabled, toolsRuntime, jsSandboxEnabled, mcpServers, uiMcpProxy,
+        vramReserve, gpuIndex, gpuList, whisperModel, speechInputMethod, whisperLoadPolicy,
+        audioOperation, audioLanguage, audioTargetLanguage, audioExportFormat,
+        audioFollowTranscript, audioTranscriptMode, audioExportTrack,
+        audioGlossary, audioTranslationModel, audioVADMode,
+        audioVADProfile, audioVADThreshold, audioVADMinSpeechMS,
+        audioVADMinSilenceMS, audioVADMaxSpeechSeconds, audioVADSpeechPadMS,
+        extraArgs, embeddings, agentToolsEnabled, toolsRuntime, jsSandboxEnabled, mcpServers, uiMcpProxy,
         cacheTypeK, cacheTypeV, mlock, cacheRAM,
-        parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, routerMode, routerModelsMax,
+        parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts,
+        dynamicMoe, dynamicMoeSlots, dynamicMoePrefetch, dynamicMoePolicy, routerMode, routerModelsMax,
         persistCache, multiGPU, multiGPUCount, splitMode, mgpuEvents, mgpuPeer,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
         menuBarIcon, menuBarGPU, autoStart, updateAutoCheck, appAccent,
@@ -216,6 +246,7 @@ enum AppLog {
     private static let subsystem = "dev.engel.toshllm"
     static let server = Logger(subsystem: subsystem, category: "server")
     static let downloads = Logger(subsystem: subsystem, category: "downloads")
+    static let speech = Logger(subsystem: subsystem, category: "speech")
     static let chat = Logger(subsystem: subsystem, category: "chat")
     static let app = Logger(subsystem: subsystem, category: "app")
 }
