@@ -1,0 +1,79 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+index c492f07..1bae359 100644
+--- a/ggml/src/ggml-metal/ggml-metal.cpp
++++ b/ggml/src/ggml-metal/ggml-metal.cpp
+@@ -1084,17 +1084,27 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     bool reduced = false;
+     auto push = [&](size_t j_src, size_t j_dst, size_t step, bool hold) {
+         view_tmp(j_dst, step);
+         const bool ok = ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
+                                                               tensors[j_src], &tmp[j_dst], prefer_events, hold);
+-        GGML_ASSERT(ok || !reduced);
++        if (!ok && reduced) {
++            // the partial sums are already folded in, so the fallback would add them a
++            // second time - a failed butterfly has no safe way out
++            GGML_ABORT("%s: allreduce push failed after partial reduction\n", __func__);
++        }
+         return ok;
+     };
+     auto reduce = [&](size_t j_dst) {
+         ggml_metal_t ctx = (ggml_metal_t) comm_ctx->backends[j_dst]->context;
+-        GGML_ASSERT(ggml_metal_add_inplace_async(ctx, tensors[j_dst], &tmp[j_dst]));
++        if (!ggml_metal_add_inplace_async(ctx, tensors[j_dst], &tmp[j_dst])) {
++            if (reduced) {
++                GGML_ABORT("%s: allreduce add failed after partial reduction\n", __func__);
++            }
++            return false;
++        }
+         reduced = true;
++        return true;
+     };
+ 
+     const size_t offset_max = ggml_backend_metal_comm_offset_max(n_backends);
+ 
+     size_t step = 0;
+@@ -1103,11 +1113,13 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+             if (!push(j_src, j_src - 2*offset_max, step, hold_dst)) {
+                 return false;
+             }
+         }
+         for (size_t j_src = 2*offset_max; j_src < n_backends; j_src++) {
+-            reduce(j_src - 2*offset_max);
++            if (!reduce(j_src - 2*offset_max)) {
++                return false;
++            }
+         }
+         step++;
+     }
+ 
+     // Every exchange of a step must read the partner's tensor before its own add rewrites it,
+@@ -1117,20 +1129,25 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+             if (!push(j, j ^ offset, step, hold_dst)) {
+                 return false;
+             }
+         }
+         for (size_t j = 0; j < 2*offset_max; j++) {
+-            reduce(j);
++            if (!reduce(j)) {
++                return false;
++            }
+         }
+         step++;
+     }
+ 
+     for (size_t j = 2*offset_max; j < n_backends; j++) {
+         const size_t j_src = j - 2*offset_max;
+-        GGML_ASSERT(ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j],
+-                                                          tensors[j_src], tensors[j], prefer_events,
+-                                                          /*hold_dst =*/ false));
++        // past the reduction, so there is no fallback left if this copy fails
++        if (!ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j],
++                                                    tensors[j_src], tensors[j], prefer_events,
++                                                    /*hold_dst =*/ false)) {
++            GGML_ABORT("%s: allreduce tail copy failed\n", __func__);
++        }
+     }
+ 
+     return true;
+ }
+ 

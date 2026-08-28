@@ -1,0 +1,19 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 29b2644..1903da0 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -860,11 +860,13 @@ static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+     if (@available(macOS 10.15, *)) {
+         id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
+         id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
+         const bool same_dev = dev_src == dev_dst && ggml_metal_peer_self();
+         const uint64_t peer_group = dev_src.peerGroupID;
+-        if (!same_dev && (peer_group == 0 || peer_group != dev_dst.peerGroupID)) {
++        // a peer group wider than a pair can span PCIe-only links, so gate on IFL pairs
++        if (!same_dev && (peer_group == 0 || peer_group != dev_dst.peerGroupID ||
++                          dev_src.peerCount != 2 || dev_dst.peerCount != 2)) {
+             return false;
+         }
+ 
+         struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);

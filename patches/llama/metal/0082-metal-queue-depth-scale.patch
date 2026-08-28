@@ -1,0 +1,56 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index b97b4c7..b9131e3 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -788,20 +788,47 @@ static enum ggml_metal_device_id ggml_metal_device_id_parse(const char * name) {
+         }
+     }
+     return GGML_METAL_DEVICE_GENERIC;
+ }
+ 
++// registered slot count, mirroring ggml_backend_metal_reg: GGML_METAL_DEVICES=K, or one slot per GGML_METAL_DEVICE_LIST entry
++static int ggml_metal_device_registered_count(void) {
++    int n = 1;
++    const char * env_num = getenv("GGML_METAL_DEVICES");
++    if (env_num) {
++        n = atoi(env_num);
++    }
++    const char * env_list = getenv("GGML_METAL_DEVICE_LIST");
++    if (env_list && *env_list) {
++        n = 1;
++        for (const char * p = env_list; *p; ++p) {
++            if (*p == ',') {
++                ++n;
++            }
++        }
++    }
++    return n;
++}
++
+ // macOS can hand out an integrated iGPU (isLowPower, ~1 GB) as the system
+ // default. Auto-selection skips it; explicit DEVICE_INDEX/LIST can still pin it.
+ // tensor split blocks the main thread on the queue's in-flight command buffer limit (64 by
+-// default), so allow raising it: TOSH_MTL_QUEUE_DEPTH
++// default), so scale it with the registered device count; TOSH_MTL_QUEUE_DEPTH overrides
+ static id<MTLCommandQueue> ggml_metal_new_queue(id<MTLDevice> device) {
+     const char * s = getenv("TOSH_MTL_QUEUE_DEPTH");
+-    const int depth = s ? atoi(s) : 0;
+ 
+-    if (depth > 0) {
+-        return [device newCommandQueueWithMaxCommandBufferCount:depth];
++    if (s != NULL) {
++        const int depth = atoi(s);
++        if (depth > 0) {
++            return [device newCommandQueueWithMaxCommandBufferCount:depth];
++        }
++        return [device newCommandQueue];
++    }
++
++    const int n_dev = ggml_metal_device_registered_count();
++    if (n_dev > 2) {
++        return [device newCommandQueueWithMaxCommandBufferCount:64 * ((n_dev + 1) / 2)];
+     }
+ 
+     return [device newCommandQueue];
+ }
+ 

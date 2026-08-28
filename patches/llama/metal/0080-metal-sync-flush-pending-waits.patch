@@ -1,0 +1,24 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 4c84fec..29b2644 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -478,10 +478,19 @@ const char * ggml_metal_get_name(ggml_metal_t ctx) {
+ 
+ void ggml_metal_synchronize(ggml_metal_t ctx) {
+     // nothing completes while a command buffer is still held open
+     ggml_metal_cmd_buf_hold_flush(ctx);
+ 
++    // pending waits guard memory a peer blit can still be reading, so they must run and complete before synchronize returns
++    if (ctx->n_ev_wait_pending > 0 || ctx->n_peer_waits > 0) {
++        @autoreleasepool {
++            id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
++            ggml_metal_encode_pending_waits(ctx, cmd_buf);
++            ggml_metal_cmd_buf_submit(ctx, cmd_buf);
++        }
++    }
++
+     // wait for any backend operations to finish
+     if (ctx->cmd_buf_last) {
+         [ctx->cmd_buf_last waitUntilCompleted];
+         ctx->cmd_buf_last = nil;
+     }
