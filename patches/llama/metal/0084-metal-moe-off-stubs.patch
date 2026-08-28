@@ -1,0 +1,76 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 4f4fef8..2c53d67 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -8,10 +8,20 @@ static inline const void * tosh_moe_ram_of(const void *)   { return nullptr; }
+ static inline const void * tosh_moe_slots_of(const void *) { return nullptr; }
+ static inline const void * tosh_moe_stage(void)            { return nullptr; }
+ static inline int tosh_moe_experts_of(const void *)         { return 0; }
+ static inline int tosh_moe_fixed_of(const void *)           { return 0; }
+ static inline bool tosh_moe_should_route(const void *, int) { return false; }
++static inline int tosh_moe_ids_room(int)                   { return 0; }
++static inline int tosh_moe_off_slot_for_id(int, int, int)  { return 0; }
++static inline int tosh_moe_off_cold_for_id(int, int, int)  { return 0; }
++static inline int tosh_moe_off_id_of_slot(int, int, int)   { return 0; }
++static inline int tosh_moe_off_usage(int, int, int)        { return 0; }
++static inline int tosh_moe_off_step(int, int, int)         { return 0; }
++static inline int tosh_moe_off_n_indices(int, int, int)    { return 0; }
++static inline int tosh_moe_off_evict(int, int, int)        { return 0; }
++static inline int tosh_moe_off_src(int, int, int)          { return 0; }
++static inline int tosh_moe_off_ids(int, int, int)          { return 0; }
+ #endif
+ 
+ #include "ggml.h"
+ #include "ggml-impl.h"
+ #include "ggml-backend-impl.h"
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index ba3736a..4c84fec 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1268,10 +1268,11 @@ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, co
+     }
+ 
+     return true;
+ }
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
+ static bool ggml_metal_moe_encode_range(
+         ggml_metal_t ctx, struct ggml_cgraph * gf, id<MTLCommandBuffer> cmd_buf, int start, int end) {
+     if (start >= end) {
+         return true;
+     }
+@@ -1837,20 +1838,22 @@ done:
+     ggml_metal_op_cached_moe_ids_clear();
+     ggml_metal_op_cached_moe_full_clear();
+     ctx->cmd_buf_last = nil;
+     return result;
+ }
++#endif
+ 
+ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+     // command buffers run in commit order, so a held one has to go in before this graph
+     ggml_metal_cmd_buf_hold_flush(ctx);
+ 
+     if (ctx->has_error) {
+         GGML_LOG_ERROR("%s: backend is in error state from a previous command buffer failure - recreate the backend to recover\n", __func__);
+         return GGML_STATUS_FAILED;
+     }
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
+     bool staged_moe = false;
+     const char * bounded_env = getenv("TOSH_MOE_BOUNDED_STAGE");
+     const bool bounded_requested = bounded_env != NULL && strcmp(bounded_env, "0") != 0;
+     const char * force_env = getenv("TOSH_MOE_BOUNDED_STAGE_FORCE");
+     const bool bounded_forced = force_env != NULL && strcmp(force_env, "0") != 0;
+@@ -1897,10 +1900,11 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+                 __func__, bounded_bank_size/(1024.0*1024.0*1024.0),
+                 bounded_threshold/(1024.0*1024.0*1024.0));
+             logged_fast = true;
+         }
+     }
++#endif
+ 
+     // number of nodes encoded by the main thread (empirically determined)
+     const int n_main = MAX(64, 0.1*gf->n_nodes);
+ 
+     // number of threads in addition to the main thread

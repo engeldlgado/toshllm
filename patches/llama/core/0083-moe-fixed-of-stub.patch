@@ -1,0 +1,16 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 694a2e0..f7551aa 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -7,10 +7,11 @@ static inline ggml_tensor * tosh_moe_bank_of(ggml_tensor * t) {
+ }
+ #else
+ static inline const void * tosh_moe_state_of(const void *) { return nullptr; }
+ static inline const void * tosh_moe_ram_of(const void *)   { return nullptr; }
+ static inline int tosh_moe_experts_of(const void *)         { return 0; }
++static inline int tosh_moe_fixed_of(const void *)           { return 0; }
+ static inline int tosh_moe_ids_room(int) { return 0; }
+ static inline ggml_tensor * tosh_moe_bank_of(ggml_tensor * t) { return t; }
+ #endif
+ 
+ #include "llama-impl.h"
