@@ -1,0 +1,58 @@
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1495,17 +1495,16 @@
+                             slot_of[e] = -2;
+                             n_unique++;
+                             if (n_fixed > 0 && tosh_moe_cold_of(layer, e) >= 0) n_cold_unique++;
+                         }
+                     }
+                 }
+             }
+         }
+-        for (int e = 0; e < n_expert; ++e) slot_of[e] = -1;
+         if (getenv("TOSH_MOE_WIDE_DEBUG") != NULL) {
+             GGML_LOG_WARN("%s: layer %d unique=%d cold=%d slots=%d fixed=%d experts=%d\n",
+                 __func__, layer, n_unique, n_cold_unique, n_slots, n_fixed, n_expert);
+         }
+         if (!ids_valid) {
+             free(slot_of); free(miss_expert); free(miss_slot);
+             result = GGML_STATUS_FAILED;
+             goto done;
+@@ -1528,33 +1527,35 @@
+                 const int32_t * cfi = sv + tosh_moe_off_cold_for_id(n_expert, n_slots, max_fetch);
+                 const int32_t * ios = sv + tosh_moe_off_id_of_slot (n_expert, n_slots, max_fetch);
+                 const int n_cold = n_expert - n_fixed;
+                 int bad_ring = 0, bad_stale = 0, bad_cold = 0, from_slot = 0, from_cold = 0;
+                 for (int e = 0; e < n_expert; ++e) {
+                     if (slot_of[e] != -2 && slot_of[e] != -1) continue;   // only experts routed this pass
+                     if (sfi[e] >= 0) {
+                         from_slot++;
+-                        if (sfi[e] >= n_fixed) bad_ring++;
+-                        else if (ios[sfi[e]] != e) bad_stale++;
++                        if (ios[sfi[e]] != e) {
++                            if (sfi[e] >= n_fixed) bad_ring++; else bad_stale++;
++                        }
+                     } else {
+                         from_cold++;
+                         if (cfi[e] < 0 || cfi[e] >= n_cold) bad_cold++;
+                     }
+                 }
+                 st_src_slot += from_slot; st_src_cold += from_cold;
+                 st_bad_ring += bad_ring; st_bad_stale += bad_stale; st_bad_cold += bad_cold;
+             }
+             free(sv);
+         }
+         if (slot_stats && (wide_shape || (n_fixed > 0 && n_cold_unique > n_slots - n_fixed))) {
+             st_layers++; st_wide++; st_slots = n_slots;
+             st_unique += n_unique; st_cold += n_cold_unique;
+             if (n_unique > st_unique_max) st_unique_max = n_unique;
+         }
++        for (int e = 0; e < n_expert; ++e) slot_of[e] = -1;
+         if (n_fixed > 0 && (wide_shape || n_cold_unique > n_slots - n_fixed)) {
+             const bool transient_map = getenv("TOSH_MOE_TRANSIENT_MAP") != NULL;
+             const bool persistent_map = getenv("TOSH_MOE_PERSISTENT_MAP") != NULL;
+             const bool double_buffer = getenv("TOSH_MOE_DOUBLE_BUFFER") != NULL &&
+                 !transient_map && !persistent_map && wide_shape;
+             const int parity = double_buffer ? full_sequence++ & 1 : 0;
+             if (full_pending[parity] != nil) {
+                 [full_pending[parity] waitUntilCompleted];
