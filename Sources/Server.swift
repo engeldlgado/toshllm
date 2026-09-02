@@ -937,7 +937,16 @@ struct ServerSettings {
                     (1.0 - Double(ceiling)/Double(expertBytes))).rounded(.up))
             }
         }
-        let fixed = min(max(max(info.activeExpertCount, floor), 1), budget)
+        var fixed = min(max(max(info.activeExpertCount, floor), 1), budget)
+        // A batch is served on the device only when its routing fits the ring; past it the whole
+        // logical bank is reassembled layer by layer. The unit is ids, not experts, so a decode
+        // step of a few tokens already needs several times the active count. Measured on a 35B
+        // A3B: a ring of 8 dropped generation to 17.6 t/s against 49.7, at the same prefill.
+        // The cold bank ceiling still wins, since `floor` is what makes the model start at all.
+        let ringWanted = info.activeExpertCount * 8
+        if budget - fixed < ringWanted {
+            fixed = max(min(fixed, budget - ringWanted), max(floor, 1))
+        }
         return (fixed, max(0, budget - fixed))
     }
 
