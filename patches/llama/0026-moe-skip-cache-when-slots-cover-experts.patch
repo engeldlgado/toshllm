@@ -1,0 +1,33 @@
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -1335,16 +1335,30 @@
+         }
+     }
+ 
+     GGML_ASSERT(ggml_nbytes(&t_meta) == ggml_nbytes(cur));
+ 
+     ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
+     if (buft == nullptr) {
+         return nullptr;
++    }
++
++    // Slots enough for every expert means nothing is ever evicted, so the cache would spend a
++    // pick and a fetch per layer to conclude that nothing is missing. Send the weights straight
++    // to the device, which is where the bank of slots would have put them anyway. Redirecting
++    // the buffer type is the whole of it: skipping only the bank would leave the weights in
++    // host memory and the matmul reading them scattered, which is far slower than the cache.
++    {
++        const int n_slots_all = tosh_moe_slots_want();
++        if (n_slots_all > 0 && ne.size() == 3 && t_meta.ne[2] <= n_slots_all &&
++            (const void *) buft == tosh_moe_host_buft() &&
++            std::string(ggml_get_name(&t_meta)).find("_exps.weight") != std::string::npos) {
++            buft = ggml_backend_dev_buffer_type(ggml_backend_buft_get_device(buft));
++        }
+     }
+ 
+     ggml_context * ctx = ctx_for_buft(buft);
+ 
+     // if duplicated, check if the original tensor was allocated in the same buffer type context and avoid creating a new one
+     if (flags & TENSOR_DUPLICATED) {
+         ggml_tensor * t = ggml_get_tensor(ctx, tn.str().c_str());
+         if (t) {
