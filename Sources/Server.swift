@@ -890,8 +890,10 @@ struct ServerSettings {
     /// MoE only: measured up to twice the prefill with experts on CPU (one expert
     /// upload per batch instead of per 512 tokens) and ~10% with the model whole on
     /// the card. A dense model measures slower with it, so it stays gated.
+    /// Dynamic MoE gains the most: on a 35B A3B its prefill went 317 to 1088 t/s from
+    /// 512 to 2048, against 455 to 862 for the same model on plain expert offload.
     var effectiveUbatch: Int? {
-        guard ubatch > 0, !effectiveDynamicMoe else { return nil }
+        guard ubatch > 0 else { return nil }
         guard routerMode || Self.modelIsMoE(at: modelPath) else { return nil }
         return ubatch
     }
@@ -975,7 +977,8 @@ struct ServerSettings {
         guard let gpu = selected.max(by: { $0.vramMB < $1.vramMB }), !gpu.isIntegrated else { return nil }
         return Self.resolveDynamicMoeSlots(
             modelBytes: size, model: info, gpuVRAMMB: gpu.vramMB,
-            reserveMB: vramReserveMB, prefetch: prefetch ?? effectiveDynamicMoePrefetch)
+            reserveMB: vramReserveMB, prefetch: prefetch ?? effectiveDynamicMoePrefetch,
+            ubatch: effectiveUbatch ?? 512)
     }
 
     static func resolveDynamicMoeSlots(
@@ -983,7 +986,8 @@ struct ServerSettings {
         model: DynamicMoeModelInfo,
         gpuVRAMMB: Int,
         reserveMB: Int,
-        prefetch: Int
+        prefetch: Int,
+        ubatch: Int = 512
     ) -> DynamicMoeSlotPlan? {
         guard modelBytes > 0, model.layerCount > 0, model.expertCount > 0,
               model.activeExpertCount > 0, model.activeExpertCount <= model.expertCount,
@@ -1004,7 +1008,11 @@ struct ServerSettings {
         let widestBankBytes = UInt64(ceil(
             Double(expertBytes) / Double(model.layerCount) * (2.0 / 3.0)))
         let transferBuffers = widestBankBytes * UInt64(max(0, min(prefetch, 16)) + 1)
-        let runtimeBytes = UInt64(512) * mib
+        // A wider prefill micro-batch buys a lot of prompt speed but its compute buffers
+        // come out of the same VRAM as the slots: measured about 640 MiB per extra 512
+        // tokens on a 35B A3B.
+        let extraUbatch = max(0, ubatch - 512)/512
+        let runtimeBytes = UInt64(512) * mib + UInt64(extraUbatch) * UInt64(640) * mib
         let fixedBytes = sharedBytes + runtimeBytes + transferBuffers
         let availableBytes = UInt64(max(0, gpuVRAMMB - reserveMB)) * mib
         let budgetSlots = availableBytes > fixedBytes
