@@ -1,0 +1,32 @@
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -2727,20 +2727,25 @@
+         device const block_iq1_m * xr = x + ibl;
+         device const uint8_t  * qs = xr->qs + 4 * ib;
+         device const uint8_t  * qh = xr->qh + 2 * ib;
+         device const uint16_t * sc = (device const uint16_t *)xr->scales;
+ 
+         for (short row = 0; row < nr0; row++) {
+             scale.u16 = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
+ 
+-            threadgroup const uint8_t * grid1 = (threadgroup const uint8_t *)(sgrid + (qs[0] | ((qh[0] << 8) & 0x700)));
+-            threadgroup const uint8_t * grid2 = (threadgroup const uint8_t *)(sgrid + (qs[1] | ((qh[0] << 4) & 0x700)));
+-            threadgroup const uint8_t * grid3 = (threadgroup const uint8_t *)(sgrid + (qs[2] | ((qh[1] << 8) & 0x700)));
+-            threadgroup const uint8_t * grid4 = (threadgroup const uint8_t *)(sgrid + (qs[3] | ((qh[1] << 4) & 0x700)));
++            // each grid entry is one word; reading it whole costs one bank access instead of four
++            const uint32_t g1 = sgrid[qs[0] | ((qh[0] << 8) & 0x700)];
++            const uint32_t g2 = sgrid[qs[1] | ((qh[0] << 4) & 0x700)];
++            const uint32_t g3 = sgrid[qs[2] | ((qh[1] << 8) & 0x700)];
++            const uint32_t g4 = sgrid[qs[3] | ((qh[1] << 4) & 0x700)];
++            thread const uint8_t * grid1 = (thread const uint8_t *)&g1;
++            thread const uint8_t * grid2 = (thread const uint8_t *)&g2;
++            thread const uint8_t * grid3 = (thread const uint8_t *)&g3;
++            thread const uint8_t * grid4 = (thread const uint8_t *)&g4;
+ 
+             float2 sum = {0.f};
+             for (short j = 0; j < 4; ++j) {
+                 sum[0] += yl[j+ 0] * (grid1[j] & 0xf) + yl[j+ 4] * (grid1[j] >> 4)
+                         + yl[j+ 8] * (grid2[j] & 0xf) + yl[j+12] * (grid2[j] >> 4);
+                 sum[1] += yl[j+16] * (grid3[j] & 0xf) + yl[j+20] * (grid3[j] >> 4)
+                         + yl[j+24] * (grid4[j] & 0xf) + yl[j+28] * (grid4[j] >> 4);
+             }
