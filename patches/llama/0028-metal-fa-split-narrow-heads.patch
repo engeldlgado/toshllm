@@ -1,0 +1,56 @@
+--- a/ggml/src/ggml-metal/kernels/fa.metal
++++ b/ggml/src/ggml-metal/kernels/fa.metal
+@@ -2489,25 +2489,30 @@
+     kernel_flash_attn_ext_vec_amd<dk, nsg, kt, nkk, dkf, vt, nkv, dvf, 32, 32, subw>;
+ // dk64 narrows to subw=8 like dk128; clean pairs keep n64=32, q4_0 in K or V drops to 24.
+ #define FA_AMD_PAIR_S(n64, s128, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_WG(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_WG(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_S( 64, n64, 8, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_S(128, 16, s128, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_S(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
+-    FA_AMD_INST_S(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf)
++    FA_AMD_INST_S(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    /* the narrow heads need the split too, but only at depths the host gates apart */ \
++    FA_AMD_INST_WG( 64, n64, 8, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_WG(128, 16, s128, nm, kt, nkk, dkf, vt, nkv, dvf)
+ // q4_0 keys: dk64 and dk128 both take 24 simdgroups for the heavier key dequant
+ #define FA_AMD_PAIR_Q4(nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_WG(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_WG(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_S( 64, 24, 8, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_S(128, 24, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_S(256, 16, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
+-    FA_AMD_INST_S(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf)
++    FA_AMD_INST_S(512, 16, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_WG( 64, 24, 8, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_WG(128, 24, 16, nm, kt, nkk, dkf, vt, nkv, dvf)
+ 
+ // symmetric pairs
+ FA_AMD_PAIR_S(32, 8,  "kf16_vf16",         half4,          1,  dequantize_f16_t4,      half4,          1,  dequantize_f16_t4)
+ FA_AMD_PAIR_S(32, 8,  "kq8_0_vq8_0",       block_q8_0,     8,  dequantize_q8_0_t4,     block_q8_0,     8,  dequantize_q8_0_t4)
+ FA_AMD_PAIR_Q4("kq4_0_vq4_0",       block_q4_0,     8,  dequantize_q4_0_t4,     block_q4_0,     8,  dequantize_q4_0_t4)
+ // asymmetric standard pairs (any mix of f16 / q8_0 / q4_0 for K and V), so every
+ // standard K/V combination runs on the GPU instead of falling back to the CPU.
+ FA_AMD_PAIR_S(32, 8,  "kq8_0_vf16",        block_q8_0,     8,  dequantize_q8_0_t4,     half4,          1,  dequantize_f16_t4)
+@@ -2551,17 +2556,19 @@
+ template [[host_name("kernel_flash_attn_ext_vec_amd_dk" #dk "_" nm "_w64_wg32")]] kernel flash_attn_ext_vec_amd_t \
+     kernel_flash_attn_ext_vec_amd<dk, nsg, kt, nkk, dkf, vt, nkv, dvf, 64, 32, subw>;
+ #define FA_AMD_PAIR_W64(nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_W64_WG(256, 8, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_W64_WG(512, 8, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_W64_S( 64, 16,  8, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_W64_S(128,  8,  8, nm, kt, nkk, dkf, vt, nkv, dvf) \
+     FA_AMD_INST_W64_S(256,  8, 16, nm, kt, nkk, dkf, vt, nkv, dvf) \
+-    FA_AMD_INST_W64_S(512,  8, 32, nm, kt, nkk, dkf, vt, nkv, dvf)
++    FA_AMD_INST_W64_S(512,  8, 32, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_W64_WG( 64, 16,  8, nm, kt, nkk, dkf, vt, nkv, dvf) \
++    FA_AMD_INST_W64_WG(128,  8,  8, nm, kt, nkk, dkf, vt, nkv, dvf)
+ FA_AMD_PAIR_W64("kf16_vf16",   half4,      1, dequantize_f16_t4,  half4,      1, dequantize_f16_t4)
+ FA_AMD_PAIR_W64("kq8_0_vq8_0", block_q8_0, 8, dequantize_q8_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
+ 
+ // DK=72 (vision towers: qwen3vl_merger and SigLIP are 1152/16). f16 only: 72 is
+ // not a multiple of the 32-element quant block, so quantized K/V cannot occur.
+ // DV4=18 is not a power of two, so the auto subw would break the shuffle reduction;
+ // pin subw=16 and let the ch < DV4 guards cover the top two chunks.
+ FA_AMD_INST_S   (72, 32, 16, "kf16_vf16", half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4)

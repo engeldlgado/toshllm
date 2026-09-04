@@ -1,0 +1,48 @@
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4078,20 +4078,42 @@
+             }
+         }
+         if (props_dev->simd_width == 64) {
+             fa_amd_nsg /= 2;
+         }
+ 
+         // one threadgroup per query head leaves most of the GPU idle on models with
+         // few heads; split the cache across 32 and let upstream's reduce merge them
++        // head 128 also idles the card with one threadgroup per query head, but it needs a
++        // deeper cache than the wide heads before the 32-way reduce pays for itself, and the
++        // depth it turns at is not the same on both widths
++        static const int64_t wg_dk128_env = []() {
++            const char * s = getenv("TOSH_FA_WG_DK128_MIN_KV");
++            return s ? (int64_t) atoll(s) : (int64_t) -1;
++        }();
++        const int64_t wg_dk128_min_kv = wg_dk128_env >= 0 ? wg_dk128_env
++                                      : (props_dev->simd_width == 64 ? 16384 : 24576);
++        // head 64 turns at yet another depth and is not enabled by default
++        static const int64_t wg_dk64_min_kv = []() {
++            const char * s = getenv("TOSH_FA_WG_DK64");
++            return s ? (int64_t) atoll(s) : (int64_t) 0;
++        }();
++        const bool wg_width_ok = props_dev->simd_width == 32 || props_dev->simd_width == 64;
++        const bool wg_dk64  = ne00 == 64 && ne20 == 64 && wg_width_ok &&
++                              wg_dk64_min_kv > 0 && ne11 >= wg_dk64_min_kv;
++        const bool wg_dk128 = (ne00 == 128 && ne20 == 128 && wg_width_ok &&
++                               wg_dk128_min_kv > 0 && ne11 >= wg_dk128_min_kv) || wg_dk64;
++        const bool wg_wide_head =
++            ne00 == 256 || ne00 == 512 || (ne00 == 576 && ne20 == 512) ||
++            (ne00 == 320 && ne20 == 256);
+         const int fa_amd_nwg =
+-            (ne00 == 256 || ne00 == 512 || (ne00 == 576 && ne20 == 512) ||
+-             (ne00 == 320 && ne20 == 256)) && ne01 == 1 && !has_sinks &&
+-            (props_dev->simd_width == 32 || props_dev->simd_width == 64) && ne11 >= 1024 &&
++            (wg_wide_head || wg_dk128) && ne01 == 1 && !has_sinks &&
++            (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
++            (wg_dk128 || ne11 >= 1024) &&
+             getenv("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
+ 
+         char fa_amd_wg_pipeline[96];
+         if (fa_amd_nwg > 1) {
+             snprintf(fa_amd_wg_pipeline, sizeof(fa_amd_wg_pipeline), "%s_wg32", fa_amd_pipeline);
+         }
+ 
+         auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
