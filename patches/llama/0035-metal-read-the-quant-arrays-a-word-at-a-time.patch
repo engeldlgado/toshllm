@@ -198,7 +198,7 @@
              sumf[row] += dh[0] * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1355,30 +1355,35 @@
+@@ -1355,30 +1355,38 @@
              smem = (size_t) nw*sizeof(float);
          }
      }
@@ -208,9 +208,12 @@
      const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
                        getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
 +
-+    // a stride that is a multiple of four lets the same arrays be read a word at a time
-+    const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
-+                      getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
++    // A stride that is a multiple of four lets the quant arrays be read a word at a time.
++    // The two widths are decided apart: 64 lanes have no last-level cache to hide the extra
++    // loads and every type gains, while 32 lanes only measured a gain on q8_0.
++    const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
++    const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
++    const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
  
      snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
 -    snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d", base, nsg, ne12, r2, r3, nw, row4);
