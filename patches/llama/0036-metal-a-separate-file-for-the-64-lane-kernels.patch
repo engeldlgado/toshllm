@@ -1,0 +1,190 @@
+--- a/ggml/src/ggml-metal/CMakeLists.txt
++++ b/ggml/src/ggml-metal/CMakeLists.txt
+@@ -33,16 +33,17 @@
+ if (TOSH_ENABLE_DYNAMIC_MOE)
+     configure_file(${CMAKE_SOURCE_DIR}/tosh-moe/tosh-moe-lru.metal
+                    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tosh_moe.metal COPYONLY)
+ endif()
+ 
+ set(METALLIB_KERNEL_SOURCES
+     kernels/fa.metal
+     kernels/mul_mv.metal
++    kernels/mul_mv_w64.metal
+     kernels/mul_mm.metal
+     kernels/quantize.metal
+     kernels/softmax.metal
+     kernels/norm.metal
+     kernels/unary.metal
+     kernels/binbcast.metal
+     kernels/reduce.metal
+     kernels/tri.metal
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -112,16 +112,17 @@
+ // Single source of truth for the per-kind metal libraries. The order here
+ // defines the enum values and every per-kind table below, so adding a library
+ // is a one-line change here (plus adding its source to CMakeLists.txt).
+ //   X(suffix, name): name is both the kernels/<name>.metal basename and the
+ //   ggml_metallib_<name>_{start,end} embed-symbol stem.
+ #define GGML_METAL_LIBS \
+     X(FA,              fa)             \
+     X(MUL_MV,          mul_mv)         \
++    X(MUL_MV_W64,      mul_mv_w64)     \
+     X(MUL_MM,          mul_mm)         \
+     X(QUANTIZE,        quantize)       \
+     X(SOFTMAX,         softmax)        \
+     X(NORM,            norm)           \
+     X(UNARY,           unary)          \
+     X(BINBCAST,        binbcast)       \
+     X(REDUCE,          reduce)         \
+     X(TRI,             tri)            \
+--- /dev/null
++++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+@@ -0,0 +1,147 @@
++// Kernels written for a 64-wide simdgroup. They do not share a lane mapping with the ones in
++// mul_mv.metal, so they live apart: a change here cannot reach the 32-lane path. Kernels that
++// only differ by a function constant stay there, where each width already compiles its own
++// pipeline from the same source.
++
++#include "common.h"
++#include "dequantize.h"
++constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
++constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
++constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
++constant short FC_mul_mv_r3   [[function_constant(FC_MUL_MV + 4)]];
++constant short FC_mul_mv_nw   [[function_constant(FC_MUL_MV + 5)]];
++constant bool  FC_mul_mv_row4 [[function_constant(FC_MUL_MV + 6)]];
++constant bool  FC_mul_mv_row8 [[function_constant(FC_MUL_MV + 7)]];
++
++// wave64 reads the block eight bytes at a time: half the loads of the four-byte path, and
++// eight of the sixty-four lanes cover one block instead of sixteen, so a simdgroup walks
++// eight blocks at once. The four-byte kernel above stays for thirty-two lanes.
++template<short nr0, typename args_t>
++void kernel_mul_mv_q6_K_f32_w64_impl(
++        args_t args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem,
++        uint3  tgpig,
++        ushort tiisg,
++        ushort sgitg) {
++    const short NSG = FC_mul_mv_nsg;
++
++    constexpr uint8_t kmask1 = 0x03;
++    constexpr uint8_t kmask2 = 0x0C;
++    constexpr uint8_t kmask3 = 0x30;
++    constexpr uint8_t kmask4 = 0xC0;
++
++    const int nb = args.ne00/QK_K;
++
++    const int r0 = tgpig.x;
++    const int r1 = tgpig.y;
++    const int im = tgpig.z;
++
++    const int first_row = (r0 * NSG + sgitg) * nr0;
++
++    const uint i12 = im%FC_mul_mv_ne12;
++    const uint i13 = im/FC_mul_mv_ne12;
++
++    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
++    const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
++
++    device const block_q6_K * x = (device const block_q6_K *) (src0 + offset0);
++    device const float     * yy = (device const float      *) (src1 + offset1);
++    float sumf[nr0] = { 0.f };
++
++    float yl[32];
++
++    const short NG  = FC_mul_mv_nw/8;
++    const short tid = tiisg%8;
++    const short ix  = tiisg/8;
++    const short ip  = tid/4;         // 0 or 1
++    const short il  = tid%4;
++    const short l0  = 8*il;
++    const short is  = 8*ip + l0/16;
++
++    const short y_offset   = 128*ip + l0;
++    const short q_offset_l =  64*ip + l0;
++    const short q_offset_h =  32*ip + l0;
++
++    for (int i = ix; i < nb; i += NG) {
++        device const uint8_t * q1 = x[i].ql + q_offset_l;
++        device const uint8_t * q2 = q1 + 32;
++        device const uint8_t * qh = x[i].qh + q_offset_h;
++        device const int8_t  * sc = x[i].scales + is;
++        device const half    * dh = &x[i].d;
++
++        device const float * y = yy + i * QK_K + y_offset;
++
++        for (short l = 0; l < 8; ++l) {
++            yl[4*l + 0] = y[l +  0];
++            yl[4*l + 1] = y[l + 32];
++            yl[4*l + 2] = y[l + 64];
++            yl[4*l + 3] = y[l + 96];
++        }
++
++        for (short row = 0; row < nr0; ++row) {
++            float4 sums = {0.f, 0.f, 0.f, 0.f};
++
++            // eight bytes land aligned whenever the row stride is a multiple of eight; the
++            // two-word fallback keeps the odd strides correct
++            uint2 w1, w2, wh;
++            if (FC_mul_mv_row8) {
++                w1 = *(device const uint2 *) q1;
++                w2 = *(device const uint2 *) q2;
++                wh = *(device const uint2 *) qh;
++            } else {
++                device const ushort * s1 = (device const ushort *) q1;
++                device const ushort * s2 = (device const ushort *) q2;
++                device const ushort * sh = (device const ushort *) qh;
++                w1 = uint2((uint) s1[0] | ((uint) s1[1] << 16), (uint) s1[2] | ((uint) s1[3] << 16));
++                w2 = uint2((uint) s2[0] | ((uint) s2[1] << 16), (uint) s2[2] | ((uint) s2[3] << 16));
++                wh = uint2((uint) sh[0] | ((uint) sh[1] << 16), (uint) sh[2] | ((uint) sh[3] << 16));
++            }
++
++            FOR_UNROLL (short l = 0; l < 8; ++l) {
++                const uint w = l < 4 ? 0 : 1;
++                const short sft = 8*(l & 3);
++                const uint8_t b1 = (uint8_t)((w ? w1.y : w1.x) >> sft);
++                const uint8_t b2 = (uint8_t)((w ? w2.y : w2.x) >> sft);
++                const uint8_t bh = (uint8_t)((w ? wh.y : wh.x) >> sft);
++
++                sums[0] += yl[4*l + 0] * ((int8_t)((b1 & 0xF) | ((bh & kmask1) << 4)) - 32);
++                sums[1] += yl[4*l + 1] * ((int8_t)((b2 & 0xF) | ((bh & kmask2) << 2)) - 32);
++                sums[2] += yl[4*l + 2] * ((int8_t)((b1  >> 4) | ((bh & kmask3) << 0)) - 32);
++                sums[3] += yl[4*l + 3] * ((int8_t)((b2  >> 4) | ((bh & kmask4) >> 2)) - 32);
++            }
++
++            sumf[row] += dh[0] * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
++
++            q1 += args.nb01;
++            q2 += args.nb01;
++            qh += args.nb01;
++            sc += args.nb01;
++            dh += args.nb01/2;
++        }
++    }
++
++    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
++
++    for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
++        float sum_all = simd_sum(sumf[row]);
++        if (tiisg == 0) {
++            dst_f32[first_row + row] = sum_all;
++        }
++    }
++}
++
++[[host_name("kernel_mul_mv_q6_K_f32_w64_r4")]]
++kernel void kernel_mul_mv_q6_K_f32_w64_r4(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_q6_K_f32_w64_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
++}
