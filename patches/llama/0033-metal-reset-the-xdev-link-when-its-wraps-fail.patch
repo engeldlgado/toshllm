@@ -1,0 +1,27 @@
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1031,16 +1031,24 @@
+         }
+         id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
+         id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
+         link->wrap_src = [dev_src newBufferWithBytesNoCopy:link->host
+                               length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
+         link->wrap_dst = [dev_dst newBufferWithBytesNoCopy:link->host
+                               length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
+         if (link->wrap_src == nil || link->wrap_dst == nil) {
++            // leaving cap set would make the next call skip this block and hand out the nil wraps
++            [link->wrap_src release];
++            [link->wrap_dst release];
++            link->wrap_src = nil;
++            link->wrap_dst = nil;
++            free(link->host);
++            link->host = NULL;
++            link->cap  = 0;
+             return false;
+         }
+     }
+     return true;
+ }
+ 
+ 
+ // TOSH_MGPU_PEER_SELF runs the peer hand-off between two logical devices backed by the
