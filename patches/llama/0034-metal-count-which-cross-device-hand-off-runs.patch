@@ -1,0 +1,71 @@
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1171,16 +1171,25 @@
+     GGML_UNUSED(src);
+     GGML_UNUSED(dst);
+ #endif
+     return false;
+ }
+ 
+ // event-chained hand-off: both blits share one host block and order through
+ // MTLSharedEvents, so neither GPU drains and the CPU never blocks
++static _Atomic uint64_t g_xdev_ev = 0, g_xdev_peer = 0, g_xdev_gen = 0;
++
++static void tosh_xdev_report(void) {
++    fprintf(stderr, "TOSH_XDEV  events=%llu  peer=%llu  generic=%llu\n",
++            (unsigned long long) atomic_load(&g_xdev_ev),
++            (unsigned long long) atomic_load(&g_xdev_peer),
++            (unsigned long long) atomic_load(&g_xdev_gen));
++}
++
+ static bool ggml_metal_cpy_xdev_events(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+                                        const struct ggml_tensor * src, struct ggml_tensor * dst,
+                                        bool hold_dst) {
+     struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
+     struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
+     if (bid_src.metal == nil || bid_dst.metal == nil) {
+         return false;
+     }
+@@ -1247,28 +1256,42 @@
+         // a success that silently returns wrong data has no fallback.
+         static int use_peer = -1;
+         if (use_peer < 0) {
+             const char * v = getenv("TOSH_MGPU_PEER");
+             use_peer = (v && v[0] == '1') ? 1 : 0;
+         }
+         ggml_backend_buffer_t ebsrc = src->view_src ? src->view_src->buffer : src->buffer;
+         ggml_backend_buffer_t ebdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
++        // which of the three hand-offs actually runs is not visible otherwise, and the flag
++        // alone does not tell: TOSH_MGPU_XDEV_COUNT reports the tally at exit
++        static int count = -1;
++        if (count < 0) {
++            count = getenv("TOSH_MGPU_XDEV_COUNT") != NULL;
++            if (count) {
++                atexit(tosh_xdev_report);
++            }
++        }
++
+         if (!ggml_metal_buffer_is_shared(ebsrc->context) &&
+             !ggml_metal_buffer_is_shared(ebdst->context)) {
+             if (prefer_events && use_events && ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst, hold_dst)) {
++                atomic_fetch_add(&g_xdev_ev, 1);
+                 return true;
+             }
+             if (use_peer && ggml_metal_cpy_xdev_peer(ctx_src, ctx_dst, src, dst)) {
++                atomic_fetch_add(&g_xdev_peer, 1);
+                 return true;
+             }
+             if (use_events && ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst, hold_dst)) {
++                atomic_fetch_add(&g_xdev_ev, 1);
+                 return true;
+             }
+         }
++        atomic_fetch_add(&g_xdev_gen, 1);
+         // drain both GPUs: the source before reading it, the destination before
+         // overwriting an input its in-flight graph may still be consuming
+         ggml_metal_synchronize(ctx_src);
+         ggml_metal_synchronize(ctx_dst);
+ 
+         ggml_backend_buffer_t bsrc = src->view_src ? src->view_src->buffer : src->buffer;
+         ggml_backend_buffer_t bdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
+         ggml_metal_buffer_t buf_src = (ggml_metal_buffer_t) bsrc->context;
