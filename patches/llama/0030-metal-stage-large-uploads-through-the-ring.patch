@@ -1,0 +1,43 @@
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -3341,16 +3341,40 @@
+         // pointer below allocates a kernel resource per call, and on AMD those
+         // accumulate across a long generation until transfers crawl.
+         {
+             struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
+             bid_dst.offs += offset;
+ 
+             if (ggml_metal_device_stage_set(buf->dev, bid_dst, data, size)) {
+                 return;
++            }
++
++            // A large transfer wrapped whole registers the caller's pages with the device for the
++            // whole blit; feeding it through the ring in slices keeps the copy pipelined instead.
++            static int stage_load = -1;
++            if (stage_load < 0) { stage_load = getenv("TOSH_STAGE_LOAD") != NULL; }
++            if (stage_load) {
++                bool done_all = true;
++                for (size_t done = 0; done < size;) {
++                    const size_t n = MIN(GGML_METAL_STAGE_BUF_MAX, size - done);
++
++                    struct ggml_metal_buffer_id bid = bid_dst;
++                    bid.offs += done;
++
++                    if (!ggml_metal_device_stage_set(buf->dev, bid, (const char *) data + done, n)) {
++                        done_all = false;
++                        break;
++                    }
++
++                    done += n;
++                }
++                if (done_all) {
++                    return;
++                }
+             }
+         }
+ 
+         const uint64_t t0 = tosh_prof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+ 
+         // src
+         void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
+         const bool wprof = getenv("TOSH_CB_PROFILE") != NULL;
