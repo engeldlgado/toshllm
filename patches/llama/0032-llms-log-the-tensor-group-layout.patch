@@ -1,0 +1,24 @@
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -169,16 +169,21 @@
+     }
+ 
+     if (n_devs % (size_t) g != 0) {
+         LLAMA_LOG_WARN("%s: TOSH_MGPU_TENSOR_GROUP=%ld does not divide %zu devices, using one group\n",
+                 __func__, g, n_devs);
+         return n_devs;
+     }
+ 
++    // the grouping is invisible in the log otherwise, so there is no way to tell whether the
++    // variable took effect
++    LLAMA_LOG_INFO("%s: TOSH_MGPU_TENSOR_GROUP=%ld: %zu devices in %zu groups of %ld\n",
++            __func__, g, n_devs, n_devs / (size_t) g, g);
++
+     return (size_t) g;
+ }
+ 
+ // returns true on success
+ static bool llama_prepare_model_devices(const llama_model_params & params, llama_model * model) {
+     // create list of devices to use with this model
+     if (params.devices) {
+         if (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
