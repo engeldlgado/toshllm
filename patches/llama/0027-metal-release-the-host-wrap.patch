@@ -1,0 +1,22 @@
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -3350,16 +3350,19 @@
+ 
+             dispatch_semaphore_signal(completion_semaphore);
+         }];
+ 
+         [cmd_buf commit];
+ 
+         dispatch_semaphore_wait(completion_semaphore, DISPATCH_TIME_FOREVER);
+         dispatch_release(completion_semaphore);
++        // the wrap is an owned object here, and keeping it leaves the host pages registered
++        // with the device for the rest of the load
++        [buf_src release];
+ 
+         //[cmd_buf waitUntilCompleted];
+ 
+         if (t0) {
+             tosh_prof_add(TOSH_PROF_H2D_DIRECT, size, t0);
+         }
+     }
+ }
