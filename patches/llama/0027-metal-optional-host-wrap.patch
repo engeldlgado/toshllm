@@ -1,0 +1,25 @@
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -3263,17 +3263,21 @@
+                 return;
+             }
+         }
+ 
+         const uint64_t t0 = tosh_prof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+ 
+         // src
+         void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
+-        id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
++        // wrapping the caller's pointer holds a device reservation for the whole load, so
++        // a card short on memory can trade some load time for it and stage in chunks instead
++        static int no_wrap = -1;
++        if (no_wrap < 0) { no_wrap = getenv("TOSH_NO_HOST_WRAP") != NULL; }
++        id<MTLBuffer> buf_src = no_wrap ? nil : [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
+                                                                length:size
+                                                               options:MTLResourceStorageModeShared
+                                                           deallocator:nil];
+ 
+         // dst
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
+         bid_dst.offs += offset;
+ 
