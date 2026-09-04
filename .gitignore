@@ -1,6 +1,5 @@
 .build/
 .vscode/
-.claude/
 dist/
 vendor/
 AppIcon.iconset/
