@@ -1,0 +1,32 @@
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1153,25 +1153,20 @@
+                     nsg = N_SG_Q8_0;
+                     nr0 = N_R0_Q8_0;
+                 }
+                 // the reduction buffer scales with the rows, so it follows the effective nr0
+                 smem = 32*sizeof(float)*nr0;
+             } break;
+         case GGML_TYPE_MXFP4:
+             {
+-                // the defines carry the 32-lane tuning; 64 lanes keep the values they were
+-                // validated with
+-                if (simd_width == 64) {
+-                    nsg = 2;
+-                    nr0 = 2;
+-                } else {
+-                    nsg = N_SG_MXFP4;
+-                    nr0 = N_R0_MXFP4;
+-                }
++                // Fewer than four rows per simdgroup falls off a cliff here: two rows measured
++                // 3904 us against 122 for four on the same matrix, so both widths take four.
++                nsg = N_SG_MXFP4;
++                nr0 = N_R0_MXFP4;
+                 smem = 32*sizeof(float);
+             } break;
+         case GGML_TYPE_Q2_K:
+             {
+                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+                     nr0 = 8;
+                     suffix = "_r8";
