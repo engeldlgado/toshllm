@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -8,138 +8,2845 @@
+@@ -8,140 +8,3038 @@
  constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
  constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
  constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
@@ -131,6 +131,15 @@
 -
 -[[host_name("kernel_mul_mv_q6_K_f32_w64_r4")]]
 -kernel void kernel_mul_mv_q6_K_f32_w64_r4(
+-        constant ggml_metal_kargs_mul_mv & args,
+-        device const char * src0,
+-        device const char * src1,
+-        device       char * dst,
+-        uint3  tgpig[[threadgroup_position_in_grid]],
+-        ushort tiisg[[thread_index_in_simdgroup]],
+-        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+-
+-    kernel_mul_mv_q6_K_f32_w64_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
 +inline float block_q_n_dot_y(device const block_q1_0 * qb_curr, float sumy, thread float * yl, int il) {
 +    device const uint8_t * qs = qb_curr->qs + il / 8;
 +    const uint8_t b0 = qs[0];
@@ -883,7 +892,7 @@
 +    const short it = tiisg%8;  // 0...7
 +    const short iq = it/4;     // 0 or 1
 +    const short ir = it%4;     // 0...3
-+    const short is = (8*ir)/16; // 0 or 1 // 0 or 1// 0 or 1
++    const short is = (8*ir)/16; // 0 or 1
 +
 +    device const float * y4 = y + ix * QK_K + 128 * iq + 8 * ir;
 +
@@ -907,7 +916,13 @@
 +            // the four shorts this lane reads are contiguous, so an aligned stride turns
 +            // them into two words
 +            ushort qw[4];
-+            qw[0] = qs[0]; qw[1] = qs[1]; qw[2] = qs[2]; qw[3] = qs[3];
++            if (FC_mul_mv_row8) {
++                const uint2 t = *(device const uint2 *)qs;
++                qw[0] = (ushort)(t.x); qw[1] = (ushort)(t.x >> 16);
++                qw[2] = (ushort)(t.y); qw[3] = (ushort)(t.y >> 16);
++            } else {
++                qw[0] = qs[0]; qw[1] = qs[1]; qw[2] = qs[2]; qw[3] = qs[3];
++            }
 +
 +            for (short i = 0; i < 8; i += 2) {
 +                acc1[0] += yl[i+ 0] * (qw[i/2] & 0x0003);
@@ -996,17 +1011,18 @@
 +
 +    float sumf[nr0] = { 0.f };
 +
-+    // 32 lanes cover a block instead of 16: half the activations per lane
-+    float yl[8];
++    // 16 lanes per block: four bytes per lane is what lets the three arrays be read
++    // a word at a time, and it keeps four blocks in flight
++    float yl[16];
 +
 +    // 16 threads per block-group; scale the group count with the SIMD width so ip stays
 +    // in {0,1} on wave64 (NG = 2 on wave32, 4 on wave64).
-+    const short NG  = FC_mul_mv_nw/32;
-+    const short tid = tiisg%32;
-+    const short ix  = tiisg/32;
-+    const short ip  = tid/16;        // 0 or 1
-+    const short il  = tid%16;
-+    const short l0  = 2*il;
++    const short NG  = FC_mul_mv_nw/16;
++    const short tid = tiisg%16;
++    const short ix  = tiisg/16;
++    const short ip  = tid/8;         // 0 or 1
++    const short il  = tid%8;
++    const short l0  = 4*il;
 +    const short is  = 8*ip + l0/16;
 +
 +    const short y_offset   = 128*ip + l0;
@@ -1022,7 +1038,7 @@
 +
 +        device const float * y = yy + i * QK_K + y_offset;
 +
-+        for (short l = 0; l < 2; ++l) {
++        for (short l = 0; l < 4; ++l) {
 +            yl[4*l + 0] = y[l +  0];
 +            yl[4*l + 1] = y[l + 32];
 +            yl[4*l + 2] = y[l + 64];
@@ -1032,24 +1048,28 @@
 +        for (short row = 0; row < nr0; ++row) {
 +            float4 sums = {0.f, 0.f, 0.f, 0.f};
 +
-+            // the three arrays are read four consecutive bytes at a time. The block is 210 bytes,
-+            // so every other one sits two bytes off a word and a card that requires natural
-+            // alignment reads the wrong bytes there; two shorts land right on every block
++            // the block is 210 bytes, so every other one sits two bytes off a word and a
++            // card that requires natural alignment reads the wrong bytes; two shorts land
++            // right on every block, and one word is fine where the row stride allows it
 +            uint w1 = 0, w2 = 0, wh = 0;
-+            if (FC_mul_mv_row4) {
++            if (FC_mul_mv_row8) {
++                w1 = *(device const uint *) q1;
++                w2 = *(device const uint *) q2;
++                wh = *(device const uint *) qh;
++            } else if (FC_mul_mv_row4) {
 +                device const ushort * s1 = (device const ushort *) q1;
 +                device const ushort * s2 = (device const ushort *) q2;
 +                device const ushort * sh = (device const ushort *) qh;
 +
-+                w1 = (uint) s1[0];
-+                w2 = (uint) s2[0];
-+                wh = (uint) sh[0];
++                w1 = (uint) s1[0] | ((uint) s1[1] << 16);
++                w2 = (uint) s2[0] | ((uint) s2[1] << 16);
++                wh = (uint) sh[0] | ((uint) sh[1] << 16);
 +            }
 +
-+            FOR_UNROLL (short l = 0; l < 2; ++l) {
-+                const uint8_t b1 = FC_mul_mv_row4 ? (uint8_t)(w1 >> (8*l)) : q1[l];
-+                const uint8_t b2 = FC_mul_mv_row4 ? (uint8_t)(w2 >> (8*l)) : q2[l];
-+                const uint8_t bh = FC_mul_mv_row4 ? (uint8_t)(wh >> (8*l)) : qh[l];
++            FOR_UNROLL (short l = 0; l < 4; ++l) {
++                const uint8_t b1 = (FC_mul_mv_row4 || FC_mul_mv_row8) ? (uint8_t)(w1 >> (8*l)) : q1[l];
++                const uint8_t b2 = (FC_mul_mv_row4 || FC_mul_mv_row8) ? (uint8_t)(w2 >> (8*l)) : q2[l];
++                const uint8_t bh = (FC_mul_mv_row4 || FC_mul_mv_row8) ? (uint8_t)(wh >> (8*l)) : qh[l];
 +
 +                sums[0] += yl[4*l + 0] * ((int8_t)((b1 & 0xF) | ((bh & kmask1) << 4)) - 32);
 +                sums[1] += yl[4*l + 1] * ((int8_t)((b2 & 0xF) | ((bh & kmask2) << 2)) - 32);
@@ -1695,10 +1715,9 @@
 +    device const block_iq3_xxs * x = (device const block_iq3_xxs *) (src0 + offset0);
 +    device const float         * y = (device const float         *) (src1 + offset1);
 +
-+    // two lanes share the block: each folds half of its groups
-+    // this type has two grids per group, so it takes eight lanes to give each one a single lookup
-+    // four lanes, one group each; eight measured worse
-+    float yl[8];
++    // the block header is one word for all four groups, so splitting it across lanes
++    // duplicates that read; one lane per block, with each grid entry read as a word
++    float yl[32];
 +    float sumf[nr0]={0.f};
 +
 +    const int nb32 = nb * (QK_K / 32);
@@ -1713,13 +1732,12 @@
 +        threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
 +
-+    const int   ix = tiisg/4;
-+    const short hg = tiisg%4;
++    const int ix = tiisg;
 +
-+    device const float * y4 = y + 32 * ix + 8 * hg;
++    device const float * y4 = y + 32 * ix;
 +
-+    for (int ib32 = ix; ib32 < nb32; ib32 += FC_mul_mv_nw/4) {
-+        for (short i = 0; i < 8; ++i) {
++    for (int ib32 = ix; ib32 < nb32; ib32 += FC_mul_mv_nw) {
++        for (short i = 0; i < 32; ++i) {
 +            yl[i] = y4[i];
 +        }
 +
@@ -1737,14 +1755,17 @@
 +            const float d = db * (0.5f + (aux32 >> 28));
 +
 +            float2 sum = {0};
-+            {
-+                const short l = hg;
-+                const threadgroup uint8_t * grid1 = (const threadgroup uint8_t *)(svalues + q3[2*l+0]);
-+                const threadgroup uint8_t * grid2 = (const threadgroup uint8_t *)(svalues + q3[2*l+1]);
++            for (short l = 0; l < 4; ++l) {
++                // each grid entry is four bytes, so one word read replaces four byte reads
++                const uint32_t g1 = svalues[q3[2*l+0]];
++                const uint32_t g2 = svalues[q3[2*l+1]];
 +                const uint8_t signs = ssigns[(aux32 >> 7*l) & 127];
++
 +                for (short j = 0; j < 4; ++j) {
-+                    sum[0] += yl[j + 0] * grid1[j] * (signs & kmask_iq2xs[j+0] ? -1.f : 1.f);
-+                    sum[1] += yl[j + 4] * grid2[j] * (signs & kmask_iq2xs[j+4] ? -1.f : 1.f);
++                    const short sh = 8*j;
++
++                    sum[0] += yl[8*l + j + 0] * (float)((g1 >> sh) & 0xFF) * (signs & kmask_iq2xs[j+0] ? -1.f : 1.f);
++                    sum[1] += yl[8*l + j + 4] * (float)((g2 >> sh) & 0xFF) * (signs & kmask_iq2xs[j+4] ? -1.f : 1.f);
 +                }
 +            }
 +            sumf[row] += d * (sum[0] + sum[1]);
@@ -1754,7 +1775,7 @@
 +            gas += args.nb01/2;
 +        }
 +
-+        y4 += 8 * FC_mul_mv_nw;
++        y4 += 32 * FC_mul_mv_nw;
 +    }
 +
 +    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
@@ -2960,14 +2981,195 @@
 +
 +[[host_name("kernel_mul_mv_q6_K_f32_r4_w64")]]
 +kernel void kernel_mul_mv_q6_K_f32_r4_w64(
-         constant ggml_metal_kargs_mul_mv & args,
-         device const char * src0,
-         device const char * src1,
-         device       char * dst,
-         uint3  tgpig[[threadgroup_position_in_grid]],
-         ushort tiisg[[thread_index_in_simdgroup]],
-         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
- 
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_q6_K_f32_w64_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
++}
++
++template<int nr0, typename args_t>
++void kernel_mul_mv_q5_K_f32_w64_impl(
++        args_t args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem,
++        uint3  tgpig,
++        ushort tiisg,
++        ushort sgitg) {
++    const short NSG = FC_mul_mv_nsg;
++
++    const int nb = args.ne00/QK_K;
++
++    const int r0 = tgpig.x;
++    const int r1 = tgpig.y;
++    const int im = tgpig.z;
++
++    const int first_row = (r0 * NSG + sgitg) * nr0;
++
++    const uint i12 = im%FC_mul_mv_ne12;
++    const uint i13 = im/FC_mul_mv_ne12;
++
++    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
++    const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
++
++    device const block_q5_K * x = (device const block_q5_K *) (src0 + offset0);
++    device const float     * yy = (device const float      *) (src1 + offset1);
++
++    float sumf[nr0]={0.f};
++
++    // four lanes per block: sixteen bytes each, so qs and qh arrive as one uint4
++    float yl[32], yh[32];
++
++    constexpr uint16_t kmask1 = 0x3f3f;
++    constexpr uint16_t kmask2 = 0x0f0f;
++    constexpr uint16_t kmask3 = 0xc0c0;
++
++    // 8 threads per block-group; scale the group count with the SIMD width so iq stays
++    // in {0,1} on wave64 (NG = 4 on wave32, 8 on wave64).
++    const short NG  = FC_mul_mv_nw/4;
++    const short tid = tiisg%4;
++    const short ix  = tiisg/4;
++    const short iq  = tid/2;
++    const short ir  = tid%2;
++
++    const short l0 = 16*ir;
++    const short q_offset = 32*iq + l0;
++    const short y_offset = 64*iq + l0;
++
++    // pre-shifting qh by this puts the four bits this lane wants at fixed positions
++    // 0/1/4/5, so the masks below are constants and the selects become shifts
++    const ushort hsh = 2*iq;
++
++    uint16_t sc16[4];
++    thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
++
++    device const float * y1 = yy + ix*QK_K + y_offset;
++
++    // same header as q4_K: d, dmin and the 12 scales are the block's first 16 bytes, and 176
++    // keeps every row 16-byte aligned, so one load covers what was two halves and three shorts
++    const ushort shs = 16*iq;
++
++    for (int i = ix; i < nb; i += NG) {
++        device const uint8_t * q1 = x[i].qs + q_offset;
++        device const uint8_t * qh = x[i].qh + l0;
++        device const uint4  * hp = (device const uint4 *) &x[i];
++
++        device const float * y2 = y1 + 128;
++        float4 sumy = {0.f, 0.f, 0.f, 0.f};
++        for (short l = 0; l < 16; ++l) {
++            yl[l+ 0] = y1[l+ 0]; sumy[0] += yl[l+ 0];
++            yl[l+16] = y1[l+32]; sumy[1] += yl[l+16];
++            yh[l+ 0] = y2[l+ 0]; sumy[2] += yh[l+ 0];
++            yh[l+16] = y2[l+32]; sumy[3] += yh[l+16];
++        }
++
++        for (short row = 0; row < nr0; ++row) {
++            device const uint8_t * q2 = q1 + 64;
++
++            const uint4  hdr = *hp;
++            const half2  dm  = as_type<half2>(hdr.x);
++
++            const uint16_t s0 = (uint16_t) (hdr.y >> shs);
++            const uint16_t s2 = (uint16_t) (hdr.z >> shs);
++            const uint16_t s4 = (uint16_t) (hdr.w >> shs);
++
++            sc16[0] = s0 & kmask1;
++            sc16[1] = s2 & kmask1;
++            sc16[2] = ((s4 >> 0) & kmask2) | ((s0 & kmask3) >> 2);
++            sc16[3] = ((s4 >> 4) & kmask2) | ((s2 & kmask3) >> 2);
++
++            float4 acc1 = {0.f};
++            // sixteen bytes per lane: one uint4 each where the 32-wide kernel needed two loads
++            const uint4 q1w = *(device const uint4 *)(q1);
++            const uint4 q2w = *(device const uint4 *)(q2);
++            const uint4 qhw = *(device const uint4 *)(qh);
++
++            FOR_UNROLL (short w = 0; w < 4; ++w) {
++                const uchar4 qv1 = as_type<uchar4>(q1w[w]);
++                const uchar4 qv2 = as_type<uchar4>(q2w[w]);
++                const uchar4 qvh = as_type<uchar4>((qhw[w] >> hsh) & 0x33333333u);
++
++                FOR_UNROLL (short l = 0; l < 4; ++l) {
++                    const short    o  = 4*w + l;
++                    const uint8_t  h  = qvh[l];
++                    const uint8_t  v1 = qv1[l];
++                    const uint8_t  v2 = qv2[l];
++
++                    acc1[0] += yl[o+ 0] * (float) ((v1 & 0x0F) | ((h & 1) << 4));
++                    acc1[1] += yl[o+16] * (float) ((v1 >>   4) | ((h & 2) << 3));
++                    acc1[2] += yh[o+ 0] * (float) ((v2 & 0x0F) |  (h & 16));
++                    acc1[3] += yh[o+16] * (float) ((v2 >>   4) | ((h & 32) >> 1));
++                }
++            }
++
++            sumf[row] += dm[0] * (sc8[0] * acc1[0] +
++                                  sc8[1] * acc1[1] +
++                                  sc8[4] * acc1[2] +
++                                  sc8[5] * acc1[3]) -
++                         dm[1] * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
++
++            q1 += args.nb01;
++            qh += args.nb01;
++            hp  = (device const uint4 *) ((device const char *) hp + args.nb01);
++        }
++
++        y1 += NG * QK_K;
++    }
++
++    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
++
++    for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
++        const float tot = simd_sum(sumf[row]);
++        if (tiisg == 0) {
++            dst_f32[first_row + row] = tot;
++        }
++    }
++}
++
++[[host_name("kernel_mul_mv_q5_K_f32_w64")]]
++kernel void kernel_mul_mv_q5_K_f32_w64(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_q5_K_f32_w64_impl<2, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
++}
++
++[[host_name("kernel_mul_mv_q5_K_f32_r8_w64")]]
++kernel void kernel_mul_mv_q5_K_f32_r8_w64(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_q5_K_f32_w64_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
++}
++
++[[host_name("kernel_mul_mv_q5_K_f32_r4_w64")]]
++kernel void kernel_mul_mv_q5_K_f32_r4_w64(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_q5_K_f32_w64_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
+ }
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -1050,16 +1050,17 @@
@@ -3161,7 +3363,28 @@
                      nr0 = N_R0_Q4_K;
                  }
              } break;
-@@ -1181,76 +1260,132 @@
+@@ -1169,88 +1248,153 @@
+                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+                     nr0 = 8;
+                     suffix = "_r8";
+                 } else {
+                     nsg = N_SG_Q5_K;
+                     nr0 = N_R0_Q5_K;
+                 }
++
++                // A 64-lane twin exists in mul_mv_w64.metal: four lanes per block so qs and
++                // qh come in as one uint4. It is opt-in because it loses. Sixteen bytes per
++                // lane means four times the activation cache, and the eight rows this type
++                // wants on 64 lanes are already spending the registers that would pay for it:
++                // +27.3% with eight rows, +41.4% with four.
++                if (simd_width == 64 && getenv("TOSH_MV_Q5K_W64") != nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_Q6_K:
+             {
+                 // 64 lanes want four rows in one group (+16.3% tg); 32 keep the shipped pair
                  if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
                      nsg = 1;
                      nr0 = 4;
@@ -3298,7 +3521,8 @@
              } break;
          default:
              {
-@@ -1300,16 +1435,22 @@
+@@ -1299,16 +1443,22 @@
+                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
  
      // A stride that is a multiple of four lets the quant arrays be read a word at a time.
      // The two widths are decided apart: 64 lanes have no last-level cache to hide the extra
@@ -3306,13 +3530,13 @@
      const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
      const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
      const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
- 
++
 +    char sfx[64];
 +    if (w64) {
 +        snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
 +        suffix = sfx;
 +    }
-+
+ 
      snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
      snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d", base, nsg, ne12, r2, r3, nw, row4, row8);
  
@@ -3320,4 +3544,3 @@
      if (!res.pipeline) {
          ggml_metal_cv_t cv = ggml_metal_cv_init();
  
-         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
