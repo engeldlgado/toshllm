@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -8,140 +8,3038 @@
+@@ -8,140 +8,3045 @@
  constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
  constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
  constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
@@ -1751,14 +1751,21 @@
 +
 +        for (short row = 0; row < nr0; row++) {
 +            const float db = dh[0];
-+            const uint32_t aux32 = gas[0] | (gas[1] << 16);
++
++            // the eight index bytes and the two halves of aux32 are contiguous, so the
++            // whole block header comes in as three words instead of ten narrow reads
++            const uint2 q3w = *(device const uint2 *)(q3);
++            const uint32_t aux32 = *(device const uint32_t *)(gas);
++
++            thread const uint8_t * q3b = (thread const uint8_t *)&q3w;
++
 +            const float d = db * (0.5f + (aux32 >> 28));
 +
 +            float2 sum = {0};
 +            for (short l = 0; l < 4; ++l) {
 +                // each grid entry is four bytes, so one word read replaces four byte reads
-+                const uint32_t g1 = svalues[q3[2*l+0]];
-+                const uint32_t g2 = svalues[q3[2*l+1]];
++                const uint32_t g1 = svalues[q3b[2*l+0]];
++                const uint32_t g2 = svalues[q3b[2*l+1]];
 +                const uint8_t signs = ssigns[(aux32 >> 7*l) & 127];
 +
 +                for (short j = 0; j < 4; ++j) {
