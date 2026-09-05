@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -8,138 +8,2850 @@
+@@ -8,138 +8,2845 @@
  constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
  constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
  constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
@@ -1105,8 +1105,9 @@
 +    const short NSG = FC_mul_mv_nsg;
 +
 +    const short NW = FC_mul_mv_nw;
-+    // half the quants per lane, so twice as many lanes cover a block
-+    constexpr short NQ = 4;
++    // four lanes per block, eight quants each: the sweep puts the minimum here, and
++    // both sides still move in float4 and whole words
++    constexpr short NQ = 8;
 +    // Blocks processed per iteration scales with the SIMD width; lane partitioning
 +    // within a block stays tied to QK8_0 so wave64 reads the right quants.
 +    const short NBI = NW*NQ/QK8_0;
@@ -1141,33 +1142,27 @@
 +
 +    const int ib0 = sgitg*NBI + ix;
 +
-+    float yl[NQ];
++    float4 yl[NQ/4];
 +
 +    device const float * yb = y + ib0*QK8_0 + il*NQ;
 +
 +    // each thread in a SIMD group deals with NQ quants at a time
 +    for (int ib = ib0; ib < nb; ib += NSG*NBI) {
-+        for (short i = 0; i < NQ; ++i) {
-+            yl[i] = yb[i];
++        device const float4 * yb4 = (device const float4 *) yb;
++
++        FOR_UNROLL (short w = 0; w < NQ/4; ++w) {
++            yl[w] = yb4[w];
 +        }
 +
 +        for (short row = 0; row < NR0; row++) {
 +            device const int8_t * qs = ax[row][ib].qs + il*NQ;
 +
 +            float sumq = 0.f;
-+            // the eight quants this lane wants are contiguous and the block is 34 bytes, so a
-+            // stride that keeps them word-aligned lets two loads replace eight
-+            if (FC_mul_mv_row8 && (NQ % 4) == 0) {
-+                FOR_UNROLL (short w = 0; w < NQ/4; ++w) {
-+                    const uint b = *(device const uint *)(qs + 4*w);
-+                    FOR_UNROLL (short i = 0; i < 4; ++i) {
-+                        sumq += (float)(int8_t)(b >> (8*i)) * yl[4*w + i];
-+                    }
-+                }
-+            } else {
-+                FOR_UNROLL (short i = 0; i < NQ; ++i) {
-+                    sumq += qs[i] * yl[i];
-+                }
++
++            FOR_UNROLL (short w = 0; w < NQ/4; ++w) {
++                const char4 q = as_type<char4>(*(device const uint *)(qs + 4*w));
++
++                sumq += dot(float4(q.x, q.y, q.z, q.w), yl[w]);
 +            }
 +
 +            sumf[row] += sumq*ax[row][ib].d;
