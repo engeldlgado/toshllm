@@ -40,7 +40,7 @@ hand.
 | German (Deutsch) | `de` | not started |
 | French (Français) | `fr` | not started |
 | Portuguese (Português) | `pt` | not started |
-| Chinese (Simplified) (简体中文) | `zh` | not started |
+| Chinese (Simplified) (简体中文) | `zh` | 100% (1392/1392) |
 | Japanese (日本語) | `ja` | 100% (1392/1392) |
 | Korean (한국어) | `ko` | not started |
 | Russian (Русский) | `ru` | not started |
