@@ -7785,7 +7785,7 @@
          case GGML_TYPE_BF16:
              {
                  if (ne00 < 32) {
-@@ -1082,83 +1084,164 @@
+@@ -1082,83 +1084,167 @@
              } break;
          case GGML_TYPE_Q2_0:
              {
@@ -7796,12 +7796,12 @@
              {
 -                nsg = N_SG_Q4_0;
 -                nr0 = N_R0_Q4_0;
-+                // eight rows per thread measured worse on 64 lanes for this type, so the
-+                // inherited pair stays; TOSH_MV_Q4_0_R8 opens it again for measuring
-+                if (getenv("TOSH_MV_Q4_0_R8") != nullptr) {
-+                    nsg = 1;
-+                    nr0 = 8;
-+                    suffix = "_r8";
++                // eight lanes per block with four rows each: +5.8% of generation
++                if (simd_width == 64 && getenv("TOSH_MV_Q4_0_W64_DISABLE") == nullptr) {
++                    nsg    = 1;
++                    nr0    = 4;
++                    suffix = "_L8r4";
++                    w64    = true;
 +                } else {
 +                    nsg = N_SG_Q4_0;
 +                    nr0 = N_R0_Q4_0;
@@ -7811,12 +7811,12 @@
              {
 -                nsg = N_SG_Q4_1;
 -                nr0 = N_R0_Q4_1;
-+                // eight rows per thread measured worse on 64 lanes for this type, so the
-+                // inherited pair stays; TOSH_MV_Q4_1_R8 opens it again for measuring
-+                if (getenv("TOSH_MV_Q4_1_R8") != nullptr) {
-+                    nsg = 1;
-+                    nr0 = 8;
-+                    suffix = "_r8";
++                // four lanes per block with four rows each: +6.2% of generation
++                if (simd_width == 64 && getenv("TOSH_MV_Q4_1_W64_DISABLE") == nullptr) {
++                    nsg    = 1;
++                    nr0    = 4;
++                    suffix = "_L4r4";
++                    w64    = true;
 +                } else {
 +                    nsg = N_SG_Q4_1;
 +                    nr0 = N_R0_Q4_1;
@@ -7946,10 +7946,13 @@
 +                // 64 lanes have their own decomposition: sixteen cover a block instead of
 +                // eight, which brings the kernel from 246 registers down to 184. It does not
 +                // cover the small-matrix case, which still wants one group with four rows.
++                // Sixteen lanes with four rows each: +5.8% over eight lanes. Sixteen lanes
++                // with the inherited rows loses, so the win lives in the crossing of the two.
 +                if (simd_width == 64 && !q4k_small && getenv("TOSH_MV_Q4K_W64_DISABLE") == nullptr) {
-+                    nsg = N_SG_Q4_K;
-+                    nr0 = N_R0_Q4_K;
-+                    suffix = "_w64";
++                    nsg    = 1;
++                    nr0    = 4;
++                    suffix = "_L16r4";
++                    w64    = true;
 +                    break;
 +                }
 +                if (q4k_small) {
@@ -7961,7 +7964,8 @@
                      nr0 = N_R0_Q4_K;
                  }
              } break;
-@@ -1169,88 +1252,153 @@
+@@ -1168,89 +1254,156 @@
+                 // TOSH_MV_R8 forces it on 32 too, so that width can be A/B'd without a rebuild
                  if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
                      nsg = 1;
                      nr0 = 8;
@@ -7969,16 +7973,18 @@
                  } else {
                      nsg = N_SG_Q5_K;
                      nr0 = N_R0_Q5_K;
-                 }
-+
-+                // A 64-lane twin exists in mul_mv_w64.metal: four lanes per block so qs and
-+                // qh come in as one uint4. It is opt-in because it loses. Sixteen bytes per
-+                // lane means four times the activation cache, and the eight rows this type
-+                // wants on 64 lanes are already spending the registers that would pay for it:
-+                // +27.3% with eight rows, +41.4% with four.
-+                if (simd_width == 64 && getenv("TOSH_MV_Q5K_W64") != nullptr) {
-+                    w64 = true;
 +                }
++
++                // Sixteen lanes per block with two rows each: measured +10.9% of generation
++                // over the inherited pair, five alternating pairs. Four lanes with eight rows
++                // loses, which is why the two fronts have to be walked as a grid and not one
++                // at a time.
++                if (simd_width == 64 && getenv("TOSH_MV_Q5K_W64_DISABLE") == nullptr) {
++                    nsg    = 1;
++                    nr0    = 2;
++                    suffix = "_L16r2";
++                    w64    = true;
+                 }
              } break;
          case GGML_TYPE_Q6_K:
              {
@@ -8119,7 +8125,8 @@
              } break;
          default:
              {
-@@ -1300,19 +1448,60 @@
+@@ -1299,20 +1452,61 @@
+                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
  
      // A stride that is a multiple of four lets the quant arrays be read a word at a time.
      // The two widths are decided apart: 64 lanes have no last-level cache to hide the extra
@@ -8127,7 +8134,7 @@
      const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
      const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
      const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
- 
++
 +    // Sweep hook: TOSH_SWEEP_TYPE names one ggml type and TOSH_SWEEP_NR0 / TOSH_SWEEP_NSG
 +    // force its rows per lane and simdgroups, so the register front can be measured without
 +    // rebuilding. The pipeline name carries both, so a run can be checked against what it asked.
@@ -8164,7 +8171,7 @@
 +        snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
 +        suffix = sfx;
 +    }
-+
+ 
      snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
      snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d", base, nsg, ne12, r2, r3, nw, row4, row8);
  
