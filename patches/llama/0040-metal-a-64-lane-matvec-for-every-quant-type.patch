@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -8,140 +8,3045 @@
+@@ -8,140 +8,3046 @@
  constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
  constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
  constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
@@ -562,12 +562,13 @@
 +    constexpr uint16_t kmask2 = 0x0f0f;
 +    constexpr uint16_t kmask3 = 0xc0c0;
 +
-+    // 16 lanes per block keeps four blocks in flight, the same as the 32-wide kernel
-+    const short NG = FC_mul_mv_nw/16;
-+    const short ix = tiisg/16;   // 0...NG-1
-+    const short it = tiisg%16;   // 0...15
-+    const short iq = it/8;       // 0 or 1
-+    const short ir = it%8;       // 0...7
++    // 8 lanes per block: sixteen halved the blocks in flight, and that cost more in a
++    // real model than the registers it saved
++    const short NG = FC_mul_mv_nw/8;
++    const short ix = tiisg/8;    // 0...NG-1
++    const short it = tiisg%8;    // 0...7
++    const short iq = it/4;       // 0 or 1
++    const short ir = it%4;       // 0...3
 +
 +    const int nb = args.ne00/QK_K;
 +
@@ -586,12 +587,12 @@
 +    device const block_q4_K * x = (device const block_q4_K *) (src0 + offset0);
 +    device const float     * y = (device const float      *) (src1 + offset1);
 +
-+    float yl[8];
-+    float yh[8];
++    float yl[16];
++    float yh[16];
 +
 +    float sumf[nr0]={0.f};
 +
-+    device const float * y4 = y + ix * QK_K + 64 * iq + 4 * ir;
++    device const float * y4 = y + ix * QK_K + 64 * iq + 8 * ir;
 +
 +    uint16_t sc16[4];
 +    thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
@@ -599,15 +600,15 @@
 +    for (int ib = ix; ib < nb; ib += NG) {
 +        float4 sumy = {0.f, 0.f, 0.f, 0.f};
 +
-+        for (short i = 0; i < 4; ++i) {
++        for (short i = 0; i < 8; ++i) {
 +            yl[i+0] = y4[i+  0]; sumy[0] += yl[i+0];
-+            yl[i+4] = y4[i+ 32]; sumy[1] += yl[i+4];
++            yl[i+8] = y4[i+ 32]; sumy[1] += yl[i+8];
 +            yh[i+0] = y4[i+128]; sumy[2] += yh[i+0];
-+            yh[i+4] = y4[i+160]; sumy[3] += yh[i+4];
++            yh[i+8] = y4[i+160]; sumy[3] += yh[i+8];
 +        }
 +
 +        device const uint4 * hp = (device const uint4 *) &x[ib];
-+        device const uint16_t * q1 = (device const uint16_t *)x[ib].qs + (16 * (int) iq + 2 * (int) ir);
++        device const uint16_t * q1 = (device const uint16_t *)x[ib].qs + (16 * (int) iq + 4 * (int) ir);
 +
 +        const ushort shs = 16*iq;
 +
@@ -627,19 +628,19 @@
 +            float4 acc1 = {0.f, 0.f, 0.f, 0.f};
 +            float4 acc2 = {0.f, 0.f, 0.f, 0.f};
 +
-+            for (short w = 0; w < 2; ++w) {
-+                const ushort qv1 = q1[w     ];
-+                const ushort qv2 = q1[w + 32];
-+                const short  i   = 2*w;
++            // eight contiguous bytes per side: one vector load each, unrolled
++            const ushort4 qv1 = *(device const ushort4 *)(q1);
++            const ushort4 qv2 = *(device const ushort4 *)(q1 + 32);
 +
-+                acc1[0] += yl[i+0] * (qv1 & 0x000F);
-+                acc1[1] += yl[i+1] * (qv1 & 0x0F00);
-+                acc1[2] += yl[i+4] * (qv1 & 0x00F0);
-+                acc1[3] += yl[i+5] * (qv1 & 0xF000);
-+                acc2[0] += yh[i+0] * (qv2 & 0x000F);
-+                acc2[1] += yh[i+1] * (qv2 & 0x0F00);
-+                acc2[2] += yh[i+4] * (qv2 & 0x00F0);
-+                acc2[3] += yh[i+5] * (qv2 & 0xF000);
++            FOR_UNROLL (short i = 0; i < 4; ++i) {
++                acc1[0] += yl[2*i + 0] * (qv1[i] & 0x000F);
++                acc1[1] += yl[2*i + 1] * (qv1[i] & 0x0F00);
++                acc1[2] += yl[2*i + 8] * (qv1[i] & 0x00F0);
++                acc1[3] += yl[2*i + 9] * (qv1[i] & 0xF000);
++                acc2[0] += yh[2*i + 0] * (qv2[i] & 0x000F);
++                acc2[1] += yh[2*i + 1] * (qv2[i] & 0x0F00);
++                acc2[2] += yh[2*i + 8] * (qv2[i] & 0x00F0);
++                acc2[3] += yh[2*i + 9] * (qv2[i] & 0xF000);
 +            }
 +
 +            sumf[row] += dm[0] * ((acc1[0] + 1.f/256.f * acc1[1]) * sc8[0] +
@@ -3197,7 +3198,7 @@
          case GGML_TYPE_BF16:
              {
                  if (ne00 < 32) {
-@@ -1082,83 +1083,161 @@
+@@ -1082,83 +1083,164 @@
              } break;
          case GGML_TYPE_Q2_0:
              {
@@ -3353,15 +3354,18 @@
 +                // stays by shape; TOSH_MV_Q4K_R4 opens it again for measuring
 +                const bool q4k_r4_wide = getenv("TOSH_MV_Q4K_R4") != nullptr &&
 +                                         getenv("TOSH_MV_Q4K_R4_DISABLE") == nullptr;
++                const bool q4k_small = ne00 <= 2048 || ne01 <= 2048 || q4k_r4_wide;
++
 +                // 64 lanes have their own decomposition: sixteen cover a block instead of
-+                // eight, which brings the kernel from 246 registers down to 184
-+                if (simd_width == 64 && getenv("TOSH_MV_Q4K_W64_DISABLE") == nullptr) {
++                // eight, which brings the kernel from 246 registers down to 184. It does not
++                // cover the small-matrix case, which still wants one group with four rows.
++                if (simd_width == 64 && !q4k_small && getenv("TOSH_MV_Q4K_W64_DISABLE") == nullptr) {
 +                    nsg = N_SG_Q4_K;
 +                    nr0 = N_R0_Q4_K;
 +                    suffix = "_w64";
 +                    break;
 +                }
-+                if (ne00 <= 2048 || ne01 <= 2048 || q4k_r4_wide) {
++                if (q4k_small) {
                      nsg = 1;
                      nr0 = 4;
                      suffix = "_r4";
@@ -3370,7 +3374,7 @@
                      nr0 = N_R0_Q4_K;
                  }
              } break;
-@@ -1169,88 +1248,153 @@
+@@ -1169,88 +1251,153 @@
                  if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
                      nsg = 1;
                      nr0 = 8;
@@ -3528,8 +3532,7 @@
              } break;
          default:
              {
-@@ -1299,16 +1443,22 @@
-                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
+@@ -1300,16 +1447,22 @@
  
      // A stride that is a multiple of four lets the quant arrays be read a word at a time.
      // The two widths are decided apart: 64 lanes have no last-level cache to hide the extra
@@ -3537,13 +3540,13 @@
      const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
      const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
      const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
-+
+ 
 +    char sfx[64];
 +    if (w64) {
 +        snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
 +        suffix = sfx;
 +    }
- 
++
      snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
      snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d", base, nsg, ne12, r2, r3, nw, row4, row8);
  
@@ -3551,3 +3554,4 @@
      if (!res.pipeline) {
          ggml_metal_cv_t cv = ggml_metal_cv_init();
  
+         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
