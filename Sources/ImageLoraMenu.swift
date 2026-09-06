@@ -17,6 +17,9 @@ struct ImageLoraMenu: View {
                 ForEach(files, id: \.self) { file in
                     Button(file.deletingPathExtension().lastPathComponent) { insert(file) }
                 }
+                Divider()
+                Text(loc.t("LCM y Turbo: pocos pasos y guía cerca de 1.5",
+                           "LCM and Turbo: few steps and guidance near 1.5"))
             }
             Divider()
             Button(loc.t("Abrir la carpeta", "Open the folder"), systemImage: "folder") {
@@ -30,8 +33,8 @@ struct ImageLoraMenu: View {
         } label: {
             Label("LoRA", systemImage: "slider.horizontal.below.square.filled.and.square")
         }
-        .help(loc.t("Añade un LoRA al prompt. El peso se puede editar en la etiqueta.",
-                    "Adds a LoRA to the prompt. The weight can be edited in the tag."))
+        .help(loc.t("Añade un LoRA al prompt. El peso se puede editar en la etiqueta. Los LoRA de tipo LCM o Turbo piden además pocos pasos y una guía baja, cerca de 1.5, o la imagen sale quemada.",
+                    "Adds a LoRA to the prompt. The weight can be edited in the tag. LCM and Turbo LoRAs also want few steps and a low guidance, around 1.5, or the image comes out burnt."))
         .task { refresh() }
         .onChange(of: prompt) { _, _ in }
     }
