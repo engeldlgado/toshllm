@@ -183,11 +183,17 @@ final class DownloadItem: NSObject, ObservableObject, Identifiable, URLSessionDa
         }
 
         if let needed = expectedBytes {
-            let values = try? destination.deletingLastPathComponent()
-                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            // volumeAvailableCapacityForImportantUsage is APFS only and reads zero on exFAT or
+            // any other foreign volume, which stalls the download claiming no space is left.
+            let dir = destination.deletingLastPathComponent()
+            let values = try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey,
+                                                           .volumeAvailableCapacityKey])
+            let important = values?.volumeAvailableCapacityForImportantUsage ?? 0
+            let plain = Int64(values?.volumeAvailableCapacity ?? 0)
+            let capacity = important > 0 ? important : plain
             let remaining = max(0, needed - sink.size())
-            if let free = values?.volumeAvailableCapacityForImportantUsage,
-               free < remaining + 1_000_000_000 {
+            if capacity > 0, capacity < remaining + 1_000_000_000 {
+                let free = capacity
                 let neededGB = Double(remaining) / 1_073_741_824
                 let freeGB = Double(free) / 1_073_741_824
                 phase = .failed(String(format: "Espacio insuficiente: %.1f GB libres, %.1f GB necesarios / not enough disk space", freeGB, neededGB))
