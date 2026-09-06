@@ -58,8 +58,14 @@ Turning the tile on earlier does not help. With the floor forced down to 32 toke
 | Q5_1 | -28.8% | -26.6% | +0.6% |
 
 Below roughly a hundred tokens the tile loses for everything, so the shipped floor of 112 sits
-where it should. Raising it does not help either: at 128 tokens the gain is small but real for
-the types that keep the tile.
+where it should.
+
+Whether to raise it is the one question two cards could not settle. At 128 tokens the RX 6700 XT
+gains between 0.1% and 3.8% from the tile, while the W6800X loses between 0.8% and 2.5% on the
+same types, and only F16 gains on both. Moving the floor to 192 would help one card and cost the
+other by about the same amount, so it stays where it is. The likely difference is the
+last-level cache that only one of the two carries, and settling it needs a third card rather
+than a preference.
 
 The shape holds outside Qwen3-4B. Gemma-4 12B gains 7.3% at 128 tokens and 11.2% at 512, its
 smaller sibling 2.9% and 6.1%, and an OLMoE mixture 2.0% at 512, where less of the work goes
