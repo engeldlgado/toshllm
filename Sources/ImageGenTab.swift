@@ -459,6 +459,8 @@ struct QueueFeedView: View {
                 }
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
             HStack(spacing: 14) {
+                ImageLoraMenu(prompt: $draft)
+                    .fixedSize()
                 HStack(spacing: 4) {
                     Text(loc.t("Destino", "Target")).font(.caption).foregroundStyle(.secondary)
                     Picker("", selection: $draftTarget) {

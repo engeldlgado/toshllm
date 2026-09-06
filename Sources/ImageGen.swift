@@ -605,6 +605,12 @@ final class ImageGenerator: ObservableObject {
         for comp in model.components {
             args += [comp.flag, comp.path(in: dir).path]
         }
+        // sd-cli picks a LoRA up from the prompt, as <lora:file:weight>, but only when it knows
+        // where to look. The folder is only passed when it holds something, so an empty one
+        // does not make the engine scan on every run.
+        if let lora = ImageGenPool.loraDirectory(), ImageGenPool.loraFiles(in: lora).isEmpty == false {
+            args += ["--lora-model-dir", lora.path]
+        }
         args += [
             "-p", prompt,
             "--cfg-scale", String(format: "%.1f", model.cfgScale),
@@ -1116,6 +1122,21 @@ final class ImageGenPool: ObservableObject {
             guard name.hasPrefix("toshllm_"), !name.contains("-x2"), !name.contains("-x4") else { continue }
             try? FileManager.default.removeItem(at: f)
         }
+    }
+
+    /// Where LoRA files live: an `imagen/lora` folder next to the image models. Returns nil when
+    /// it does not exist, so nothing is passed to the engine until the user creates it.
+    nonisolated static func loraDirectory() -> URL? {
+        let dir = ServerSettings.modelsDirectory
+            .appendingPathComponent("imagen", isDirectory: true)
+            .appendingPathComponent("lora", isDirectory: true)
+        return FileManager.default.fileExists(atPath: dir.path) ? dir : nil
+    }
+
+    nonisolated static func loraFiles(in dir: URL) -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { ["safetensors", "ckpt", "pt"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     private func save() {
