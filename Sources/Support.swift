@@ -73,6 +73,10 @@ enum SettingsKeys {
     /// Comma-separated physical GPU indices to split across (2+ entries).
     static let gpuList = "gpuList"
     static let extraArgs = "extraArgs"
+
+    /// Per-model extra arguments, keyed by model path. They are appended after the
+    /// shared ones, so a model can override a flag the global field also sets.
+    static let extraArgsByModel = "extraArgsByModel"
     static let embeddings = "embeddings"
     static let agentToolsEnabled = "agentToolsEnabled"
     static let toolsRuntime = "toolsRuntime"

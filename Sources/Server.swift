@@ -530,7 +530,9 @@ struct ServerSettings {
         }
         var env: [String: String] = [:]
         var cli: [String] = []
-        for tok in ShellWords.split(extraArgs) {
+        // The model's own arguments come last so they win over the shared field.
+        let combined = extraArgs + " " + Self.extraArgs(forModel: modelPath)
+        for tok in ShellWords.split(combined) {
             if let eq = tok.firstIndex(of: "="), eq != tok.startIndex, isEnvName(tok[..<eq]) {
                 env[String(tok[..<eq])] = String(tok[tok.index(after: eq)...])
             } else {
@@ -1306,6 +1308,17 @@ struct ServerSettings {
     nonisolated static func isIncompatibleMmproj(model: String, projector: String) -> Bool {
         (UserDefaults.standard.stringArray(forKey: SettingsKeys.incompatibleMmproj) ?? [])
             .contains(mmprojPairKey(model, projector))
+    }
+
+    nonisolated static func extraArgs(forModel path: String) -> String {
+        (UserDefaults.standard.dictionary(forKey: SettingsKeys.extraArgsByModel) as? [String: String])?[path] ?? ""
+    }
+
+    nonisolated static func setExtraArgs(_ args: String, forModel path: String) {
+        var map = UserDefaults.standard.dictionary(forKey: SettingsKeys.extraArgsByModel) as? [String: String] ?? [:]
+        let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { map.removeValue(forKey: path) } else { map[path] = trimmed }
+        UserDefaults.standard.set(map, forKey: SettingsKeys.extraArgsByModel)
     }
 
     nonisolated static func mmprojOverride(forModel path: String) -> String? {

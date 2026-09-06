@@ -15,6 +15,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **Simplified Chinese.** The interface now ships in Spanish, English, Italian, Japanese and Simplified Chinese. Requested in #86.
 
+- **Extra arguments can be set per model and per server, not only once for everything.** The field in Settings still applies to every server, and now a model's settings popover and each server card carry one of their own. What a model sets is added after the shared field and wins over it, so a model that needs an MTP head from a separate file, or a server that needs a flag only it should get, no longer forces the setting on the rest. Requested in #89.
+
 ### Fixed
 
 - **Downloads work when the models folder is on an exFAT volume.** The free-space check used a figure macOS only reports for APFS, and read it as zero anywhere else, so a download stopped before it started saying no space was left. It now falls back to the plain figure, and lets the download through when neither can be read rather than assuming the worst. Reported in #92.

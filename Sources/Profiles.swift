@@ -62,6 +62,7 @@ struct Profile: Codable, Identifiable {
         static let uiMcpProxy  = "uiMcpProxy"
         static let router     = "router"
         static let ubatch     = "ubatch"
+        static let extraArgs  = "extraArgs"
     }
 }
 

@@ -782,6 +782,7 @@ struct AddedServerCard: View {
     @AppStorage(SettingsKeys.routerMode) private var gRouterMode = false
     @AppStorage(SettingsKeys.routerModelsMax) private var gRouterModelsMax = 1
     @AppStorage(SettingsKeys.ubatch) private var gUbatch = 0
+    @AppStorage(SettingsKeys.extraArgs) private var gExtraArgs = ""
 
     var body: some View {
         let busy = c.state == .running || c.state == .starting
@@ -867,6 +868,21 @@ struct AddedServerCard: View {
                 .help(loc.t("Tokens de prompt que la GPU procesa de una vez. Uno más grande lee el prompt más rápido a cambio de VRAM. Hereda el de Ajustes hasta que lo cambies aquí.",
                             "Prompt tokens the GPU processes at once. A larger one reads the prompt faster in exchange for VRAM. Follows Settings until you change it here."))
             }
+            HStack(spacing: 8) {
+                Image(systemName: "terminal").frame(width: 18).foregroundStyle(.secondary)
+                TextField(loc.t("Argumentos extra", "Extra arguments"), text: Binding(
+                    get: { isPinned(Profile.Pin.extraArgs) ? (c.profile?.extraArgs ?? gExtraArgs) : gExtraArgs },
+                    set: { c.profile?.extraArgs = $0; pin(Profile.Pin.extraArgs); manager.persist() }),
+                    prompt: Text(verbatim: "--no-warmup -np 2"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.callout, design: .monospaced))
+                    .autocorrectionDisabled()
+                    .disabled(busy)
+                    .accessibilityLabel(loc.t("Argumentos extra de este servidor",
+                                              "Extra arguments for this server"))
+            }
+            .help(loc.t("Banderas que se pasan al motor solo en este servidor. Hereda las de Ajustes hasta que las cambies aquí.",
+                        "Flags passed to the engine for this server only. Follows Settings until you change them here."))
             HStack(spacing: 8) {
                 Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
                 Text(loc.t("Puerto", "Port")).font(.callout)

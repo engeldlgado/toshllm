@@ -167,6 +167,15 @@ private struct LocalModelSettingsPopover: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Section {
+                    ModelExtraArgsControl(modelPath: model.url.path)
+                } header: {
+                    Text(loc.t("Argumentos extra", "Extra arguments"))
+                } footer: {
+                    Text(loc.t("Se añaden a los de Ajustes y solo se aplican a este modelo, por ejemplo un cabezal MTP en otro archivo.",
+                               "Added to the ones in Settings and applied to this model only, an MTP head in a separate file for instance."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             .formStyle(.grouped)
             .scrollDisabled(true)
