@@ -3,6 +3,23 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **LLMs: Radeon Pro Vega II and Radeon VII read prompts faster.** The kernels that read a prompt now have versions written for these cards, kept in files of their own instead of running code laid out for Radeon RX. One group of lanes owns a whole tile and covers 32 columns rather than 16, which takes a division out of the inner loop. The dense matrix multiply, the expert matrix multiply, the fused QKV and the attention used while reading a prompt each have one. The thresholds that decide when the wide tile pays are now set per quantization type, because a value that helps one type costs another. Measured on a Radeon Pro Vega II Duo, prompt tokens per second on `pp512`:
+
+  | Quantization | Before | Now |
+  |---|---|---|
+  | Q5_0 | 813 | **1016** |
+  | Q5_1 | 809 | **1003** |
+  | Q8_0 | 975 | **1038** |
+  | F16 | 1293 | **1374** |
+  | Q4_K_M | 1221 | **1259** |
+  | Q3_K_M | 1184 | **1214** |
+
+  Shorter prompts gain more where the old tile was worst: at 256 tokens Q8_0 goes from 774 to 987 and F16 from 1178 to 1379. Sixteen quantization types were measured at three prompt lengths, and fifteen of them are unchanged or faster at every length. Perplexity is identical on all twelve models checked, and so is what they generate. Radeon RX cards are untouched: the new kernels live in separate files that they never load.
+
 ## [0.86.6] - 2026-09-02
 
 ### Fixed

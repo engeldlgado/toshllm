@@ -1,0 +1,94 @@
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -937,28 +937,64 @@
+     }
+     const bool narrow = use_mm_manual && !has_tensor && tsrc1 == GGML_TYPE_F32 &&
+                         (op->ne[1] <= 32 || tail_32);
+ 
+     // wave64 wants a far higher floor: between 288 and 384 the tile loses on two models,
+     // and from 448 up it wins 4 to 6%
+     const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
+     const bool wide_width_ok = simd_width != 64 || getenv("TOSH_MM_WIDE_W64_DISABLE") == nullptr;
+-    const int wide_floor = wide_floor_env ? wide_floor_env : (simd_width == 64 ? 448 : 112);
++    // Both floors were derived against the 32-lane tile. The 64-lane rewrite moved the
++    // crossover, and it moved by a different amount per type, so each carries its own:
++    // a single number would have to pick whom to hurt (q8_0 gains 3.7% where q4_K loses 3.1%).
++    // Types with no measurement of their own keep the width default.
++    int wide_floor = wide_floor_env ? wide_floor_env : (simd_width == 64 ? 448 : 112);
++    if (!wide_floor_env && simd_width == 64) {
++        switch (tsrc0) {
++            // measured one type at a time over 128/192/256/384 tokens: 192 is where the tile
++            // starts paying for these, and below it every type loses (128 costs 4 to 19%)
++            case GGML_TYPE_Q8_0:
++            case GGML_TYPE_Q6_K:
++            case GGML_TYPE_Q5_K:
++            case GGML_TYPE_Q4_1:
++            case GGML_TYPE_Q3_K:
++            case GGML_TYPE_IQ3_S: wide_floor = 192; break;
++            // q4_0 turns one step later: at 192 it loses 10% on a 192-token prompt
++            case GGML_TYPE_Q4_0: wide_floor = 256; break;
++            // left at the width default because the shorter floor measured worse: f16 (-4.8%),
++            // q5_0 (-1.3%), q5_1 (-1.4%), and q4_K, which gains on a 4B and loses on an 8B
++            default: break;
++        }
++    }
+ 
+     // the tile also needs enough output rows, not just enough tokens. Halving the simdgroups per
+     // threadgroup costs more where the rows run out: on 64 lanes 2560 rows lose 7 to 10% at 512
+     // tokens while 4096 and up keep winning
+     static const int ne0_floor_env = []() {
+         const char * s = getenv("TOSH_MM_NE0_FLOOR");
+         return s ? atoi(s) : 0;
+     }();
+ 
+-    const int ne0_floor = ne0_floor_env ? ne0_floor_env : (simd_width == 64 ? 4096 : 2048);
++    int ne0_floor = ne0_floor_env ? ne0_floor_env : (simd_width == 64 ? 4096 : 2048);
++    if (!ne0_floor_env && simd_width == 64) {
++        switch (tsrc0) {
++            // these two win with the shorter weights the 64-lane tile now handles; q4_K and
++            // q6_K measured worse there and keep the higher floor
++            case GGML_TYPE_Q8_0:
++            case GGML_TYPE_Q4_0: ne0_floor = 2048; break;
++            default: break;
++        }
++    }
+ 
++    static const int wide_ext_floor_env = []() {
++        const char * s = getenv("TOSH_MM_WIDE_EXT_FLOOR");
++        return s ? atoi(s) : 0;
++    }();
++    const int wide_ext_floor = wide_ext_floor_env ? wide_ext_floor_env : 2048;
++
+     bool wide = use_mm_manual && !has_tensor && !narrow && tsrc1 == GGML_TYPE_F32 && wide_width_ok &&
+                 op->ne[1] >= wide_floor && (op->ne[0] >= ne0_floor || getenv("TOSH_MM_NE0_FLOOR_DISABLE") != nullptr) &&
+                 getenv("TOSH_MM_WIDE_DISABLE") == nullptr;
+     if (wide) {
+         // it needs 64 accumulators, so only where the dequant leaves the registers
+         switch (tsrc0) {
+             case GGML_TYPE_F16:
+             case GGML_TYPE_Q8_0:
+@@ -979,18 +1015,22 @@
+             case GGML_TYPE_IQ4_XS:
+             case GGML_TYPE_IQ3_S:
+             case GGML_TYPE_IQ2_S:
+             case GGML_TYPE_IQ1_S:
+             case GGML_TYPE_IQ1_M:
+             case GGML_TYPE_IQ2_XXS:
+             case GGML_TYPE_IQ2_XS:
+             case GGML_TYPE_IQ3_XXS:
+-                wide = op->ne[0] >= 2048 && getenv("TOSH_MM_WIDE_EXT_DISABLE") == nullptr; break;
+-            default: wide = false; break;
++                // third floor, for the types whose dequant leaves less room: it was picked
++                // against the 32-lane tile too, so TOSH_MM_WIDE_EXT_FLOOR opens it for sweeping
++                wide = op->ne[0] >= wide_ext_floor && getenv("TOSH_MM_WIDE_EXT_DISABLE") == nullptr; break;
++            // f32 and bf16 have never been through this gate; the override opens them so the
++            // exclusion can be measured instead of inherited
++            default: wide = getenv("TOSH_MM_WIDE_ALL") != nullptr && op->ne[0] >= wide_ext_floor; break;
+         }
+     }
+ 
+     // attention matmuls read a permuted KV cache view and can exceed half range in the packed
+     // accumulator; bfloat has no native arithmetic here, so float is faster for it too
+     const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
+                          getenv("TOSH_MM_ACC_F32_DISABLE") == nullptr;
+ 
