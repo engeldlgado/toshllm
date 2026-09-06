@@ -20,7 +20,7 @@
      constexpr short SVS = BK + 4;
      // int, not short: a 128-key block overflows it (BK*SQS passes 32767) and the array
      constexpr int   SKV = BK*SQS > DV*SVS ? BK*SQS : DV*SVS;
-@@ -355,8 +358,31 @@ FA_AMD_PF_W64_TURBO("kturbo4_vturbo2", block_turbo4_0, 32, dequantize_turbo4_0_t
+@@ -355,8 +358,30 @@ FA_AMD_PF_W64_TURBO("kturbo4_vturbo2", block_turbo4_0, 32, dequantize_turbo4_0_t
  FA_AMD_PF_W64_TURBO("kturbo4_vturbo3", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
  FA_AMD_PF_W64_TURBO("kturbo4_vturbo4", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
  FA_AMD_PF_W64_TURBO("kq4_0_vturbo2", block_q4_0, 8, dequantize_q4_0_t4, block_turbo2_0, 32, dequantize_turbo2_0_t4)
@@ -30,9 +30,8 @@
  FA_AMD_PF_W64_TURBO("kturbo3_vq4_0", block_turbo3_0, 32, dequantize_turbo3_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
  FA_AMD_PF_W64_TURBO("kturbo4_vq4_0", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
 +
-+// Asymmetric heads and the 512 head had no 64-lane twin, so on a 64-lane card their prefill
-+// still ran the 32-lane kernel. The template already carries DK and DV apart; only the
-+// instantiations were missing.
++// Asymmetric heads and the 512 head had no 64-lane twin, so on such a card their prefill ran
++// the 32-lane kernel. The template already carries DK and DV apart; only these were missing.
 +#define FA_AMD_PF_W64_INST_DV(dk, dv, bq, bk, lg, nm, kt, nkk, dkf, vt, nkv, dvf) \
 +template [[host_name("kernel_flash_attn_ext_pf_amd_dk" #dk "_dv" #dv "_" nm "_w64_lg" #lg)]] kernel flash_attn_ext_pf_amd_w64_t \
 +    kernel_flash_attn_ext_pf_amd_w64<dk, dv, bq, bk, 256, lg, kt, nkk, dkf, vt, nkv, dvf>;

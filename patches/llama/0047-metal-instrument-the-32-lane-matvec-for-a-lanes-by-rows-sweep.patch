@@ -198,7 +198,7 @@
          device       char * dst,
          threadgroup  char * shmem,
          uint3  tgpig,
-@@ -4244,16 +4408,3396 @@ template [[host_name("kernel_mul_mv_id_bf16_f32")]]    kernel kernel_mul_mv_id_t
+@@ -4244,16 +4408,3394 @@ template [[host_name("kernel_mul_mv_id_bf16_f32")]]    kernel kernel_mul_mv_id_t
  template [[host_name("kernel_mul_mv_id_bf16e_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<bf16e, float>>>;
  template [[host_name("kernel_mul_mv_id_f32_f32_4")]]   kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<float, float4, float, float4>>>;
  template [[host_name("kernel_mul_mv_id_f16_f32_4")]]   kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<half,  half4,  float, float4>>>;
@@ -1738,10 +1738,8 @@
 +
 +
 +
-+// q4_K with the lanes per block as a template argument. H is how many of the block's values a
-+// lane covers in each quarter. The quant loads go two wide instead of four so that one body
-+// serves every lane count; the shipped kernel keeps its four-wide load, so it is the control
-+// and not a cell of this grid.
++// q4_K with the lanes per block as a template argument. The quant loads go two wide so one
++// body serves every count, so the shipped four-wide kernel is the control, not a cell here.
 +template<int nr0, short LANES, typename args_t>
 +void kernel_mul_mv_q4_K_f32_l_impl(
 +        args_t args,
@@ -2396,7 +2394,7 @@
 +            float4 acc2 = {0.f, 0.f, 0.f, 0.f};
 +            // the four shorts this lane reads are contiguous, so an aligned stride turns
 +            // them into two words
-+            // the two-word read only lines up when the lane covers exactly four shorts
++            // the two-word read only lines up when a lane covers exactly four shorts
 +            ushort qw[Q/2];
 +            if (FC_mul_mv_row8 && Q == 8) {
 +                FOR_UNROLL (short j = 0; j < Q/2; j += 4) {
@@ -2700,8 +2698,8 @@
 +
 +            float4 acc1 = {0.f};
 +
-+            // four bytes at a time: l0 is a multiple of four for every lane count, while the
-+            // eight-byte load of the shipped kernel only lines up when a lane covers eight
++            // four bytes at a time: l0 divides by four for every count, while the shipped
++            // eight-byte load only lines up when a lane covers eight
 +            FOR_UNROLL (short c = 0; c < E/4; ++c) {
 +                const uchar4 q1c = as_type<uchar4>(*(device const uint *)(q1 + 4*c));
 +                const uchar4 q2c = as_type<uchar4>(*(device const uint *)(q2 + 4*c));

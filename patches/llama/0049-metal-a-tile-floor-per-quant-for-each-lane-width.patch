@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -942,16 +942,23 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+@@ -942,16 +942,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
      // and from 448 up it wins 4 to 6%
      const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
      const bool wide_width_ok = simd_width != 64 || getenv("TOSH_MM_WIDE_W64_DISABLE") == nullptr;
@@ -9,9 +9,8 @@
      // a single number would have to pick whom to hurt (q8_0 gains 3.7% where q4_K loses 3.1%).
      // Types with no measurement of their own keep the width default.
      int wide_floor = wide_floor_env ? wide_floor_env : (simd_width == 64 ? 448 : 112);
-+    // On 32 lanes q5_0 and q5_1 never earn the wide tile: measured from 48 to 2048 tokens it
-+    // costs them 5 to 30%, while the same tile is worth 24% to them on 64 lanes. A floor past
-+    // any batch keeps them on the narrow path without touching the other types.
++    // On 32 lanes q5_0 and q5_1 never earn the wide tile: it costs them 5 to 30% from 48 to
++    // 2048 tokens, while the same tile is worth 24% to them on 64 lanes.
 +    if (!wide_floor_env && simd_width == 32 &&
 +        (tsrc0 == GGML_TYPE_Q5_0 || tsrc0 == GGML_TYPE_Q5_1)) {
 +        wide_floor = INT32_MAX;
@@ -24,7 +23,7 @@
              case GGML_TYPE_Q6_K:
              case GGML_TYPE_Q5_K:
              case GGML_TYPE_Q4_1:
-@@ -1031,17 +1038,28 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+@@ -1031,17 +1037,27 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
  
      // attention matmuls read a permuted KV cache view and can exceed half range in the packed
      // accumulator; bfloat has no native arithmetic here, so float is faster for it too
@@ -33,9 +32,8 @@
  
      // the 64-lane GEMM lives in mul_mm_w64.metal: one wave is one tile there, so it needs the
      // dispatch to hand it whole waves instead of the 32-thread groups the shared kernel expects
-+    // iq4_nl is the one type this kernel does not suit at every batch: isolated at 256 tokens it
-+    // costs 3.9% and at 512 it gains 1.0%, so it takes a floor of its own rather than losing the
-+    // gain. Every other type measured neutral or better at both.
++    // iq4_nl is the one type this kernel does not suit at every batch: it costs 3.9% at 256
++    // tokens and gains 1.0% at 512, so it takes a floor rather than lose the gain.
 +    static const int w64_floor_env = []() {
 +        const char * s = getenv("TOSH_MM_W64_FLOOR");
 +        return s ? atoi(s) : 0;
