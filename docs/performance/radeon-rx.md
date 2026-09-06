@@ -36,6 +36,12 @@ They now stay on the narrow path. Prompt tokens per second against 0.86.6:
 The four rows below the line are controls: they were measured to confirm the change reaches only
 the two types it names. None moves outside a third of a percent.
 
+The same comparison was repeated on a Radeon Pro W6800X Duo, a workstation card of the same
+generation but with different memory and none of the last-level cache the RX 6700 XT carries. It
+reproduces, and by more: Q5_0 gains 19.2% at 128 tokens there against 17.2% here, and 8.1% at
+1024 tokens against 5.5%. The controls stay still on both. The threshold belongs to the lane
+width, not to one card.
+
 The same quantizations gain 24% from the wide tile on Radeon Pro Vega. A single threshold cannot
 serve both, which is why they are set per type and per card family.
 
