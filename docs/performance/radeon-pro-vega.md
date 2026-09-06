@@ -75,11 +75,16 @@ second, and the change against 0.86.6.
 | IQ3_M | 906 → **914** (+0.8%) | 984 → **991** (+0.7%) | 1027 → **1045** (+1.7%) |
 | IQ4_XS | 992 → **999** (+0.7%) | 1059 → 1055 (-0.3%) | 1063 → **1078** (+1.4%) |
 | IQ2_M | 882 → **887** (+0.6%) | 973 → 976 (+0.3%) | 1003 → **1020** (+1.6%) |
-| IQ4_NL | 913 → 877 (-3.9%) | 1006 → 1005 (-0.1%) | 996 → **1006** (+1.0%) |
+| IQ4_NL | 917 → **921** (+0.4%) | 1006 → 1004 (-0.2%) | 1043 → **1055** (+1.2%) |
 
-Across the 144 pairs the average is +4.1% and the middle of the range is +1.1%. Fifteen of
-the sixteen types are unchanged or faster at every length measured; only IQ4_NL at 256 tokens
-is meaningfully slower, and that one is still open.
+Across the 144 pairs the average is +4.1% and the middle of the range is +1.1%. Every one of the
+sixteen types is unchanged or faster at every length measured; nothing falls below half a percent.
+
+IQ4_NL took the longest to settle. The kernel that reads a prompt in 64-lane groups costs it 3.9%
+at 256 tokens and gains it 1.2% at 512, so rather than lose the gain it has a floor of its own and
+only uses that kernel past 384 tokens. Isolating it needed each change turned off separately:
+switching off the wide tile left the loss untouched, switching off the 64-lane kernel removed it
+exactly.
 
 Q5_0 and Q5_1 look flat until 512 tokens because that is where the wide tile starts being
 used at all. Q8_0 and F16 gain most at the short lengths, which is where the old tile was

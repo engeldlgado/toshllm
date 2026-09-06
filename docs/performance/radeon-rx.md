@@ -77,6 +77,29 @@ Everything else measured between -0.2% and -34%, so the defaults stay. MXFP4 is 
 contrast: on the Vega cards this sweep doubled its generation, and here no cell beats the
 default at all.
 
+## What else was measured, and left alone
+
+Eight fronts were swept in all. Six of them found the shipped settings already right, which is
+worth stating as plainly as the two that did not:
+
+| Front | Result |
+|---|---|
+| Wide tile floor, per type | Two types changed, up to 17% |
+| Lanes and rows in the matvec | One type changed, 3% |
+| Expert matrix multiply floor | Already right; switching it off costs 4.7% to 7.4% |
+| Flash attention tile, work groups, ext, graph optimizer | Nothing moves, thirty points within a tenth of a percent |
+| Tail bound, f32 accumulator, `MM_MIN` | Nothing moves |
+| Double buffering | Already on; switching it off costs 1.7% to 5.7% |
+| Prompt micro-batch | 512 stays; doubling it gains 1% on three types and loses on a fourth |
+| Prefill attention block sizes | Already right |
+
+Two of those carry numbers worth keeping. The attention used while reading a prompt is worth
+5.6% to 6.2% on a short prompt and **17.8% to 20.0% at a depth of 4096**, the largest single
+contribution on this card. Double buffering the matrix multiply is worth more the wider the
+data: 5.5% on F16 and 5.7% on Q5_0 against 1.8% on Q4_K_M.
+
+The QKV fusion, worth 4.1% on the Vega cards, measures nothing here.
+
 ## Correctness
 
 Perplexity and generated text were compared against 0.86.6 on all sixteen quantizations.
