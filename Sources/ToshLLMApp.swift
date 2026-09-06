@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var sigtermSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Anything the archive hook could not deliver last run is still on disk.
+        MemoryArchiveHook.resume()
         // The system default tooltip delay (~1.5 s) makes the bilingual .help
         // hints feel broken; show them promptly.
         UserDefaults.standard.set(400, forKey: "NSInitialToolTipDelay")

@@ -1644,6 +1644,18 @@ final class ChatStore: ObservableObject {
         conversations[i].updated = Date()
         save()
         AppLog.chat.info("archived messages \(range.from)..<\(range.to)")
+        // The turns leave the context here, so this is the one moment an external index can
+        // still see them without reading the transcript file.
+        MemoryArchiveHook.send(
+            conversationID: conversations[i].id.uuidString,
+            title: conversations[i].title,
+            from: range.from, to: range.to,
+            note: note.isEmpty ? "archived" : note,
+            messages: conversations[i].messages[range.from..<range.to].enumerated().map {
+                (index: range.from + $0.offset,
+                 role: $0.element.role,
+                 content: $0.element.role == "assistant" ? $0.element.parts.body : $0.element.wireContent)
+            })
         let freed = conversations[i].messages[range.from..<range.to]
             .reduce(0) { $0 + $1.estimatedTokens }
         return ToolExecutionResult(

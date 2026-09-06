@@ -12,6 +12,8 @@ struct ChatAdvancedSettingsSection: View {
     @AppStorage(SettingsKeys.toolsRuntime) private var toolsRuntime = ""
     @AppStorage(SettingsKeys.jsSandboxEnabled) private var jsSandboxEnabled = false
     @AppStorage(SettingsKeys.memoryToolsEnabled) private var memoryToolsEnabled = true
+    @AppStorage(SettingsKeys.memoryArchiveHookURL) private var archiveHookURL = ""
+    @AppStorage(SettingsKeys.memoryArchiveHookSecret) private var archiveHookSecret = ""
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
     @AppStorage(SettingsKeys.chatTopP) private var topP = 0.95
     @AppStorage(SettingsKeys.chatMinP) private var minP = 0.05
@@ -232,6 +234,20 @@ struct ChatAdvancedSettingsSection: View {
                            isOn: $memoryToolsEnabled)
                         .infoTip(loc.t("Da al modelo tres herramientas para gestionar su propio contexto: listar la conversación, archivar lo terminado y recuperarlo cuando vuelve a hacer falta. Desactívalo si usas un servidor de memoria externo y el modelo confunde los dos.",
                                        "Gives the model three tools to manage its own context: list the conversation, archive what is finished and recall it when it matters again. Turn it off if you use an external memory server and the model confuses the two."))
+                    if memoryToolsEnabled {
+                        TextField(loc.t("Enviar lo archivado a", "Send archived turns to"),
+                                  text: $archiveHookURL, prompt: Text(verbatim: "https://127.0.0.1:8000/hook"))
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
+                            .infoTip(loc.t("Cada vez que el modelo archiva turnos, se envían a esta dirección en JSON para que un índice externo los guarde. Vacío lo desactiva. Los envíos se guardan en disco y se reintentan, así que un receptor caído no pierde nada ni frena el chat.",
+                                           "Every time the model archives turns they are posted to this address as JSON, so an external index can keep them. Empty turns it off. Deliveries are stored on disk and retried, so a receiver that is down loses nothing and does not hold up the chat."))
+                        TextField(loc.t("Token del receptor (opcional)", "Receiver token (optional)"),
+                                  text: $archiveHookSecret)
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
+                            .infoTip(loc.t("Se envía como Authorization: Bearer en cada entrega, para receptores que lo pidan.",
+                                           "Sent as Authorization: Bearer with each delivery, for receivers that ask for one."))
+                    }
                     integerStepper(loc.t("Turnos máximos del agente", "Maximum agent turns"),
                                    value: $agenticMaxTurns, range: 1...100,
                                    help: loc.t("Máximo de rondas herramienta→respuesta que el agente encadena en un turno antes de detenerse.",
@@ -372,5 +388,6 @@ struct ChatAdvancedSettingsSection: View {
         maxImageMegapixels = 1; pdfAsImages = false
         autoCompact = true; smoothTyping = true; agentToolsEnabled = false; jsSandboxEnabled = false
         memoryToolsEnabled = true; toolsRuntime = ""
+        archiveHookURL = ""; archiveHookSecret = ""
     }
 }

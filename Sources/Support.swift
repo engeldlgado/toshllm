@@ -77,6 +77,12 @@ enum SettingsKeys {
     /// Per-model extra arguments, keyed by model path. They are appended after the
     /// shared ones, so a model can override a flag the global field also sets.
     static let extraArgsByModel = "extraArgsByModel"
+
+    /// Where to POST the turns memory_archive sets aside. Empty disables the hook.
+    static let memoryArchiveHookURL = "memoryArchiveHookURL"
+
+    /// Sent as a bearer token with each delivery, for receivers that want one.
+    static let memoryArchiveHookSecret = "memoryArchiveHookSecret"
     static let embeddings = "embeddings"
     static let agentToolsEnabled = "agentToolsEnabled"
     static let toolsRuntime = "toolsRuntime"

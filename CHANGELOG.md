@@ -15,6 +15,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **Simplified Chinese.** The interface now ships in Spanish, English, Italian, Japanese and Simplified Chinese. Requested in #86.
 
+- **The turns the model archives can be sent to an address of your choosing.** When the model sets a range of turns aside to free context, they can now be posted as JSON to a URL in Settings, so an external index keeps what leaves the conversation. Deliveries are written to disk before they are attempted and only dropped once accepted, so quitting mid-flight loses nothing and they resume on the next launch; a receiver that is down is retried with a growing wait rather than holding up the chat, and each delivery carries an id that stays the same across retries so nothing is stored twice. Empty means off, and a bearer token can be set for receivers that want one. Requested in #90.
+
+- **LoRA files apply to image generation.** Put them in an `imagen/lora` folder and a menu next to the prompt inserts the tag for one, with the weight editable in the tag itself. Works with every model in the catalogue. Requested in #93.
+
 - **Extra arguments can be set per model and per server, not only once for everything.** The field in Settings still applies to every server, and now a model's settings popover and each server card carry one of their own. What a model sets is added after the shared field and wins over it, so a model that needs an MTP head from a separate file, or a server that needs a flag only it should get, no longer forces the setting on the rest. Requested in #89.
 
 ### Fixed
