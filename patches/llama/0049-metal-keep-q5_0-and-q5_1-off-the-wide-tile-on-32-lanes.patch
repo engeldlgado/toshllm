@@ -1,0 +1,26 @@
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -942,16 +942,23 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     // and from 448 up it wins 4 to 6%
+     const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
+     const bool wide_width_ok = simd_width != 64 || getenv("TOSH_MM_WIDE_W64_DISABLE") == nullptr;
+     // Both floors were derived against the 32-lane tile. The 64-lane rewrite moved the
+     // crossover, and it moved by a different amount per type, so each carries its own:
+     // a single number would have to pick whom to hurt (q8_0 gains 3.7% where q4_K loses 3.1%).
+     // Types with no measurement of their own keep the width default.
+     int wide_floor = wide_floor_env ? wide_floor_env : (simd_width == 64 ? 448 : 112);
++    // On 32 lanes q5_0 and q5_1 never earn the wide tile: measured from 48 to 2048 tokens it
++    // costs them 5 to 30%, while the same tile is worth 24% to them on 64 lanes. A floor past
++    // any batch keeps them on the narrow path without touching the other types.
++    if (!wide_floor_env && simd_width == 32 &&
++        (tsrc0 == GGML_TYPE_Q5_0 || tsrc0 == GGML_TYPE_Q5_1)) {
++        wide_floor = INT32_MAX;
++    }
+     if (!wide_floor_env && simd_width == 64) {
+         switch (tsrc0) {
+             // measured one type at a time over 128/192/256/384 tokens: 192 is where the tile
+             // starts paying for these, and below it every type loses (128 costs 4 to 19%)
+             case GGML_TYPE_Q8_0:
+             case GGML_TYPE_Q6_K:
+             case GGML_TYPE_Q5_K:
+             case GGML_TYPE_Q4_1:

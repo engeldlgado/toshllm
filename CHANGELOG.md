@@ -9,6 +9,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: Radeon Pro Vega II and Radeon VII generate and read prompts faster.** These cards now have kernels written for them, kept in files of their own instead of running code laid out for Radeon RX, and the thresholds that pick the wide tile are set per quantization type. Generation gains about 10% across twenty types, 18% on average, and up to 105% on the type that gained most. Reading a prompt gains about 4% on average and up to 29%. Seventeen of the twenty types generate faster and fifteen of the sixteen measured are unchanged or faster at reading. Perplexity is identical everywhere, and so is what the models generate. Radeon RX cards never load the new kernels and are untouched. Per-type tables in [Radeon Pro Vega II and Radeon VII](docs/performance/radeon-pro-vega.md).
 
+- **LLMs: Radeon RX reads Q5_0 and Q5_1 prompts up to 17% faster.** Both were being given a wide tile that costs them at every prompt length, because the threshold that picks it was one value for every quantization type. They now keep the narrow path. Reading a prompt gains about 12% on those two at a short prompt and 6% at a long one; the other fourteen types are unchanged, within a third of a percent. Q5_K generates 3% faster from a different split of the work. Perplexity and generated text are identical on all sixteen types. Per-type tables in [Radeon RX](docs/performance/radeon-rx.md).
+
 ## [0.86.6] - 2026-09-02
 
 ### Fixed

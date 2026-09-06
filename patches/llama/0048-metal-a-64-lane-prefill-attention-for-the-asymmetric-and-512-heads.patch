@@ -1,0 +1,155 @@
+--- a/ggml/src/ggml-metal/kernels/fa_w64.metal
++++ b/ggml/src/ggml-metal/kernels/fa_w64.metal
+@@ -22,16 +22,19 @@ kernel void kernel_flash_attn_ext_pf_amd_w64(
+         device const char * pad   [[buffer(6)]],
+         device       char * dst   [[buffer(7)]],
+         uint3  tgpig [[threadgroup_position_in_grid]],
+         ushort tiitg [[thread_index_in_threadgroup]]) {
+     constexpr short DK4 = DK/4;
+     constexpr short DV4 = DV/4;
+     constexpr short NQG = NT/LG;
+     constexpr short NQR = BQ/NQG;
++    // A lane group wider than the key block leaves no column per lane, and the array below
++    // comes out zero-length with an error that does not name the cause.
++    static_assert(BK >= LG, "the key block has to cover the lane group");
+     constexpr short NKC = BK/LG;
+     constexpr short NDC = (DV + LG - 1)/LG;  // DK 72 (vision) leaves the top lanes idle
+     // half2 run before flushing to float; it has to divide DK, and 576 (MLA) is not a multiple of 128
+     constexpr short DKF = DK % 128 == 0 ? 128 : (DK % 64 == 0 ? 64 : DK);
+     constexpr short SQS = DK + 4;
+     constexpr short SVS = BK + 4;
+     // int, not short: a 128-key block overflows it (BK*SQS passes 32767) and the array
+     constexpr int   SKV = BK*SQS > DV*SVS ? BK*SQS : DV*SVS;
+@@ -355,8 +358,31 @@ FA_AMD_PF_W64_TURBO("kturbo4_vturbo2", block_turbo4_0, 32, dequantize_turbo4_0_t
+ FA_AMD_PF_W64_TURBO("kturbo4_vturbo3", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
+ FA_AMD_PF_W64_TURBO("kturbo4_vturbo4", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
+ FA_AMD_PF_W64_TURBO("kq4_0_vturbo2", block_q4_0, 8, dequantize_q4_0_t4, block_turbo2_0, 32, dequantize_turbo2_0_t4)
+ FA_AMD_PF_W64_TURBO("kq4_0_vturbo3", block_q4_0, 8, dequantize_q4_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
+ FA_AMD_PF_W64_TURBO("kq4_0_vturbo4", block_q4_0, 8, dequantize_q4_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
+ FA_AMD_PF_W64_TURBO("kturbo2_vq4_0", block_turbo2_0, 32, dequantize_turbo2_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
+ FA_AMD_PF_W64_TURBO("kturbo3_vq4_0", block_turbo3_0, 32, dequantize_turbo3_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
+ FA_AMD_PF_W64_TURBO("kturbo4_vq4_0", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
++
++// Asymmetric heads and the 512 head had no 64-lane twin, so on a 64-lane card their prefill
++// still ran the 32-lane kernel. The template already carries DK and DV apart; only the
++// instantiations were missing.
++#define FA_AMD_PF_W64_INST_DV(dk, dv, bq, bk, lg, nm, kt, nkk, dkf, vt, nkv, dvf) \
++template [[host_name("kernel_flash_attn_ext_pf_amd_dk" #dk "_dv" #dv "_" nm "_w64_lg" #lg)]] kernel flash_attn_ext_pf_amd_w64_t \
++    kernel_flash_attn_ext_pf_amd_w64<dk, dv, bq, bk, 256, lg, kt, nkk, dkf, vt, nkv, dvf>;
++
++// head 512, symmetric
++FA_AMD_PF_W64_INST(512, 16, 32, 16, "kf16_vf16",  half4,      1, dequantize_f16_t4,  half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST(512, 16, 32, 16, "kq8_0_vf16", block_q8_0, 8, dequantize_q8_0_t4, half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST(512, 16, 32, 16, "kq4_0_vf16", block_q4_0, 8, dequantize_q4_0_t4, half4, 1, dequantize_f16_t4)
++
++// MLA: K is 576 (512 latent + 64 rope) and V is 512. The wider groups are here because the
++// sweep that closed the symmetric heads at sixteen never covered an asymmetric one.
++FA_AMD_PF_W64_INST_DV(576, 512, 16, 32, 32, "kf16_vf16",  half4,      1, dequantize_f16_t4,  half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST_DV(576, 512, 16, 64, 64, "kf16_vf16",  half4,      1, dequantize_f16_t4,  half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST_DV(320, 256, 16, 32, 32, "kf16_vf16",  half4,      1, dequantize_f16_t4,  half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST(512, 16, 32, 32, "kf16_vf16",  half4, 1, dequantize_f16_t4, half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST_DV(576, 512, 16, 32, 16, "kf16_vf16",  half4,      1, dequantize_f16_t4,  half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST_DV(576, 512, 16, 32, 16, "kq8_0_vf16", block_q8_0, 8, dequantize_q8_0_t4, half4, 1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST_DV(320, 256, 16, 32, 16, "kf16_vf16",   half4,      1, dequantize_f16_t4,  half4,      1, dequantize_f16_t4)
++FA_AMD_PF_W64_INST_DV(320, 256, 16, 32, 16, "kq8_0_vq8_0", block_q8_0, 8, dequantize_q8_0_t4, block_q8_0, 8, dequantize_q8_0_t4)
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3997,26 +3997,34 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         int fa_pf_bq = (ne00 == 256 || ne00 == 160) ? 32
+             : ((fa_pf_512 || fa_pf_mla || fa_pf_mla320) ? 16 : 64);
+         const bool fa_pf_head_ok =
+             ne00 == 64 || ne00 == 128 || ne00 == 256 || fa_amd_dk72 || fa_amd_unet || fa_pf_512 ||
+             fa_pf_mla || fa_pf_mla320;
+         // PF always dispatches 256 threads and subdivides them into logical
+         // 16-lane query groups, so the same specialization works on wave32
+         // (8 physical simdgroups) and wave64 (4 physical simdgroups).
++        if (getenv("TOSH_FA_PF_DEBUG") != nullptr) {
++            fprintf(stderr, "FA_PF gate dk=%d dv=%d ne01=%d head_ok=%d ktype=%s vtype=%s\n",
++                    (int) ne00, (int) ne20, (int) ne01, (int) fa_pf_head_ok,
++                    ggml_type_name(op->src[1]->type), ggml_type_name(op->src[2]->type));
++        }
+         if ((props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+             ne01 >= 32 && fa_pf_head_ok && getenv("TOSH_FA_PF_DISABLE") == NULL) {
+             char fa_pf_pipeline[80];
++            bool fa_pf_asym = false;
+             if (fa_pf_mla) {
+                 snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk576_dv512_k%s_vf16",
+                          ggml_metal_fa_amd_type_suffix(op->src[1]->type));
++                fa_pf_asym = true;
+             } else if (ne20 != ne00) {
+                 snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk%d_dv%d_k%s_v%s",
+                          (int) ne00, (int) ne20,
+                          ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type));
++                fa_pf_asym = true;
+             } else {
+             snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk%d_k%s_v%s", (int) ne00,
+                      ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type));
+ 
+                 // the 64-lane twin lives in fa_w64.metal, with the lane group as a parameter.
+                 // Only the symmetric heads have one; MLA and the asymmetric pairs stay above.
+                 // TOSH_FA_PF_LG picks the group so the three can be compared; 16 reproduces
+                 // the 32-lane kernel exactly and is the control.
+@@ -4034,17 +4042,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                 }();
+                 // TOSH_FA_PF_BK picks the key-block twin: the counterpart of BQ on the other
+                 // side of the K/V reuse, so a bigger block pays the same traffic fewer times
+                 static const int pf_bk = []() {
+                     const char * s = getenv("TOSH_FA_PF_BK");
+                     return s ? atoi(s) : 0;
+                 }();
+                 if (props_dev->simd_width == 64 && (pf_lg == 16 || pf_lg == 32 || pf_lg == 64) &&
+-                    (ne00 == 64 || ne00 == 128 || ne00 == 256) &&
++                    (ne00 == 64 || ne00 == 128 || ne00 == 256 || ne00 == 512) &&
+                     getenv("TOSH_FA_PF_W64_DISABLE") == nullptr) {
+                     char w64_name[96];
+                     if (pf_bq > 0) {
+                         snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%dq%dk%d", fa_pf_pipeline, pf_lg, pf_bq,
+                                  pf_bk > 0 ? pf_bk : 64);
+                     } else {
+                         snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%d", fa_pf_pipeline, pf_lg);
+                     }
+@@ -4054,21 +4062,44 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                         // the grid steps in query blocks, so it has to follow the twin
+                         if (pf_bq > 0) {
+                             fa_pf_bq = pf_bq;
+                         }
+                     }
+                 }
+             }
+ 
++            // the asymmetric heads compose their name in the branches above, so their twin is
++            // picked here instead. Same group of sixteen; the fallback is the 32-lane kernel.
++            if (fa_pf_asym && props_dev->simd_width == 64 &&
++                getenv("TOSH_FA_PF_W64_DISABLE") == nullptr) {
++                char w64_name[96];
++                // sixteen reproduces the 32-lane kernel exactly, so it is the control; the
++                // sweep that closed the symmetric heads there never covered an asymmetric one
++                const char * slg = getenv("TOSH_FA_PF_LG");
++                snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%d", fa_pf_pipeline, slg ? atoi(slg) : 16);
++                if (ggml_metal_library_get_pipeline(lib, w64_name).pipeline ||
++                    ggml_metal_library_compile_pipeline(lib, w64_name, w64_name, nullptr).pipeline) {
++                    snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "%s", w64_name);
++                }
++            }
++
+             auto pipeline = ggml_metal_library_get_pipeline(lib, fa_pf_pipeline);
+             if (!pipeline.pipeline) {
+                 pipeline = ggml_metal_library_compile_pipeline(lib, fa_pf_pipeline, fa_pf_pipeline, nullptr);
+             }
+ 
++            // Which twin a head actually lands on cannot be read from the timings: a switch that
++            // never reaches the kernel gives the same number on both sides.
++            if (getenv("TOSH_FA_PF_DEBUG") != nullptr) {
++                fprintf(stderr, "FA_PF dk=%d dv=%d bq=%d -> %s%s\n",
++                        (int) ne00, (int) ne20, fa_pf_bq, fa_pf_pipeline,
++                        pipeline.pipeline ? "" : "  (NO EXISTE, cae al tile)");
++            }
++
+             // it fits in registers with nothing to spare; a compiler bump could
+             // push it under the 256 threads it dispatches
+             if (ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) >= 256) {
+                 ggml_metal_encoder_set_pipeline(enc, pipeline);
+                 ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);

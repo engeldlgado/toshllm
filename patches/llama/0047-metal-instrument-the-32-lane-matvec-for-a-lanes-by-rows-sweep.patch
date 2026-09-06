@@ -3236,7 +3236,7 @@
 +    float4 yl[2*P];
 +    float sumf[NR0]={0.f};
 +
-+    device const float * yb = y + ix*QK4_NL + it*8*P;
++    device const float * yb = y + ix*QK4_NL + it*4*P;
 +
 +    uint32_t aux32[2];
 +    thread const uint8_t * q8 = (thread const uint8_t *)aux32;
@@ -3253,7 +3253,7 @@
 +
 +        for (short row = 0; row < NR0; row++) {
 +            device const block_iq4_nl & xb = x[row*ns01 + ib];
-+            device const uint16_t * q4 = (device const uint16_t *)(xb.qs + 8*it*P);
++            device const uint16_t * q4 = (device const uint16_t *)(xb.qs + 4*it*P);
 +
 +            float4 acc1 = {0.f}, acc2 = {0.f};
 +
@@ -3441,7 +3441,7 @@
 +    float4 yl[2*P];
 +    float sumf[NR0]={0.f};
 +
-+    device const float * yb = y + ix*QK_MXFP4 + it*8*P;
++    device const float * yb = y + ix*QK_MXFP4 + it*4*P;
 +
 +    // note: just the check `ib < nb` is enough, but adding the redundant `&& ib < ns01` check makes the kernel a bit faster
 +    //       no idea why that is - needs some deeper investigation [TAG_MUL_MV_WEIRD]
@@ -3455,7 +3455,7 @@
 +
 +        FOR_UNROLL (short row = 0; row < NR0; row++) {
 +            device const block_mxfp4 & xb = x[row*ns01 + ib];
-+            device const uint8_t     * q2 = (device const uint8_t *)(xb.qs + 8*it*P);
++            device const uint8_t     * q2 = (device const uint8_t *)(xb.qs + 4*it*P);
 +
 +            float4 acc1 = {0.f}, acc2 = {0.f};
 +            FOR_UNROLL (short j = 0; j < P; ++j) {
