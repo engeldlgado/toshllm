@@ -42,7 +42,7 @@ reproduces, and by more: Q5_0 gains 19.2% at 128 tokens there against 17.2% here
 1024 tokens against 5.5%. The controls stay still on both. The threshold belongs to the lane
 width, not to one card.
 
-The same quantizations gain 24% from the wide tile on Radeon Pro Vega. A single threshold cannot
+The same quantizations gain 24% from the wide tile on GCN. A single threshold cannot
 serve both, which is why they are set per type and per card family.
 
 ## Where the floor belongs

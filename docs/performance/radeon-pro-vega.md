@@ -5,7 +5,7 @@ numbers because the two are different silicon and, as the tables below show, the
 can help one and cost the other.
 
 The work behind these figures gave these cards kernels of their own, in their own source
-files, instead of running code laid out for Radeon RX. The Radeon RX path never loads them,
+files, instead of running code laid out for RDNA. The RDNA path never loads them,
 so nothing here changes what those cards do.
 
 ## How this was measured
