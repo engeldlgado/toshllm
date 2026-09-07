@@ -1,8 +1,8 @@
-# Radeon RX
+# RDNA
 
-Measurements for the cards that run 32 lanes to a group. They are kept apart from the Radeon Pro
-Vega numbers because the two are different silicon, and, as the tables here show, the same
-setting can be worth 24% on one and cost 14% on the other.
+Measurements for RDNA cards: RX 5000 and later. They are kept apart from the GCN numbers
+because the two are different silicon, and, as the tables here show, the same setting can be
+worth 24% on one and cost 14% on the other.
 
 ## How this was measured
 

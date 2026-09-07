@@ -1,8 +1,8 @@
-# Radeon Pro Vega II and Radeon VII
+# GCN
 
-Measurements for the cards that run 64 lanes to a group. They are kept apart from the Radeon
-RX numbers because the two are different silicon and, as the tables below show, the same
-setting can help one and cost the other.
+Measurements for GCN cards: Vega, Radeon VII and RX 400/500. They are kept apart from the RDNA
+numbers because the two are different silicon and, as the tables below show, the same setting
+can help one and cost the other.
 
 The work behind these figures gave these cards kernels of their own, in their own source
 files, instead of running code laid out for Radeon RX. The Radeon RX path never loads them,

@@ -7,9 +7,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
-- **LLMs: Radeon Pro Vega II and Radeon VII generate and read prompts faster.** These cards now have kernels written for them instead of running code laid out for Radeon RX. Generation gains about 18% on average across twenty quantization types and reading a prompt about 4%. Perplexity and generated text are identical. Per-type tables in [GCN/VEGA](docs/performance/radeon-pro-vega.md).
+- **LLMs: GCN cards generate and read prompts faster.** They now have kernels written for them instead of running code laid out for RDNA. Generation gains about 18% on average across twenty quantization types and reading a prompt about 4%. Perplexity and generated text are identical. Per-type tables in [GCN/VEGA](docs/performance/radeon-pro-vega.md).
 
-- **LLMs: Radeon RX reads Q5_0 and Q5_1 prompts up to 17% faster.** Both were being handed a wide tile that costs them at every prompt length. Reading a prompt gains about 9% on those two and Q5_K generates 3% faster; the other types are unchanged. Perplexity and generated text are identical. Per-type tables in [RDNA](docs/performance/radeon-rx.md).
+- **LLMs: RDNA reads Q5_0 and Q5_1 prompts up to 17% faster.** Both were being handed a wide tile that costs them at every prompt length. Reading a prompt gains about 9% on those two and Q5_K generates 3% faster; the other types are unchanged. Perplexity and generated text are identical. Per-type tables in [RDNA](docs/performance/radeon-rx.md).
 
 - **LLMs: the engine moves to a newer upstream.** It brings the fixes and the model architectures added there since the last one. Speed and generated text are unchanged.
 
