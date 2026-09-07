@@ -11,6 +11,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: Radeon RX reads Q5_0 and Q5_1 prompts up to 17% faster.** Both were being given a wide tile that costs them at every prompt length, because the threshold that picks it was one value for every quantization type. They now keep the narrow path. Reading a prompt gains about 12% on those two at a short prompt and 6% at a long one; the other fourteen types are unchanged, within a third of a percent. Q5_K generates 3% faster from a different split of the work. Perplexity and generated text are identical on all sixteen types. Per-type tables in [Radeon RX](docs/performance/radeon-rx.md).
 
+- **LLMs: the engine moves to a newer upstream.** It brings the fixes and the model architectures added there since the last one, and reading a prompt is unchanged: the kernels this app writes for Radeon cards had been sharing an argument layout with upstream's, so a field added to it cost about 4% of prompt reading at large batches. They now keep their own. What the models generate is identical.
+
 ### Added
 
 - **Simplified Chinese.** The interface now ships in Spanish, English, Italian, Japanese and Simplified Chinese. Requested in #86.
