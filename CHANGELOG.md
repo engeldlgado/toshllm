@@ -21,7 +21,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LoRA files apply to image generation.** Put them in an `imagen/lora` folder and a menu next to the prompt inserts the tag for one, with the weight editable in the tag itself. Works with every model in the catalogue. Requested in #93.
 
-- **Extra arguments can be set per model and per server, not only once for everything.** The field in Settings still applies to every server, and now a model's settings popover and each server card carry one of their own. What a model sets is added after the shared field and wins over it, so a model that needs an MTP head from a separate file, or a server that needs a flag only it should get, no longer forces the setting on the rest. Requested in #89.
+- **Extra arguments can be set per model and per server, not only once for everything.** The field in Settings still applies to every server, and now a model's settings popover and every server card carry one of their own, under Advanced options. What a model sets is added after the shared field and wins over it, so a model that needs an MTP head from a separate file, or a server that needs a flag only it should get, no longer forces the setting on the rest. Requested in #89.
 
 ### Fixed
 

@@ -24,6 +24,7 @@ struct DashboardView: View {
     @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
     @AppStorage(SettingsKeys.embeddings) private var embeddings = false
     @AppStorage(SettingsKeys.uiMcpProxy) private var uiMcpProxy = false
+    @AppStorage(SettingsKeys.extraArgs) private var extraArgs = ""
     @State private var showNotes = false
     @AppStorage(SettingsKeys.routerMode) private var routerMode = false
     @AppStorage(SettingsKeys.routerModelsMax) private var routerModelsMax = 1
@@ -372,6 +373,22 @@ struct DashboardView: View {
                                 "How many models the router keeps loaded at once; the rest unload automatically (LRU). 1 is safest on a single GPU."))
                     .padding(.top, 4)
                 }
+                HStack(spacing: 8) {
+                    Image(systemName: "terminal").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Argumentos extra", "Extra arguments")).font(.callout)
+                    Spacer(minLength: 8)
+                    TextField("", text: $extraArgs, prompt: Text(verbatim: "--no-warmup -np 2"))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.callout, design: .monospaced))
+                        .autocorrectionDisabled()
+                        .frame(maxWidth: 220)
+                        .disabled(serverBusy)
+                        .accessibilityLabel(loc.t("Argumentos extra del servidor",
+                                                  "Extra arguments for the server"))
+                }
+                .help(loc.t("Banderas que se pasan al motor. Las mismas que el campo de Ajustes: cambiarlas aquí las cambia allí.",
+                            "Flags passed to the engine. The same field as in Settings: changing it here changes it there."))
+                .padding(.top, 4)
             } label: {
                 Text(loc.t("Opciones avanzadas", "Advanced options"))
                     .font(.caption).foregroundStyle(.secondary)
@@ -869,21 +886,6 @@ struct AddedServerCard: View {
                             "Prompt tokens the GPU processes at once. A larger one reads the prompt faster in exchange for VRAM. Follows Settings until you change it here."))
             }
             HStack(spacing: 8) {
-                Image(systemName: "terminal").frame(width: 18).foregroundStyle(.secondary)
-                TextField(loc.t("Argumentos extra", "Extra arguments"), text: Binding(
-                    get: { isPinned(Profile.Pin.extraArgs) ? (c.profile?.extraArgs ?? gExtraArgs) : gExtraArgs },
-                    set: { c.profile?.extraArgs = $0; pin(Profile.Pin.extraArgs); manager.persist() }),
-                    prompt: Text(verbatim: "--no-warmup -np 2"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.callout, design: .monospaced))
-                    .autocorrectionDisabled()
-                    .disabled(busy)
-                    .accessibilityLabel(loc.t("Argumentos extra de este servidor",
-                                              "Extra arguments for this server"))
-            }
-            .help(loc.t("Banderas que se pasan al motor solo en este servidor. Hereda las de Ajustes hasta que las cambies aquí.",
-                        "Flags passed to the engine for this server only. Follows Settings until you change them here."))
-            HStack(spacing: 8) {
                 Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
                 Text(loc.t("Puerto", "Port")).font(.callout)
                 Spacer(minLength: 8)
@@ -993,6 +995,25 @@ struct AddedServerCard: View {
                     }
                     .padding(.top, 4)
                 }
+                HStack(spacing: 8) {
+                    Image(systemName: "terminal").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Argumentos extra", "Extra arguments")).font(.callout)
+                    Spacer(minLength: 8)
+                    TextField("", text: Binding(
+                        get: { isPinned(Profile.Pin.extraArgs) ? (c.profile?.extraArgs ?? gExtraArgs) : gExtraArgs },
+                        set: { c.profile?.extraArgs = $0; pin(Profile.Pin.extraArgs); manager.persist() }),
+                        prompt: Text(verbatim: "--no-warmup -np 2"))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.callout, design: .monospaced))
+                        .autocorrectionDisabled()
+                        .frame(maxWidth: 220)
+                        .disabled(busy)
+                        .accessibilityLabel(loc.t("Argumentos extra de este servidor",
+                                                  "Extra arguments for this server"))
+                }
+                .help(loc.t("Banderas que se pasan al motor solo en este servidor. Hereda las de Ajustes hasta que las cambies aquí.",
+                            "Flags passed to the engine for this server only. Follows Settings until you change them here."))
+                .padding(.top, 4)
             } label: {
                 Text(loc.t("Opciones avanzadas", "Advanced options"))
                     .font(.caption).foregroundStyle(.secondary)
