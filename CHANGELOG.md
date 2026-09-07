@@ -7,21 +7,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
-- **LLMs: Radeon Pro Vega II and Radeon VII generate and read prompts faster.** These cards now have kernels written for them, kept in files of their own instead of running code laid out for Radeon RX, and the thresholds that pick the wide tile are set per quantization type. Generation gains about 10% across twenty types, 18% on average, and up to 105% on the type that gained most. Reading a prompt gains about 4% on average and up to 29%. Seventeen of the twenty types generate faster and fifteen of the sixteen measured are unchanged or faster at reading. Perplexity is identical everywhere, and so is what the models generate. Radeon RX cards never load the new kernels and are untouched. Per-type tables in [Radeon Pro Vega II and Radeon VII](docs/performance/radeon-pro-vega.md).
+- **LLMs: Radeon Pro Vega II and Radeon VII generate and read prompts faster.** These cards now have kernels written for them instead of running code laid out for Radeon RX. Generation gains about 18% on average across twenty quantization types and reading a prompt about 4%. Perplexity and generated text are identical. Per-type tables in [GCN/VEGA](docs/performance/radeon-pro-vega.md).
 
-- **LLMs: Radeon RX reads Q5_0 and Q5_1 prompts up to 17% faster.** Both were being given a wide tile that costs them at every prompt length, because the threshold that picks it was one value for every quantization type. They now keep the narrow path. Reading a prompt gains about 12% on those two at a short prompt and 6% at a long one; the other fourteen types are unchanged, within a third of a percent. Q5_K generates 3% faster from a different split of the work. Perplexity and generated text are identical on all sixteen types. Per-type tables in [Radeon RX](docs/performance/radeon-rx.md).
+- **LLMs: Radeon RX reads Q5_0 and Q5_1 prompts up to 17% faster.** Both were being handed a wide tile that costs them at every prompt length. Reading a prompt gains about 9% on those two and Q5_K generates 3% faster; the other types are unchanged. Perplexity and generated text are identical. Per-type tables in [RDNA](docs/performance/radeon-rx.md).
 
-- **LLMs: the engine moves to a newer upstream.** It brings the fixes and the model architectures added there since the last one, and reading a prompt is unchanged: the kernels this app writes for Radeon cards had been sharing an argument layout with upstream's, so a field added to it cost about 4% of prompt reading at large batches. They now keep their own. What the models generate is identical.
+- **LLMs: the engine moves to a newer upstream.** It brings the fixes and the model architectures added there since the last one. Speed and generated text are unchanged.
 
 ### Added
 
 - **Simplified Chinese.** The interface now ships in Spanish, English, Italian, Japanese and Simplified Chinese. Requested in #86.
 
-- **The turns the model archives can be sent to an address of your choosing.** When the model sets a range of turns aside to free context, they can now be posted as JSON to a URL in Settings, so an external index keeps what leaves the conversation. Deliveries are written to disk before they are attempted and only dropped once accepted, so quitting mid-flight loses nothing and they resume on the next launch; a receiver that is down is retried with a growing wait rather than holding up the chat, and each delivery carries an id that stays the same across retries so nothing is stored twice. Empty means off, and a bearer token can be set for receivers that want one. Requested in #90.
+- **The turns the model archives can be sent to an address of your choosing.** When the model sets a range of turns aside to free context, they can now be posted as JSON to a URL in Settings, so an external index keeps what leaves the conversation. Nothing is lost if the receiver is down or the app quits mid-flight: deliveries wait on disk and resume, and they carry an id so a retry is not stored twice. Empty means off, and a bearer token can be set. Requested in #90.
 
 - **LoRA files apply to image generation.** Put them in an `imagen/lora` folder and a menu next to the prompt inserts the tag for one, with the weight editable in the tag itself. Works with every model in the catalogue. Requested in #93.
 
-- **Extra arguments can be set per model and per server, not only once for everything.** The field in Settings still applies to every server, and now a model's settings popover and every server card carry one of their own, under Advanced options. What a model sets is added after the shared field and wins over it; what a server sets replaces it, an empty value included. So a model that needs an MTP head from a separate file, or a server that should not get a flag the rest do, no longer forces the setting on everything. Requested in #89.
+- **Extra arguments can be set per model and per server, not only once for everything.** The field in Settings still applies to every server, and now a model's settings popover and every server card carry one of their own, under Advanced options. What a model sets is added after the shared field; what a server sets replaces it, an empty value included. Requested in #89.
 
 ### Fixed
 

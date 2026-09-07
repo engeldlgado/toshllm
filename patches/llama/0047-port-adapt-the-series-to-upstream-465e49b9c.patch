@@ -851,8 +851,8 @@ index 354545a36..0475aaa25 100644
      int32_t  has_mask;  // 0 for bidirectional attention (vision towers), which has no mask
  } ggml_metal_kargs_flash_attn_ext_vec;
  
-+// the AMD kernels take their own copy: a field added to the upstream vec struct changes the
-+// constant buffer layout and with it the code the Metal compiler emits for them
++// Their own copy of the upstream vec args: a field added there changes the constant buffer
++// layout, and with it the code emitted for these kernels.
 +typedef struct {
 +    int32_t  ne01;
 +    int32_t  ne02;

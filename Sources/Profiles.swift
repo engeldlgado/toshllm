@@ -279,8 +279,8 @@ extension ServerSettings {
         if pinned.contains(Profile.Pin.vision), let v = p.loadVision { loadVision = v }
         if pinned.contains(Profile.Pin.embeddings), let v = p.embeddings { embeddings = v }
         if pinned.contains(Profile.Pin.uiMcpProxy), let v = p.uiMcpProxy { uiMcpProxy = v }
-        // replaces the shared field rather than adding to it, so a server that needs a
-        // different flag can drop what the rest get, an empty value included
+        // Replaces the shared field instead of adding to it, so an empty value here means
+        // this server gets none of the flags the rest do.
         if pinned.contains(Profile.Pin.extraArgs) { extraArgs = p.extraArgs }
         if pinned.contains(Profile.Pin.router) {
             if let v = p.routerMode { routerMode = v }

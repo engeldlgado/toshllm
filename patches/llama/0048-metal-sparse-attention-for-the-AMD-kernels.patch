@@ -29,8 +29,8 @@ index b0d29ff37..8bd24f471 100644
      const bool fa_amd_width_ok = props_dev->simd_width == 32
          ? props_dev->has_simdgroup_reduction
          : props_dev->wave64_decode;
-+    // sparse attention (QSA / DeepSeek-V4): the mask already carries the selection, the
-+    // index kernel compacts it and the vec kernel walks the list instead of the whole cache
++    // The mask already carries the selection, so this only compacts it: one query row per
++    // list, which is why the sparse path takes the vec kernel and not the tiled one.
 +    const int amd_n_kv_max = ggml_metal_op_flash_attn_ext_n_kv_max_sparse(op);
 +    const bool amd_sparse  = amd_n_kv_max > 0 && ne01 == 1;
 +    const int amd_n_kv_pad = amd_sparse ? GGML_PAD(amd_n_kv_max, OP_FLASH_ATTN_EXT_VEC_NCPSG) : 0;
