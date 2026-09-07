@@ -1,11 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:15 -0400
+Subject: [PATCH] 0041-metal-a-64-lane-gemm-of-its-own
+
+---
+ ggml/src/ggml-metal/CMakeLists.txt           |   1 +
+ ggml/src/ggml-metal/ggml-metal-device.cpp    |  13 +-
+ ggml/src/ggml-metal/ggml-metal-device.h      |   3 +
+ ggml/src/ggml-metal/ggml-metal-device.m      |   3 +
+ ggml/src/ggml-metal/ggml-metal-ops.cpp       |   4 +-
+ ggml/src/ggml-metal/kernels/mul_mm_w64.metal | 389 +++++++++++++++++++
+ 6 files changed, 411 insertions(+), 2 deletions(-)
+ create mode 100644 ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+
+diff --git a/ggml/src/ggml-metal/CMakeLists.txt b/ggml/src/ggml-metal/CMakeLists.txt
+index f59be3aa0..c914e19f2 100644
 --- a/ggml/src/ggml-metal/CMakeLists.txt
 +++ b/ggml/src/ggml-metal/CMakeLists.txt
-@@ -35,16 +35,17 @@
-                    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tosh_moe.metal COPYONLY)
- endif()
- 
- set(METALLIB_KERNEL_SOURCES
-     kernels/fa.metal
+@@ -40,6 +40,7 @@ set(METALLIB_KERNEL_SOURCES
      kernels/mul_mv.metal
      kernels/mul_mv_w64.metal
      kernels/mul_mm.metal
@@ -13,97 +25,11 @@
      kernels/quantize.metal
      kernels/softmax.metal
      kernels/norm.metal
-     kernels/unary.metal
-     kernels/binbcast.metal
-     kernels/reduce.metal
-     kernels/tri.metal
-     kernels/ssm.metal
---- a/ggml/src/ggml-metal/ggml-metal-device.h
-+++ b/ggml/src/ggml-metal/ggml-metal-device.h
-@@ -51,16 +51,19 @@
- 
-     int nr0;
-     int nr1;
- 
-     size_t smem;
- 
-     bool c4;
-     bool cnt;
-+
-+    // lanes per simdgroup the dispatch asks for; 0 keeps the 32-lane default
-+    int sgw;
- };
- 
- int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_with_params pipeline);
- 
- //
- // MTLCommandBuffer wrapper
- //
- 
---- a/ggml/src/ggml-metal/ggml-metal-device.m
-+++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -114,16 +114,17 @@
- // is a one-line change here (plus adding its source to CMakeLists.txt).
- //   X(suffix, name): name is both the kernels/<name>.metal basename and the
- //   ggml_metallib_<name>_{start,end} embed-symbol stem.
- #define GGML_METAL_LIBS \
-     X(FA,              fa)             \
-     X(MUL_MV,          mul_mv)         \
-     X(MUL_MV_W64,      mul_mv_w64)     \
-     X(MUL_MM,          mul_mm)         \
-+    X(MUL_MM_W64,      mul_mm_w64)     \
-     X(QUANTIZE,        quantize)       \
-     X(SOFTMAX,         softmax)        \
-     X(NORM,            norm)           \
-     X(UNARY,           unary)          \
-     X(BINBCAST,        binbcast)       \
-     X(REDUCE,          reduce)         \
-     X(TRI,             tri)            \
-     X(SSM,             ssm)            \
-@@ -690,16 +691,17 @@
-     struct ggml_metal_pipeline_with_params res = {
-         /*.pipeline =*/ nil,
-         /*.nsg      =*/ 0,
-         /*.nr0      =*/ 0,
-         /*.nr1      =*/ 0,
-         /*.smem     =*/ 0,
-         /*.c4       =*/ false,
-         /*.cnt      =*/ false,
-+        /*.sgw      =*/ 0,
-     };
- 
-     res.pipeline = ggml_metal_pipelines_get(lib->pipelines, name);
- 
-     [lib->lock unlock];
- 
-     return res;
- }
-@@ -708,16 +710,17 @@
-     struct ggml_metal_pipeline_with_params res = {
-         /*.pipeline =*/ nil,
-         /*.nsg      =*/ 0,
-         /*.nr0      =*/ 0,
-         /*.nr1      =*/ 0,
-         /*.smem     =*/ 0,
-         /*.c4       =*/ false,
-         /*.cnt      =*/ false,
-+        /*.sgw      =*/ 0,
-     };
- 
-     [lib->lock lock];
- 
-     res.pipeline = ggml_metal_pipelines_get(lib->pipelines, name);
-     if (res.pipeline) {
-         [lib->lock unlock];
- 
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 3072f7bc6..03eb6728c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -989,17 +989,22 @@
-         }
-     }
- 
-     // attention matmuls read a permuted KV cache view and can exceed half range in the packed
-     // accumulator; bfloat has no native arithmetic here, so float is faster for it too
+@@ -993,7 +993,12 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
      const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
                           getenv("TOSH_MM_ACC_F32_DISABLE") == nullptr;
  
@@ -117,17 +43,7 @@
      snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d",
               base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual + 2*narrow, use_mm_double_buffer, acc_f32);
  
-     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
-     if (!res.pipeline) {
-         ggml_metal_cv_t cv = ggml_metal_cv_init();
- 
-         ggml_metal_cv_set_bool(cv, narrow, FC_MUL_MM + 7);
-@@ -1028,16 +1033,22 @@
-         res.nr0 = 64;
-         res.nr1 = use_mm_manual ? (narrow ? 32 : 64) : 32;
- 
-         res.smem = use_mm_double_buffer ? 16384 : ((bc_out || use_mm_manual) ? 8192 : (4096 + 2048));
-     }
+@@ -1032,6 +1037,12 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
  
      res.nsg = (!has_tensor && use_mm_manual) ? ((wide || narrow) ? 4 : 8) : N_MM_SIMD_GROUP_X * N_MM_SIMD_GROUP_Y;
  
@@ -140,19 +56,53 @@
      return res;
  }
  
- ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_metal_library_t lib, const ggml_tensor * op) {
-     GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
-     GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index d4b0bf425..a5fdf4dae 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -56,6 +56,9 @@ struct ggml_metal_pipeline_with_params {
  
-     char base[256];
+     bool c4;
+     bool cnt;
++
++    // lanes per simdgroup the dispatch asks for; 0 keeps the 32-lane default
++    int sgw;
+ };
+ 
+ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_with_params pipeline);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index da9e7e58d..6a46dae74 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -121,6 +121,7 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
+     X(MUL_MV,          mul_mv)         \
+     X(MUL_MV_W64,      mul_mv_w64)     \
+     X(MUL_MM,          mul_mm)         \
++    X(MUL_MM_W64,      mul_mm_w64)     \
+     X(QUANTIZE,        quantize)       \
+     X(SOFTMAX,         softmax)        \
+     X(NORM,            norm)           \
+@@ -751,6 +752,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline(ggml_meta
+         /*.smem     =*/ 0,
+         /*.c4       =*/ false,
+         /*.cnt      =*/ false,
++        /*.sgw      =*/ 0,
+     };
+ 
+     res.pipeline = ggml_metal_pipelines_get(lib->pipelines, name);
+@@ -769,6 +771,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+         /*.smem     =*/ 0,
+         /*.c4       =*/ false,
+         /*.cnt      =*/ false,
++        /*.sgw      =*/ 0,
+     };
+ 
+     [lib->lock lock];
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index a139e6686..f5cb47d65 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3029,17 +3029,19 @@
-         const size_t smem = pipeline.smem;
- 
-         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
- 
-         const int nr0 = pipeline.nr0;
+@@ -3029,7 +3029,9 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
          const int nr1 = pipeline.nr1;
          const int nsg = pipeline.nsg;
  
@@ -163,11 +113,9 @@
      } else {
          auto pipeline = ggml_metal_library_get_pipeline_mul_mv(lib, op);
  
-         const int nr0 = pipeline.nr0;
-         const int nr1 = pipeline.nr1;
-         const int nsg = pipeline.nsg;
- 
-         const size_t smem = pipeline.smem;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+new file mode 100644
+index 000000000..936fb737e
 --- /dev/null
 +++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
 @@ -0,0 +1,389 @@

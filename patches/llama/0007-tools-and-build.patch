@@ -1,13 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:08 -0400
+Subject: [PATCH] 0007-tools-and-build
+
+---
+ CMakeLists.txt                    |   2 +
+ cmake/build-info.cmake            |   4 +
+ tests/CMakeLists.txt              |   8 +
+ tests/test-backend-ops.cpp        |  74 ++++++++
+ tests/test-chat.cpp               |  58 ++++++
+ tests/test-quantize-fns.cpp       |  11 +-
+ tests/test-tosh-moe-cache.cpp     | 299 ++++++++++++++++++++++++++++++
+ tools/llama-bench/llama-bench.cpp |  51 ++++-
+ tools/mtmd/clip-model.h           |  10 +-
+ tools/server/server-chat.cpp      |   6 +-
+ 10 files changed, 515 insertions(+), 8 deletions(-)
+ create mode 100644 tests/test-tosh-moe-cache.cpp
+
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 1d4bcf45f..4d7bb1e6d 100644
+index 86b09dfd4..6f99d7aa2 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -124,16 +124,18 @@ option(LLAMA_FATAL_WARNINGS "llama: enable -Werror flag" OFF)
- option(LLAMA_SANITIZE_THREAD    "llama: enable thread sanitizer"    OFF)
- option(LLAMA_SANITIZE_ADDRESS   "llama: enable address sanitizer"   OFF)
- option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
- 
- # utils
+@@ -129,6 +129,8 @@ option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
  option(LLAMA_BUILD_COMMON "llama: build common utils library" ${LLAMA_STANDALONE})
  
  # extra artifacts
@@ -16,21 +30,11 @@ index 1d4bcf45f..4d7bb1e6d 100644
  option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
  option(LLAMA_BUILD_TOOLS     "llama: build tools"                                                                ${LLAMA_STANDALONE})
  option(LLAMA_BUILD_EXAMPLES  "llama: build examples"                                                             ${LLAMA_STANDALONE})
- option(LLAMA_BUILD_SERVER    "llama: build server example"                                                       ${LLAMA_STANDALONE})
- option(LLAMA_BUILD_APP       "llama: build the unified binary"                                                   ${LLAMA_STANDALONE})
- option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server"                                       OFF)
- option(LLAMA_USE_PREBUILT_UI "llama: use prebuilt UI from HF Bucket when available" ON)
- 
 diff --git a/cmake/build-info.cmake b/cmake/build-info.cmake
 index c7005950c..5262e4ce8 100644
 --- a/cmake/build-info.cmake
 +++ b/cmake/build-info.cmake
-@@ -38,11 +38,15 @@ if(Git_FOUND)
-         set(BUILD_NUMBER ${COUNT})
-     endif()
- endif()
- 
- set(BUILD_COMPILER "${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+@@ -43,6 +43,10 @@ set(BUILD_COMPILER "${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
  
  if(CMAKE_VS_PLATFORM_NAME)
      set(BUILD_TARGET ${CMAKE_VS_PLATFORM_NAME})
@@ -42,15 +46,10 @@ index c7005950c..5262e4ce8 100644
      set(BUILD_TARGET "${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}")
  endif()
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index b9f9d4b78..74bb27ca1 100644
+index c46377c76..1a7e370f5 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -305,16 +305,18 @@ set_tests_properties(test-save-load-state PROPERTIES FIXTURES_REQUIRED test-down
- 
- if (APPLE)
-     llama_build(test-rset-release.cpp)
- endif()
- 
+@@ -323,6 +323,8 @@ endif()
  if (NOT GGML_BACKEND_DL)
      # these tests use the backends directly and cannot be built with dynamic loading
      llama_build_and_test(test-barrier.cpp)
@@ -59,17 +58,7 @@ index b9f9d4b78..74bb27ca1 100644
      llama_build_and_test(test-quantize-fns.cpp)
      llama_build_and_test(test-quantize-perf.cpp)
      llama_build_and_test(test-rope.cpp)
-     llama_build_and_test(test-col2im-1d.cpp)
- endif()
- 
- # libmtmd
- set(LLAMA_TEST_NAME test-mtmd-c-api)
-@@ -359,8 +361,14 @@ if (NOT LLAMA_USE_SYSTEM_GGML)
-     llama_build_and_test(test-alloc.cpp)
- endif()
- 
- llama_build(test-export-graph-ops.cpp)
- if (TARGET gguf-model-data)
+@@ -377,3 +379,9 @@ if (TARGET gguf-model-data)
      target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)
      target_compile_definitions(test-export-graph-ops PRIVATE LLAMA_HF_FETCH)
  endif()
@@ -80,15 +69,10 @@ index b9f9d4b78..74bb27ca1 100644
 +    add_test(NAME test-tosh-moe-cache COMMAND test-tosh-moe-cache)
 +endif()
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index df0b9aa66..27fcdf98e 100644
+index c93e41b2e..c7f2cad03 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -2434,16 +2434,19 @@ struct test_set_rows : public test_case {
-                 init_set_rows_row_ids(t, ne[1]);
-             } else {
-                 init_tensor_uniform(t);
-             }
-         }
+@@ -2524,6 +2524,9 @@ struct test_set_rows : public test_case {
      }
  
      double max_nmse_err() override {
@@ -98,17 +82,7 @@ index df0b9aa66..27fcdf98e 100644
          if (type_dst == GGML_TYPE_Q2_0 || type_dst == GGML_TYPE_Q4_0 || type_dst == GGML_TYPE_Q4_1 ||
              type_dst == GGML_TYPE_IQ4_NL ||
              type_dst == GGML_TYPE_Q5_0 || type_dst == GGML_TYPE_Q5_1 || type_dst == GGML_TYPE_Q8_0) {
-             // estimate what the max nmse error would be if one quantized value is
-             // off by one. The test values are distributed in [-1,1], so it'll be
-             // roughly (2.0 / 2^bits)^2, divided by the mean square value of the reference,
-             // which is roughly 0.25 times the number of elements.
-             double err_estimate = 1.0f/8.0f;
-@@ -8429,16 +8432,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
-     }
-     for (bool v : {false, true}) {
-         test_cases.emplace_back(new test_get_rows_back(GGML_TYPE_I32, 256, 5, 4, 1, v));
-     }
- 
+@@ -8826,6 +8829,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I64, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
      test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_I32, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
      test_cases.emplace_back(new test_set_rows(GGML_TYPE_F32, GGML_TYPE_Q8_0, GGML_TYPE_I32, { 256, 5, 1, 3 }, { 1, 1, }, 1, false));
@@ -121,17 +95,7 @@ index df0b9aa66..27fcdf98e 100644
      for (ggml_type src_type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
          for (ggml_type type : all_types) {
              for (int b : {1, 7}) {
-                 for (bool v : {false, true}) {
-                     test_cases.emplace_back(new test_set_rows(src_type, type, GGML_TYPE_I64, { 256, 5,  b, 3 }, { 1, 1, }, 1, v));
-                     test_cases.emplace_back(new test_set_rows(src_type, type, GGML_TYPE_I64, { 256, 11, 1, b }, { 2, 3, }, 7, v));
- 
-                     test_cases.emplace_back(new test_set_rows(src_type, type, GGML_TYPE_I64, { 3*ggml_blck_size(type), 3, b, 1 }, { 2, 3, }, 2, v));
-@@ -9990,16 +9999,81 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
-     // stops at kv=1024, blind to long-context FA bugs (e.g. the oneDNN SDPA ordering race on BMG).
-     for (int64_t kv : { 4096, 16384 }) {
-         test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, 512, true, false, 0, 0,
-                                                         GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
-         test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1}, kv, 512, true, false, 0, 0,
+@@ -10483,6 +10492,71 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                          GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
      }
  
@@ -203,21 +167,11 @@ index df0b9aa66..27fcdf98e 100644
      // dense-allocated (non-view) quant K/V at batch >= 64, in cache and native layouts
      test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, false));
      test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {4, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, false));
-     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 1024, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, false));
-     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, false));
- 
-     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
-     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
 diff --git a/tests/test-chat.cpp b/tests/test-chat.cpp
-index 7918f0ffc..9235c271a 100644
+index f27c91e4d..950a4553e 100644
 --- a/tests/test-chat.cpp
 +++ b/tests/test-chat.cpp
-@@ -1847,16 +1847,74 @@ static void test_convert_responses_to_chatcmpl() {
-         assert_equals(std::string("text"), msg2.at("content")[0].at("type").get<std::string>());
-         assert_equals(std::string("hi"), msg2.at("content")[0].at("text").get<std::string>());
- 
-         // Verify other fields preserved
-         assert_equals(std::string("gpt-5-mini"), result.at("model").get<std::string>());
+@@ -1852,6 +1852,64 @@ static void test_convert_responses_to_chatcmpl() {
          assert_equals(false, result.at("stream").get<bool>());
      }
  
@@ -282,21 +236,11 @@ index 7918f0ffc..9235c271a 100644
      // Test string input
      {
          json input = json::parse(R"({
-             "input": "Hello, world!",
-             "model": "test-model"
-         })");
- 
-         json result = server_chat_convert_responses_to_chatcmpl(input);
 diff --git a/tests/test-quantize-fns.cpp b/tests/test-quantize-fns.cpp
 index 9510ac14c..379709b95 100644
 --- a/tests/test-quantize-fns.cpp
 +++ b/tests/test-quantize-fns.cpp
-@@ -147,45 +147,54 @@ static int test_vec_dot_q(bool verbose) {
-             continue;
-         }
- 
-         const ggml_type ei = (ggml_type)i;
- 
+@@ -152,6 +152,14 @@ static int test_vec_dot_q(bool verbose) {
          printf("Testing %s\n", ggml_type_name((ggml_type) i));
          ggml_quantize_init(ei);
  
@@ -311,12 +255,7 @@ index 9510ac14c..379709b95 100644
          if (qfns_cpu->from_float && qfns->to_float) {
              const float total_error = total_quantization_error(qfns, qfns_cpu, test_size, test_data.data());
              const float max_quantization_error =
-                 type == GGML_TYPE_Q1_0    ? MAX_QUANTIZATION_TOTAL_ERROR_BINARY :
-                 type == GGML_TYPE_TQ1_0   ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
-                 type == GGML_TYPE_TQ2_0   ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
-                 type == GGML_TYPE_Q2_0    ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
-                 type == GGML_TYPE_Q2_K    ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
-                 type == GGML_TYPE_IQ2_S   ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
+@@ -164,6 +172,7 @@ static int test_vec_dot_q(bool verbose) {
                  type == GGML_TYPE_Q3_K    ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
                  type == GGML_TYPE_IQ3_S   ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
                  type == GGML_TYPE_IQ3_XXS ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS_XXS :
@@ -324,16 +263,7 @@ index 9510ac14c..379709b95 100644
                  type == GGML_TYPE_NVFP4   ? MAX_QUANTIZATION_TOTAL_ERROR_FP4 : MAX_QUANTIZATION_TOTAL_ERROR;
              bool failed = !(total_error < max_quantization_error);
              num_failed += failed;
-             if (failed || verbose) {
-                 printf("%5s absolute quantization error:    %s (%f)\n", ggml_type_name(type), RESULT_STR[failed], total_error);
-             }
- 
-             const float reference_error = reference_quantization_error(qfns, qfns_cpu, test_size, test_data.data());
-             failed = !(reference_error < MAX_QUANTIZATION_REFERENCE_ERROR);
-             num_failed += failed;
-             if (failed || verbose) {
-                 printf("%5s reference implementation error: %s (%f)\n", ggml_type_name(type), RESULT_STR[failed], reference_error);
-             }
+@@ -180,7 +189,7 @@ static int test_vec_dot_q(bool verbose) {
  
              const float vec_dot_error = dot_product_error(qfns, qfns_cpu, test_size, test_data.data(), test_data2.data());
              const float max_allowed_error = type == GGML_TYPE_Q2_K || type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
@@ -342,333 +272,6 @@ index 9510ac14c..379709b95 100644
                  ? MAX_DOT_PRODUCT_ERROR_LOWBIT
                  : type == GGML_TYPE_Q1_0
                  ? MAX_DOT_PRODUCT_ERROR_BINARY
-                 : type == GGML_TYPE_TQ1_0 || type == GGML_TYPE_TQ2_0 || type == GGML_TYPE_Q2_0
-                 ? MAX_DOT_PRODUCT_ERROR_TERNARY
-                 : type == GGML_TYPE_NVFP4
-                 ? MAX_DOT_PRODUCT_ERROR_FP4
-                 : MAX_DOT_PRODUCT_ERROR;
-diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
-index bc14d15c7..64b95a0cf 100644
---- a/tools/llama-bench/llama-bench.cpp
-+++ b/tools/llama-bench/llama-bench.cpp
-@@ -495,16 +495,25 @@ static ggml_type ggml_type_from_name(const std::string & s) {
-         return GGML_TYPE_Q5_0;
-     }
-     if (s == "q5_1") {
-         return GGML_TYPE_Q5_1;
-     }
-     if (s == "iq4_nl") {
-         return GGML_TYPE_IQ4_NL;
-     }
-+    if (s == "turbo2") {
-+        return GGML_TYPE_TURBO2_0;
-+    }
-+    if (s == "turbo3") {
-+        return GGML_TYPE_TURBO3_0;
-+    }
-+    if (s == "turbo4") {
-+        return GGML_TYPE_TURBO4_0;
-+    }
- 
-     return GGML_TYPE_COUNT;
- }
- 
- static cmd_params parse_cmd_params(int argc, char ** argv) {
-     cmd_params        params;
-     std::string       arg;
-     bool              invalid_param = false;
-@@ -932,16 +941,26 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
-                 if (buft_list.empty()) {
-                     // enumerate all the devices and add their buffer types to the list
-                     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-                         auto * dev = ggml_backend_dev_get(i);
-                         auto * buft = ggml_backend_dev_buffer_type(dev);
-                         if (buft) {
-                             buft_list[ggml_backend_buft_name(buft)] = buft;
-                         }
-+
-+                        // a backend can offer more than its default one
-+                        auto * reg = ggml_backend_dev_backend_reg(dev);
-+                        auto fn = reg ? (ggml_backend_dev_get_extra_bufts_t)
-+                            ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_extra_bufts") : nullptr;
-+                        if (fn) {
-+                            for (auto ** bufts = fn(dev); bufts && *bufts; ++bufts) {
-+                                buft_list[ggml_backend_buft_name(*bufts)] = *bufts;
-+                            }
-+                        }
-                     }
-                 }
-                 auto override_group_span_len = std::strcspn(value, ",");
-                 bool last_group = false;
-                 do {
-                     if (override_group_span_len == 0) {
-                         // Adds an empty override-tensors for an empty span
-                         params.tensor_buft_overrides.push_back({{}});
-@@ -1431,16 +1450,30 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
-             instances.push_back(instance);
-         }
-     }
-     // clang-format on
- 
-     return instances;
- }
- 
-+// Dynamic MoE: the run is decided by how many expert slots the card holds, so the report says
-+// that instead of the CPU-expert count and the tensor override, which are fixed while it is on.
-+static int tosh_bench_moe_slots() {
-+    const char * mode  = getenv("TOSH_MOE_MODE");
-+    const char * slots = getenv("TOSH_MOE_SLOTS");
-+    if (!mode || !slots || strcmp(mode, "off") == 0) {
-+        return 0;
-+    }
-+
-+    const int n = atoi(slots);
-+
-+    return n > 0 ? n : 0;
-+}
-+
- struct test {
-     static const std::string build_commit;
-     static const int         build_number;
-     const std::string        cpu_info;
-     const std::string        gpu_info;
-     std::string              model_filename;
-     std::string              model_type;
-     uint64_t                 model_size;
-@@ -1450,16 +1483,17 @@ struct test {
-     int                      n_threads;
-     std::string              cpu_mask;
-     bool                     cpu_strict;
-     int                      poll;
-     ggml_type                type_k;
-     ggml_type                type_v;
-     int                      n_gpu_layers;
-     int                      n_cpu_moe;
-+    int                      dmoe_k;
-     llama_split_mode         split_mode;
-     llama_load_mode          load_mode;
-     int                      main_gpu;
-     bool                     no_kv_offload;
-     llama_flash_attn_type    flash_attn;
-     std::vector<ggml_backend_dev_t> devices;
-     std::vector<float>       tensor_split;
-     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
-@@ -1489,16 +1523,17 @@ struct test {
-         n_threads      = inst.n_threads;
-         cpu_mask       = inst.cpu_mask;
-         cpu_strict     = inst.cpu_strict;
-         poll           = inst.poll;
-         type_k         = inst.type_k;
-         type_v         = inst.type_v;
-         n_gpu_layers   = inst.n_gpu_layers;
-         n_cpu_moe      = inst.n_cpu_moe;
-+        dmoe_k         = tosh_bench_moe_slots();
-         split_mode     = inst.split_mode;
-         load_mode      = inst.load_mode;
-         main_gpu       = inst.main_gpu;
-         no_kv_offload  = inst.no_kv_offload;
-         flash_attn     = inst.flash_attn;
-         devices        = inst.devices;
-         tensor_split   = inst.tensor_split;
-         tensor_buft_overrides = inst.tensor_buft_overrides;
-@@ -1556,33 +1591,34 @@ struct test {
-         return backends.empty() ? "CPU" : join(backends, ",");
-     }
- 
-     static const std::vector<std::string> & get_fields() {
-         static const std::vector<std::string> fields = {
-             "build_commit",   "build_number",   "cpu_info",      "gpu_info",       "backends",
-             "model_filename", "model_type",     "model_size",    "model_n_params", "n_batch",
-             "n_ubatch",       "n_threads",      "cpu_mask",      "cpu_strict",     "poll",
--            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "split_mode",
-+            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "dmoe_k",
-+            "split_mode",
-             "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
-             "tensor_buft_overrides",            "load_mode",     "embeddings",
-             "no_op_offload",  "no_host",        "fit_target",    "fit_min_ctx",
-             "n_prompt",       "n_gen",          "n_depth",
-             "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts"
-         };
-         return fields;
-     }
- 
-     enum field_type { STRING, BOOL, INT, FLOAT };
- 
-     static field_type get_field_type(const std::string & field) {
-         if (field == "build_number" || field == "n_batch" || field == "n_ubatch" || field == "n_threads" ||
-             field == "poll" || field == "model_size" || field == "model_n_params" || field == "n_gpu_layers" ||
-             field == "main_gpu" || field == "n_prompt" || field == "n_gen" || field == "n_depth" || field == "avg_ns" ||
--            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" ||
-+            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" || field == "dmoe_k" ||
-             field == "fit_target" || field == "fit_min_ctx" || field == "flash_attn") {
-             return INT;
-         }
-         if (field == "f16_kv" || field == "no_kv_offload" || field == "cpu_strict" ||
-             field == "embeddings" || field == "no_host") {
-             return BOOL;
-         }
-         if (field == "avg_ts" || field == "stddev_ts") {
-@@ -1645,16 +1681,17 @@ struct test {
-                                             std::to_string(n_threads),
-                                             cpu_mask,
-                                             std::to_string(cpu_strict),
-                                             std::to_string(poll),
-                                             ggml_type_name(type_k),
-                                             ggml_type_name(type_v),
-                                             std::to_string(n_gpu_layers),
-                                             std::to_string(n_cpu_moe),
-+                                            std::to_string(dmoe_k),
-                                             split_mode_str(split_mode),
-                                             std::to_string(main_gpu),
-                                             std::to_string(no_kv_offload),
-                                             std::to_string((int) flash_attn),
-                                             devices_to_string(devices),
-                                             tensor_split_str,
-                                             tensor_buft_overrides_str,
-                                             llama_load_mode_name(load_mode),
-@@ -1895,16 +1932,19 @@ struct markdown_printer : public printer {
-             return "dev";
-         }
-         if (field == "tensor_split") {
-             return "ts";
-         }
-         if (field == "tensor_buft_overrides") {
-             return "ot";
-         }
-+        if (field == "dmoe_k") {
-+            return "K";
-+        }
-         if (field == "fit_target") {
-             return "fitt";
-         }
-         if (field == "fit_min_ctx") {
-             return "fitc";
-         }
-         return field;
-     }
-@@ -1916,17 +1956,20 @@ struct markdown_printer : public printer {
-         fields.emplace_back("params");
-         fields.emplace_back("backend");
-         bool is_cpu_backend = test::get_backend().find("CPU") != std::string::npos ||
-                               test::get_backend().find("BLAS") != std::string::npos ||
-                               test::get_backend().find("ZenDNN") != std::string::npos;
-         if (!is_cpu_backend) {
-             fields.emplace_back("n_gpu_layers");
-         }
--        if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
-+        const int dmoe_k = tosh_bench_moe_slots();
-+        if (dmoe_k > 0) {
-+            fields.emplace_back("dmoe_k");
-+        } else if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
-             fields.emplace_back("n_cpu_moe");
-         }
-         if (params.n_threads.size() > 1 || params.n_threads != cmd_params_defaults.n_threads || is_cpu_backend) {
-             fields.emplace_back("n_threads");
-         }
-         if (params.cpu_mask.size() > 1 || params.cpu_mask != cmd_params_defaults.cpu_mask) {
-             fields.emplace_back("cpu_mask");
-         }
-@@ -1961,17 +2004,18 @@ struct markdown_printer : public printer {
-             fields.emplace_back("flash_attn");
-         }
-         if (params.devices.size() > 1 || params.devices != cmd_params_defaults.devices) {
-             fields.emplace_back("devices");
-         }
-         if (params.tensor_split.size() > 1 || params.tensor_split != cmd_params_defaults.tensor_split) {
-             fields.emplace_back("tensor_split");
-         }
--        if (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides)) {
-+        if (dmoe_k == 0 &&
-+            (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides))) {
-             fields.emplace_back("tensor_buft_overrides");
-         }
-         if (params.load_mode.size() > 1 || params.load_mode != cmd_params_defaults.load_mode) {
-             fields.emplace_back("load_mode");
-         }
-         if (params.embeddings.size() > 1 || params.embeddings != cmd_params_defaults.embeddings) {
-             fields.emplace_back("embeddings");
-         }
-@@ -2057,17 +2101,19 @@ struct markdown_printer : public printer {
-                 width += 1;
-             }
-             fprintf(fout, " %*s |", width, value.c_str());
-         }
-         fprintf(fout, "\n");
-     }
- 
-     void print_footer() override {
--        fprintf(fout, "\nbuild: %s (%d)\n", test::build_commit.c_str(), test::build_number);
-+        // the build number only tracks upstream, so name the engine version too
-+        fprintf(fout, "\nbuild: %s (%d), ToshLLM engine %s\n", test::build_commit.c_str(), test::build_number,
-+                common_tosh_version());
-     }
- };
- 
- struct sql_printer : public printer {
-     static std::string get_sql_field_type(const std::string & field) {
-         switch (test::get_field_type(field)) {
-             case test::STRING:
-                 return "TEXT";
-diff --git a/tools/mtmd/clip-model.h b/tools/mtmd/clip-model.h
-index 060938d86..c223c54df 100644
---- a/tools/mtmd/clip-model.h
-+++ b/tools/mtmd/clip-model.h
-@@ -197,20 +197,26 @@ struct clip_hparams {
-             image_min_pixels = custom_image_min_tokens * patch_area;
-         }
-         if (custom_image_max_tokens > 0) {
-             image_max_pixels = custom_image_max_tokens * patch_area;
-         }
-     }
- 
-     void set_warmup_n_tokens(int n_tokens) {
-+        // the cap has to shrink the warmup too: without flash attention this graph holds the
-+        // whole score matrix, and on a small card it is the warmup that fails to allocate
-+        const bool capped = custom_image_max_tokens > 0 && custom_image_max_tokens < n_tokens;
-+        if (capped) {
-+            n_tokens = custom_image_max_tokens;
-+        }
-         int n_tok_per_side = static_cast<int>(std::sqrt(n_tokens));
--        GGML_ASSERT(n_tok_per_side * n_tok_per_side == n_tokens && "n_tokens must be n*n");
-+        GGML_ASSERT(n_tok_per_side > 0);
-+        GGML_ASSERT((capped || n_tok_per_side * n_tok_per_side == n_tokens) && "n_tokens must be n*n");
-         warmup_image_size = n_tok_per_side * patch_size * n_merge;
--        // TODO: support warmup size for custom token numbers
-     }
-     // sam vit deepseek-ocr
-     std::vector<int32_t> global_attn_indices() const {
-         return {  2,  5,  8, 11 };
-     }
-     bool is_global_attn(int32_t layer) const {
-         const auto indices = global_attn_indices();
- 
-diff --git a/tools/server/server-chat.cpp b/tools/server/server-chat.cpp
-index a6fe3c6ba..4f3c6aaad 100644
---- a/tools/server/server-chat.cpp
-+++ b/tools/server/server-chat.cpp
-@@ -102,18 +102,20 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
-                 if (item.contains("status")) {
-                     item.erase("status");
-                 }
-                 item["content"] = chatcmpl_content;
- 
-                 chatcmpl_messages.push_back(item);
-             } else if (exists_and_is_string(item, "role") &&
-                 item.at("role") == "assistant" &&
--                exists_and_is_string(item, "type") &&
--                item.at("type") == "message"
-+                // 'type' is optional on an output message, and clients replaying a
-+                // stream they cut short send the turn without it
-+                (!item.contains("type") ||
-+                    (exists_and_is_string(item, "type") && item.at("type") == "message"))
-             ) {
-                 // #responses_create-input-input_item_list-item-output_message
-                 auto chatcmpl_content = json::array();
- 
-                 // Handle both string content and array content
-                 if (item.contains("content") && item.at("content").is_string()) {
-                     // String content - convert to text content part
-                     chatcmpl_content.push_back({
 diff --git a/tests/test-tosh-moe-cache.cpp b/tests/test-tosh-moe-cache.cpp
 new file mode 100644
 index 000000000..9cb40d66e
@@ -974,3 +577,168 @@ index 000000000..9cb40d66e
 +
 +    return g_fail == 0 ? 0 : 1;
 +}
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index 1fff21f70..f78b74331 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -516,6 +516,15 @@ static ggml_type ggml_type_from_name(const std::string & s) {
+     if (s == "iq4_nl") {
+         return GGML_TYPE_IQ4_NL;
+     }
++    if (s == "turbo2") {
++        return GGML_TYPE_TURBO2_0;
++    }
++    if (s == "turbo3") {
++        return GGML_TYPE_TURBO3_0;
++    }
++    if (s == "turbo4") {
++        return GGML_TYPE_TURBO4_0;
++    }
+ 
+     return GGML_TYPE_COUNT;
+ }
+@@ -979,6 +988,16 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
+                         if (buft) {
+                             buft_list[ggml_backend_buft_name(buft)] = buft;
+                         }
++
++                        // a backend can offer more than its default one
++                        auto * reg = ggml_backend_dev_backend_reg(dev);
++                        auto fn = reg ? (ggml_backend_dev_get_extra_bufts_t)
++                            ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_extra_bufts") : nullptr;
++                        if (fn) {
++                            for (auto ** bufts = fn(dev); bufts && *bufts; ++bufts) {
++                                buft_list[ggml_backend_buft_name(*bufts)] = *bufts;
++                            }
++                        }
+                     }
+                 }
+                 auto override_group_span_len = std::strcspn(value, ",");
+@@ -1488,6 +1507,20 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
+     return instances;
+ }
+ 
++// Dynamic MoE: the run is decided by how many expert slots the card holds, so the report says
++// that instead of the CPU-expert count and the tensor override, which are fixed while it is on.
++static int tosh_bench_moe_slots() {
++    const char * mode  = getenv("TOSH_MOE_MODE");
++    const char * slots = getenv("TOSH_MOE_SLOTS");
++    if (!mode || !slots || strcmp(mode, "off") == 0) {
++        return 0;
++    }
++
++    const int n = atoi(slots);
++
++    return n > 0 ? n : 0;
++}
++
+ struct test {
+     static const std::string build_commit;
+     static const int         build_number;
+@@ -1507,6 +1540,7 @@ struct test {
+     ggml_type                type_v;
+     int                      n_gpu_layers;
+     int                      n_cpu_moe;
++    int                      dmoe_k;
+     llama_split_mode         split_mode;
+     llama_load_mode          load_mode;
+     llama_lazy_mode          lazy_mode;
+@@ -1547,6 +1581,7 @@ struct test {
+         type_v         = inst.type_v;
+         n_gpu_layers   = inst.n_gpu_layers;
+         n_cpu_moe      = inst.n_cpu_moe;
++        dmoe_k         = tosh_bench_moe_slots();
+         split_mode     = inst.split_mode;
+         load_mode      = inst.load_mode;
+         lazy_mode      = inst.lazy_mode;
+@@ -1705,6 +1740,7 @@ struct test {
+                                             ggml_type_name(type_v),
+                                             std::to_string(n_gpu_layers),
+                                             std::to_string(n_cpu_moe),
++                                            std::to_string(dmoe_k),
+                                             split_mode_str(split_mode),
+                                             std::to_string(main_gpu),
+                                             std::to_string(no_kv_offload),
+@@ -1956,6 +1992,9 @@ struct markdown_printer : public printer {
+         if (field == "tensor_buft_overrides") {
+             return "ot";
+         }
++        if (field == "dmoe_k") {
++            return "K";
++        }
+         if (field == "fit_target") {
+             return "fitt";
+         }
+@@ -1977,7 +2016,10 @@ struct markdown_printer : public printer {
+         if (!is_cpu_backend) {
+             fields.emplace_back("n_gpu_layers");
+         }
+-        if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
++        const int dmoe_k = tosh_bench_moe_slots();
++        if (dmoe_k > 0) {
++            fields.emplace_back("dmoe_k");
++        } else if (params.n_cpu_moe.size() > 1 || params.n_cpu_moe != cmd_params_defaults.n_cpu_moe) {
+             fields.emplace_back("n_cpu_moe");
+         }
+         if (params.n_threads.size() > 1 || params.n_threads != cmd_params_defaults.n_threads || is_cpu_backend) {
+@@ -2022,7 +2064,8 @@ struct markdown_printer : public printer {
+         if (params.tensor_split.size() > 1 || params.tensor_split != cmd_params_defaults.tensor_split) {
+             fields.emplace_back("tensor_split");
+         }
+-        if (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides)) {
++        if (dmoe_k == 0 &&
++            (params.tensor_buft_overrides.size() > 1 || !vec_vec_tensor_buft_override_equal(params.tensor_buft_overrides, cmd_params_defaults.tensor_buft_overrides))) {
+             fields.emplace_back("tensor_buft_overrides");
+         }
+         if (params.load_mode.size() > 1 || params.load_mode != cmd_params_defaults.load_mode) {
+@@ -2121,7 +2164,9 @@ struct markdown_printer : public printer {
+     }
+ 
+     void print_footer() override {
+-        fprintf(fout, "\nbuild: %s (%d)\n", test::build_commit.c_str(), test::build_number);
++        // the build number only tracks upstream, so name the engine version too
++        fprintf(fout, "\nbuild: %s (%d), ToshLLM engine %s\n", test::build_commit.c_str(), test::build_number,
++                common_tosh_version());
+     }
+ };
+ 
+diff --git a/tools/mtmd/clip-model.h b/tools/mtmd/clip-model.h
+index f737ccc24..7f50df0e9 100644
+--- a/tools/mtmd/clip-model.h
++++ b/tools/mtmd/clip-model.h
+@@ -206,10 +206,16 @@ struct clip_hparams {
+     }
+ 
+     void set_warmup_n_tokens(int n_tokens) {
++        // the cap has to shrink the warmup too: without flash attention this graph holds the
++        // whole score matrix, and on a small card it is the warmup that fails to allocate
++        const bool capped = custom_image_max_tokens > 0 && custom_image_max_tokens < n_tokens;
++        if (capped) {
++            n_tokens = custom_image_max_tokens;
++        }
+         int n_tok_per_side = static_cast<int>(std::sqrt(n_tokens));
+-        GGML_ASSERT(n_tok_per_side * n_tok_per_side == n_tokens && "n_tokens must be n*n");
++        GGML_ASSERT(n_tok_per_side > 0);
++        GGML_ASSERT((capped || n_tok_per_side * n_tok_per_side == n_tokens) && "n_tokens must be n*n");
+         warmup_image_size = n_tok_per_side * patch_size * n_merge;
+-        // TODO: support warmup size for custom token numbers
+     }
+     // sam vit deepseek-ocr
+     std::vector<int32_t> global_attn_indices() const {
+diff --git a/tools/server/server-chat.cpp b/tools/server/server-chat.cpp
+index a6fe3c6ba..4f3c6aaad 100644
+--- a/tools/server/server-chat.cpp
++++ b/tools/server/server-chat.cpp
+@@ -107,8 +107,10 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
+                 chatcmpl_messages.push_back(item);
+             } else if (exists_and_is_string(item, "role") &&
+                 item.at("role") == "assistant" &&
+-                exists_and_is_string(item, "type") &&
+-                item.at("type") == "message"
++                // 'type' is optional on an output message, and clients replaying a
++                // stream they cut short send the turn without it
++                (!item.contains("type") ||
++                    (exists_and_is_string(item, "type") && item.at("type") == "message"))
+             ) {
+                 // #responses_create-input-input_item_list-item-output_message
+                 auto chatcmpl_content = json::array();

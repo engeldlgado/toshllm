@@ -1,12 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:10 -0400
+Subject: [PATCH] 0018-moe-cache-maps-thread-safe
+
+---
+ ggml/src/ggml-metal/ggml-metal-ops.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 8b38bdc77..a606583cf 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -26,24 +26,28 @@
- #include "ggml-impl.h"
- #include "ggml-backend-impl.h"
- 
- #include "ggml-metal-impl.h"
- #include "ggml-metal-common.h"
+@@ -31,6 +31,7 @@ static inline int tosh_moe_off_ids(int, int, int)          { return 0; }
  #include "ggml-metal-device.h"
  #include "ggml-metal-tuning.h"
  
@@ -14,8 +19,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
  #include <cassert>
  #include <algorithm>
  #include <cstdlib>
- #include <cstring>
- #include <limits>
+@@ -39,6 +40,9 @@ static inline int tosh_moe_off_ids(int, int, int)          { return 0; }
  #include <cmath>
  #include <unordered_map>
  
@@ -25,17 +29,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
  static std::unordered_map<const ggml_tensor *, ggml_metal_buffer_id> g_tosh_moe_staged_ids;
  
  static std::unordered_map<const ggml_tensor *, ggml_metal_buffer_id> g_tosh_moe_full_cold;
- static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
-     if (!t) {
-         return { nullptr, 0 };
-     }
- 
-@@ -113,28 +117,32 @@
-     }
- #else
-     (void) op;
- #endif
-     return nullptr;
+@@ -118,18 +122,22 @@ const ggml_tensor * ggml_metal_op_cached_moe_host(const ggml_tensor * op) {
  }
  
  void ggml_metal_op_cached_moe_ids_set(const ggml_tensor * slots, ggml_metal_buffer_id ids) {
@@ -57,88 +51,4 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +    std::lock_guard<std::mutex> lock(g_tosh_moe_mutex);
      g_tosh_moe_full_cold.clear();
  }
- 
- struct ggml_metal_op {
-     ggml_metal_op(
-         ggml_metal_device_t dev,
-         ggml_metal_cmd_buf_t cmd_buf,
-         ggml_cgraph * gf,
-@@ -3176,55 +3184,71 @@
-             ggml_metal_encoder_dispatch_threadgroups(enc, 512, 1, 1, 256, 1, 1);
- 
-             ggml_metal_op_concurrency_reset(ctx);
- 
-             bid_src0 = ggml_metal_get_buffer_id(stage);
-         }
-     }
- 
--    const auto full_cold = g_tosh_moe_full_cold.find(op->src[0]);
--    if (full_cold != g_tosh_moe_full_cold.end()) {
-+    ggml_metal_buffer_id full_cold_bid = {};
-+    bool has_full_cold = false;
-+    ggml_metal_buffer_id staged_ids_bid = {};
-+    bool has_staged_ids = false;
-+    {
-+        std::lock_guard<std::mutex> lock(g_tosh_moe_mutex);
-+        const auto it_full = g_tosh_moe_full_cold.find(op->src[0]);
-+        if (it_full != g_tosh_moe_full_cold.end()) {
-+            full_cold_bid = it_full->second;
-+            has_full_cold = true;
-+        }
-+        const auto it_ids = g_tosh_moe_staged_ids.find(op->src[0]);
-+        if (it_ids != g_tosh_moe_staged_ids.end()) {
-+            staged_ids_bid = it_ids->second;
-+            has_staged_ids = true;
-+        }
-+    }
-+
-+    if (has_full_cold) {
-         const ggml_tensor * stage = (const ggml_tensor *) tosh_moe_stage();
-         const ggml_tensor * state = (const ggml_tensor *) tosh_moe_state_of(op->src[0]);
-         const int n_expert = tosh_moe_experts_of(op->src[0]);
-         const int n_slots = (int) ne02;
-         const int n_fixed = tosh_moe_fixed_of(op->src[0]);
-         const int max_fetch = n_slots - n_fixed;
-         GGML_ASSERT(stage && state && n_expert > n_slots && nb02 % 16 == 0);
-         struct { uint32_t row_u4; uint32_t n_expert; } args = {
-             (uint32_t) (nb02/16), (uint32_t) n_expert
-         };
-         auto ps = ggml_metal_library_compile_pipeline(lib, "tosh_moe_assemble", "tosh_moe_assemble", nullptr);
-         ggml_metal_buffer_id sb = ggml_metal_get_buffer_id(state);
-         ggml_metal_encoder_set_pipeline(enc, ps);
-         ggml_metal_encoder_set_bytes (enc, &args, sizeof(args), 0);
-         ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(stage), 1);
--        ggml_metal_encoder_set_buffer(enc, full_cold->second, 2);
-+        ggml_metal_encoder_set_buffer(enc, full_cold_bid, 2);
-         ggml_metal_encoder_set_buffer(enc, bid_src0, 3);
-         sb.offs = ggml_metal_get_buffer_id(state).offs +
-             tosh_moe_off_slot_for_id(n_expert, n_slots, max_fetch)*sizeof(int32_t);
-         ggml_metal_encoder_set_buffer(enc, sb, 4);
-         sb.offs = ggml_metal_get_buffer_id(state).offs +
-             tosh_moe_off_cold_for_id(n_expert, n_slots, max_fetch)*sizeof(int32_t);
-         ggml_metal_encoder_set_buffer(enc, sb, 5);
-         const uint64_t total = (uint64_t) args.row_u4*args.n_expert;
-         ggml_metal_encoder_dispatch_threadgroups(enc, (total + 255)/256, 1, 1, 256, 1, 1);
-         ggml_metal_op_concurrency_reset(ctx);
-         bid_src0 = ggml_metal_get_buffer_id(stage);
-         ne02_run = n_expert;
-     }
- 
--    const auto staged_ids = g_tosh_moe_staged_ids.find(op->src[0]);
--    if (full_cold != g_tosh_moe_full_cold.end()) {
-+    if (has_full_cold) {
-         // Full staging preserves the original global expert ids.
--    } else if (staged_ids != g_tosh_moe_staged_ids.end()) {
-+    } else if (has_staged_ids) {
-         // The bounded host path has already copied only the selected expert rows into these
-         // private slots. Its compact shared ID buffer names the physical slots directly.
--        bid_src2 = staged_ids->second;
-+        bid_src2 = staged_ids_bid;
-     } else if (const ggml_tensor * state = (const ggml_tensor *) tosh_moe_state_of(op->src[0])) {
-         // the graph only routes a batch here when its remapped ids fit the state
-         const int registered_experts = tosh_moe_experts_of(op->src[0]);
-         GGML_ASSERT(registered_experts > 0);
-         GGML_ASSERT((int64_t) (ne21 - 1)*(int64_t) (nb21/sizeof(int32_t)) + ne20 <=
-                 tosh_moe_ids_room(registered_experts));
-         const ggml_tensor * host = (const ggml_tensor *) tosh_moe_ram_of(op->src[0]);
  

@@ -1,11 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:15 -0400
+Subject: [PATCH] 0039-metal-read-the-iq1-grid-entry-as-one-word
+
+---
+ ggml/src/ggml-metal/kernels/mul_mv.metal | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index 3ca7eb879..73cdefe8f 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -2727,20 +2727,25 @@
-         device const block_iq1_m * xr = x + ibl;
-         device const uint8_t  * qs = xr->qs + 4 * ib;
-         device const uint8_t  * qh = xr->qh + 2 * ib;
-         device const uint16_t * sc = (device const uint16_t *)xr->scales;
- 
+@@ -2680,10 +2680,15 @@ void kernel_mul_mv_iq1_m_f32_impl(
          for (short row = 0; row < nr0; row++) {
              scale.u16 = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
  
@@ -25,8 +31,3 @@
  
              float2 sum = {0.f};
              for (short j = 0; j < 4; ++j) {
-                 sum[0] += yl[j+ 0] * (grid1[j] & 0xf) + yl[j+ 4] * (grid1[j] >> 4)
-                         + yl[j+ 8] * (grid2[j] & 0xf) + yl[j+12] * (grid2[j] >> 4);
-                 sum[1] += yl[j+16] * (grid3[j] & 0xf) + yl[j+20] * (grid3[j] >> 4)
-                         + yl[j+24] * (grid4[j] & 0xf) + yl[j+28] * (grid4[j] >> 4);
-             }

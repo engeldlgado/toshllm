@@ -1,11 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:17 -0400
+Subject: [PATCH] 0046-metal-a-tile-floor-for-each-quant
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.cpp | 48 +++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 4 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 83a0ec15f..7c135df78 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -937,28 +937,64 @@
-     }
-     const bool narrow = use_mm_manual && !has_tensor && tsrc1 == GGML_TYPE_F32 &&
-                         (op->ne[1] <= 32 || tail_32);
- 
-     // wave64 wants a far higher floor: between 288 and 384 the tile loses on two models,
+@@ -941,7 +941,28 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
      // and from 448 up it wins 4 to 6%
      const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
      const bool wide_width_ok = simd_width != 64 || getenv("TOSH_MM_WIDE_W64_DISABLE") == nullptr;
@@ -35,9 +41,7 @@
  
      // the tile also needs enough output rows, not just enough tokens. Halving the simdgroups per
      // threadgroup costs more where the rows run out: on 64 lanes 2560 rows lose 7 to 10% at 512
-     // tokens while 4096 and up keep winning
-     static const int ne0_floor_env = []() {
-         const char * s = getenv("TOSH_MM_NE0_FLOOR");
+@@ -951,7 +972,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
          return s ? atoi(s) : 0;
      }();
  
@@ -52,27 +56,16 @@
 +            default: break;
 +        }
 +    }
- 
++
 +    static const int wide_ext_floor_env = []() {
 +        const char * s = getenv("TOSH_MM_WIDE_EXT_FLOOR");
 +        return s ? atoi(s) : 0;
 +    }();
 +    const int wide_ext_floor = wide_ext_floor_env ? wide_ext_floor_env : 2048;
-+
+ 
      bool wide = use_mm_manual && !has_tensor && !narrow && tsrc1 == GGML_TYPE_F32 && wide_width_ok &&
                  op->ne[1] >= wide_floor && (op->ne[0] >= ne0_floor || getenv("TOSH_MM_NE0_FLOOR_DISABLE") != nullptr) &&
-                 getenv("TOSH_MM_WIDE_DISABLE") == nullptr;
-     if (wide) {
-         // it needs 64 accumulators, so only where the dequant leaves the registers
-         switch (tsrc0) {
-             case GGML_TYPE_F16:
-             case GGML_TYPE_Q8_0:
-@@ -979,18 +1015,22 @@
-             case GGML_TYPE_IQ4_XS:
-             case GGML_TYPE_IQ3_S:
-             case GGML_TYPE_IQ2_S:
-             case GGML_TYPE_IQ1_S:
-             case GGML_TYPE_IQ1_M:
+@@ -983,8 +1019,12 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
              case GGML_TYPE_IQ2_XXS:
              case GGML_TYPE_IQ2_XS:
              case GGML_TYPE_IQ3_XXS:
@@ -86,9 +79,4 @@
 +            default: wide = getenv("TOSH_MM_WIDE_ALL") != nullptr && op->ne[0] >= wide_ext_floor; break;
          }
      }
- 
-     // attention matmuls read a permuted KV cache view and can exceed half range in the packed
-     // accumulator; bfloat has no native arithmetic here, so float is faster for it too
-     const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
-                          getenv("TOSH_MM_ACC_F32_DISABLE") == nullptr;
  

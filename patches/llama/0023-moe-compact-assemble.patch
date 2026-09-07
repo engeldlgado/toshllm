@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:12 -0400
+Subject: [PATCH] 0024-moe-compact-assemble
+
+---
+ tosh-moe/tosh-moe-lru.metal | 36 ++++++++++++++++++++++++++++++++++++
+ tosh-moe/tosh-moe.h         |  4 +++-
+ 2 files changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/tosh-moe/tosh-moe-lru.metal b/tosh-moe/tosh-moe-lru.metal
+index 3af62d3bf..97c8427e2 100644
+--- a/tosh-moe/tosh-moe-lru.metal
++++ b/tosh-moe/tosh-moe-lru.metal
+@@ -217,6 +217,7 @@ kernel void tosh_moe_stage(
+ struct tosh_assemble_args {
+     uint32_t row_u4;
+     uint32_t n_expert;
++    int32_t  use_active;
+ };
+ 
+ kernel void tosh_moe_assemble(
+@@ -226,13 +227,48 @@ kernel void tosh_moe_assemble(
+         device const uint4          * slots       [[buffer(3)]],
+         device const int32_t        * slot_for_id [[buffer(4)]],
+         device const int32_t        * cold_for_id [[buffer(5)]],
++        device const int32_t        * active      [[buffer(6)]],
+         uint gid [[thread_position_in_grid]]) {
+     const uint64_t total = (uint64_t) args.n_expert*args.row_u4;
+     if ((uint64_t) gid >= total) return;
+     const uint32_t expert = gid/args.row_u4;
++    // A batch routes to far fewer experts than the bank holds, and a row nothing routes to is
++    // never read: leaving it stale costs nothing and skipping it is most of the traffic.
++    if (args.use_active != 0 && active[expert] == 0) return;
+     const uint32_t col = gid - expert*args.row_u4;
+     const int32_t slot = slot_for_id[expert];
+     const int32_t ci = cold_for_id[expert];
+     dst[gid] = slot >= 0 ? slots[(uint64_t) slot*args.row_u4 + col]
+                          : cold[(uint64_t) ci*args.row_u4 + col];
+ }
++
++// Marks the experts one batch routes to, so the assemble can skip the rest.
++struct tosh_mark_args {
++    int32_t n_used;
++    int32_t n_tokens;
++    int32_t stride;
++    int32_t n_expert;
++};
++
++// One threadgroup: the clear has to be visible to the marking, and a barrier only spans a
++// threadgroup. The work is a few thousand ids, so one is plenty.
++kernel void tosh_moe_mark_active(
++        constant tosh_mark_args & args   [[buffer(0)]],
++        device const int32_t    * ids    [[buffer(1)]],
++        device       int32_t    * active [[buffer(2)]],
++        uint tid [[thread_position_in_threadgroup]],
++        uint ntg [[threads_per_threadgroup]]) {
++    for (uint e = tid; e < (uint) args.n_expert; e += ntg) {
++        active[e] = 0;
++    }
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++    const uint n_active = (uint) (args.n_used*args.n_tokens);
++    for (uint i = tid; i < n_active; i += ntg) {
++        const uint t = i / (uint) args.n_used;
++        const uint k = i % (uint) args.n_used;
++        const int32_t e = ids[t*(uint) args.stride + k];
++        if (e >= 0 && e < args.n_expert) {
++            active[e] = 1;
++        }
++    }
++}
+diff --git a/tosh-moe/tosh-moe.h b/tosh-moe/tosh-moe.h
+index 3e62af81b..6b6b1ad67 100644
+--- a/tosh-moe/tosh-moe.h
++++ b/tosh-moe/tosh-moe.h
+@@ -70,7 +70,7 @@ static inline int tosh_moe_ids_room(int n_expert) {
+ }
+ 
+ static inline int tosh_moe_state_ints(int n_expert, int n_slots, int max_fetch) {
+-    return 2*n_expert + 2*n_slots + 2 + 2*max_fetch + tosh_moe_ids_room(n_expert);
++    return 2*n_expert + 2*n_slots + 2 + 2*max_fetch + tosh_moe_ids_room(n_expert) + n_expert;
+ }
+ static inline int tosh_moe_off_slot_for_id(int n_expert, int n_slots, int max_fetch) { (void) n_expert; (void) n_slots; (void) max_fetch; return 0; }
+ static inline int tosh_moe_off_cold_for_id(int n_expert, int n_slots, int max_fetch) { (void) n_slots; (void) max_fetch; return n_expert; }
+@@ -81,6 +81,8 @@ static inline int tosh_moe_off_n_indices  (int n_expert, int n_slots, int max_fe
+ static inline int tosh_moe_off_evict      (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return 2*n_expert + 2*n_slots + 2; }
+ static inline int tosh_moe_off_src        (int n_expert, int n_slots, int max_fetch) { return 2*n_expert + 2*n_slots + 2 + max_fetch; }
+ static inline int tosh_moe_off_ids        (int n_expert, int n_slots, int max_fetch) { return 2*n_expert + 2*n_slots + 2 + 2*max_fetch; }
++// Which experts the current batch routes to. Last, so every offset above keeps its place.
++static inline int tosh_moe_off_active     (int n_expert, int n_slots, int max_fetch) { return 2*n_expert + 2*n_slots + 2 + 2*max_fetch + tosh_moe_ids_room(n_expert); }
+ 
+ // Slots per expert bank, 0 when the cache is off.
+ int tosh_moe_slots_want(void);

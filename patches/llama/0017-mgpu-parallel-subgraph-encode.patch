@@ -1,11 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:09 -0400
+Subject: [PATCH] 0017-mgpu-parallel-subgraph-encode
+
+---
+ ggml/src/ggml-backend-meta.cpp | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index 30ad13c8d..66e107d6b 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -1,15 +1,17 @@
- #include "ggml.h"
- #include "ggml-impl.h"
- #include "ggml-backend.h"
- #include "ggml-backend-impl.h"
+@@ -5,6 +5,8 @@
  #include "ggml-alloc.h"
  #include "ggml-cpp.h"
  
@@ -14,21 +20,9 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
  #include <algorithm>
  #include <cassert>
  #include <cmath>
- #include <cstddef>
- #include <cstdint>
- #include <cstring>
- #include <map>
- #include <memory>
-@@ -2567,19 +2569,42 @@
- 
-             ggml_tensor * node_src = bcj_src.cgraphs[i].cgraph_main->nodes[bcj_src.cgraphs[i].cgraph_main->n_nodes - 1];
-             ggml_tensor * node_dst = bcj_dst.cgraphs[i].cgraph_main->nodes[bcj_dst.cgraphs[i].cgraph_main->n_nodes - 1];
-             ggml_backend_tensor_copy_async(bcj_src.backend, bcj_dst.backend, node_src, node_dst);
-         }
- 
-         return GGML_STATUS_SUCCESS;
+@@ -2574,7 +2576,30 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
      };
-+
+ 
  
 +    // One device per token is the shape this loop was written for, so it encodes
 +    // them one after another; with four cards that is four full encodes in series.
@@ -38,7 +32,7 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
 +        const char * s_se = getenv("TOSH_MGPU_SERIAL_ENCODE");
 +        serial_encode = s_se ? atoi(s_se) : 0;
 +    }
- 
++
      for (size_t i = 0; i < backend_ctx->n_subgraphs; i++) {
 +        if (!serial_encode && n_backends > 1) {
 +            std::atomic<int> failed{(int) GGML_STATUS_SUCCESS};
@@ -57,8 +51,3 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
          for (size_t j = 0; j < n_backends; j++) {
              auto & bcj = backend_ctx->backend_configs[j];
              const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, bcj.cgraphs[i].cgraph_main);
-             if (status != GGML_STATUS_SUCCESS) {
-                 return status;
-             }
-         }
- 

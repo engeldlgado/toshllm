@@ -1,11 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:13 -0400
+Subject: [PATCH] 0029-metal-fa-split-depth-per-head
+
+---
+ ggml/src/ggml-metal/ggml-metal-ops.cpp | 28 +++++++++++++++++++++++---
+ 1 file changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index e5435df0f..a139e6686 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4078,20 +4078,42 @@
-             }
-         }
-         if (props_dev->simd_width == 64) {
-             fa_amd_nsg /= 2;
-         }
+@@ -3958,10 +3958,32 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
  
          // one threadgroup per query head leaves most of the GPU idle on models with
          // few heads; split the cache across 32 and let upstream's reduce merge them
@@ -41,8 +47,3 @@
              getenv("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
  
          char fa_amd_wg_pipeline[96];
-         if (fa_amd_nwg > 1) {
-             snprintf(fa_amd_wg_pipeline, sizeof(fa_amd_wg_pipeline), "%s_wg32", fa_amd_pipeline);
-         }
- 
-         auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);

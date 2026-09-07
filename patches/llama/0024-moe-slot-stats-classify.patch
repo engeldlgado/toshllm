@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:13 -0400
+Subject: [PATCH] 0025-moe-slot-stats-classify
+
+---
+ ggml/src/ggml-metal/ggml-metal-context.m | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 539753b5b..e2f9e7bb1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1150,7 +1150,6 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+                 }
+             }
+         }
+-        for (int e = 0; e < n_expert; ++e) slot_of[e] = -1;
+         if (getenv("TOSH_MOE_WIDE_DEBUG") != NULL) {
+             GGML_LOG_WARN("%s: layer %d unique=%d cold=%d slots=%d fixed=%d experts=%d\n",
+                 __func__, layer, n_unique, n_cold_unique, n_slots, n_fixed, n_expert);
+@@ -1183,8 +1182,9 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+                     if (slot_of[e] != -2 && slot_of[e] != -1) continue;   // only experts routed this pass
+                     if (sfi[e] >= 0) {
+                         from_slot++;
+-                        if (sfi[e] >= n_fixed) bad_ring++;
+-                        else if (ios[sfi[e]] != e) bad_stale++;
++                        if (ios[sfi[e]] != e) {
++                            if (sfi[e] >= n_fixed) bad_ring++; else bad_stale++;
++                        }
+                     } else {
+                         from_cold++;
+                         if (cfi[e] < 0 || cfi[e] >= n_cold) bad_cold++;
+@@ -1200,6 +1200,7 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+             st_unique += n_unique; st_cold += n_cold_unique;
+             if (n_unique > st_unique_max) st_unique_max = n_unique;
+         }
++        for (int e = 0; e < n_expert; ++e) slot_of[e] = -1;
+         if (n_fixed > 0 && (wide_shape || n_cold_unique > n_slots - n_fixed)) {
+             const bool transient_map = getenv("TOSH_MOE_TRANSIENT_MAP") != NULL;
+             const bool persistent_map = getenv("TOSH_MOE_PERSISTENT_MAP") != NULL;

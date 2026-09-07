@@ -1,18 +1,17 @@
-llms: size the expert id map by the expert count, not by the cache slots
-
-With a split expert bank src0 holds the slots, so mul_mm_id_map0 wrote one entry
-per expert into space reserved for one per slot and overran into the ids that
-follow it. Perplexity drifted a few percent and stopped being reproducible.
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:10 -0400
+Subject: [PATCH] 0020-moe-id-map-size
 
 ---
+ ggml/src/ggml-metal/ggml-metal-ops.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index a606583cf..e5435df0f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3105,17 +3105,21 @@
-     }
- 
-     return 1;
- }
- 
+@@ -3117,7 +3117,11 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
  size_t ggml_metal_op_mul_mat_id_extra_tpe(const ggml_tensor * op) {
      assert(op->op == GGML_OP_MUL_MAT_ID);
  
@@ -25,8 +24,3 @@ follow it. Perplexity drifted a few percent and stopped being reproducible.
  
      return ggml_type_size(GGML_TYPE_I32)*ne02;
  }
- 
- size_t ggml_metal_op_mul_mat_id_extra_ids(const ggml_tensor * op) {
-     assert(op->op == GGML_OP_MUL_MAT_ID);
- 
-     const int registered = tosh_moe_experts_of(op->src[0]);

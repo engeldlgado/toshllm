@@ -1,12 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:09 -0400
+Subject: [PATCH] 0015-pipeline-events-always
+
+---
+ src/llama-context.cpp | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 6d4fbab2f..6e0a8f274 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -420,21 +420,22 @@
-             backend_ptrs.push_back(backend.get());
-             backend_buf_exp_size.push_back(0);
-         }
- 
-         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
+@@ -425,11 +425,12 @@ llama_context::llama_context(
  
          // TODO: move these checks to ggml_backend_sched
          // enabling pipeline parallelism in the scheduler increases memory usage, so it is only done when necessary
@@ -22,8 +27,3 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
              cparams.offload_kqv &&
              !model.has_tensor_overrides();
  
-         // pipeline parallelism requires support for async compute and events in all devices
-         if (pipeline_parallel) {
-             for (auto & backend : backends) {
-                 auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
-                 if (dev_type == GGML_BACKEND_DEVICE_TYPE_CPU || dev_type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {

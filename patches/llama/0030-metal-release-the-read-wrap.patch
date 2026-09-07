@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:13 -0400
+Subject: [PATCH] 0031-metal-release-the-read-wrap
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.m | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 8acce8eda..09f092903 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -3464,6 +3464,9 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
+             [cmd_buf commit];
+             [cmd_buf waitUntilCompleted];
+ 
++            // the wrap is owned here too; the write path already releases its own
++            [buf_dst release];
++
+             if (t0) {
+                 tosh_prof_add(TOSH_PROF_D2H_DIRECT, size, t0);
+             }

@@ -1,15 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:13 -0400
+Subject: [PATCH] 0030-metal-stage-large-uploads-through-the-ring
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.m | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 084cd446c..8acce8eda 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -3256,17 +3256,33 @@
-         // pointer below allocates a kernel resource per call, and on AMD those
-         // accumulate across a long generation until transfers crawl.
-         {
-             struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
-             bid_dst.offs += offset;
- 
+@@ -3296,6 +3296,22 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
              if (ggml_metal_device_stage_set(buf->dev, bid_dst, data, size)) {
                  return;
-+            }
+             }
 +
 +            // A large transfer wrapped whole registers the caller's pages with the device for the
 +            // whole blit; feeding it through the ring in slices keeps the copy pipelined instead.
@@ -24,13 +29,8 @@
 +                    const char * n = getenv("GGML_METAL_DEVICES");
 +                    stage_load = (n == NULL || atoi(n) <= 1) && getenv("GGML_METAL_DEVICE_LIST") == NULL;
 +                }
-             }
++            }
 +
          }
  
          const uint64_t t0 = tosh_prof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
- 
-         // src
-         void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
-         id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
-                                                                length:size

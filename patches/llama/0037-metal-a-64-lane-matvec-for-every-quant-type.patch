@@ -1,145 +1,381 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:15 -0400
+Subject: [PATCH] 0040-metal-a-64-lane-matvec-for-every-quant-type
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.cpp    |  224 +-
+ ggml/src/ggml-metal/kernels/mul_mv_w64.metal | 7496 +++++++++++++++++-
+ 2 files changed, 7703 insertions(+), 17 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 0bd714a46..3072f7bc6 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1054,6 +1054,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
+ 
+     const char * suffix = "";
++    bool w64 = false;
++    char sweep_sfx[16] = {0};
+ 
+     // use custom matrix x vector kernel
+     switch (tsrc0) {
+@@ -1086,27 +1088,73 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+             } break;
+         case GGML_TYPE_Q4_0:
+             {
+-                nsg = N_SG_Q4_0;
+-                nr0 = N_R0_Q4_0;
++                // eight lanes per block with four rows each: +5.8% of generation
++                if (simd_width == 64 && getenv("TOSH_MV_Q4_0_W64_DISABLE") == nullptr) {
++                    nsg    = 1;
++                    nr0    = 4;
++                    suffix = "_L8r4";
++                    w64    = true;
++                } else {
++                    nsg = N_SG_Q4_0;
++                    nr0 = N_R0_Q4_0;
++                }
+             } break;
+         case GGML_TYPE_Q4_1:
+             {
+-                nsg = N_SG_Q4_1;
+-                nr0 = N_R0_Q4_1;
++                // four lanes per block with four rows each: +6.2% of generation
++                if (simd_width == 64 && getenv("TOSH_MV_Q4_1_W64_DISABLE") == nullptr) {
++                    nsg    = 1;
++                    nr0    = 4;
++                    suffix = "_L4r4";
++                    w64    = true;
++                } else {
++                    nsg = N_SG_Q4_1;
++                    nr0 = N_R0_Q4_1;
++                }
+             } break;
+         case GGML_TYPE_Q5_0:
+             {
+-                nsg = N_SG_Q5_0;
+-                nr0 = N_R0_Q5_0;
++                // eight rows per thread measured worse on 64 lanes for this type, so the
++                // inherited pair stays; TOSH_MV_Q5_0_R8 opens it again for measuring
++                if (getenv("TOSH_MV_Q5_0_R8") != nullptr) {
++                    nsg = 1;
++                    nr0 = 8;
++                    suffix = "_r8";
++                } else {
++                    nsg = N_SG_Q5_0;
++                    nr0 = N_R0_Q5_0;
++                }
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_Q5_1:
+             {
+-                nsg = N_SG_Q5_1;
+-                nr0 = N_R0_Q5_1;
++                // eight rows per thread measured worse on 64 lanes for this type, so the
++                // inherited pair stays; TOSH_MV_Q5_1_R8 opens it again for measuring
++                if (getenv("TOSH_MV_Q5_1_R8") != nullptr) {
++                    nsg = 1;
++                    nr0 = 8;
++                    suffix = "_r8";
++                } else {
++                    nsg = N_SG_Q5_1;
++                    nr0 = N_R0_Q5_1;
++                }
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_Q8_0:
+             {
+-                if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
++                // TOSH_MV_Q8_0_R8 asks for eight rows instead of the four this width takes,
++                // so the three values can be compared
++                if (getenv("TOSH_MV_Q8_0_R8") != nullptr) {
++                    nsg = 1;
++                    nr0 = 8;
++                    suffix = "_r8";
++                } else if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+                     nr0 = 4;
+                     suffix = "_r4";
+@@ -1116,6 +1164,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 }
+                 // the reduction buffer scales with the rows, so it follows the effective nr0
+                 smem = 32*sizeof(float)*nr0;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_MXFP4:
+             {
+@@ -1124,6 +1176,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 nsg = N_SG_MXFP4;
+                 nr0 = N_R0_MXFP4;
+                 smem = 32*sizeof(float);
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_Q2_K:
+             {
+@@ -1135,9 +1191,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nsg = N_SG_Q2_K;
+                     nr0 = N_R0_Q2_K;
+                 }
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_Q3_K:
+             {
++                // A 64-lane variant with thirty-two lanes per block and the mask tables derived
++                // instead of held: measured 127.2 against 126.2, so it stays behind the switch.
++                if (simd_width == 64 && getenv("TOSH_MV_Q3K_W64") != nullptr) {
++                    nsg = N_SG_Q3_K;
++                    nr0 = N_R0_Q3_K;
++                    suffix = "_w64";
++                    break;
++                }
+                 // 64 lanes want eight rows in one group (+7.2% tg); two groups there costs 30%
+                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+@@ -1151,8 +1219,26 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         case GGML_TYPE_Q4_K:
+             {
+                 // small matrices: one simdgroup with 4 rows amortizes the
+-                // per-threadgroup setup better than two with 2
+-                if (ne00 <= 2048 || ne01 <= 2048) {
++                // per-threadgroup setup better than two with 2. Unlike q5_K and q6_K,
++                // 64 lanes do NOT want the four-row path at any size here, so the choice
++                // stays by shape; TOSH_MV_Q4K_R4 opens it again for measuring
++                const bool q4k_r4_wide = getenv("TOSH_MV_Q4K_R4") != nullptr &&
++                                         getenv("TOSH_MV_Q4K_R4_DISABLE") == nullptr;
++                const bool q4k_small = ne00 <= 2048 || ne01 <= 2048 || q4k_r4_wide;
++
++                // 64 lanes have their own decomposition: sixteen cover a block instead of
++                // eight, which brings the kernel from 246 registers down to 184. It does not
++                // cover the small-matrix case, which still wants one group with four rows.
++                // Sixteen lanes with four rows each: +5.8% over eight lanes. Sixteen lanes
++                // with the inherited rows loses, so the win lives in the crossing of the two.
++                if (simd_width == 64 && !q4k_small && getenv("TOSH_MV_Q4K_W64_DISABLE") == nullptr) {
++                    nsg    = 1;
++                    nr0    = 4;
++                    suffix = "_L16r4";
++                    w64    = true;
++                    break;
++                }
++                if (q4k_small) {
+                     nsg = 1;
+                     nr0 = 4;
+                     suffix = "_r4";
+@@ -1173,6 +1259,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nsg = N_SG_Q5_K;
+                     nr0 = N_R0_Q5_K;
+                 }
++
++                // Sixteen lanes per block with two rows each: measured +10.9% of generation
++                // over the inherited pair, five alternating pairs. Four lanes with eight rows
++                // loses, which is why the two fronts have to be walked as a grid and not one
++                // at a time.
++                if (simd_width == 64 && getenv("TOSH_MV_Q5K_W64_DISABLE") == nullptr) {
++                    nsg    = 1;
++                    nr0    = 2;
++                    suffix = "_L16r2";
++                    w64    = true;
++                }
+             } break;
+         case GGML_TYPE_Q6_K:
+             {
+@@ -1185,18 +1282,30 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nsg = N_SG_Q6_K;
+                     nr0 = N_R0_Q6_K;
+                 }
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ2_XXS:
+             {
+                 nsg = N_SG_IQ2_XXS;
+                 nr0 = N_R0_IQ2_XXS;
+                 smem = 256*8+128;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ2_XS:
+             {
+                 nsg = N_SG_IQ2_XS;
+                 nr0 = N_R0_IQ2_XS;
+                 smem = 512*8+128;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ3_XXS:
+             {
+@@ -1209,42 +1318,86 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nr0 = N_R0_IQ3_XXS;
+                 }
+                 smem = 256*4+128;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ3_S:
+             {
+                 nsg = N_SG_IQ3_S;
+                 nr0 = N_R0_IQ3_S;
+                 smem = 512*4;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ2_S:
+             {
+                 nsg = N_SG_IQ2_S;
+                 nr0 = N_R0_IQ2_S;
+                 smem = 1024*8;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ1_S:
+             {
+                 nsg = N_SG_IQ1_S;
+                 nr0 = N_R0_IQ1_S;
+                 smem = 2048*4;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ1_M:
+             {
+                 nsg = N_SG_IQ1_M;
+                 nr0 = N_R0_IQ1_M;
+                 smem = 2048*4;
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ4_NL:
+             {
+-                nsg = N_SG_IQ4_NL;
+-                nr0 = N_R0_IQ4_NL;
++                // eight rows per thread measured worse on 64 lanes for this type, so the
++                // inherited pair stays; TOSH_MV_IQ4_NL_R8 opens it again for measuring
++                if (getenv("TOSH_MV_IQ4_NL_R8") != nullptr) {
++                    nsg = 1;
++                    nr0 = 8;
++                    suffix = "_r8";
++                } else {
++                    nsg = N_SG_IQ4_NL;
++                    nr0 = N_R0_IQ4_NL;
++                }
+                 smem = 32*sizeof(float);
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_IQ4_XS:
+             {
+-                nsg = N_SG_IQ4_XS;
+-                nr0 = N_R0_IQ4_XS;
++                // eight rows per thread measured worse on 64 lanes for this type, so the
++                // inherited pair stays; TOSH_MV_IQ4_XS_R8 opens it again for measuring
++                if (getenv("TOSH_MV_IQ4_XS_R8") != nullptr) {
++                    nsg = 1;
++                    nr0 = 8;
++                    suffix = "_r8";
++                } else {
++                    nsg = N_SG_IQ4_XS;
++                    nr0 = N_R0_IQ4_XS;
++                }
+                 smem = 32*sizeof(float);
++                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
++                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
++                    w64 = true;
++                }
+             } break;
+         case GGML_TYPE_TQ2_0:
+             {
+@@ -1304,9 +1457,50 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
+     const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
+ 
++    // Sweep hook: TOSH_SWEEP_TYPE names one ggml type and TOSH_SWEEP_NR0 / TOSH_SWEEP_NSG
++    // force its rows per lane and simdgroups, so the register front can be measured without
++    // rebuilding. The pipeline name carries both, so a run can be checked against what it asked.
++    {
++        const char * st = getenv("TOSH_SWEEP_TYPE");
++
++        if (st != nullptr && strcmp(st, ggml_type_name(tsrc0)) == 0) {
++            const char * snr = getenv("TOSH_SWEEP_NR0");
++            const char * sns = getenv("TOSH_SWEEP_NSG");
++
++            const char * sln = getenv("TOSH_SWEEP_LANES");
++
++            if (snr != nullptr && sln != nullptr) {
++                // cross sweep: the 32-block family carries one entry point per (lanes, rows)
++                nr0 = atoi(snr);
++                snprintf(sweep_sfx, sizeof(sweep_sfx), "_L%dr%d", atoi(sln), nr0);
++                suffix = sweep_sfx;
++                w64 = simd_width == 64;
++            } else if (snr != nullptr) {
++                nr0 = atoi(snr);
++                snprintf(sweep_sfx, sizeof(sweep_sfx), "_r%d", nr0);
++                suffix = sweep_sfx;
++                w64 = simd_width == 64;
++            }
++
++            if (sns != nullptr) {
++                nsg = atoi(sns);
++            }
++        }
++    }
++
++    char sfx[64];
++    if (w64) {
++        snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
++        suffix = sfx;
++    }
++
+     snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
+     snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d", base, nsg, ne12, r2, r3, nw, row4, row8);
+ 
++    if (getenv("TOSH_SWEEP_DEBUG") != nullptr) {
++        fprintf(stderr, "SWEEP pipeline = %s (nsg=%d nr0=%d)\n", name, nsg, nr0);
++    }
++
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+index 08bc2ecf3..195f978d5 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -8,140 +8,7632 @@
- constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
- constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
- constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
- constant short FC_mul_mv_r3   [[function_constant(FC_MUL_MV + 4)]];
- constant short FC_mul_mv_nw   [[function_constant(FC_MUL_MV + 5)]];
+@@ -13,11 +13,353 @@ constant short FC_mul_mv_nw   [[function_constant(FC_MUL_MV + 5)]];
  constant bool  FC_mul_mv_row4 [[function_constant(FC_MUL_MV + 6)]];
  constant bool  FC_mul_mv_row8 [[function_constant(FC_MUL_MV + 7)]];
  
--// wave64 reads the block eight bytes at a time: half the loads of the four-byte path, and
--// eight of the sixty-four lanes cover one block instead of sixteen, so a simdgroup walks
--// eight blocks at once. The four-byte kernel above stays for thirty-two lanes.
--template<short nr0, typename args_t>
--void kernel_mul_mv_q6_K_f32_w64_impl(
--        args_t args,
--        device const char * src0,
--        device const char * src1,
--        device       char * dst,
--        threadgroup  char * shmem,
--        uint3  tgpig,
--        ushort tiisg,
--        ushort sgitg) {
--    const short NSG = FC_mul_mv_nsg;
--
--    constexpr uint8_t kmask1 = 0x03;
--    constexpr uint8_t kmask2 = 0x0C;
--    constexpr uint8_t kmask3 = 0x30;
--    constexpr uint8_t kmask4 = 0xC0;
--
--    const int nb = args.ne00/QK_K;
--
--    const int r0 = tgpig.x;
--    const int r1 = tgpig.y;
--    const int im = tgpig.z;
--
--    const int first_row = (r0 * NSG + sgitg) * nr0;
--
--    const uint i12 = im%FC_mul_mv_ne12;
--    const uint i13 = im/FC_mul_mv_ne12;
--
--    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
--    const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
--
--    device const block_q6_K * x = (device const block_q6_K *) (src0 + offset0);
--    device const float     * yy = (device const float      *) (src1 + offset1);
--    float sumf[nr0] = { 0.f };
--
--    float yl[32];
--
--    const short NG  = FC_mul_mv_nw/8;
--    const short tid = tiisg%8;
--    const short ix  = tiisg/8;
--    const short ip  = tid/4;         // 0 or 1
--    const short il  = tid%4;
--    const short l0  = 8*il;
--    const short is  = 8*ip + l0/16;
--
--    const short y_offset   = 128*ip + l0;
--    const short q_offset_l =  64*ip + l0;
--    const short q_offset_h =  32*ip + l0;
--
--    for (int i = ix; i < nb; i += NG) {
--        device const uint8_t * q1 = x[i].ql + q_offset_l;
--        device const uint8_t * q2 = q1 + 32;
--        device const uint8_t * qh = x[i].qh + q_offset_h;
--        device const int8_t  * sc = x[i].scales + is;
--        device const half    * dh = &x[i].d;
--
--        device const float * y = yy + i * QK_K + y_offset;
--
--        for (short l = 0; l < 8; ++l) {
--            yl[4*l + 0] = y[l +  0];
--            yl[4*l + 1] = y[l + 32];
--            yl[4*l + 2] = y[l + 64];
--            yl[4*l + 3] = y[l + 96];
--        }
--
--        for (short row = 0; row < nr0; ++row) {
--            float4 sums = {0.f, 0.f, 0.f, 0.f};
--
--            // eight bytes land aligned whenever the row stride is a multiple of eight; the
--            // two-word fallback keeps the odd strides correct
--            uint2 w1, w2, wh;
--            if (FC_mul_mv_row8) {
--                w1 = *(device const uint2 *) q1;
--                w2 = *(device const uint2 *) q2;
--                wh = *(device const uint2 *) qh;
--            } else {
--                device const ushort * s1 = (device const ushort *) q1;
--                device const ushort * s2 = (device const ushort *) q2;
--                device const ushort * sh = (device const ushort *) qh;
--                w1 = uint2((uint) s1[0] | ((uint) s1[1] << 16), (uint) s1[2] | ((uint) s1[3] << 16));
--                w2 = uint2((uint) s2[0] | ((uint) s2[1] << 16), (uint) s2[2] | ((uint) s2[3] << 16));
--                wh = uint2((uint) sh[0] | ((uint) sh[1] << 16), (uint) sh[2] | ((uint) sh[3] << 16));
--            }
--
--            FOR_UNROLL (short l = 0; l < 8; ++l) {
--                const uint w = l < 4 ? 0 : 1;
--                const short sft = 8*(l & 3);
--                const uint8_t b1 = (uint8_t)((w ? w1.y : w1.x) >> sft);
--                const uint8_t b2 = (uint8_t)((w ? w2.y : w2.x) >> sft);
--                const uint8_t bh = (uint8_t)((w ? wh.y : wh.x) >> sft);
--
--                sums[0] += yl[4*l + 0] * ((int8_t)((b1 & 0xF) | ((bh & kmask1) << 4)) - 32);
--                sums[1] += yl[4*l + 1] * ((int8_t)((b2 & 0xF) | ((bh & kmask2) << 2)) - 32);
--                sums[2] += yl[4*l + 2] * ((int8_t)((b1  >> 4) | ((bh & kmask3) << 0)) - 32);
--                sums[3] += yl[4*l + 3] * ((int8_t)((b2  >> 4) | ((bh & kmask4) >> 2)) - 32);
--            }
--
--            sumf[row] += dh[0] * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
--
--            q1 += args.nb01;
--            q2 += args.nb01;
--            qh += args.nb01;
--            sc += args.nb01;
--            dh += args.nb01/2;
--        }
--    }
--
--    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
--
--    for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
--        float sum_all = simd_sum(sumf[row]);
--        if (tiisg == 0) {
--            dst_f32[first_row + row] = sum_all;
--        }
--    }
--}
--
--[[host_name("kernel_mul_mv_q6_K_f32_w64_r4")]]
--kernel void kernel_mul_mv_q6_K_f32_w64_r4(
--        constant ggml_metal_kargs_mul_mv & args,
--        device const char * src0,
--        device const char * src1,
--        device       char * dst,
--        uint3  tgpig[[threadgroup_position_in_grid]],
--        ushort tiisg[[thread_index_in_simdgroup]],
--        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
--
--    kernel_mul_mv_q6_K_f32_w64_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
 +inline float block_q_n_dot_y(device const block_q1_0 * qb_curr, float sumy, thread float * yl, int il) {
 +    device const uint8_t * qs = qb_curr->qs + il / 8;
 +    const uint8_t b0 = qs[0];
@@ -482,136 +718,20 @@
 +
 +
 +
-+// wave64 reads the block eight bytes at a time: half the loads of the four-byte path, and
-+// eight of the sixty-four lanes cover one block instead of sixteen, so a simdgroup walks
-+// eight blocks at once. The four-byte kernel above stays for thirty-two lanes.
-+template<short nr0, typename args_t>
+ // wave64 reads the block eight bytes at a time: half the loads of the four-byte path, and
+ // eight of the sixty-four lanes cover one block instead of sixteen, so a simdgroup walks
+ // eight blocks at once. The four-byte kernel above stays for thirty-two lanes.
+ template<short nr0, typename args_t>
+-void kernel_mul_mv_q6_K_f32_w64_impl(
 +void kernel_mul_mv_q6_K_f32_w64_wide_impl(
-+        args_t args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
-+        ushort tiisg,
-+        ushort sgitg) {
-+    const short NSG = FC_mul_mv_nsg;
-+
-+    constexpr uint8_t kmask1 = 0x03;
-+    constexpr uint8_t kmask2 = 0x0C;
-+    constexpr uint8_t kmask3 = 0x30;
-+    constexpr uint8_t kmask4 = 0xC0;
-+
-+    const int nb = args.ne00/QK_K;
-+
-+    const int r0 = tgpig.x;
-+    const int r1 = tgpig.y;
-+    const int im = tgpig.z;
-+
-+    const int first_row = (r0 * NSG + sgitg) * nr0;
-+
-+    const uint i12 = im%FC_mul_mv_ne12;
-+    const uint i13 = im/FC_mul_mv_ne12;
-+
-+    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
-+    const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
-+
-+    device const block_q6_K * x = (device const block_q6_K *) (src0 + offset0);
-+    device const float     * yy = (device const float      *) (src1 + offset1);
-+    float sumf[nr0] = { 0.f };
-+
-+    float yl[32];
-+
-+    const short NG  = FC_mul_mv_nw/8;
-+    const short tid = tiisg%8;
-+    const short ix  = tiisg/8;
-+    const short ip  = tid/4;         // 0 or 1
-+    const short il  = tid%4;
-+    const short l0  = 8*il;
-+    const short is  = 8*ip + l0/16;
-+
-+    const short y_offset   = 128*ip + l0;
-+    const short q_offset_l =  64*ip + l0;
-+    const short q_offset_h =  32*ip + l0;
-+
-+    for (int i = ix; i < nb; i += NG) {
-+        device const uint8_t * q1 = x[i].ql + q_offset_l;
-+        device const uint8_t * q2 = q1 + 32;
-+        device const uint8_t * qh = x[i].qh + q_offset_h;
-+        device const int8_t  * sc = x[i].scales + is;
-+        device const half    * dh = &x[i].d;
-+
-+        device const float * y = yy + i * QK_K + y_offset;
-+
-+        for (short l = 0; l < 8; ++l) {
-+            yl[4*l + 0] = y[l +  0];
-+            yl[4*l + 1] = y[l + 32];
-+            yl[4*l + 2] = y[l + 64];
-+            yl[4*l + 3] = y[l + 96];
-+        }
-+
-+        for (short row = 0; row < nr0; ++row) {
-+            float4 sums = {0.f, 0.f, 0.f, 0.f};
-+
-+            // eight bytes land aligned whenever the row stride is a multiple of eight; the
-+            // two-word fallback keeps the odd strides correct
-+            uint2 w1, w2, wh;
-+            if (FC_mul_mv_row8) {
-+                w1 = *(device const uint2 *) q1;
-+                w2 = *(device const uint2 *) q2;
-+                wh = *(device const uint2 *) qh;
-+            } else {
-+                device const ushort * s1 = (device const ushort *) q1;
-+                device const ushort * s2 = (device const ushort *) q2;
-+                device const ushort * sh = (device const ushort *) qh;
-+                w1 = uint2((uint) s1[0] | ((uint) s1[1] << 16), (uint) s1[2] | ((uint) s1[3] << 16));
-+                w2 = uint2((uint) s2[0] | ((uint) s2[1] << 16), (uint) s2[2] | ((uint) s2[3] << 16));
-+                wh = uint2((uint) sh[0] | ((uint) sh[1] << 16), (uint) sh[2] | ((uint) sh[3] << 16));
-+            }
-+
-+            FOR_UNROLL (short l = 0; l < 8; ++l) {
-+                const uint w = l < 4 ? 0 : 1;
-+                const short sft = 8*(l & 3);
-+                const uint8_t b1 = (uint8_t)((w ? w1.y : w1.x) >> sft);
-+                const uint8_t b2 = (uint8_t)((w ? w2.y : w2.x) >> sft);
-+                const uint8_t bh = (uint8_t)((w ? wh.y : wh.x) >> sft);
-+
-+                sums[0] += yl[4*l + 0] * ((int8_t)((b1 & 0xF) | ((bh & kmask1) << 4)) - 32);
-+                sums[1] += yl[4*l + 1] * ((int8_t)((b2 & 0xF) | ((bh & kmask2) << 2)) - 32);
-+                sums[2] += yl[4*l + 2] * ((int8_t)((b1  >> 4) | ((bh & kmask3) << 0)) - 32);
-+                sums[3] += yl[4*l + 3] * ((int8_t)((b2  >> 4) | ((bh & kmask4) >> 2)) - 32);
-+            }
-+
-+            sumf[row] += dh[0] * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
-+
-+            q1 += args.nb01;
-+            q2 += args.nb01;
-+            qh += args.nb01;
-+            sc += args.nb01;
-+            dh += args.nb01/2;
-+        }
-+    }
-+
-+    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
-+
-+    for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
-+        float sum_all = simd_sum(sumf[row]);
-+        if (tiisg == 0) {
-+            dst_f32[first_row + row] = sum_all;
-+        }
-+    }
-+}
-+
-+[[host_name("kernel_mul_mv_q6_K_f32_w64_r4")]]
-+kernel void kernel_mul_mv_q6_K_f32_w64_r4(
-+        constant ggml_metal_kargs_mul_mv & args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiisg[[thread_index_in_simdgroup]],
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+@@ -143,5 +485,7155 @@ kernel void kernel_mul_mv_q6_K_f32_w64_r4(
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
+-    kernel_mul_mv_q6_K_f32_w64_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
 +    kernel_mul_mv_q6_K_f32_w64_wide_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
 +}
 +
@@ -7764,426 +7884,3 @@
 +        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
 +    kernel_mul_mv_q5_K_f32_L16_w64_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
---- a/ggml/src/ggml-metal/ggml-metal-device.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1050,16 +1050,18 @@
-     size_t smem = 0; // shared memory
- 
-     const ggml_type tsrc0 = op->src[0]->type;
-     const ggml_type tsrc1 = op->src[1]->type;
- 
-     const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
- 
-     const char * suffix = "";
-+    bool w64 = false;
-+    char sweep_sfx[16] = {0};
- 
-     // use custom matrix x vector kernel
-     switch (tsrc0) {
-         case GGML_TYPE_F32:
-         case GGML_TYPE_F16:
-         case GGML_TYPE_BF16:
-             {
-                 if (ne00 < 32) {
-@@ -1082,83 +1084,167 @@
-             } break;
-         case GGML_TYPE_Q2_0:
-             {
-                 nsg = N_SG_Q2_0;
-                 nr0 = N_R0_Q2_0;
-             } break;
-         case GGML_TYPE_Q4_0:
-             {
--                nsg = N_SG_Q4_0;
--                nr0 = N_R0_Q4_0;
-+                // eight lanes per block with four rows each: +5.8% of generation
-+                if (simd_width == 64 && getenv("TOSH_MV_Q4_0_W64_DISABLE") == nullptr) {
-+                    nsg    = 1;
-+                    nr0    = 4;
-+                    suffix = "_L8r4";
-+                    w64    = true;
-+                } else {
-+                    nsg = N_SG_Q4_0;
-+                    nr0 = N_R0_Q4_0;
-+                }
-             } break;
-         case GGML_TYPE_Q4_1:
-             {
--                nsg = N_SG_Q4_1;
--                nr0 = N_R0_Q4_1;
-+                // four lanes per block with four rows each: +6.2% of generation
-+                if (simd_width == 64 && getenv("TOSH_MV_Q4_1_W64_DISABLE") == nullptr) {
-+                    nsg    = 1;
-+                    nr0    = 4;
-+                    suffix = "_L4r4";
-+                    w64    = true;
-+                } else {
-+                    nsg = N_SG_Q4_1;
-+                    nr0 = N_R0_Q4_1;
-+                }
-             } break;
-         case GGML_TYPE_Q5_0:
-             {
--                nsg = N_SG_Q5_0;
--                nr0 = N_R0_Q5_0;
-+                // eight rows per thread measured worse on 64 lanes for this type, so the
-+                // inherited pair stays; TOSH_MV_Q5_0_R8 opens it again for measuring
-+                if (getenv("TOSH_MV_Q5_0_R8") != nullptr) {
-+                    nsg = 1;
-+                    nr0 = 8;
-+                    suffix = "_r8";
-+                } else {
-+                    nsg = N_SG_Q5_0;
-+                    nr0 = N_R0_Q5_0;
-+                }
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_Q5_1:
-             {
--                nsg = N_SG_Q5_1;
--                nr0 = N_R0_Q5_1;
-+                // eight rows per thread measured worse on 64 lanes for this type, so the
-+                // inherited pair stays; TOSH_MV_Q5_1_R8 opens it again for measuring
-+                if (getenv("TOSH_MV_Q5_1_R8") != nullptr) {
-+                    nsg = 1;
-+                    nr0 = 8;
-+                    suffix = "_r8";
-+                } else {
-+                    nsg = N_SG_Q5_1;
-+                    nr0 = N_R0_Q5_1;
-+                }
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_Q8_0:
-             {
--                if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
-+                // TOSH_MV_Q8_0_R8 asks for eight rows instead of the four this width takes,
-+                // so the three values can be compared
-+                if (getenv("TOSH_MV_Q8_0_R8") != nullptr) {
-                     nsg = 1;
-+                    nr0 = 8;
-+                    suffix = "_r8";
-+                } else if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
-+                    nsg = 1;
-                     nr0 = 4;
-                     suffix = "_r4";
-                 } else {
-                     nsg = N_SG_Q8_0;
-                     nr0 = N_R0_Q8_0;
-                 }
-                 // the reduction buffer scales with the rows, so it follows the effective nr0
-                 smem = 32*sizeof(float)*nr0;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_MXFP4:
-             {
-                 // Fewer than four rows per simdgroup falls off a cliff here: two rows measured
-                 // 3904 us against 122 for four on the same matrix, so both widths take four.
-                 nsg = N_SG_MXFP4;
-                 nr0 = N_R0_MXFP4;
-                 smem = 32*sizeof(float);
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_Q2_K:
-             {
-                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
-                     nsg = 1;
-                     nr0 = 8;
-                     suffix = "_r8";
-                 } else {
-                     nsg = N_SG_Q2_K;
-                     nr0 = N_R0_Q2_K;
-                 }
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_Q3_K:
-             {
-+                // A 64-lane variant with thirty-two lanes per block and the mask tables derived
-+                // instead of held: measured 127.2 against 126.2, so it stays behind the switch.
-+                if (simd_width == 64 && getenv("TOSH_MV_Q3K_W64") != nullptr) {
-+                    nsg = N_SG_Q3_K;
-+                    nr0 = N_R0_Q3_K;
-+                    suffix = "_w64";
-+                    break;
-+                }
-                 // 64 lanes want eight rows in one group (+7.2% tg); two groups there costs 30%
-                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
-                     nsg = 1;
-                     nr0 = 8;
-                     suffix = "_r8";
-                 } else {
-                     nsg = N_SG_Q3_K;
-                     nr0 = N_R0_Q3_K;
-                 }
-             } break;
-         case GGML_TYPE_Q4_K:
-             {
-                 // small matrices: one simdgroup with 4 rows amortizes the
--                // per-threadgroup setup better than two with 2
--                if (ne00 <= 2048 || ne01 <= 2048) {
-+                // per-threadgroup setup better than two with 2. Unlike q5_K and q6_K,
-+                // 64 lanes do NOT want the four-row path at any size here, so the choice
-+                // stays by shape; TOSH_MV_Q4K_R4 opens it again for measuring
-+                const bool q4k_r4_wide = getenv("TOSH_MV_Q4K_R4") != nullptr &&
-+                                         getenv("TOSH_MV_Q4K_R4_DISABLE") == nullptr;
-+                const bool q4k_small = ne00 <= 2048 || ne01 <= 2048 || q4k_r4_wide;
-+
-+                // 64 lanes have their own decomposition: sixteen cover a block instead of
-+                // eight, which brings the kernel from 246 registers down to 184. It does not
-+                // cover the small-matrix case, which still wants one group with four rows.
-+                // Sixteen lanes with four rows each: +5.8% over eight lanes. Sixteen lanes
-+                // with the inherited rows loses, so the win lives in the crossing of the two.
-+                if (simd_width == 64 && !q4k_small && getenv("TOSH_MV_Q4K_W64_DISABLE") == nullptr) {
-+                    nsg    = 1;
-+                    nr0    = 4;
-+                    suffix = "_L16r4";
-+                    w64    = true;
-+                    break;
-+                }
-+                if (q4k_small) {
-                     nsg = 1;
-                     nr0 = 4;
-                     suffix = "_r4";
-                 } else {
-                     nsg = N_SG_Q4_K;
-                     nr0 = N_R0_Q4_K;
-                 }
-             } break;
-@@ -1168,89 +1254,156 @@
-                 // TOSH_MV_R8 forces it on 32 too, so that width can be A/B'd without a rebuild
-                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
-                     nsg = 1;
-                     nr0 = 8;
-                     suffix = "_r8";
-                 } else {
-                     nsg = N_SG_Q5_K;
-                     nr0 = N_R0_Q5_K;
-+                }
-+
-+                // Sixteen lanes per block with two rows each: measured +10.9% of generation
-+                // over the inherited pair, five alternating pairs. Four lanes with eight rows
-+                // loses, which is why the two fronts have to be walked as a grid and not one
-+                // at a time.
-+                if (simd_width == 64 && getenv("TOSH_MV_Q5K_W64_DISABLE") == nullptr) {
-+                    nsg    = 1;
-+                    nr0    = 2;
-+                    suffix = "_L16r2";
-+                    w64    = true;
-                 }
-             } break;
-         case GGML_TYPE_Q6_K:
-             {
-                 // 64 lanes want four rows in one group (+16.3% tg); 32 keep the shipped pair
-                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
-                     nsg = 1;
-                     nr0 = 4;
-                     suffix = "_r4";
-                 } else {
-                     nsg = N_SG_Q6_K;
-                     nr0 = N_R0_Q6_K;
-                 }
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ2_XXS:
-             {
-                 nsg = N_SG_IQ2_XXS;
-                 nr0 = N_R0_IQ2_XXS;
-                 smem = 256*8+128;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ2_XS:
-             {
-                 nsg = N_SG_IQ2_XS;
-                 nr0 = N_R0_IQ2_XS;
-                 smem = 512*8+128;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ3_XXS:
-             {
-                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
-                     nsg = 1;
-                     nr0 = 8;
-                     suffix = "_r8";
-                 } else {
-                     nsg = N_SG_IQ3_XXS;
-                     nr0 = N_R0_IQ3_XXS;
-                 }
-                 smem = 256*4+128;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ3_S:
-             {
-                 nsg = N_SG_IQ3_S;
-                 nr0 = N_R0_IQ3_S;
-                 smem = 512*4;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ2_S:
-             {
-                 nsg = N_SG_IQ2_S;
-                 nr0 = N_R0_IQ2_S;
-                 smem = 1024*8;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ1_S:
-             {
-                 nsg = N_SG_IQ1_S;
-                 nr0 = N_R0_IQ1_S;
-                 smem = 2048*4;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ1_M:
-             {
-                 nsg = N_SG_IQ1_M;
-                 nr0 = N_R0_IQ1_M;
-                 smem = 2048*4;
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ4_NL:
-             {
--                nsg = N_SG_IQ4_NL;
--                nr0 = N_R0_IQ4_NL;
-+                // eight rows per thread measured worse on 64 lanes for this type, so the
-+                // inherited pair stays; TOSH_MV_IQ4_NL_R8 opens it again for measuring
-+                if (getenv("TOSH_MV_IQ4_NL_R8") != nullptr) {
-+                    nsg = 1;
-+                    nr0 = 8;
-+                    suffix = "_r8";
-+                } else {
-+                    nsg = N_SG_IQ4_NL;
-+                    nr0 = N_R0_IQ4_NL;
-+                }
-                 smem = 32*sizeof(float);
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_IQ4_XS:
-             {
--                nsg = N_SG_IQ4_XS;
--                nr0 = N_R0_IQ4_XS;
-+                // eight rows per thread measured worse on 64 lanes for this type, so the
-+                // inherited pair stays; TOSH_MV_IQ4_XS_R8 opens it again for measuring
-+                if (getenv("TOSH_MV_IQ4_XS_R8") != nullptr) {
-+                    nsg = 1;
-+                    nr0 = 8;
-+                    suffix = "_r8";
-+                } else {
-+                    nsg = N_SG_IQ4_XS;
-+                    nr0 = N_R0_IQ4_XS;
-+                }
-                 smem = 32*sizeof(float);
-+                // the 64-lane twin of this kernel lives in mul_mv_w64.metal
-+                if (simd_width == 64 && getenv("TOSH_MV_W64_DISABLE") == nullptr) {
-+                    w64 = true;
-+                }
-             } break;
-         case GGML_TYPE_TQ2_0:
-             {
-                 nsg = N_SG_TQ2_0;
-                 nr0 = N_R0_TQ2_0;
-             } break;
-         default:
-             {
-@@ -1299,20 +1452,61 @@
-                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
- 
-     // A stride that is a multiple of four lets the quant arrays be read a word at a time.
-     // The two widths are decided apart: 64 lanes have no last-level cache to hide the extra
-     // loads and every type gains, while 32 lanes only measured a gain on q8_0.
-     const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
-     const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
-     const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
-+
-+    // Sweep hook: TOSH_SWEEP_TYPE names one ggml type and TOSH_SWEEP_NR0 / TOSH_SWEEP_NSG
-+    // force its rows per lane and simdgroups, so the register front can be measured without
-+    // rebuilding. The pipeline name carries both, so a run can be checked against what it asked.
-+    {
-+        const char * st = getenv("TOSH_SWEEP_TYPE");
-+
-+        if (st != nullptr && strcmp(st, ggml_type_name(tsrc0)) == 0) {
-+            const char * snr = getenv("TOSH_SWEEP_NR0");
-+            const char * sns = getenv("TOSH_SWEEP_NSG");
-+
-+            const char * sln = getenv("TOSH_SWEEP_LANES");
-+
-+            if (snr != nullptr && sln != nullptr) {
-+                // cross sweep: the 32-block family carries one entry point per (lanes, rows)
-+                nr0 = atoi(snr);
-+                snprintf(sweep_sfx, sizeof(sweep_sfx), "_L%dr%d", atoi(sln), nr0);
-+                suffix = sweep_sfx;
-+                w64 = simd_width == 64;
-+            } else if (snr != nullptr) {
-+                nr0 = atoi(snr);
-+                snprintf(sweep_sfx, sizeof(sweep_sfx), "_r%d", nr0);
-+                suffix = sweep_sfx;
-+                w64 = simd_width == 64;
-+            }
-+
-+            if (sns != nullptr) {
-+                nsg = atoi(sns);
-+            }
-+        }
-+    }
-+
-+    char sfx[64];
-+    if (w64) {
-+        snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
-+        suffix = sfx;
-+    }
- 
-     snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
-     snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d", base, nsg, ne12, r2, r3, nw, row4, row8);
- 
-+    if (getenv("TOSH_SWEEP_DEBUG") != nullptr) {
-+        fprintf(stderr, "SWEEP pipeline = %s (nsg=%d nr0=%d)\n", name, nsg, nr0);
-+    }
-+
-     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
-     if (!res.pipeline) {
-         ggml_metal_cv_t cv = ggml_metal_cv_init();
- 
-         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
-         ggml_metal_cv_set_int16(cv, (int16_t) ne12, FC_MUL_MV + 2);
-         ggml_metal_cv_set_int16(cv, r2,             FC_MUL_MV + 3);
-         ggml_metal_cv_set_int16(cv, r3,             FC_MUL_MV + 4);

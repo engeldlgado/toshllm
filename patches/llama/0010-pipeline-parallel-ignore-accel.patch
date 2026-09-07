@@ -1,12 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:08 -0400
+Subject: [PATCH] 0010-pipeline-parallel-ignore-accel
+
+---
+ src/llama-context.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 0636f288a..9dcede009 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -431,19 +431,19 @@
-             model.split_mode() == LLAMA_SPLIT_MODE_LAYER &&
-             cparams.offload_kqv &&
-             !model.has_tensor_overrides();
- 
-         // pipeline parallelism requires support for async compute and events in all devices
+@@ -436,9 +436,9 @@ llama_context::llama_context(
          if (pipeline_parallel) {
              for (auto & backend : backends) {
                  auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
@@ -19,8 +24,3 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
                      continue;
                  }
                  auto * dev = ggml_backend_get_device(backend.get());
-                 ggml_backend_dev_props props;
-                 ggml_backend_dev_get_props(dev, &props);
-                 if (!props.caps.async || !props.caps.events) {
-                     // device does not support async compute or events
-                     pipeline_parallel = false;

@@ -1,0 +1,1377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:57 -0400
+Subject: [PATCH] port: adapt the series to upstream 465e49b9c
+
+---
+ ggml/src/ggml-metal/ggml-metal-common.cpp  |  16 +-
+ ggml/src/ggml-metal/ggml-metal-common.h    |  15 +-
+ ggml/src/ggml-metal/ggml-metal-context.m   | 455 +++++++++++++++++++--
+ ggml/src/ggml-metal/ggml-metal-device.cpp  |   8 +-
+ ggml/src/ggml-metal/ggml-metal-device.m    | 157 +++++--
+ ggml/src/ggml-metal/ggml-metal-impl.h      |  39 ++
+ ggml/src/ggml-metal/ggml-metal-ops.cpp     | 245 ++++++++++-
+ ggml/src/ggml-metal/kernels/fa.metal       |   6 +-
+ ggml/src/ggml-metal/kernels/fa_w64.metal   |   2 +-
+ ggml/src/ggml-metal/kernels/tosh_moe.metal |  36 ++
+ src/llama-arch.cpp                         |   1 -
+ src/llama-graph.cpp                        |   8 +-
+ src/llama-model.cpp                        |   9 +-
+ tools/llama-bench/llama-bench.cpp          |   5 +-
+ 14 files changed, 897 insertions(+), 105 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-common.cpp b/ggml/src/ggml-metal/ggml-metal-common.cpp
+index 6f1638a11..b235c6f2e 100644
+--- a/ggml/src/ggml-metal/ggml-metal-common.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-common.cpp
+@@ -4,23 +4,9 @@
+ #include "ggml-impl.h"
+ #include "ggml-backend-impl.h"
+ 
++#include <cstdlib>
+ #include <vector>
+ 
+-bool ggml_metal_op_mul_mat_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
+-    const int64_t ne00 = op->src[0]->ne[0];
+-    const int64_t ne11 = op->src[1]->ne[1];
+-
+-    return !ggml_is_transposed(op->src[0]) &&
+-           !ggml_is_transposed(op->src[1]) &&
+-           has_simdgroup_mm && ne00 >= 64 && ne11 > 8;
+-}
+-
+-bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
+-    const int64_t ne00 = op->src[0]->ne[0];
+-    const int64_t ne21 = op->src[2]->ne[1];
+-
+-    return has_simdgroup_mm && ne00 >= 64 && ne21 >= 32;
+-}
+ 
+ // represents a memory range (i.e. an interval from a starting address p0 to an ending address p1 in a given buffer pb)
+ // the type indicates whether it is a source range (i.e. ops read data from it) or a destination range (i.e. ops write data to it)
+diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-metal-common.h
+index 66abdb52e..08f86f002 100644
+--- a/ggml/src/ggml-metal/ggml-metal-common.h
++++ b/ggml/src/ggml-metal/ggml-metal-common.h
+@@ -2,6 +2,8 @@
+ 
+ #pragma once
+ 
++#include "ggml.h"
++
+ #include <stdbool.h>
+ 
+ #ifdef __cplusplus
+@@ -48,8 +50,17 @@ bool ggml_mem_ranges_check(ggml_mem_ranges_t mrs, const struct ggml_tensor * ten
+ void ggml_graph_optimize(struct ggml_cgraph * gf);
+ 
+ // mat-mat vs mat-vec dispatch; used by both supports_op and ggml_metal_op_mul_mat*
+-bool ggml_metal_op_mul_mat_use_mm   (const struct ggml_tensor * op, bool has_simdgroup_mm);
+-bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm);
++// inline: these run once per matmul node during encode, and a cross-TU call there is not free
++static inline bool ggml_metal_op_mul_mat_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
++    static const int ne11_mm_min = 8;
++    return !ggml_is_transposed(op->src[0]) &&
++           !ggml_is_transposed(op->src[1]) &&
++           has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[1]->ne[1] > ne11_mm_min;
++}
++
++static inline bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
++    return has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[2]->ne[1] >= 32;
++}
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 8375625b4..af5c76778 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -467,12 +467,19 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+         // TODO: would it be better to have one queue for the backend and one queue for the device?
+         //       the graph encoders and async ops would use the backend queue while the sync ops would use the device queue?
+         //res->queue = [device newCommandQueue]; [TAG_QUEUE_PER_BACKEND]
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+-        if (queue == nil) {
++        res->queue = prefetch ? ggml_metal_device_acquire_queue(dev, &res->owns_queue)
++                              : ggml_metal_device_get_queue(dev);
++        if (res->queue == nil) {
+             GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
+             free(res);
+             return NULL;
+         }
++        res->is_prefetch = prefetch;
++        if (prefetch) {
++            const char * val = getenv("GGML_METAL_PREFETCH_STAGE_COUNT");
++            const int requested = val ? atoi(val) : 1;
++            res->prefetch_stage_count = MAX(1, MIN(requested, GGML_METAL_MAX_PREFETCH_STAGES));
++        }
+ 
+         res->dev = dev;
+         res->lib = ggml_metal_device_get_library(dev);
+@@ -878,52 +885,443 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor,
+ }
+ 
+ void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
++    if (size == 0) {
++        return;
++    }
++
+     @autoreleasepool {
++        ggml_metal_prof_note(tensor->name, size, true);
+         id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
++
++        struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(tensor);
++        if (bid_src.metal == nil) {
++            GGML_ABORT("%s: failed to find buffer for tensor '%s'\n", __func__, tensor->name);
++        }
++
++        bid_src.offs += offset;
++
++        // private buffers route small transfers through the device staging
++        // buffer (synchronous) instead of allocating a Metal buffer per call
++        ggml_backend_buffer_t buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
++        if (!ggml_metal_buffer_is_shared(buffer->context)
++            && ggml_metal_device_stage_get(ctx->dev, bid_src, data, size)) {
++            return;
++        }
++
++        id<MTLCommandQueue> queue = ctx->queue;
++
+         id<MTLBuffer> buf_dst = [device newBufferWithBytesNoCopy:data
+                                                           length:size
+                                                          options:MTLResourceStorageModeShared
+                                                      deallocator:nil];
+ 
+-        GGML_ASSERT(buf_dst);
++        if (buf_dst != nil) {
++            // queue the copy operation into the queue of the Metal context
++            // this will be queued at the end, after any currently ongoing GPU operations
++            id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
++            ggml_metal_encode_pending_waits(ctx, cmd_buf);
++            id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+-        struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(tensor);
+-        if (bid_src.metal == nil) {
+-            GGML_ABORT("%s: failed to find buffer for tensor '%s'\n", __func__, tensor->name);
++            [encoder copyFromBuffer:bid_src.metal
++                       sourceOffset:bid_src.offs
++                           toBuffer:buf_dst
++                  destinationOffset:0
++                               size:size];
++
++            [encoder endEncoding];
++            [cmd_buf commit];
++
++            [ctx->buf_refs addObject:buf_dst];
++            [buf_dst release];
++
++            // do not wait here for completion
++            //[cmd_buf waitUntilCompleted];
++
++            // instead, remember a reference to the command buffer and wait for it later if needed
++            [ctx->cmd_bufs_ext addObject:cmd_buf];
++            ctx->cmd_buf_last = cmd_buf;
++
++            [cmd_buf retain];
++
++            return;
+         }
+ 
+-        bid_src.offs += offset;
++        // newBufferWithBytesNoCopy requires page-aligned data, and some drivers cap the size of
++        // host-visible allocations; copy through a small staging buffer in chunks instead. The
++        // staging path is synchronous (commit + waitUntilCompleted) so callers that would later
++        // wait on cmd_buf_last still observe a completed transfer.
++        size_t stage_size = MIN(size, (size_t) 8*1024*1024);
++        id<MTLBuffer> buf_stage = nil;
++        while (stage_size > 0) {
++            buf_stage = [device newBufferWithLength:stage_size options:MTLResourceStorageModeShared];
++            if (buf_stage != nil) {
++                break;
++            }
++            stage_size /= 2;
++        }
++        if (buf_stage == nil) {
++            GGML_LOG_ERROR("%s: failed to allocate staging buffer, size = %zu\n", __func__, size);
++        }
++        GGML_ASSERT(buf_stage);
+ 
+-        // queue the copy operation into the queue of the Metal context
+-        // this will be queued at the end, after any currently ongoing GPU operations
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
+-        id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
+-        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
++        for (size_t done = 0; done < size;) {
++            const size_t n = MIN(stage_size, size - done);
+ 
+-        [encoder copyFromBuffer:bid_src.metal
+-                   sourceOffset:bid_src.offs
+-                       toBuffer:buf_dst
+-              destinationOffset:0
+-                           size:size];
++            id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
++            ggml_metal_encode_pending_waits(ctx, cmd_buf);
+ 
+-        [encoder endEncoding];
+-        [cmd_buf commit];
++            {
++                id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+-        [ctx->buf_refs addObject:buf_dst];
+-        [buf_dst release];
++                [encoder copyFromBuffer:bid_src.metal
++                           sourceOffset:bid_src.offs + done
++                               toBuffer:buf_stage
++                      destinationOffset:0
++                                   size:n];
+ 
+-        // do not wait here for completion
+-        //[cmd_buf waitUntilCompleted];
++                [encoder endEncoding];
++            }
+ 
+-        // instead, remember a reference to the command buffer and wait for it later if needed
+-        [ctx->cmd_bufs_ext addObject:cmd_buf];
+-        ctx->cmd_buf_last = cmd_buf;
++            [cmd_buf commit];
++            [cmd_buf waitUntilCompleted];
+ 
+-        [cmd_buf retain];
++            memcpy((char *) data + done, buf_stage.contents, n);
++
++            done += n;
++        }
+     }
+ }
+ 
++static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
++        ggml_metal_t ctx_src, ggml_metal_t ctx_dst) {
++    struct ggml_metal_xdev_link * link = NULL;
++    for (int i = 0; i < ctx_dst->n_xlinks; i++) {
++        if (ctx_dst->xlinks[i].src_dev == ctx_src->dev) {
++            link = &ctx_dst->xlinks[i];
++            break;
++        }
++    }
++    if (link == NULL) {
++        if (ctx_dst->n_xlinks == 4) {
++            return NULL;
++        }
++        link = &ctx_dst->xlinks[ctx_dst->n_xlinks++];
++        link->src_dev = ctx_src->dev;
++        id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
++        id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
++        link->ev_ready = [dev_src newSharedEvent];
++        link->ev_done  = [dev_dst newSharedEvent];
++        if (link->ev_ready == nil || link->ev_done == nil) {
++            [link->ev_ready release];
++            [link->ev_done release];
++            memset(link, 0, sizeof(*link));
++            ctx_dst->n_xlinks--;
++            return NULL;
++        }
++    }
++
++    return link;
++}
++
++static bool ggml_metal_xdev_link_reserve(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
++                                        struct ggml_metal_xdev_link * link, size_t size) {
++    if (link->cap == 0) {
++        GGML_LOG_INFO("%s: cross-device hand-off via shared events and host staging (TOSH_MGPU_EVENTS)\n", __func__);
++    }
++
++    if (link->cap < size) {
++        // resizing frees pages a queued blit may still read; wait out the link first
++        if (link->seq > 0 && ![link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000]) {
++            return false;
++        }
++        [link->wrap_src release];
++        [link->wrap_dst release];
++        free(link->host);
++        link->cap = MAX(size, (size_t) 1*1024*1024);
++        if (posix_memalign(&link->host, (size_t) sysconf(_SC_PAGESIZE), link->cap) != 0) {
++            link->host = NULL;
++            link->cap  = 0;
++            return false;
++        }
++        id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
++        id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
++        link->wrap_src = [dev_src newBufferWithBytesNoCopy:link->host
++                              length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
++        link->wrap_dst = [dev_dst newBufferWithBytesNoCopy:link->host
++                              length:link->cap options:MTLResourceStorageModeShared deallocator:nil];
++        if (link->wrap_src == nil || link->wrap_dst == nil) {
++            // leaving cap set would make the next call skip this block and hand out the nil wraps
++            [link->wrap_src release];
++            [link->wrap_dst release];
++            link->wrap_src = nil;
++            link->wrap_dst = nil;
++            free(link->host);
++            link->host = NULL;
++            link->cap  = 0;
++            return false;
++        }
++    }
++    return true;
++}
++
++
++// TOSH_MGPU_PEER_SELF runs the peer hand-off between two logical devices backed by the
++// same GPU (GGML_METAL_DEVICE_LIST=0,0), which needs no bridge: the queues are still
++// separate, so the cross-device ordering is testable on a single card.
++static bool ggml_metal_peer_self(void) {
++    static int val = -1;
++    if (val < 0) {
++        const char * v = getenv("TOSH_MGPU_PEER_SELF");
++        val = (v && v[0] == '1') ? 1 : 0;
++    }
++    return val;
++}
++
++// Direct copy between GPUs in the same Metal peer group.
++static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
++                                     const struct ggml_tensor * src, struct ggml_tensor * dst) {
++#if TARGET_OS_OSX
++    if (@available(macOS 10.15, *)) {
++        id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
++        id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
++        const bool same_dev = dev_src == dev_dst && ggml_metal_peer_self();
++        const uint64_t peer_group = dev_src.peerGroupID;
++        if (!same_dev && (peer_group == 0 || peer_group != dev_dst.peerGroupID)) {
++            return false;
++        }
++
++        struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
++        struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
++        if (bid_src.metal == nil || bid_dst.metal == nil) {
++            return false;
++        }
++        id<MTLBuffer> metal_src = (id<MTLBuffer>) bid_src.metal;
++        id<MTLBuffer> metal_dst = (id<MTLBuffer>) bid_dst.metal;
++
++        const size_t size = ggml_nbytes(src);
++        if (bid_src.offs > metal_src.length || size > metal_src.length - bid_src.offs ||
++            bid_dst.offs > metal_dst.length || size > metal_dst.length - bid_dst.offs) {
++            return false;
++        }
++
++        struct ggml_metal_xdev_link * link = ggml_metal_xdev_link_get(ctx_src, ctx_dst);
++        if (link == NULL) {
++            return false;
++        }
++
++        if (link->peer_src != metal_src) {
++            // Wait before replacing a remote view still used by the last blit.
++            if (link->peer_view != nil && link->seq > 0 &&
++                ![link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000]) {
++                return false;
++            }
++
++            [link->peer_view release];
++            [link->peer_src release];
++            link->peer_view = same_dev ? [metal_src retain]
++                                       : [metal_src newRemoteBufferViewForDevice:dev_dst];
++            link->peer_src  = link->peer_view != nil ? [metal_src retain] : nil;
++            if (link->peer_view == nil) {
++                return false;
++            }
++        }
++
++        const uint64_t seq = ++link->seq;
++        @autoreleasepool {
++            id<MTLCommandBuffer> cmd_src = [ctx_src->queue commandBuffer];
++            ggml_metal_encode_pending_waits(ctx_src, cmd_src);
++            [cmd_src encodeSignalEvent:link->ev_ready value:seq];
++            [cmd_src commit];
++            [ctx_src->cmd_bufs_ext addObject:cmd_src];
++            ctx_src->cmd_buf_last = cmd_src;
++            [cmd_src retain];
++
++            id<MTLCommandBuffer> cmd_dst = [ctx_dst->queue commandBuffer];
++            ggml_metal_encode_pending_waits(ctx_dst, cmd_dst);
++            [cmd_dst encodeWaitForEvent:link->ev_ready value:seq];
++            id<MTLBlitCommandEncoder> encoder = [cmd_dst blitCommandEncoder];
++            [encoder copyFromBuffer:link->peer_view sourceOffset:bid_src.offs
++                           toBuffer:metal_dst destinationOffset:bid_dst.offs size:size];
++            [encoder endEncoding];
++            [cmd_dst encodeSignalEvent:link->ev_done value:seq];
++            [cmd_dst commit];
++            [ctx_dst->cmd_bufs_ext addObject:cmd_dst];
++            ctx_dst->cmd_buf_last = cmd_dst;
++            [cmd_dst retain];
++        }
++
++        ggml_metal_peer_wait_add(ctx_src, link->ev_done, seq);
++
++        if (!link->peer_logged) {
++            // fprintf, not GGML_LOG_INFO, so the confirmation shows at the default
++            // log level like the SIMD-width line. Deduped by peer group across contexts:
++            // a tool that reloads the model per run rebuilds the link every time.
++            static uint64_t logged[8];
++            static int      n_logged = 0;
++
++            bool seen = false;
++            for (int i = 0; i < n_logged; ++i) {
++                seen = seen || logged[i] == peer_group;
++            }
++
++            if (!seen) {
++                fprintf(stderr, same_dev
++                            ? "ggml_metal: peer transfer self-test: %s -> %s (no bridge, peer group %llu)\n"
++                            : "ggml_metal: Infinity Fabric peer transfer enabled: %s -> %s (peer group %llu)\n",
++                        dev_src.name.UTF8String, dev_dst.name.UTF8String,
++                        (unsigned long long) peer_group);
++                if (n_logged < (int) (sizeof(logged)/sizeof(logged[0]))) {
++                    logged[n_logged++] = peer_group;
++                }
++            }
++
++            link->peer_logged = true;
++        }
++        return true;
++    }
++#else
++    GGML_UNUSED(ctx_src);
++    GGML_UNUSED(ctx_dst);
++    GGML_UNUSED(src);
++    GGML_UNUSED(dst);
++#endif
++    return false;
++}
++
++// event-chained hand-off: both blits share one host block and order through
++// MTLSharedEvents, so neither GPU drains and the CPU never blocks
++static _Atomic uint64_t g_xdev_ev = 0, g_xdev_peer = 0, g_xdev_gen = 0;
++
++static void tosh_xdev_report(void) {
++    fprintf(stderr, "TOSH_XDEV  events=%llu  peer=%llu  generic=%llu\n",
++            (unsigned long long) atomic_load(&g_xdev_ev),
++            (unsigned long long) atomic_load(&g_xdev_peer),
++            (unsigned long long) atomic_load(&g_xdev_gen));
++}
++
++static bool ggml_metal_cpy_xdev_events(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
++                                       const struct ggml_tensor * src, struct ggml_tensor * dst,
++                                       bool hold_dst) {
++    struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
++    struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
++    if (bid_src.metal == nil || bid_dst.metal == nil) {
++        return false;
++    }
++
++    const size_t size = ggml_nbytes(src);
++
++    struct ggml_metal_xdev_link * link = ggml_metal_xdev_link_get(ctx_src, ctx_dst);
++    if (link == NULL) {
++        return false;
++    }
++    if (!ggml_metal_xdev_link_reserve(ctx_src, ctx_dst, link, size)) {
++        return false;
++    }
++
++    const uint64_t seq = ++link->seq;
++
++    @autoreleasepool {
++        // reuse the host block only after the destination consumed the last hand-off
++        id<MTLCommandBuffer> cmd_src = ggml_metal_cmd_buf_continue(ctx_src);
++        if (seq > 1) {
++            [cmd_src encodeWaitForEvent:link->ev_done value:seq - 1];
++        }
++        id<MTLBlitCommandEncoder> enc_src = [cmd_src blitCommandEncoder];
++        [enc_src copyFromBuffer:bid_src.metal sourceOffset:bid_src.offs
++                       toBuffer:link->wrap_src destinationOffset:0 size:size];
++        [enc_src endEncoding];
++        [cmd_src encodeSignalEvent:link->ev_ready value:seq];
++        ggml_metal_cmd_buf_end(ctx_src, cmd_src, false);
++
++        id<MTLCommandBuffer> cmd_dst = ggml_metal_cmd_buf_new(ctx_dst);
++        [cmd_dst encodeWaitForEvent:link->ev_ready value:seq];
++        id<MTLBlitCommandEncoder> enc_dst = [cmd_dst blitCommandEncoder];
++        [enc_dst copyFromBuffer:link->wrap_dst sourceOffset:0
++                       toBuffer:bid_dst.metal destinationOffset:bid_dst.offs size:size];
++        [enc_dst endEncoding];
++        [cmd_dst encodeSignalEvent:link->ev_done value:seq];
++        // the signal lands when the blit does, so holding the buffer open does not keep the
++        // source waiting on whatever gets encoded into it afterwards
++        ggml_metal_cmd_buf_end(ctx_dst, cmd_dst, hold_dst);
++    }
++
++    return true;
++}
++
+ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst) {
++    return ggml_metal_cpy_tensor_async_ex(ctx_src, ctx_dst, src, dst, /*prefer_events =*/ false, /*hold_dst =*/ false);
++}
++
++bool ggml_metal_cpy_tensor_async_ex(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst, bool prefer_events, bool hold_dst) {
++    // A Metal blit can't reach a buffer owned by another device, so a multi-GPU layer
++    // hand-off goes through host memory (GGML_METAL_CROSS_STAGING_DISABLE uses the generic copy).
++    if (ctx_src->dev != ctx_dst->dev) {
++        if (getenv("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
++            return false;
++        }
++
++        // both buffers must be private for the cross-device blits
++        static int use_events = -1;
++        if (use_events < 0) {
++            const char * v = getenv("TOSH_MGPU_EVENTS");
++            use_events = (v && v[0] == '1') ? 1 : 0;
++        }
++        // Infinity Fabric peer copy is opt-in until validated on bridged hardware:
++        // a success that silently returns wrong data has no fallback.
++        static int use_peer = -1;
++        if (use_peer < 0) {
++            const char * v = getenv("TOSH_MGPU_PEER");
++            use_peer = (v && v[0] == '1') ? 1 : 0;
++        }
++        ggml_backend_buffer_t ebsrc = src->view_src ? src->view_src->buffer : src->buffer;
++        ggml_backend_buffer_t ebdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
++        // which of the three hand-offs actually runs is not visible otherwise, and the flag
++        // alone does not tell: TOSH_MGPU_XDEV_COUNT reports the tally at exit
++        static int count = -1;
++        if (count < 0) {
++            count = getenv("TOSH_MGPU_XDEV_COUNT") != NULL;
++            if (count) {
++                atexit(tosh_xdev_report);
++            }
++        }
++
++        if (!ggml_metal_buffer_is_shared(ebsrc->context) &&
++            !ggml_metal_buffer_is_shared(ebdst->context)) {
++            if (prefer_events && use_events && ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst, hold_dst)) {
++                atomic_fetch_add(&g_xdev_ev, 1);
++                return true;
++            }
++            if (use_peer && ggml_metal_cpy_xdev_peer(ctx_src, ctx_dst, src, dst)) {
++                atomic_fetch_add(&g_xdev_peer, 1);
++                return true;
++            }
++            if (use_events && ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst, hold_dst)) {
++                atomic_fetch_add(&g_xdev_ev, 1);
++                return true;
++            }
++        }
++        atomic_fetch_add(&g_xdev_gen, 1);
++        // drain both GPUs: the source before reading it, the destination before
++        // overwriting an input its in-flight graph may still be consuming
++        ggml_metal_synchronize(ctx_src);
++        ggml_metal_synchronize(ctx_dst);
++
++        ggml_backend_buffer_t bsrc = src->view_src ? src->view_src->buffer : src->buffer;
++        ggml_backend_buffer_t bdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
++        ggml_metal_buffer_t buf_src = (ggml_metal_buffer_t) bsrc->context;
++        ggml_metal_buffer_t buf_dst = (ggml_metal_buffer_t) bdst->context;
++
++        const size_t size = ggml_nbytes(src);
++        void * stage = malloc(size);
++        if (!stage) {
++            return false;
++        }
++        ggml_metal_buffer_get_tensor(buf_src, src, stage, 0, size);
++        ggml_metal_buffer_set_tensor(buf_dst, dst, stage, 0, size);
++        free(stage);
++        return true;
++    }
++
+     @autoreleasepool {
+         struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
+@@ -934,8 +1332,9 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
+ 
+         // queue the copy operation into the Metal context
+         // this will be queued at the end, after any currently ongoing GPU operations
+-        id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx_src->dev);
++        id<MTLCommandQueue> queue = ctx_src->queue;
+         id<MTLCommandBuffer> cmd_buf = [queue commandBuffer];
++        ggml_metal_encode_pending_waits(ctx_src, cmd_buf);
+         id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+ 
+         [encoder copyFromBuffer:bid_src.metal
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index c71e9b0a1..1e0d16d50 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -647,7 +647,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_ssm_scan(ggml_me
+     char base[256];
+     char name[256];
+ 
+-    const int nsg = (ne00 + 31)/32;
++    const int nw  = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
++    const int nsg = (ne00 + nw - 1)/nw;
+ 
+     snprintf(base, 256, "kernel_ssm_scan_%s%s", ggml_type_name(op->src[0]->type), tail ? "_tail" : "");
+     snprintf(name, 256, "%s_nsg=%d", base, nsg);
+@@ -661,8 +662,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_ssm_scan(ggml_me
+     // - sgptg * NW floats for partial sums (nsg * 32)
+     // - sgptg floats for shared_x_dt (nsg)
+     // - sgptg floats for shared_dA (nsg)
+-    // Total: nsg * (32 + 2) floats
+-    res.smem = GGML_PAD((32 + 2)*sizeof(float)*nsg, 16);
++    // Total: nsg * (NW + 2) floats
++    // per simdgroup: NW floats of partial sums plus one x_dt and one dA
++    res.smem = GGML_PAD((nw + 2)*sizeof(float)*nsg, 16);
+ 
+     return res;
+ }
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 4b1d5a44d..a680b7694 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -5,7 +5,6 @@
+ #import "ggml-impl.h"
+ #import "ggml-backend-impl.h"
+ #import "ggml-metal-impl.h"
+-#import "ggml-metal-common.h"
+ 
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+ #import "tosh-moe.h"
+@@ -13,6 +12,7 @@
+ enum { TOSH_MOE_OFF = 0 };
+ static inline int tosh_moe_mode(void) { return TOSH_MOE_OFF; }
+ #endif
++#import "ggml-metal-common.h"
+ 
+ #include <Foundation/Foundation.h>
+ 
+@@ -911,10 +911,6 @@ void ggml_metal_encoder_debug_group_pop (ggml_metal_encoder_t encoder) {
+ }
+ 
+ void ggml_metal_encoder_set_pipeline(ggml_metal_encoder_t encoder, struct ggml_metal_pipeline_with_params pipeline) {
+-    if (!pipeline.pipeline) {
+-        GGML_ABORT("%s: nil Metal pipeline (missing kernel; see compile_pipeline log above)\n", __func__);
+-    }
+-
+     [encoder->obj setComputePipelineState:pipeline.pipeline->obj];
+ }
+ 
+@@ -927,9 +923,6 @@ void ggml_metal_encoder_set_buffer(ggml_metal_encoder_t encoder, struct ggml_met
+ }
+ 
+ void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder, size_t size, int idx) {
+-    // ref: https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/setthreadgroupmemorylength(_:index:)
+-    GGML_ASSERT(size % 16 == 0);
+-
+     [encoder->obj setThreadgroupMemoryLength:size atIndex:idx];
+ }
+ 
+@@ -1152,7 +1145,6 @@ static const struct {
+ #undef DEV
+ };
+ 
+-
+ // tensor split blocks the main thread on the queue's in-flight command buffer limit (64 by
+ // default), so allow raising it: TOSH_MTL_QUEUE_DEPTH
+ // macOS can hand out an integrated iGPU (isLowPower, ~1 GB) as the system
+@@ -1182,6 +1174,7 @@ static id<MTLDevice> ggml_metal_device_default_discrete(void) {
+     return def;
+ }
+ 
++
+ static id<MTLCommandQueue> ggml_metal_new_queue(id<MTLDevice> device) {
+     const char * s = getenv("TOSH_MTL_QUEUE_DEPTH");
+     const int depth = s ? atoi(s) : 0;
+@@ -1633,33 +1626,33 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
+         dev->library = NULL;
+ 
+         if (dev->stage_buf) {
+-        [dev->stage_buf release];
+-        dev->stage_buf = nil;
+-    }
++            [dev->stage_buf release];
++            dev->stage_buf = nil;
++        }
+ 
+-    ggml_metal_device_upload_drain(dev);
+-    for (int i = 0; i < 4; i++) {
+-        [dev->stage_set_bufs[i] release];
+-        dev->stage_set_bufs[i] = nil;
+-    }
++        ggml_metal_device_upload_drain(dev);
++        for (int i = 0; i < 4; i++) {
++            [dev->stage_set_bufs[i] release];
++            dev->stage_set_bufs[i] = nil;
++        }
+ 
+-    if (dev->stage_lock) {
+-        [dev->stage_lock release];
+-        dev->stage_lock = nil;
+-    }
++        if (dev->stage_lock) {
++            [dev->stage_lock release];
++            dev->stage_lock = nil;
++        }
+ 
+-    for (int i = 0; i < dev->n_host_wraps; i++) {
+-        [dev->host_wraps[i].buf release];
+-    }
+-    dev->n_host_wraps = 0;
+-    dev->host_wrap_bytes = 0;
++        for (int i = 0; i < dev->n_host_wraps; i++) {
++            [dev->host_wraps[i].buf release];
++        }
++        dev->n_host_wraps = 0;
++        dev->host_wrap_bytes = 0;
+ 
+-    if (dev->wrap_lock) {
+-        [dev->wrap_lock release];
+-        dev->wrap_lock = nil;
+-    }
++        if (dev->wrap_lock) {
++            [dev->wrap_lock release];
++            dev->wrap_lock = nil;
++        }
+ 
+-    if (dev->mtl_queue) {
++        if (dev->mtl_queue) {
+             [dev->mtl_queue release];
+             dev->mtl_queue = nil;
+         }
+@@ -2319,24 +2312,104 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                 ggml_is_contiguous_rows(op->src[2]) &&
+                 ggml_is_contiguous_rows(op->src[3]);
+         case GGML_OP_SSM_SCAN:
+-            return has_simdgroup_reduction;
++            // wave64: NW, nsg and the shmem layout follow the real width.
++            return has_simdgroup_reduction || wave64_decode;
+         case GGML_OP_SSM_CONV:
+-            return has_simdgroup_reduction;
++            // wave64: per-thread serial dot, no simdgroup reduction needed.
++            return has_simdgroup_reduction || wave64_decode;
+         case GGML_OP_RWKV_WKV6:
+         case GGML_OP_RWKV_WKV7:
+             return true;
+         case GGML_OP_GATED_DELTA_NET:
+-            return has_simdgroup_reduction && op->src[2]->ne[0] % 32 == 0;
++            // wave64: the kernel reduces within 32-lane halves (gdn_sum32).
++            return (has_simdgroup_reduction || wave64_decode) && op->src[2]->ne[0] % 32 == 0;
++        case GGML_OP_TURBO_WHT:
++            // 128-element group WHT rotation; head_dim must be a multiple of 128.
++            return op->src[0]->type == GGML_TYPE_F32 && op->src[0]->ne[0] % 128 == 0;
+         case GGML_OP_SOLVE_TRI:
+             return has_simdgroup_reduction && op->src[0]->type == GGML_TYPE_F32;
+-        case GGML_OP_MUL_MAT:
+-            return ggml_metal_supports_mul_mat_op(
+-                    has_simdgroup_reduction, op, true,
+-                    ggml_metal_op_mul_mat_use_mm(op, has_simdgroup_mm));
+-        case GGML_OP_MUL_MAT_ID:
+-            return ggml_metal_supports_mul_mat_op(
+-                    has_simdgroup_reduction, op, false,
+-                    ggml_metal_op_mul_mat_id_use_mm(op, has_simdgroup_mm));
++        case GGML_OP_MUL_MAT: {
++            if (op->src[0]->type == GGML_TYPE_NVFP4 || ggml_metal_type_is_ternary(op->src[0]->type)) {
++                return false;
++            }
++            if (has_simdgroup_reduction) {
++                return ggml_metal_supports_mul_mat_op(
++                        has_simdgroup_reduction, op, true,
++                        ggml_metal_op_mul_mat_use_mm(op, has_simdgroup_mm));
++            }
++            // wave64 prefill: the manual tiled mul_mm (batched). Mirror the dispatch check.
++            const bool prefill =
++                use_mm_manual &&
++                !ggml_is_transposed(op->src[0]) && !ggml_is_transposed(op->src[1]) &&
++                op->src[0]->ne[0] >= 64 && op->src[1]->ne[1] > 8;
++            // wave64 decode (experimental, opt-in): the width-parameterized mat-vec kernels.
++            const bool decode =
++                wave64_decode && op->src[0]->ne[0] >= 32 &&
++                (op->src[0]->type == GGML_TYPE_F16 ||
++                 op->src[0]->type == GGML_TYPE_F32 ||
++                 op->src[0]->type == GGML_TYPE_BF16 ||
++                 op->src[0]->type == GGML_TYPE_Q8_0 ||
++                 op->src[0]->type == GGML_TYPE_Q4_K ||
++                 op->src[0]->type == GGML_TYPE_Q5_K ||
++                 op->src[0]->type == GGML_TYPE_Q6_K ||
++                 op->src[0]->type == GGML_TYPE_Q2_K ||
++                 op->src[0]->type == GGML_TYPE_Q3_K ||
++                 op->src[0]->type == GGML_TYPE_MXFP4 ||
++                 op->src[0]->type == GGML_TYPE_IQ2_XXS ||
++                 op->src[0]->type == GGML_TYPE_IQ2_XS ||
++                 op->src[0]->type == GGML_TYPE_IQ3_XXS ||
++                 op->src[0]->type == GGML_TYPE_IQ3_S ||
++                 op->src[0]->type == GGML_TYPE_IQ2_S ||
++                 op->src[0]->type == GGML_TYPE_IQ1_S ||
++                 op->src[0]->type == GGML_TYPE_IQ1_M ||
++                 op->src[0]->type == GGML_TYPE_IQ4_NL ||
++                 op->src[0]->type == GGML_TYPE_IQ4_XS ||
++                 op->src[0]->type == GGML_TYPE_Q4_0 ||
++                 op->src[0]->type == GGML_TYPE_Q4_1 ||
++                 op->src[0]->type == GGML_TYPE_Q5_0 ||
++                 op->src[0]->type == GGML_TYPE_Q5_1 ||
++                 op->src[0]->type == GGML_TYPE_Q1_0 ||
++                 op->src[0]->type == GGML_TYPE_Q2_0);
++            return prefill || decode;
++        }
++        case GGML_OP_MUL_MAT_ID: {
++            if (op->src[0]->type == GGML_TYPE_NVFP4 || ggml_metal_type_is_ternary(op->src[0]->type)) {
++                return false;
++            }
++            if (has_simdgroup_reduction) {
++                return ggml_metal_supports_mul_mat_op(
++                        has_simdgroup_reduction, op, false,
++                        ggml_metal_op_mul_mat_id_use_mm(op, has_simdgroup_mm));
++            }
++            // wave64: mul_mv_id reuses the width-parameterized decode impls and the
++            // manual mm_id prefill uses virtual 32-wide indices; both run on the GPU.
++            return wave64_decode && op->src[0]->ne[0] >= 32 &&
++                (op->src[0]->type == GGML_TYPE_F16 ||
++                 op->src[0]->type == GGML_TYPE_F32 ||
++                 op->src[0]->type == GGML_TYPE_BF16 ||
++                 op->src[0]->type == GGML_TYPE_Q8_0 ||
++                 op->src[0]->type == GGML_TYPE_Q4_K ||
++                 op->src[0]->type == GGML_TYPE_Q5_K ||
++                 op->src[0]->type == GGML_TYPE_Q6_K ||
++                 op->src[0]->type == GGML_TYPE_Q2_K ||
++                 op->src[0]->type == GGML_TYPE_Q3_K ||
++                 op->src[0]->type == GGML_TYPE_MXFP4 ||
++                 op->src[0]->type == GGML_TYPE_IQ2_XXS ||
++                 op->src[0]->type == GGML_TYPE_IQ2_XS ||
++                 op->src[0]->type == GGML_TYPE_IQ3_XXS ||
++                 op->src[0]->type == GGML_TYPE_IQ3_S ||
++                 op->src[0]->type == GGML_TYPE_IQ2_S ||
++                 op->src[0]->type == GGML_TYPE_IQ1_S ||
++                 op->src[0]->type == GGML_TYPE_IQ1_M ||
++                 op->src[0]->type == GGML_TYPE_IQ4_NL ||
++                 op->src[0]->type == GGML_TYPE_IQ4_XS ||
++                 op->src[0]->type == GGML_TYPE_Q4_0 ||
++                 op->src[0]->type == GGML_TYPE_Q4_1 ||
++                 op->src[0]->type == GGML_TYPE_Q5_0 ||
++                 op->src[0]->type == GGML_TYPE_Q5_1 ||
++                 op->src[0]->type == GGML_TYPE_Q1_0 ||
++                 op->src[0]->type == GGML_TYPE_Q2_0);
++        }
+         case GGML_OP_SET:
+         case GGML_OP_CPY:
+         case GGML_OP_DUP:
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index 354545a36..0475aaa25 100644
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -464,6 +464,45 @@ typedef struct {
+     int32_t  has_mask;  // 0 for bidirectional attention (vision towers), which has no mask
+ } ggml_metal_kargs_flash_attn_ext_vec;
+ 
++// the AMD kernels take their own copy: a field added to the upstream vec struct changes the
++// constant buffer layout and with it the code the Metal compiler emits for them
++typedef struct {
++    int32_t  ne01;
++    int32_t  ne02;
++    int32_t  ne03;
++    uint64_t nb01;
++    uint64_t nb02;
++    uint64_t nb03;
++    int32_t  ne11;
++    int32_t  ne_12_2; // assume K and V are same shape
++    int32_t  ne_12_3;
++    int32_t  ns10;
++    uint64_t nb11;
++    uint64_t nb12;
++    uint64_t nb13;
++    int32_t  ns20;
++    uint64_t nb21;
++    uint64_t nb22;
++    uint64_t nb23;
++    int32_t  ne31;
++    int32_t  ne32;
++    int32_t  ne33;
++    uint64_t nb31;
++    uint64_t nb32;
++    uint64_t nb33;
++    int32_t  ne1;
++    int32_t  ne2;
++    int32_t  ne3;
++    float    scale;
++    float    max_bias;
++    float    m0;
++    float    m1;
++    int32_t  n_head_log2;
++    float    logit_softcap;
++    int32_t  has_sinks; // read by the AMD kernels; upstream uses a function constant
++    int32_t  has_mask;  // 0 for bidirectional attention (vision towers), which has no mask
++} ggml_metal_kargs_flash_attn_ext_amd;
++
+ typedef struct {
+     int32_t  ne30;
+     int32_t  ne31;
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 84f0aeee0..b0d29ff37 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -679,12 +679,43 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+     return n_fuse;
+ }
+ 
++
++// TOSH_OPPROF=1: CPU time spent encoding each op kind, to compare dispatch cost across engines
++#include <time.h>
++static uint64_t g_opprof_ns[GGML_OP_COUNT];
++static uint64_t g_opprof_n [GGML_OP_COUNT];
++static bool tosh_opprof_on(void) {
++    static int v = -1;
++    if (v < 0) { v = getenv("TOSH_OPPROF") != nullptr; }
++    return v;
++}
++static void tosh_opprof_dump(void) {
++    if (!tosh_opprof_on()) return;
++    for (int i = 0; i < GGML_OP_COUNT; i++) {
++        if (g_opprof_n[i] == 0) continue;
++        fprintf(stderr, "TOSH_OPPROF %-22s n=%-7llu total_us=%-10.1f us/op=%.3f\n",
++                ggml_op_name((enum ggml_op) i),
++                (unsigned long long) g_opprof_n[i],
++                g_opprof_ns[i]/1e3, (double) g_opprof_ns[i]/g_opprof_n[i]/1e3);
++    }
++}
++
+ int ggml_metal_op_encode(ggml_metal_op_t ctx, int idx) {
+     if (ctx->use_capture) {
+         ggml_metal_encoder_debug_group_push(ctx->enc, ggml_op_desc(ctx->node(idx)));
+     }
+ 
++    static bool reg = false;
++    if (!reg && tosh_opprof_on()) { reg = true; atexit(tosh_opprof_dump); }
++    const enum ggml_op prof_op = ctx->node(idx)->op;
++    const uint64_t prof_t0 = tosh_opprof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++
+     int res = ggml_metal_op_encode_impl(ctx, idx);
++
++    if (prof_t0) {
++        g_opprof_ns[prof_op] += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - prof_t0;
++        g_opprof_n [prof_op] += 1;
++    }
+     if (idx + res > ctx->n_nodes()) {
+         GGML_ABORT("fusion error: nodes spanning multiple encoders have been fused. this indicates a bug in the fusion logic %s",
+                 "https://github.com/ggml-org/llama.cpp/pull/14849");
+@@ -1126,7 +1157,7 @@ int ggml_metal_op_sum(ggml_metal_op_t ctx, int idx) {
+     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
+ 
+-    ggml_metal_encoder_set_threadgroup_memory_size(enc, GGML_PAD(nsg * sizeof(float), 16), 0);
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, nsg * sizeof(float), 0);
+ 
+     ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, nth, 1, 1);
+ 
+@@ -2999,8 +3030,9 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+ 
+-        ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + r0ptg - 1)/r0ptg), ((ne11 + r1ptg - 1)/r1ptg), ne12*ne13, 32, nsg, 1);
+-    } else if (ggml_metal_op_mul_mat_use_mm(op, props_dev->has_simdgroup_mm)) {
++        ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + r0ptg - 1)/r0ptg), ((ne11 + r1ptg - 1)/r1ptg), ne12*ne13, props_dev->simd_width, nsg, 1);
++    // the manual tiled kernels give AMD the same matrix path Apple gets from simdgroup_mm
++    } else if (ggml_metal_op_mul_mat_use_mm(op, props_dev->has_simdgroup_mm || props_dev->use_mm_manual)) {
+         //GGML_LOG_INFO("matrix: ne00 = %6d, ne01 = %6d, ne02 = %6d, ne11 = %6d, ne12 = %6d\n", ne00, ne01, ne02, ne11, ne12);
+ 
+         // some Metal matrix data types require aligned pointers
+@@ -3187,8 +3219,211 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+ 
+     const uint32_t r2 = 1;
+     const uint32_t r3 = 1;
++    int32_t ne02_run = ne02;
++
++    // A cached bank: pick the experts and pull in what is missing before the matmul reads the
++    // slots. Both run on this encoder, so the routing never goes back to the host.
++    // A bank handed over whole, because the batch was too wide for the cache: copy it to the
++    // scratch first. Reading experts scattered from host memory is what makes prefill crawl.
++    // Only banks of small rows gain: those are read scattered from host and the copy makes them
++    // contiguous. A bank of few, large rows already reads well and the copy is pure extra traffic.
++    static const size_t stage_row_max = []() {
++        const char * s = getenv("TOSH_MOE_STAGE_ROW_KIB");
++        return (size_t) (s ? atoi(s) : 1024) << 10;
++    }();
++
++    if (const ggml_tensor * stage = (const ggml_tensor *) (tosh_moe_slots_of(op->src[0]) ? tosh_moe_stage() : nullptr)) {
++        if (ggml_nbytes(op->src[0]) <= ggml_nbytes(stage) && nb02 <= stage_row_max) {
++            const uint32_t n_u4 = (uint32_t) (ggml_nbytes(op->src[0])/16);
++
++            auto ps = ggml_metal_library_compile_pipeline(lib, "tosh_moe_stage", "tosh_moe_stage", nullptr);
++
++            ggml_metal_encoder_set_pipeline(enc, ps);
++            ggml_metal_encoder_set_bytes (enc, (void *) &n_u4, sizeof(n_u4), 0);
++            ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(stage), 1);
++            ggml_metal_encoder_set_buffer(enc, bid_src0, 2);
++            ggml_metal_encoder_dispatch_threadgroups(enc, 512, 1, 1, 256, 1, 1);
++
++            ggml_metal_op_concurrency_reset(ctx);
++
++            bid_src0 = ggml_metal_get_buffer_id(stage);
++        }
++    }
++
++    ggml_metal_buffer_id full_cold_bid = {};
++    bool has_full_cold = false;
++    ggml_metal_buffer_id staged_ids_bid = {};
++    bool has_staged_ids = false;
++    {
++        std::lock_guard<std::mutex> lock(g_tosh_moe_mutex);
++        const auto it_full = g_tosh_moe_full_cold.find(op->src[0]);
++        if (it_full != g_tosh_moe_full_cold.end()) {
++            full_cold_bid = it_full->second;
++            has_full_cold = true;
++        }
++        const auto it_ids = g_tosh_moe_staged_ids.find(op->src[0]);
++        if (it_ids != g_tosh_moe_staged_ids.end()) {
++            staged_ids_bid = it_ids->second;
++            has_staged_ids = true;
++        }
++    }
++
++    if (has_full_cold) {
++        const ggml_tensor * stage = (const ggml_tensor *) tosh_moe_stage();
++        const ggml_tensor * state = (const ggml_tensor *) tosh_moe_state_of(op->src[0]);
++        const int n_expert = tosh_moe_experts_of(op->src[0]);
++        const int n_slots = (int) ne02;
++        const int n_fixed = tosh_moe_fixed_of(op->src[0]);
++        const int max_fetch = n_slots - n_fixed;
++        GGML_ASSERT(stage && state && n_expert > n_slots && nb02 % 16 == 0);
++        // A batch routes to a fraction of the bank, so rebuilding every row is most of the
++        // traffic of this path. Mark the routed ones and let the assemble skip the rest; a row
++        // nothing routes to is never read, so leaving it stale is safe.
++        static const bool compact = getenv("TOSH_MOE_COMPACT_ASSEMBLE_DISABLE") == nullptr;
++        ggml_metal_buffer_id ab = ggml_metal_get_buffer_id(state);
++        ab.offs += tosh_moe_off_active(n_expert, n_slots, max_fetch)*sizeof(int32_t);
++        if (compact) {
++            struct { int32_t n_used; int32_t n_tokens; int32_t stride; int32_t n_expert; } ma = {
++                (int32_t) ne20, (int32_t) ne21, (int32_t) (nb21/sizeof(int32_t)), n_expert
++            };
++            auto pm = ggml_metal_library_compile_pipeline(lib, "tosh_moe_mark_active", "tosh_moe_mark_active", nullptr);
++            ggml_metal_encoder_set_pipeline(enc, pm);
++            ggml_metal_encoder_set_bytes (enc, &ma, sizeof(ma), 0);
++            ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(op->src[2]), 1);
++            ggml_metal_encoder_set_buffer(enc, ab, 2);
++            ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, 256, 1, 1);
++            ggml_metal_op_concurrency_reset(ctx);
++        }
++        struct { uint32_t row_u4; uint32_t n_expert; int32_t use_active; } args = {
++            (uint32_t) (nb02/16), (uint32_t) n_expert, compact ? 1 : 0
++        };
++        auto ps = ggml_metal_library_compile_pipeline(lib, "tosh_moe_assemble", "tosh_moe_assemble", nullptr);
++        ggml_metal_buffer_id sb = ggml_metal_get_buffer_id(state);
++        ggml_metal_encoder_set_pipeline(enc, ps);
++        ggml_metal_encoder_set_bytes (enc, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(stage), 1);
++        ggml_metal_encoder_set_buffer(enc, full_cold_bid, 2);
++        ggml_metal_encoder_set_buffer(enc, bid_src0, 3);
++        sb.offs = ggml_metal_get_buffer_id(state).offs +
++            tosh_moe_off_slot_for_id(n_expert, n_slots, max_fetch)*sizeof(int32_t);
++        ggml_metal_encoder_set_buffer(enc, sb, 4);
++        sb.offs = ggml_metal_get_buffer_id(state).offs +
++            tosh_moe_off_cold_for_id(n_expert, n_slots, max_fetch)*sizeof(int32_t);
++        ggml_metal_encoder_set_buffer(enc, sb, 5);
++        ggml_metal_encoder_set_buffer(enc, ab, 6);
++        const uint64_t total = (uint64_t) args.row_u4*args.n_expert;
++        ggml_metal_encoder_dispatch_threadgroups(enc, (total + 255)/256, 1, 1, 256, 1, 1);
++        ggml_metal_op_concurrency_reset(ctx);
++        bid_src0 = ggml_metal_get_buffer_id(stage);
++        ne02_run = n_expert;
++    }
++
++    if (has_full_cold) {
++        // Full staging preserves the original global expert ids.
++    } else if (has_staged_ids) {
++        // The bounded host path has already copied only the selected expert rows into these
++        // private slots. Its compact shared ID buffer names the physical slots directly.
++        bid_src2 = staged_ids_bid;
++    } else if (const ggml_tensor * state = (const ggml_tensor *) tosh_moe_state_of(op->src[0])) {
++        // the graph only routes a batch here when its remapped ids fit the state
++        const int registered_experts = tosh_moe_experts_of(op->src[0]);
++        GGML_ASSERT(registered_experts > 0);
++        GGML_ASSERT((int64_t) (ne21 - 1)*(int64_t) (nb21/sizeof(int32_t)) + ne20 <=
++                tosh_moe_ids_room(registered_experts));
++        const ggml_tensor * host = (const ggml_tensor *) tosh_moe_ram_of(op->src[0]);
++
++        const int n_expert  = registered_experts;
++        const int n_slots   = (int) ne02;
++        const int n_fixed   = tosh_moe_fixed_of(op->src[0]);
++        const int max_fetch = n_fixed > 0 ? n_slots - n_fixed : n_slots;
++
++        const ggml_metal_buffer_id bid_state = ggml_metal_get_buffer_id(state);
++        const size_t i32 = sizeof(int32_t);
++
++        if (tosh_moe_should_route(op->src[0], idx)) {
++            const int n_fixed = tosh_moe_fixed_of(op->src[0]);
++            ggml_metal_kargs_moe_lru la = {
++                /*.n_used   =*/ (int32_t) ne20,
++                /*.n_tokens =*/ (int32_t) ne21,
++                /*.stride   =*/ (int32_t) (nb21/sizeof(int32_t)),
++                /*.n_expert =*/ n_expert,
++                /*.n_slots  =*/ n_slots,
++                /*.n_fixed  =*/ n_fixed,
++                /*.max_fetch=*/ max_fetch,
++            };
++
++            auto pl = ggml_metal_library_compile_pipeline(lib, "tosh_moe_lru", "tosh_moe_lru", nullptr);
++
++            ggml_metal_encoder_set_pipeline(enc, pl);
++            ggml_metal_encoder_set_bytes (enc, &la, sizeof(la), 0);
++            ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(op->src[2]), 1);
++            ggml_metal_buffer_id b = bid_state;
++            b.offs = bid_state.offs + tosh_moe_off_slot_for_id(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 2);
++            b.offs = bid_state.offs + tosh_moe_off_id_of_slot(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 3);
++            b.offs = bid_state.offs + tosh_moe_off_usage(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 4);
++            b.offs = bid_state.offs + tosh_moe_off_step(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 5);
++            b.offs = bid_state.offs + tosh_moe_off_evict(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 6);
++            b.offs = bid_state.offs + tosh_moe_off_src(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 7);
++            b.offs = bid_state.offs + tosh_moe_off_n_indices(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 8);
++            b.offs = bid_state.offs + tosh_moe_off_ids(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 9);
++            b.offs = bid_state.offs + tosh_moe_off_cold_for_id(n_expert, n_slots, max_fetch)*i32;
++            ggml_metal_encoder_set_buffer(enc, b, 10);
++            ggml_metal_encoder_set_threadgroup_memory_size(enc, (2*n_expert + 512)*i32, 0);
++            ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, 256, 1, 1);
++
++            ggml_metal_op_concurrency_reset(ctx);
++        }
++
++        // a whole expert is megabytes: one threadgroup per row leaves the device idle
++        static const int n_chunks = []() {
++            const char * s = getenv("TOSH_MOE_FETCH_CHUNKS");
++            const int v = s ? atoi(s) : 16;
++            return v > 0 ? v : 1;
++        }();
+ 
+-    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm)) {
++        ggml_metal_kargs_moe_fetch fa = {
++            /*.row_u4    =*/ (uint32_t) (nb02/16),
++            /*.max_fetch =*/ max_fetch,
++            /*.n_chunks  =*/ n_chunks,
++        };
++
++        auto pf = ggml_metal_library_compile_pipeline(lib, "tosh_moe_fetch", "tosh_moe_fetch", nullptr);
++
++        ggml_metal_buffer_id b = bid_state;
++        ggml_metal_encoder_set_pipeline(enc, pf);
++        ggml_metal_encoder_set_bytes (enc, &fa, sizeof(fa), 0);
++        ggml_metal_encoder_set_buffer(enc, bid_src0, 1);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_host_buffer_id(ctx->dev, host), 2);
++        b.offs = bid_state.offs + tosh_moe_off_evict(n_expert, n_slots, max_fetch)*i32;
++        ggml_metal_encoder_set_buffer(enc, b, 3);
++        b.offs = bid_state.offs + tosh_moe_off_src(n_expert, n_slots, max_fetch)*i32;
++        ggml_metal_encoder_set_buffer(enc, b, 4);
++        b.offs = bid_state.offs + tosh_moe_off_n_indices(n_expert, n_slots, max_fetch)*i32;
++        ggml_metal_encoder_set_buffer(enc, b, 5);
++        ggml_metal_encoder_dispatch_threadgroups(enc, max_fetch*n_chunks, 1, 1, 256, 1, 1);
++
++        ggml_metal_op_concurrency_reset(ctx);
++
++        static const bool raw_ids = getenv("TOSH_MOE_RAW_IDS") != nullptr;
++        if (!raw_ids) {
++            bid_src2 = bid_state;
++            bid_src2.offs = bid_state.offs + tosh_moe_off_ids(n_expert, n_slots, max_fetch)*i32;
++        }
++    }
++
++    // escape hatch: revert wave64 MoE prefill to the mat-vec route
++    const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
++        getenv("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
++
++    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok))) {
+         // some Metal matrix data types require aligned pointers
+         // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
+         //switch (op->src[0]->type) {
+@@ -3821,7 +4056,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
+         !has_bias && !has_scap) {
+ 
+-        ggml_metal_kargs_flash_attn_ext_vec args = {
++        ggml_metal_kargs_flash_attn_ext_amd args = {
+             /*.ne01          =*/ ne01,
+             /*.ne02          =*/ ne02,
+             /*.ne03          =*/ ne03,
+diff --git a/ggml/src/ggml-metal/kernels/fa.metal b/ggml/src/ggml-metal/kernels/fa.metal
+index 027b4ae8a..31a9c39a5 100644
+--- a/ggml/src/ggml-metal/kernels/fa.metal
++++ b/ggml/src/ggml-metal/kernels/fa.metal
+@@ -2460,7 +2460,7 @@ template<
+     typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &),
+     short NW = 32, short NWG = 1, short SUBWP = 0, short DVP = 0>
+ kernel void kernel_flash_attn_ext_vec_amd(
+-        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
++        constant ggml_metal_kargs_flash_attn_ext_amd & args [[buffer(0)]],
+         device const char * q     [[buffer(1)]],
+         device const char * k     [[buffer(2)]],
+         device const char * v     [[buffer(3)]],
+@@ -2877,7 +2877,7 @@ template<
+     typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &),
+     short NW = 32, short DVP = 0>
+ kernel void kernel_flash_attn_ext_tile_amd(
+-        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
++        constant ggml_metal_kargs_flash_attn_ext_amd & args [[buffer(0)]],
+         device const char * q     [[buffer(1)]],
+         device const char * k     [[buffer(2)]],
+         device const char * v     [[buffer(3)]],
+@@ -3186,7 +3186,7 @@ template<
+     typename k_t, short NKK, void (*deq_k)(device const k_t *, short, thread float4 &),
+     typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &)>
+ kernel void kernel_flash_attn_ext_pf_amd(
+-        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
++        constant ggml_metal_kargs_flash_attn_ext_amd & args [[buffer(0)]],
+         device const char * q     [[buffer(1)]],
+         device const char * k     [[buffer(2)]],
+         device const char * v     [[buffer(3)]],
+diff --git a/ggml/src/ggml-metal/kernels/fa_w64.metal b/ggml/src/ggml-metal/kernels/fa_w64.metal
+index a7bc5d29a..444776226 100644
+--- a/ggml/src/ggml-metal/kernels/fa_w64.metal
++++ b/ggml/src/ggml-metal/kernels/fa_w64.metal
+@@ -13,7 +13,7 @@ template<
+     typename k_t, short NKK, void (*deq_k)(device const k_t *, short, thread float4 &),
+     typename v_t, short NKV, void (*deq_v)(device const v_t *, short, thread float4 &)>
+ kernel void kernel_flash_attn_ext_pf_amd_w64(
+-        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
++        constant ggml_metal_kargs_flash_attn_ext_amd & args [[buffer(0)]],
+         device const char * q     [[buffer(1)]],
+         device const char * k     [[buffer(2)]],
+         device const char * v     [[buffer(3)]],
+diff --git a/ggml/src/ggml-metal/kernels/tosh_moe.metal b/ggml/src/ggml-metal/kernels/tosh_moe.metal
+index 3af62d3bf..97c8427e2 100644
+--- a/ggml/src/ggml-metal/kernels/tosh_moe.metal
++++ b/ggml/src/ggml-metal/kernels/tosh_moe.metal
+@@ -217,6 +217,7 @@ kernel void tosh_moe_stage(
+ struct tosh_assemble_args {
+     uint32_t row_u4;
+     uint32_t n_expert;
++    int32_t  use_active;
+ };
+ 
+ kernel void tosh_moe_assemble(
+@@ -226,13 +227,48 @@ kernel void tosh_moe_assemble(
+         device const uint4          * slots       [[buffer(3)]],
+         device const int32_t        * slot_for_id [[buffer(4)]],
+         device const int32_t        * cold_for_id [[buffer(5)]],
++        device const int32_t        * active      [[buffer(6)]],
+         uint gid [[thread_position_in_grid]]) {
+     const uint64_t total = (uint64_t) args.n_expert*args.row_u4;
+     if ((uint64_t) gid >= total) return;
+     const uint32_t expert = gid/args.row_u4;
++    // A batch routes to far fewer experts than the bank holds, and a row nothing routes to is
++    // never read: leaving it stale costs nothing and skipping it is most of the traffic.
++    if (args.use_active != 0 && active[expert] == 0) return;
+     const uint32_t col = gid - expert*args.row_u4;
+     const int32_t slot = slot_for_id[expert];
+     const int32_t ci = cold_for_id[expert];
+     dst[gid] = slot >= 0 ? slots[(uint64_t) slot*args.row_u4 + col]
+                          : cold[(uint64_t) ci*args.row_u4 + col];
+ }
++
++// Marks the experts one batch routes to, so the assemble can skip the rest.
++struct tosh_mark_args {
++    int32_t n_used;
++    int32_t n_tokens;
++    int32_t stride;
++    int32_t n_expert;
++};
++
++// One threadgroup: the clear has to be visible to the marking, and a barrier only spans a
++// threadgroup. The work is a few thousand ids, so one is plenty.
++kernel void tosh_moe_mark_active(
++        constant tosh_mark_args & args   [[buffer(0)]],
++        device const int32_t    * ids    [[buffer(1)]],
++        device       int32_t    * active [[buffer(2)]],
++        uint tid [[thread_position_in_threadgroup]],
++        uint ntg [[threads_per_threadgroup]]) {
++    for (uint e = tid; e < (uint) args.n_expert; e += ntg) {
++        active[e] = 0;
++    }
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++    const uint n_active = (uint) (args.n_used*args.n_tokens);
++    for (uint i = tid; i < n_active; i += ntg) {
++        const uint t = i / (uint) args.n_used;
++        const uint k = i % (uint) args.n_used;
++        const int32_t e = ids[t*(uint) args.stride + k];
++        if (e >= 0 && e < args.n_expert) {
++            active[e] = 1;
++        }
++    }
++}
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index 15f651919..ab8764aab 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -1149,7 +1149,6 @@ bool llm_arch_supports_sm_tensor(const llm_arch & arch) {
+         case LLM_ARCH_BAILINGMOE3:
+         case LLM_ARCH_KIMI_K3:
+         case LLM_ARCH_QWEN3TTS:
+-        case LLM_ARCH_QWEN4EXP:   // TODO: fix test-llama-archs
+             return false;
+         default:
+             return true;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index ebe1fa78b..9515657d3 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -3185,7 +3185,9 @@ ggml_tensor * llm_graph_context::build_attn(
+ 
+     ggml_tensor * q = q_cur;
+     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+-    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
++    const bool turbo_k = k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0;
++    const int64_t v_head = turbo_k ? k->ne[0] : v_cur->ne[0];
++    ggml_tensor * v = ggml_view_4d(ctx0, k, v_head, k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+ 
+     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
+     cb(cur, "kqv_out", il);
+@@ -3270,7 +3272,9 @@ ggml_tensor * llm_graph_context::build_attn(
+ 
+     ggml_tensor * q = q_cur;
+     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+-    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
++    const bool turbo_k = k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0;
++    const int64_t v_head = turbo_k ? k->ne[0] : v_cur->ne[0];
++    ggml_tensor * v = ggml_view_4d(ctx0, k, v_head, k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+ 
+     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask_top_k, sinks, v_mla, top_k->ne[0], kq_scale, il);
+     cb(cur, "kqv_out", il);
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 0133eb91a..d2e8b4f65 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1742,12 +1742,19 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+         bool buffer_from_host_ptr_supported = props.caps.buffer_from_host_ptr;
+         bool is_default_buft = buft == ggml_backend_dev_buffer_type(dev);
+ 
++        // Directly mapping the cold bank can save physical RAM, but on discrete GPUs it may
++        // cause severe paging under random expert traffic. Keep it as an internal experiment;
++        // the fast default remains the allocated/pinned host bank.
++        const bool is_bank_buft = (const void *) buft == tosh_moe_host_buft();
++        const bool map_bank     = tosh_moe_slots_want() > 0 && getenv("TOSH_MOE_MMAP_BANK") != nullptr;
++        const bool map_this     = map_bank ? is_bank_buft : is_default_buft;
++
+         std::vector<ggml_backend_buffer_ptr> bufs;
+ 
+         // a lazy context is mapped whatever the load mode, but the memory-fit pass maps nothing
+         const bool is_lazy_mapped = ctx_key.lazy && !ml.no_alloc;
+ 
+-        if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
++        if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && map_this) {
+             GGML_ASSERT(!ml.no_alloc);
+             for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
+                 // only the mmap region containing the tensors in the model is mapped to the backend buffer
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index f78b74331..9231b6486 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -1650,7 +1650,8 @@ struct test {
+             "build_commit",   "build_number",   "cpu_info",      "gpu_info",       "backends",
+             "model_filename", "model_type",     "model_size",    "model_n_params", "n_batch",
+             "n_ubatch",       "n_threads",      "cpu_mask",      "cpu_strict",     "poll",
+-            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "split_mode",
++            "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "dmoe_k",
++            "split_mode",
+             "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
+             "tensor_buft_overrides",            "load_mode",     "lazy_mode",
+             "embeddings",
+@@ -1667,7 +1668,7 @@ struct test {
+         if (field == "build_number" || field == "n_batch" || field == "n_ubatch" || field == "n_threads" ||
+             field == "poll" || field == "model_size" || field == "model_n_params" || field == "n_gpu_layers" ||
+             field == "main_gpu" || field == "n_prompt" || field == "n_gen" || field == "n_depth" || field == "avg_ns" ||
+-            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" ||
++            field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" || field == "dmoe_k" ||
+             field == "fit_target" || field == "fit_min_ctx" || field == "flash_attn") {
+             return INT;
+         }

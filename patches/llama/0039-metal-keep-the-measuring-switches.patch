@@ -1,0 +1,851 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:16 -0400
+Subject: [PATCH] 0042-metal-keep-the-measuring-switches
+
+---
+ ggml/src/ggml-metal/ggml-metal-context.m | 261 ++++++++++++++++++++++-
+ ggml/src/ggml-metal/ggml-metal-device.m  |  87 +++++++-
+ ggml/src/ggml-metal/ggml-metal-ops.cpp   |  56 +++--
+ ggml/src/ggml-metal/kernels/mul_mv.metal | 107 ++++++++++
+ 4 files changed, 495 insertions(+), 16 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index e2f9e7bb1..8375625b4 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -25,6 +25,203 @@
+ #define GGML_METAL_MAX_PENDING_WAITS   8
+ #define GGML_METAL_MAX_PREFETCH_STAGES 8
+ 
++#include <stdatomic.h>
++#include <time.h>
++
++// TOSH_CB_PROFILE=1: per-command-buffer GPU accounting, bucketed by graph size.
++// Off by default, and it attaches no completion handler when off.
++#define TOSH_CBP_MAX_BUCKETS 24
++
++struct tosh_cbp_bucket {
++    _Atomic int      n_nodes;    // 0 = free slot
++    _Atomic uint64_t n_graphs;
++    _Atomic uint64_t n_cbs;
++    _Atomic uint64_t gpu_ns;     // sum of GPUEndTime - GPUStartTime
++    _Atomic uint64_t ker_ns;     // sum of kernelEndTime - kernelStartTime
++    _Atomic uint64_t enc_ns;     // CPU time inside ggml_metal_graph_compute
++    _Atomic uint64_t span_ns;    // per graph: max(GPUEndTime) - min(GPUStartTime)
++    _Atomic uint64_t gpu_min_ns; // busiest/idlest single graph, to expose the warmup
++    _Atomic uint64_t gpu_max_ns;
++};
++
++// CPU side of synchronize, kept apart from the encode so a blocked wait is not read
++// as scheduler waste
++static _Atomic uint64_t g_cbp_wait_ns;   // blocked in waitUntilCompleted
++static _Atomic uint64_t g_cbp_drain_ns;  // blocked draining staged uploads
++static _Atomic uint64_t g_cbp_sync_n;
++static _Atomic uint64_t g_cbp_ops_ns;    // encoding the ops of a command buffer
++static _Atomic uint64_t g_cbp_commit_ns; // the commit call itself
++static _Atomic uint64_t g_cbp_create_ns; // creating and enqueuing the buffers of a graph
++
++static struct tosh_cbp_bucket g_cbp[TOSH_CBP_MAX_BUCKETS];
++static _Atomic int g_cbp_state = 0; // 0 unknown, 1 off, 2 on
++
++static bool tosh_cbp_on(void) {
++    int st = atomic_load_explicit(&g_cbp_state, memory_order_relaxed);
++    if (st == 0) {
++        const char * e = getenv("TOSH_CB_PROFILE");
++        st = (e != NULL && strcmp(e, "0") != 0) ? 2 : 1;
++        atomic_store_explicit(&g_cbp_state, st, memory_order_relaxed);
++    }
++    return st == 2;
++}
++
++static struct tosh_cbp_bucket * tosh_cbp_bucket_for(int n_nodes) {
++    for (int i = 0; i < TOSH_CBP_MAX_BUCKETS; ++i) {
++        int cur = atomic_load_explicit(&g_cbp[i].n_nodes, memory_order_relaxed);
++        if (cur == n_nodes) {
++            return &g_cbp[i];
++        }
++        if (cur == 0) {
++            int expected = 0;
++            if (atomic_compare_exchange_strong(&g_cbp[i].n_nodes, &expected, n_nodes)) {
++                return &g_cbp[i];
++            }
++            if (atomic_load_explicit(&g_cbp[i].n_nodes, memory_order_relaxed) == n_nodes) {
++                return &g_cbp[i];
++            }
++        }
++    }
++    return NULL;
++}
++
++// per-graph GPU timeline, filled by the completion handlers of that graph
++struct tosh_cbp_graph {
++    struct tosh_cbp_bucket * bucket;
++    _Atomic uint64_t t_first_ns;  // min GPUStartTime, ns
++    _Atomic uint64_t t_last_ns;   // max GPUEndTime, ns
++    _Atomic uint64_t gpu_ns;      // this graph's own GPU busy time
++    _Atomic int      n_left;      // command buffers still running
++};
++
++static void tosh_cbp_attach(id<MTLCommandBuffer> cb, struct tosh_cbp_graph * g) {
++    if (g == NULL) {
++        return;
++    }
++    atomic_fetch_add_explicit(&g->n_left, 1, memory_order_relaxed);
++    [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
++        const double t0 = [b GPUStartTime];
++        const double t1 = [b GPUEndTime];
++        const double k0 = [b kernelStartTime];
++        const double k1 = [b kernelEndTime];
++
++        atomic_fetch_add_explicit(&g->bucket->n_cbs, 1, memory_order_relaxed);
++        if (t1 > t0) {
++            const uint64_t d = (uint64_t)((t1 - t0)*1e9);
++            atomic_fetch_add_explicit(&g->bucket->gpu_ns, d, memory_order_relaxed);
++            atomic_fetch_add_explicit(&g->gpu_ns,         d, memory_order_relaxed);
++        }
++        if (k1 > k0) {
++            atomic_fetch_add_explicit(&g->bucket->ker_ns, (uint64_t)((k1 - k0)*1e9), memory_order_relaxed);
++        }
++
++        const uint64_t s_ns = (uint64_t)(t0*1e9);
++        const uint64_t e_ns = (uint64_t)(t1*1e9);
++        uint64_t cur = atomic_load_explicit(&g->t_first_ns, memory_order_relaxed);
++        while (s_ns < cur || cur == 0) {
++            if (atomic_compare_exchange_weak(&g->t_first_ns, &cur, s_ns)) break;
++        }
++        cur = atomic_load_explicit(&g->t_last_ns, memory_order_relaxed);
++        while (e_ns > cur) {
++            if (atomic_compare_exchange_weak(&g->t_last_ns, &cur, e_ns)) break;
++        }
++
++        if (atomic_fetch_sub_explicit(&g->n_left, 1, memory_order_acq_rel) == 1) {
++            const uint64_t a = atomic_load_explicit(&g->t_first_ns, memory_order_relaxed);
++            const uint64_t z = atomic_load_explicit(&g->t_last_ns,  memory_order_relaxed);
++            if (z > a) {
++                atomic_fetch_add_explicit(&g->bucket->span_ns, z - a, memory_order_relaxed);
++            }
++            const uint64_t own = atomic_load_explicit(&g->gpu_ns, memory_order_relaxed);
++            uint64_t m = atomic_load_explicit(&g->bucket->gpu_min_ns, memory_order_relaxed);
++            while (m == 0 || own < m) {
++                if (atomic_compare_exchange_weak(&g->bucket->gpu_min_ns, &m, own)) break;
++            }
++            m = atomic_load_explicit(&g->bucket->gpu_max_ns, memory_order_relaxed);
++            while (own > m) {
++                if (atomic_compare_exchange_weak(&g->bucket->gpu_max_ns, &m, own)) break;
++            }
++            free(g);
++        }
++    }];
++}
++
++// definidos en ggml-metal-device.m
++extern _Atomic uint64_t g_tosh_d2h_ns, g_tosh_d2h_bytes, g_tosh_d2h_n;
++extern _Atomic uint64_t g_tosh_h2d_ns, g_tosh_h2d_bytes, g_tosh_h2d_n;
++
++static void tosh_cbp_dump_dev(ggml_metal_device_t dev) {
++    if (!tosh_cbp_on()) {
++        return;
++    }
++    {
++        const uint64_t dn = atomic_load_explicit(&g_tosh_d2h_n, memory_order_relaxed);
++        const uint64_t hn = atomic_load_explicit(&g_tosh_h2d_n, memory_order_relaxed);
++        fprintf(stderr, "TOSH_CBP  readback: %llu lecturas, %.2f MiB, %.1f ms | subidas: %llu, %.2f MiB, %.1f ms\n",
++                (unsigned long long) dn,
++                atomic_load_explicit(&g_tosh_d2h_bytes, memory_order_relaxed)/1048576.0,
++                atomic_load_explicit(&g_tosh_d2h_ns,    memory_order_relaxed)/1e6,
++                (unsigned long long) hn,
++                atomic_load_explicit(&g_tosh_h2d_bytes, memory_order_relaxed)/1048576.0,
++                atomic_load_explicit(&g_tosh_h2d_ns,    memory_order_relaxed)/1e6);
++        atomic_store_explicit(&g_tosh_d2h_n, 0, memory_order_relaxed);
++        atomic_store_explicit(&g_tosh_d2h_bytes, 0, memory_order_relaxed);
++        atomic_store_explicit(&g_tosh_d2h_ns, 0, memory_order_relaxed);
++        atomic_store_explicit(&g_tosh_h2d_n, 0, memory_order_relaxed);
++        atomic_store_explicit(&g_tosh_h2d_bytes, 0, memory_order_relaxed);
++        atomic_store_explicit(&g_tosh_h2d_ns, 0, memory_order_relaxed);
++    }
++    {
++        const uint64_t n = atomic_load_explicit(&g_cbp_sync_n, memory_order_relaxed);
++        fprintf(stderr, "TOSH_CBP  pid=%d  syncs=%llu  cpu_wait=%.1f  upload_drain=%.1f  "
++                "encode_ops=%.1f  commit=%.1f  create=%.1f  (ms totales)\n",
++                getpid(), (unsigned long long) n,
++                atomic_load_explicit(&g_cbp_wait_ns,   memory_order_relaxed)/1e6,
++                atomic_load_explicit(&g_cbp_drain_ns,  memory_order_relaxed)/1e6,
++                atomic_load_explicit(&g_cbp_ops_ns,    memory_order_relaxed)/1e6,
++                atomic_load_explicit(&g_cbp_commit_ns, memory_order_relaxed)/1e6,
++                atomic_load_explicit(&g_cbp_create_ns, memory_order_relaxed)/1e6);
++        atomic_store_explicit(&g_cbp_wait_ns,   0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp_drain_ns,  0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp_sync_n,    0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp_ops_ns,    0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp_commit_ns, 0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp_create_ns, 0, memory_order_relaxed);
++    }
++    fprintf(stderr, "TOSH_CBP  %8s %8s %8s %12s %12s %12s %12s %12s %12s\n",
++            "n_nodes", "graphs", "cbs", "gpu_us/g", "gpu_us_min", "gpu_us_max", "kern_us/g", "span_us/g", "encode_us/g");
++    for (int i = 0; i < TOSH_CBP_MAX_BUCKETS; ++i) {
++        const int nn = atomic_load_explicit(&g_cbp[i].n_nodes, memory_order_relaxed);
++        if (nn == 0) {
++            continue;
++        }
++        const uint64_t ng = atomic_load_explicit(&g_cbp[i].n_graphs, memory_order_relaxed);
++        if (ng == 0) {
++            continue;
++        }
++        fprintf(stderr, "TOSH_CBP  %8d %8llu %8llu %12.1f %12.1f %12.1f %12.1f %12.1f %12.1f\n", nn,
++                (unsigned long long) ng,
++                (unsigned long long) atomic_load_explicit(&g_cbp[i].n_cbs, memory_order_relaxed),
++                atomic_load_explicit(&g_cbp[i].gpu_ns,     memory_order_relaxed)/1000.0/ng,
++                atomic_load_explicit(&g_cbp[i].gpu_min_ns, memory_order_relaxed)/1000.0,
++                atomic_load_explicit(&g_cbp[i].gpu_max_ns, memory_order_relaxed)/1000.0,
++                atomic_load_explicit(&g_cbp[i].ker_ns,     memory_order_relaxed)/1000.0/ng,
++                atomic_load_explicit(&g_cbp[i].span_ns,    memory_order_relaxed)/1000.0/ng,
++                atomic_load_explicit(&g_cbp[i].enc_ns,     memory_order_relaxed)/1000.0/ng);
++
++        // reset so each dump covers only the graphs since the previous one
++        atomic_store_explicit(&g_cbp[i].n_graphs,   0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp[i].n_cbs,      0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp[i].gpu_ns,     0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp[i].ker_ns,     0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp[i].span_ns,    0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp[i].enc_ns,     0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp[i].gpu_min_ns, 0, memory_order_relaxed);
++        atomic_store_explicit(&g_cbp[i].gpu_max_ns, 0, memory_order_relaxed);
++    }
++    fflush(stderr);
++}
++
+ struct ggml_metal_command_buffer {
+     id<MTLCommandBuffer> obj;
+ };
+@@ -361,6 +558,8 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+ }
+ 
+ void ggml_metal_free(ggml_metal_t ctx) {
++    tosh_cbp_dump_dev(ctx->dev);
++
+     GGML_LOG_INFO("%s: deallocating\n", __func__);
+ 
+     ggml_metal_cmd_buf_hold_flush(ctx);
+@@ -464,13 +663,25 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+     }
+ 
+     // wait for any backend operations to finish
++    const bool cbp_on = tosh_cbp_on();
++    uint64_t cbp_t = cbp_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+     if (ctx->cmd_buf_last) {
+         [ctx->cmd_buf_last waitUntilCompleted];
+         ctx->cmd_buf_last = nil;
+     }
++    if (cbp_on) {
++        const uint64_t t1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++        atomic_fetch_add_explicit(&g_cbp_wait_ns, t1 - cbp_t, memory_order_relaxed);
++        atomic_fetch_add_explicit(&g_cbp_sync_n, 1, memory_order_relaxed);
++        cbp_t = t1;
++    }
+ 
+     // in-flight staged uploads count as pending backend operations
+     ggml_metal_device_upload_drain(ctx->dev);
++    if (cbp_on) {
++        atomic_fetch_add_explicit(&g_cbp_drain_ns,
++                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cbp_t, memory_order_relaxed);
++    }
+ 
+     // check status of all command buffers
+     {
+@@ -1637,7 +1848,13 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+ #endif
+ 
+     // number of nodes encoded by the main thread (empirically determined)
+-    const int n_main = MAX(64, 0.1*gf->n_nodes);
++    // the split was tuned on unified memory; TOSH_N_MAIN overrides it to A/B the share here
++    static int n_main_env = -2;
++    if (n_main_env == -2) {
++        const char * v = getenv("TOSH_N_MAIN");
++        n_main_env = v ? atoi(v) : -1;
++    }
++    const int n_main = n_main_env >= 0 ? n_main_env : MAX(64, 0.1*gf->n_nodes);
+ 
+     // number of threads in addition to the main thread
+     const int n_cb = ctx->n_cb;
+@@ -1652,6 +1869,21 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+     //
+     // tests on M1 Pro and M2 Ultra using LLaMA models, show that optimal values for n_cb are 1 or 2
+ 
++    struct tosh_cbp_graph * cbp = NULL;
++    uint64_t cbp_t0 = 0;
++    if (tosh_cbp_on()) {
++        struct tosh_cbp_bucket * b = tosh_cbp_bucket_for(gf->n_nodes);
++        if (b != NULL) {
++            cbp = (struct tosh_cbp_graph *) calloc(1, sizeof(struct tosh_cbp_graph));
++            if (cbp != NULL) {
++                cbp->bucket = b;
++                atomic_store_explicit(&cbp->n_left, 1, memory_order_relaxed); // released below
++                atomic_fetch_add_explicit(&b->n_graphs, 1, memory_order_relaxed);
++                cbp_t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++            }
++        }
++    }
++
+     @autoreleasepool {
+         ctx->gf = gf;
+ 
+@@ -1701,11 +1933,14 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         // short-hand
+         id<MTLCommandQueue> queue = ctx->queue;
+ 
++        const uint64_t cbp_tc = cbp != NULL ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++
+         // the main thread commits the first few commands immediately
+         // cmd_buf[n_cb]
+         {
+             id<MTLCommandBuffer> cmd_buf = [queue commandBufferWithUnretainedReferences];
+             ggml_metal_encode_pending_waits(ctx, cmd_buf);
++            tosh_cbp_attach(cmd_buf, cbp);
+             [cmd_buf retain];
+ 
+             if (ctx->cmd_bufs[n_cb].obj) {
+@@ -1731,6 +1966,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         for (int cb_idx = 0; cb_idx < n_cb; ++cb_idx) {
+             id<MTLCommandBuffer> cmd_buf = [queue commandBufferWithUnretainedReferences];
+             ggml_metal_encode_pending_waits(ctx, cmd_buf);
++            tosh_cbp_attach(cmd_buf, cbp);
+             [cmd_buf retain];
+ 
+             if (ctx->cmd_bufs[cb_idx].obj) {
+@@ -1749,6 +1985,11 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+             }
+         }
+ 
++        if (cbp != NULL) {
++            atomic_fetch_add_explicit(&g_cbp_create_ns,
++                    clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cbp_tc, memory_order_relaxed);
++        }
++
+         dispatch_apply(n_cb, ctx->d_queue, ctx->encode_async);
+         }
+ 
+@@ -1814,6 +2055,15 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         }
+     }
+ 
++    if (cbp != NULL) {
++        atomic_fetch_add_explicit(&cbp->bucket->enc_ns,
++                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cbp_t0, memory_order_relaxed);
++        // drop the reference held while encoding; the last completion handler frees it
++        if (atomic_fetch_sub_explicit(&cbp->n_left, 1, memory_order_acq_rel) == 1) {
++            free(cbp);
++        }
++    }
++
+     return GGML_STATUS_SUCCESS;
+ }
+ 
+@@ -1946,6 +2196,9 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
+             ctx->debug_graph,
+             ctx->debug_fusion);
+ 
++        const bool cbp_on = tosh_cbp_on();
++        const uint64_t cbp_t0 = cbp_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++
+         for (int idx = 0; idx < ggml_metal_op_n_nodes(ctx_op); ++idx) {
+             const int res = ggml_metal_op_encode(ctx_op, idx);
+             if (res == 0) {
+@@ -1957,9 +2210,15 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
+ 
+         ggml_metal_op_free(ctx_op);
+ 
++        const uint64_t cbp_t1 = cbp_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+         if (cb_idx < 2 || ctx->abort_callback == NULL) {
+             [cmd_buf commit];
+         }
++        if (cbp_on) {
++            const uint64_t cbp_t2 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++            atomic_fetch_add_explicit(&g_cbp_ops_ns,    cbp_t1 - cbp_t0, memory_order_relaxed);
++            atomic_fetch_add_explicit(&g_cbp_commit_ns, cbp_t2 - cbp_t1, memory_order_relaxed);
++        }
+     });
+ }
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 6a46dae74..8537056f1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1,5 +1,7 @@
+ #import "ggml-metal-device.h"
+ 
++#include <sys/resource.h>
++
+ #import "ggml-impl.h"
+ #import "ggml-backend-impl.h"
+ #import "ggml-metal-impl.h"
+@@ -1883,6 +1885,7 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
+     GGML_UNUSED(dev);
+ }
+ 
++
+ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t * total) {
+     if (@available(macOS 10.12, iOS 16.0, *)) {
+         *total     = dev->mtl_device.recommendedMaxWorkingSetSize;
+@@ -3015,8 +3018,11 @@ bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buff
+     id<MTLBuffer> stage = dev->stage_set_bufs[slot];
+     if (stage == nil || stage.length < size) {
+         [stage release];
++        static int wc_off = -1;
++        if (wc_off < 0) { wc_off = getenv("TOSH_STAGE_WC_OFF") != NULL; }
+         stage = [dev->mtl_device newBufferWithLength:MAX(size, (size_t) 256*1024)
+-                                             options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
++                                             options:wc_off ? MTLResourceStorageModeShared
++                                                            : (MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined)];
+         dev->stage_set_bufs[slot] = stage;
+     }
+     if (stage == nil) {
+@@ -3253,6 +3259,14 @@ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buff
+     return true;
+ }
+ 
++_Atomic uint64_t g_tosh_d2h_ns, g_tosh_d2h_bytes, g_tosh_d2h_n;
++_Atomic uint64_t g_tosh_h2d_ns, g_tosh_h2d_bytes, g_tosh_h2d_n;
++static _Atomic int g_tosh_xfer_state = 0;
++
++static bool tosh_xfer_on(void);
++static void ggml_metal_buffer_set_tensor_impl(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
++static void ggml_metal_buffer_get_tensor_impl(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size);
++
+ void ggml_metal_buffer_set_tensor_2d(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size,
+         size_t n_copies, size_t stride_tensor, size_t stride_data) {
+     if (size == 0 || n_copies == 0) {
+@@ -3278,6 +3292,20 @@ void ggml_metal_buffer_set_tensor_2d(ggml_metal_buffer_t buf, struct ggml_tensor
+ }
+ 
+ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
++    const bool xf = tosh_xfer_on();
++    const uint64_t xf_t0 = xf ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++    if (xf) {
++        atomic_fetch_add_explicit(&g_tosh_h2d_n, 1, memory_order_relaxed);
++        atomic_fetch_add_explicit(&g_tosh_h2d_bytes, size, memory_order_relaxed);
++    }
++    ggml_metal_buffer_set_tensor_impl(buf, tensor, data, offset, size);
++    if (xf) {
++        atomic_fetch_add_explicit(&g_tosh_h2d_ns,
++                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - xf_t0, memory_order_relaxed);
++    }
++}
++
++static void ggml_metal_buffer_set_tensor_impl(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+     if (size == 0) {
+         return;
+     }
+@@ -3315,18 +3343,45 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+                     stage_load = (n == NULL || atoi(n) <= 1) && getenv("GGML_METAL_DEVICE_LIST") == NULL;
+                 }
+             }
++            if (stage_load) {
++                bool done_all = true;
++                for (size_t done = 0; done < size;) {
++                    static size_t slice = 0;
++                    if (slice == 0) {
++                        const char * v = getenv("TOSH_STAGE_SLICE_MB");
++                        slice = v ? MIN((size_t) atoi(v)*1024*1024, GGML_METAL_STAGE_BUF_MAX) : GGML_METAL_STAGE_BUF_MAX;
++                        if (slice == 0) { slice = GGML_METAL_STAGE_BUF_MAX; }
++                    }
++                    const size_t n = MIN(slice, size - done);
++
++                    struct ggml_metal_buffer_id bid = bid_dst;
++                    bid.offs += done;
++
++                    if (!ggml_metal_device_stage_set(buf->dev, bid, (const char *) data + done, n)) {
++                        done_all = false;
++                        break;
++                    }
+ 
++                    done += n;
++                }
++                if (done_all) {
++                    return;
++                }
++            }
+         }
+ 
+         const uint64_t t0 = tosh_prof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+ 
+         // src
+         void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
+-        id<MTLBuffer> buf_src = [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
++        // wrapping the caller's pointer registers the whole tensor as a Metal resource for the
++        // blit; TOSH_NO_HOST_WRAP skips it so the chunked staging path below is used instead
++        static int no_wrap = -1;
++        if (no_wrap < 0) { no_wrap = getenv("TOSH_NO_HOST_WRAP") != NULL; }
++        id<MTLBuffer> buf_src = no_wrap ? nil : [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
+                                                                length:size
+                                                               options:MTLResourceStorageModeShared
+                                                           deallocator:nil];
+-
+         // dst
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
+         bid_dst.offs += offset;
+@@ -3421,7 +3476,33 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+     }
+ }
+ 
++// TOSH_CB_PROFILE: coste de las lecturas de vuelta (logits) y de las escrituras, que
++// son lo que queda del hueco de decode una vez descartados commit, creacion y espera
++static bool tosh_xfer_on(void) {
++    int st = atomic_load_explicit(&g_tosh_xfer_state, memory_order_relaxed);
++    if (st == 0) {
++        const char * e = getenv("TOSH_CB_PROFILE");
++        st = (e != NULL && strcmp(e, "0") != 0) ? 2 : 1;
++        atomic_store_explicit(&g_tosh_xfer_state, st, memory_order_relaxed);
++    }
++    return st == 2;
++}
++
+ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
++    const bool xf = tosh_xfer_on();
++    const uint64_t xf_t0 = xf ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++    if (xf) {
++        atomic_fetch_add_explicit(&g_tosh_d2h_n, 1, memory_order_relaxed);
++        atomic_fetch_add_explicit(&g_tosh_d2h_bytes, size, memory_order_relaxed);
++    }
++    ggml_metal_buffer_get_tensor_impl(buf, tensor, data, offset, size);
++    if (xf) {
++        atomic_fetch_add_explicit(&g_tosh_d2h_ns,
++                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - xf_t0, memory_order_relaxed);
++    }
++}
++
++static void ggml_metal_buffer_get_tensor_impl(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+     if (size == 0) {
+         return;
+     }
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index f5cb47d65..ad53f0467 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -2944,7 +2944,18 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+ 
+         // only the K-quants have a two-row variant; forcing the override on the rest asks the
+         // library for a kernel that was never instantiated
+-        const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : 2) : 1;
++        // Four rows per thread doubles what a threadgroup covers, so a weight with few
++        // rows stops filling the grid. The threshold is per row count, not per quant type.
++        static const int64_t nr0_min_rows = []() {
++            const char * s = getenv("TOSH_EXT_NR0_MINROWS");
++            // off by default: the win depends on the weight's shape and one measured model
++            // still regresses at four columns, so it stays opt-in until that is understood
++            return s ? (int64_t) atoll(s) : (int64_t) 0;
++        }();
++        const bool nr0_wide = nr0_min_rows > 0 && props_dev->simd_width == 32 &&
++                              op->src[0]->type == GGML_TYPE_Q4_K && ne01 >= nr0_min_rows;
++
++        const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : (nr0_wide ? 4 : 2)) : 1;
+ 
+         // each group makes a full pass over the weights, so the cost is groups by group width:
+         // nine and ten columns fit in two groups of five instead of three of four
+@@ -3957,31 +3968,52 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         if (props_dev->simd_width == 64) {
+             fa_amd_nsg /= 2;
+         }
++        // the simdgroup count per head was never swept on either width; the pipeline caps it,
++        // so an override that overruns is dropped below rather than dispatched
++        // one value for every head size overruns the pipelines that cap lower, so the
++        // override is per head size: TOSH_FA_AMD_NSG_64, _128, _WIDE
++        static const int nsg_env_64 = []() {
++            const char * s = getenv("TOSH_FA_AMD_NSG_64");
++            return s ? atoi(s) : 0;
++        }();
++        static const int nsg_env_128 = []() {
++            const char * s = getenv("TOSH_FA_AMD_NSG_128");
++            return s ? atoi(s) : 0;
++        }();
++        static const int nsg_env_wide = []() {
++            const char * s = getenv("TOSH_FA_AMD_NSG_WIDE");
++            return s ? atoi(s) : 0;
++        }();
++        const int nsg_env = ne00 == 64 ? nsg_env_64 : ne00 == 128 ? nsg_env_128 : nsg_env_wide;
++        if (nsg_env > 0) {
++            fa_amd_nsg = nsg_env;
++        }
+ 
+         // one threadgroup per query head leaves most of the GPU idle on models with
+         // few heads; split the cache across 32 and let upstream's reduce merge them
+-        // head 128 also idles the card with one threadgroup per query head, but it needs a
+-        // deeper cache than the wide heads before the 32-way reduce pays for itself, and the
+-        // depth it turns at is not the same on both widths
++        // Head 128 needs a deeper cache than the wide heads before the 32-way reduce pays
++        // for itself, so it carries its own threshold. The depth it turns at is not the same
++        // on both widths, so each keeps its own.
+         static const int64_t wg_dk128_env = []() {
+             const char * s = getenv("TOSH_FA_WG_DK128_MIN_KV");
+             return s ? (int64_t) atoll(s) : (int64_t) -1;
+         }();
++        const bool wg_wide_head =
++            ne00 == 256 || ne00 == 512 || (ne00 == 576 && ne20 == 512) ||
++            (ne00 == 320 && ne20 == 256);
+         const int64_t wg_dk128_min_kv = wg_dk128_env >= 0 ? wg_dk128_env
+                                       : (props_dev->simd_width == 64 ? 16384 : 24576);
+-        // head 64 turns at yet another depth and is not enabled by default
++        const bool wg_dk128_width_ok = props_dev->simd_width == 32 || props_dev->simd_width == 64;
++        // head 64 has the instantiations but no measured depth of its own yet;
++        // TOSH_FA_WG_DK64=<kv> opens it so that one can be swept
+         static const int64_t wg_dk64_min_kv = []() {
+             const char * s = getenv("TOSH_FA_WG_DK64");
+             return s ? (int64_t) atoll(s) : (int64_t) 0;
+         }();
+-        const bool wg_width_ok = props_dev->simd_width == 32 || props_dev->simd_width == 64;
+-        const bool wg_dk64  = ne00 == 64 && ne20 == 64 && wg_width_ok &&
+-                              wg_dk64_min_kv > 0 && ne11 >= wg_dk64_min_kv;
+-        const bool wg_dk128 = (ne00 == 128 && ne20 == 128 && wg_width_ok &&
++        const bool wg_dk64 = ne00 == 64 && ne20 == 64 && wg_dk128_width_ok &&
++                             wg_dk64_min_kv > 0 && ne11 >= wg_dk64_min_kv;
++        const bool wg_dk128 = (ne00 == 128 && ne20 == 128 && wg_dk128_width_ok &&
+                                wg_dk128_min_kv > 0 && ne11 >= wg_dk128_min_kv) || wg_dk64;
+-        const bool wg_wide_head =
+-            ne00 == 256 || ne00 == 512 || (ne00 == 576 && ne20 == 512) ||
+-            (ne00 == 320 && ne20 == 256);
+         const int fa_amd_nwg =
+             (wg_wide_head || wg_dk128) && ne01 == 1 && !has_sinks &&
+             (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index 73cdefe8f..30152cd53 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -505,6 +505,19 @@ kernel void kernel_mul_mv_q5_0_f32(
+     mul_vec_q_n_f32_impl<block_q5_0, N_R0_Q5_0, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
++[[host_name("kernel_mul_mv_q5_0_f32_r8")]]
++kernel void kernel_mul_mv_q5_0_f32_r8(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    mul_vec_q_n_f32_impl<block_q5_0, 8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
++}
++
+ kernel void kernel_mul_mv_q5_1_f32(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0,
+@@ -517,6 +530,19 @@ kernel void kernel_mul_mv_q5_1_f32(
+     mul_vec_q_n_f32_impl<block_q5_1, N_R0_Q5_1, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
++[[host_name("kernel_mul_mv_q5_1_f32_r8")]]
++kernel void kernel_mul_mv_q5_1_f32_r8(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    mul_vec_q_n_f32_impl<block_q5_1, 8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
++}
++
+ template<short NR0, typename args_t>
+ void kernel_mul_mv_q8_0_f32_impl(
+         args_t args,
+@@ -2846,6 +2872,20 @@ kernel void kernel_mul_mv_iq4_nl_f32(
+     kernel_mul_mv_iq4_nl_f32_impl<N_R0_IQ4_NL, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
++[[host_name("kernel_mul_mv_iq4_nl_f32_r8")]]
++kernel void kernel_mul_mv_iq4_nl_f32_r8(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_iq4_nl_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
++}
++
+ template<int NR0, typename args_t>
+ void kernel_mul_mv_iq4_xs_f32_impl(
+         args_t args,
+@@ -2957,6 +2997,20 @@ kernel void kernel_mul_mv_iq4_xs_f32(
+     kernel_mul_mv_iq4_xs_f32_impl<N_R0_IQ4_XS, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
++[[host_name("kernel_mul_mv_iq4_xs_f32_r8")]]
++kernel void kernel_mul_mv_iq4_xs_f32_r8(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_iq4_xs_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
++}
++
+ template<int NR0, typename args_t>
+ void kernel_mul_mv_mxfp4_f32_impl(
+         args_t args,
+@@ -3555,17 +3609,24 @@ kernel void kernel_mul_mv_ext_q4_K_raw_lds_f32_disp(
+ }
+ 
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<3, 2>;
++template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<3, 4>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<4, 2>;
++template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<4, 4>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<5, 2>;
++template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<5, 4>;
+ 
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_2")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<2, 1>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<2, 2>;
++template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<2, 4>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_3")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<3, 1>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<3, 2>;
++template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<3, 4>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_4")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<4, 1>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<4, 2>;
++template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<4, 4>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_5")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<5, 1>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<5, 2>;
++template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<5, 4>;
+ 
+ // ext matvec caching the block header once per block (nxpsg=8 does two chunks of the same
+ // 256-block). q5_K's 176-byte block is 16-aligned so its scale window is cached in a uint4;
+@@ -3816,29 +3877,40 @@ kernel void kernel_mul_mv_ext_qK_hdr_f32_disp(
+ 
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_2")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 1, block_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 2, block_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 4, block_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_3")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 1, block_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 2, block_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 4, block_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_4")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 1, block_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 2, block_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 4, block_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_5")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 1, block_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 2, block_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 4, block_q5_K>;
+ 
+ 
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_2")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 1, block_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 2, block_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 4, block_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_3")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 1, block_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 2, block_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 4, block_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_4")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 1, block_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 2, block_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 4, block_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_5")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 1, block_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 2, block_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 4, block_q2_K>;
+ 
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_2")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 1, block_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 2, block_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 4, block_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_3")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 1, block_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 2, block_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 4, block_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_4")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 1, block_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 2, block_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 4, block_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_5")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 1, block_q3_K>;
+ 
+ [[host_name("kernel_mul_mv_q8_0_f32_r4")]]
+@@ -3855,6 +3927,20 @@ kernel void kernel_mul_mv_q8_0_f32_r4(
+     kernel_mul_mv_q8_0_f32_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
++[[host_name("kernel_mul_mv_q8_0_f32_r8")]]
++kernel void kernel_mul_mv_q8_0_f32_r8(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++
++    kernel_mul_mv_q8_0_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
++}
++
+ [[host_name("kernel_mul_mv_q2_K_f32_r8")]]
+ kernel void kernel_mul_mv_q2_K_f32_r8(
+         constant ggml_metal_kargs_mul_mv & args,
+@@ -4076,44 +4162,64 @@ template [[host_name("kernel_mul_mv_ext_iq4_nl_f32_r1_4")]] kernel mul_mv_ext_q4
+ template [[host_name("kernel_mul_mv_ext_iq4_nl_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_iq4_nl, 32, dequantize_iq4_nl_t4>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 1, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 2, block_q4_K, 256, dequantize_q4_K>;
++template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_3")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 1, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 2, block_q4_K, 256, dequantize_q4_K>;
++template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 1, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 2, block_q4_K, 256, dequantize_q4_K>;
++template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 4, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_5")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 1, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 2, block_q4_K, 256, dequantize_q4_K>;
++template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q4_K, 256, dequantize_q4_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 1, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 2, block_q5_K, 256, dequantize_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_3")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 1, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 2, block_q5_K, 256, dequantize_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 1, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 2, block_q5_K, 256, dequantize_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 4, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_5")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 1, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 2, block_q5_K, 256, dequantize_q5_K>;
++template [[host_name("kernel_mul_mv_ext_q5_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q5_K, 256, dequantize_q5_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 1, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 2, block_q6_K, 256, dequantize_q6_K>;
++template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_3")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 1, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 2, block_q6_K, 256, dequantize_q6_K>;
++template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 1, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 2, block_q6_K, 256, dequantize_q6_K>;
++template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 4, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 1, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 2, block_q6_K, 256, dequantize_q6_K>;
++template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 1, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 2, block_q2_K, 256, dequantize_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_3")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 1, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 2, block_q2_K, 256, dequantize_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 1, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 2, block_q2_K, 256, dequantize_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 4, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_5")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 1, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 2, block_q2_K, 256, dequantize_q2_K>;
++template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 1, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 2, block_q3_K, 256, dequantize_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_3")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 1, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 2, block_q3_K, 256, dequantize_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 1, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_4_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 2, block_q3_K, 256, dequantize_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 4, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_5")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 1, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 2, block_q3_K, 256, dequantize_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q3_K, 256, dequantize_q3_K>;
+ template [[host_name("kernel_mul_mv_f32_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<float, float>;
+ template [[host_name("kernel_mul_mv_f16_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  float>;
+ template [[host_name("kernel_mul_mv_f16_f16")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  half>;
+@@ -4165,3 +4271,4 @@ template [[host_name("kernel_mul_mv_id_iq4_nl_f32")]]  kernel kernel_mul_mv_id_t
+ template [[host_name("kernel_mul_mv_id_iq4_xs_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_xs_f32_impl <N_R0_IQ4_XS>>>;
+ template [[host_name("kernel_mul_mv_id_tq2_0_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_tq2_0_f32_impl  <N_R0_TQ2_0>>>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 2, block_q3_K>;
++template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 4, block_q3_K>;

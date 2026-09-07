@@ -1,16 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:13 -0400
+Subject: [PATCH] 0026-moe-skip-cache-when-slots-cover-experts
+
+---
+ src/llama-model-loader.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index 79fd8ab10..72cfb4e2b 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -1335,16 +1335,30 @@
-         }
+@@ -1380,6 +1380,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+         return nullptr;
      }
  
-     GGML_ASSERT(ggml_nbytes(&t_meta) == ggml_nbytes(cur));
- 
-     ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
-     if (buft == nullptr) {
-         return nullptr;
-+    }
-+
 +    // Slots enough for every expert means nothing is ever evicted, so the cache would spend a
 +    // pick and a fetch per layer to conclude that nothing is missing. Send the weights straight
 +    // to the device, which is where the bank of slots would have put them anyway. Redirecting
@@ -23,11 +27,8 @@
 +            std::string(ggml_get_name(&t_meta)).find("_exps.weight") != std::string::npos) {
 +            buft = ggml_backend_dev_buffer_type(ggml_backend_buft_get_device(buft));
 +        }
-     }
- 
++    }
++
      ggml_context * ctx = ctx_for_buft(buft);
  
      // if duplicated, check if the original tensor was allocated in the same buffer type context and avoid creating a new one
-     if (flags & TENSOR_DUPLICATED) {
-         ggml_tensor * t = ggml_get_tensor(ctx, tn.str().c_str());
-         if (t) {

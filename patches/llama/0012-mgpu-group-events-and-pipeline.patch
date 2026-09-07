@@ -1,12 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:09 -0400
+Subject: [PATCH] 0012-mgpu-group-events-and-pipeline
+
+---
+ ggml/src/ggml-backend-meta.cpp | 80 +++++++++++++++++++++++++++++++---
+ src/llama-context.cpp          |  6 ++-
+ 2 files changed, 78 insertions(+), 8 deletions(-)
+
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index ed69328ed..4e8f1a7d2 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -126,17 +126,17 @@
-     props->device_id   = 0;
- 
-     ggml_backend_meta_device_get_memory(dev, &props->memory_free, &props->memory_total);
- 
-     props->caps = {
+@@ -131,7 +131,7 @@ static void ggml_backend_meta_device_get_props(ggml_backend_dev_t dev, ggml_back
          /* .async                 = */ true,
          /* .host_buffer           = */ false, // Not implemented.
          /* .buffer_from_host_ptr  = */ false, // Not implemented.
@@ -15,17 +21,7 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
          /* .mmap_support          = */ true,
      };
      for (ggml_backend_dev_t simple_dev : meta_dev_ctx->simple_devs) {
-         ggml_backend_dev_props tmp_props;
-         ggml_backend_dev_get_props(simple_dev, &tmp_props);
-         props->caps.async                = props->caps.async                && tmp_props.caps.async;
-         props->caps.host_buffer          = props->caps.host_buffer          && tmp_props.caps.host_buffer;
-         props->caps.buffer_from_host_ptr = props->caps.buffer_from_host_ptr && tmp_props.caps.buffer_from_host_ptr;
-@@ -172,32 +172,39 @@
-     for (size_t i = 0; i < meta_dev_ctx->simple_devs.size(); i++) {
-         if (meta_dev_ctx->simple_devs[i] != meta_buft_dev_ctx->simple_devs[i]) {
-             return false;
-         }
-     }
+@@ -177,6 +177,13 @@ static bool ggml_backend_meta_device_supports_buft(ggml_backend_dev_t dev, ggml_
      return true;
  }
  
@@ -39,13 +35,7 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
  static const ggml_backend_device_i ggml_backend_meta_device_iface = {
      /* .get_name             = */ ggml_backend_meta_device_get_name,
      /* .get_description      = */ ggml_backend_meta_device_get_description,
-     /* .get_memory           = */ ggml_backend_meta_device_get_memory,
-     /* .get_type             = */ ggml_backend_meta_device_get_type,
-     /* .get_props            = */ ggml_backend_meta_device_get_props,
-     /* .init_backend         = */ ggml_backend_meta_device_init_backend,
-     /* .get_buffer_type      = */ ggml_backend_meta_device_get_buffer_type,
-     /* .get_host_buffer_type = */ ggml_backend_meta_device_get_host_buffer_type,
-     /* .buffer_from_host_ptr = */ nullptr,
+@@ -190,9 +197,9 @@ static const ggml_backend_device_i ggml_backend_meta_device_iface = {
      /* .supports_op          = */ ggml_backend_meta_device_supports_op,
      /* .supports_buft        = */ ggml_backend_meta_device_supports_buft,
      /* .offload_op           = */ nullptr,
@@ -58,22 +48,10 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
  };
  
  static bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev) {
-     return dev != nullptr && dev->iface.get_name == ggml_backend_meta_device_iface.get_name;
- }
- 
- static size_t ggml_backend_meta_dev_n_devs(ggml_backend_dev_t meta_dev) {
-     GGML_ASSERT(ggml_backend_dev_is_meta(meta_dev));
-@@ -205,18 +212,62 @@
-     return meta_dev_ctx->simple_devs.size();
- }
- 
- static ggml_backend_dev_t ggml_backend_meta_dev_simple_dev(ggml_backend_dev_t meta_dev, size_t index) {
-     GGML_ASSERT(ggml_backend_dev_is_meta(meta_dev));
-     const ggml_backend_meta_device_context * meta_dev_ctx = (const ggml_backend_meta_device_context *) meta_dev->context;
-     GGML_ASSERT(index < meta_dev_ctx->simple_devs.size());
+@@ -212,6 +219,50 @@ static ggml_backend_dev_t ggml_backend_meta_dev_simple_dev(ggml_backend_dev_t me
      return meta_dev_ctx->simple_devs[index];
-+}
-+
+ }
+ 
 +struct ggml_backend_meta_event_context {
 +    std::vector<ggml_backend_event_t> events;
 +};
@@ -107,8 +85,8 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
 +    }
 +    delete ev_ctx;
 +    delete event;
- }
- 
++}
++
 +static void ggml_backend_meta_device_event_synchronize(ggml_backend_dev_t dev, ggml_backend_event_t event) {
 +    GGML_UNUSED(dev);
 +    auto * ev_ctx = (ggml_backend_meta_event_context *) event->context;
@@ -121,17 +99,7 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
  ggml_backend_dev_t ggml_backend_meta_device(
          ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud) {
      GGML_ASSERT(n_devs <= GGML_BACKEND_META_MAX_DEVICES);
-     // TODO: this is not thread-safe - needs to be fixed
-     static std::vector<std::unique_ptr<ggml_backend_meta_device_context>>         ctxs;
-     static std::map<ggml_backend_meta_device_context, struct ggml_backend_device> meta_devs;
- 
-     std::vector<ggml_backend_dev_t> simple_devs;
-@@ -2468,32 +2519,49 @@
-                     return status;
-                 }
-             }
-         }
-     }
+@@ -2473,6 +2524,23 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
      return GGML_STATUS_SUCCESS;
  }
  
@@ -155,14 +123,7 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
  static const ggml_backend_i ggml_backend_meta_i = {
      /* .get_name                = */ ggml_backend_meta_get_name,
      /* .free                    = */ ggml_backend_meta_free,
-     /* .set_tensor_async        = */ ggml_backend_meta_set_tensor_async,
-     /* .get_tensor_async        = */ ggml_backend_meta_get_tensor_async,
-     /* .set_tensor_2d_async     = */ nullptr,
-     /* .get_tensor_2d_async     = */ nullptr,
-     /* .cpy_tensor_async        = */ nullptr,
-     /* .synchronize             = */ ggml_backend_meta_synchronize,
-     /* .graph_plan_create       = */ nullptr,
-     /* .graph_plan_free         = */ nullptr,
+@@ -2487,8 +2555,8 @@ static const ggml_backend_i ggml_backend_meta_i = {
      /* .graph_plan_update       = */ nullptr,
      /* .graph_plan_compute      = */ nullptr,
      /* .graph_compute           = */ ggml_backend_meta_graph_compute,
@@ -173,20 +134,11 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
      /* .graph_optimize          = */ nullptr,
  };
  
- bool ggml_backend_is_meta(ggml_backend_t backend) {
-     return backend != nullptr && backend->iface.get_name == ggml_backend_meta_i.get_name;
- }
- 
- static ggml_backend_t ggml_backend_meta_device_init_backend(ggml_backend_dev_t dev, const char * params) {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 9dcede009..6d4fbab2f 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -423,27 +423,28 @@
- 
-         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
- 
-         // TODO: move these checks to ggml_backend_sched
-         // enabling pipeline parallelism in the scheduler increases memory usage, so it is only done when necessary
+@@ -428,7 +428,8 @@ llama_context::llama_context(
          bool pipeline_parallel =
              model.n_devices() > 1 &&
              model.n_gpu_layers() > model.hparams.n_layer_all &&
@@ -196,9 +148,7 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
              cparams.offload_kqv &&
              !model.has_tensor_overrides();
  
-         // pipeline parallelism requires support for async compute and events in all devices
-         if (pipeline_parallel) {
-             for (auto & backend : backends) {
+@@ -438,7 +439,7 @@ llama_context::llama_context(
                  auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backend.get()));
                  if (dev_type == GGML_BACKEND_DEVICE_TYPE_CPU || dev_type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
                      // ignore CPU and ACCEL backends: BLAS is always present on macOS and reports
@@ -207,17 +157,7 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
                      continue;
                  }
                  auto * dev = ggml_backend_get_device(backend.get());
-                 ggml_backend_dev_props props;
-                 ggml_backend_dev_get_props(dev, &props);
-                 if (!props.caps.async || !props.caps.events) {
-                     // device does not support async compute or events
-                     pipeline_parallel = false;
-@@ -2513,16 +2514,17 @@
-         } else {
-             ggml_set_name(cur, name);
-         }
- 
-         // - norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
+@@ -2530,6 +2531,7 @@ llm_graph_cb llama_context::graph_get_cb() const {
          // - force the last op of the layer on the specified backend to avoid running it on the backend of the next layer due to scheduling
          // FIXME: fix in ggml_backend_sched
          const bool full_offload = model.n_gpu_layers() > model.hparams.n_layer_all;
@@ -225,8 +165,3 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
          if (ubatch.n_tokens < 32 || full_offload) {
              if (il != -1 && (strcmp(name, "norm") == 0 || strcmp(name, "l_last") == 0)) {
                  const auto & dev_layer = model.dev_layer(il);
-                 for (const auto & backend : backends) {
-                     if (ggml_backend_get_device(backend.get()) == dev_layer) {
-                         if (ggml_backend_supports_op(backend.get(), cur)) {
-                             ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
-                         }

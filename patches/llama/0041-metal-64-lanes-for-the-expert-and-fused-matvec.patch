@@ -1,11 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:17 -0400
+Subject: [PATCH] 0044-metal-64-lanes-for-the-expert-and-fused-matvec
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.cpp    |  43 +++++-
+ ggml/src/ggml-metal/ggml-metal-ops.cpp       |   7 +-
+ ggml/src/ggml-metal/kernels/mul_mv_w64.metal | 130 ++++++++++++++++++-
+ 3 files changed, 175 insertions(+), 5 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index a3a9238fb..83a0ec15f 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1815,6 +1815,47 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+             }
+     };
+ 
++    // the 64-lane expert matvec lives in mul_mv_w64.metal and carries the same lane
++    // decomposition as the standalone one, so the expert path stops falling back to 32.
++    // Types whose shared memory holds a lookup grid keep the rows and the buffer the
++    // switch above computed: only the reduction-buffer ones move.
++    bool id_w64 = simd_width == 64 && getenv("TOSH_MVID_W64_DISABLE") == nullptr;
++    if (id_w64) {
++        switch (tsrc0) {
++            case GGML_TYPE_Q4_0: nr0 = 4; break;
++            case GGML_TYPE_Q4_1: nr0 = 4; break;
++            case GGML_TYPE_Q8_0: nr0 = 4; break;
++            case GGML_TYPE_Q2_K: nr0 = 8; break;
++            // q3_K keeps the 32-lane eight-row kernel: its 64-lane twin is opt-in in the
++            // dense path too, and forcing it here measured 4.3% below on a 60-expert model
++            case GGML_TYPE_Q4_K: nr0 = 4; break;
++            case GGML_TYPE_Q5_K: nr0 = 2; break;
++            case GGML_TYPE_Q6_K: nr0 = 4; break;
++            case GGML_TYPE_Q5_0:
++            case GGML_TYPE_Q5_1:
++            case GGML_TYPE_Q1_0:
++            case GGML_TYPE_Q2_0:
++            case GGML_TYPE_MXFP4:
++            case GGML_TYPE_IQ1_S:
++            case GGML_TYPE_IQ1_M:
++            case GGML_TYPE_IQ2_S:
++            case GGML_TYPE_IQ2_XS:
++            case GGML_TYPE_IQ2_XXS:
++            case GGML_TYPE_IQ3_S:
++            case GGML_TYPE_IQ3_XXS:
++            case GGML_TYPE_IQ4_NL:
++            case GGML_TYPE_IQ4_XS: break;
++            // the rest have no 64-lane twin yet
++            default: id_w64 = false; break;
++        }
++    }
++    if (id_w64) {
++        // one wave per threadgroup, and the twins carry no suffix of their own. The rows go
++        // in before the block below, so the shared buffer is sized for the rows actually used.
++        nsg = 1;
++        suffix = "";
++    }
++
+     // wave64 decode: MoE experts reuse the same width-parameterized mat-vec impls,
+     // so run them on a 64-wide simdgroup (nw) like the dense mul_mv path.
+     auto * props_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib));
+@@ -1846,7 +1887,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                       (nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0)) &&
+                       getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
+ 
+-    snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
++    snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, id_w64 ? "_w64" : "");
+     snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d", base, nsg, nw, row4, row8);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index ad53f0467..4b546f95d 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -2678,8 +2678,13 @@ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+     const ggml_type tv = v->src[0]->type;
+     const ggml_type tk = k->src[0]->type;
+ 
++    const bool qvk_w64 = props_dev->simd_width == 64 && getenv("TOSH_QVK_W64_DISABLE") == nullptr;
++
+     if (tq == GGML_TYPE_Q4_0 && tv == GGML_TYPE_Q4_0 && tk == GGML_TYPE_Q4_0) {
+-        pattern = { "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32", 1, 4, 4, 4 };
++        // the 64-lane twin carries the same decomposition as the standalone matvec, so the
++        // fusion keeps that win instead of trading it for the saved dispatches
++        pattern = qvk_w64 ? decltype(pattern){ "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32_w64", 1, 4, 4, 4 }
++                          : decltype(pattern){ "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32",     1, 4, 4, 4 };
+     } else if (tq == GGML_TYPE_Q2_K && tv == GGML_TYPE_Q4_K && tk == GGML_TYPE_Q2_K) {
+         pattern = { "kernel_mul_mv_qvk_q2_K_q4_K_q2_K_f32", 2, 4, 2, 4 };
+     } else if (tq == GGML_TYPE_Q4_K && tv == GGML_TYPE_Q6_K && tk == GGML_TYPE_Q4_K) {
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+index 195f978d5..9def02e1e 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -4039,33 +4039,35 @@
-         device const char * wk,
-         device const char * src,
-         device       char * dst_q,
-         device       char * dst_v,
-         device       char * dst_k,
+@@ -4044,23 +4044,25 @@ kernel void kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32_w64(
          uint3  tgpig[[threadgroup_position_in_grid]],
          ushort tiisg[[thread_index_in_simdgroup]],
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
@@ -34,21 +122,10 @@
          args.k, wk, src, dst_k, nullptr, local, tiisg, sgitg);
  }
  
- [[host_name("kernel_mul_mv_iq3_xxs_f32_r8_w64")]]
- kernel void kernel_mul_mv_iq3_xxs_f32_r8_w64(
-         constant ggml_metal_kargs_mul_mv & args,
-         device const char * src0,
-         device const char * src1,
-@@ -7631,9 +7633,131 @@
- kernel void kernel_mul_mv_q5_K_f32_L16r8_w64(
-         constant ggml_metal_kargs_mul_mv & args,
-         device const char * src0, device const char * src1, device char * dst,
-         threadgroup char * shmem [[threadgroup(0)]],
-         uint3 tgpig[[threadgroup_position_in_grid]],
-         ushort tiisg[[thread_index_in_simdgroup]],
+@@ -7637,3 +7639,125 @@ kernel void kernel_mul_mv_q5_K_f32_L16r8_w64(
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
      kernel_mul_mv_q5_K_f32_L16_w64_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
+ }
 +
 +//
 +// expert matrix-vector multiplication
@@ -145,7 +222,7 @@
 +        tiitg,
 +        tiisg,
 +        sgitg);
- }
++}
 +
 +typedef decltype(kernel_mul_mv_id_w64<mmv_w64_fn<kernel_mul_mv_q8_0_f32_w64_impl<N_R0_Q8_0>>>) kernel_mul_mv_id_w64_t;
 +
@@ -171,110 +248,3 @@
 +template [[host_name("kernel_mul_mv_id_iq4_xs_f32_w64")]] kernel kernel_mul_mv_id_w64_t kernel_mul_mv_id_w64<mmv_w64_fn<kernel_mul_mv_iq4_xs_f32_w64_impl<N_R0_IQ4_XS>>>;
 +template [[host_name("kernel_mul_mv_id_q1_0_f32_w64")]] kernel kernel_mul_mv_id_w64_t kernel_mul_mv_id_w64<mmv_w64_fn<kernel_mul_mv_q1_0_f32_w64_impl<N_R0_Q1_0>>>;
 +template [[host_name("kernel_mul_mv_id_q2_0_f32_w64")]] kernel kernel_mul_mv_id_w64_t kernel_mul_mv_id_w64<mmv_w64_fn<kernel_mul_mv_q2_0_f32_w64_impl<N_R0_Q2_0>>>;
---- a/ggml/src/ggml-metal/ggml-metal-device.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1810,16 +1810,57 @@
-             } break;
-         default:
-             {
-                 GGML_LOG_ERROR("Asserting on type %d\n", (int)op->src[2]->type);
-                 GGML_ABORT("not implemented");
-             }
-     };
- 
-+    // the 64-lane expert matvec lives in mul_mv_w64.metal and carries the same lane
-+    // decomposition as the standalone one, so the expert path stops falling back to 32.
-+    // Types whose shared memory holds a lookup grid keep the rows and the buffer the
-+    // switch above computed: only the reduction-buffer ones move.
-+    bool id_w64 = simd_width == 64 && getenv("TOSH_MVID_W64_DISABLE") == nullptr;
-+    if (id_w64) {
-+        switch (tsrc0) {
-+            case GGML_TYPE_Q4_0: nr0 = 4; break;
-+            case GGML_TYPE_Q4_1: nr0 = 4; break;
-+            case GGML_TYPE_Q8_0: nr0 = 4; break;
-+            case GGML_TYPE_Q2_K: nr0 = 8; break;
-+            // q3_K keeps the 32-lane eight-row kernel: its 64-lane twin is opt-in in the
-+            // dense path too, and forcing it here measured 4.3% below on a 60-expert model
-+            case GGML_TYPE_Q4_K: nr0 = 4; break;
-+            case GGML_TYPE_Q5_K: nr0 = 2; break;
-+            case GGML_TYPE_Q6_K: nr0 = 4; break;
-+            case GGML_TYPE_Q5_0:
-+            case GGML_TYPE_Q5_1:
-+            case GGML_TYPE_Q1_0:
-+            case GGML_TYPE_Q2_0:
-+            case GGML_TYPE_MXFP4:
-+            case GGML_TYPE_IQ1_S:
-+            case GGML_TYPE_IQ1_M:
-+            case GGML_TYPE_IQ2_S:
-+            case GGML_TYPE_IQ2_XS:
-+            case GGML_TYPE_IQ2_XXS:
-+            case GGML_TYPE_IQ3_S:
-+            case GGML_TYPE_IQ3_XXS:
-+            case GGML_TYPE_IQ4_NL:
-+            case GGML_TYPE_IQ4_XS: break;
-+            // the rest have no 64-lane twin yet
-+            default: id_w64 = false; break;
-+        }
-+    }
-+    if (id_w64) {
-+        // one wave per threadgroup, and the twins carry no suffix of their own. The rows go
-+        // in before the block below, so the shared buffer is sized for the rows actually used.
-+        nsg = 1;
-+        suffix = "";
-+    }
-+
-     // wave64 decode: MoE experts reuse the same width-parameterized mat-vec impls,
-     // so run them on a 64-wide simdgroup (nw) like the dense mul_mv path.
-     auto * props_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib));
-     int16_t nw = 32;
-     if (props_id->wave64_decode) {
-         const bool helper = (tsrc0 == GGML_TYPE_F16 || tsrc0 == GGML_TYPE_F32 ||
-                              tsrc0 == GGML_TYPE_BF16 || tsrc0 == GGML_TYPE_Q8_0);
-         const bool sr     = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K || tsrc0 == GGML_TYPE_Q6_K ||
-@@ -1841,17 +1882,17 @@
-                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
- 
-     // The expert kernels share the implementations of the dense path, so they can read the
-     // quant arrays a word at a time under the same conditions.
-     const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
-                       (nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0)) &&
-                       getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
- 
--    snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
-+    snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, id_w64 ? "_w64" : "");
-     snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d", base, nsg, nw, row4, row8);
- 
-     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
-     if (!res.pipeline) {
-         ggml_metal_cv_t cv = ggml_metal_cv_init();
- 
-         ggml_metal_cv_set_int16(cv, nsg, FC_MUL_MV + 0);
-         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 2);
---- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2656,19 +2656,24 @@
-         uint32_t nr_q;
-         uint32_t nr_v;
-         uint32_t nr_k;
-     } pattern = {};
- 
-     const ggml_type tq = q->src[0]->type;
-     const ggml_type tv = v->src[0]->type;
-     const ggml_type tk = k->src[0]->type;
-+
-+    const bool qvk_w64 = props_dev->simd_width == 64 && getenv("TOSH_QVK_W64_DISABLE") == nullptr;
- 
-     if (tq == GGML_TYPE_Q4_0 && tv == GGML_TYPE_Q4_0 && tk == GGML_TYPE_Q4_0) {
--        pattern = { "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32", 1, 4, 4, 4 };
-+        // the 64-lane twin carries the same decomposition as the standalone matvec, so the
-+        // fusion keeps that win instead of trading it for the saved dispatches
-+        pattern = qvk_w64 ? decltype(pattern){ "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32_w64", 1, 4, 4, 4 }
-+                          : decltype(pattern){ "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32",     1, 4, 4, 4 };
-     } else if (tq == GGML_TYPE_Q2_K && tv == GGML_TYPE_Q4_K && tk == GGML_TYPE_Q2_K) {
-         pattern = { "kernel_mul_mv_qvk_q2_K_q4_K_q2_K_f32", 2, 4, 2, 4 };
-     } else if (tq == GGML_TYPE_Q4_K && tv == GGML_TYPE_Q6_K && tk == GGML_TYPE_Q4_K) {
-         pattern = { "kernel_mul_mv_qvk_q4_K_q6_K_q4_K_f32", 2, 2, 2, 4 };
-     } else {
-         return 0;
-     }
- 

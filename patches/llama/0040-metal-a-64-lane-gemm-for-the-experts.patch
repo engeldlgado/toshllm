@@ -1,15 +1,39 @@
---- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
-+++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
-@@ -307,17 +307,301 @@
-             if (row < args.ne0 && col < args.ne1) {
-                 Dbase[row + (int64_t)col*args.ne0] = acc[rr][cc];
-             }
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:16 -0400
+Subject: [PATCH] 0043-metal-a-64-lane-gemm-for-the-experts
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.cpp    |   7 +-
+ ggml/src/ggml-metal/kernels/mul_mm_w64.metal | 357 +++++++++++++++++++
+ 2 files changed, 363 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 03eb6728c..a3a9238fb 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1615,7 +1615,12 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
          }
      }
- }
+ 
+-    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "");
++    // the 64-lane twin lives in mul_mm_w64.metal, beside the dense one
++    const int simd_width_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
++    const bool w64 = simd_width_id == 64 && use_mm_manual &&
++                     getenv("TOSH_MMID_W64_DISABLE") == nullptr;
++
++    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
+     snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d", base, bc_inp, use_mm_manual, acc_f32);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+index 936fb737e..f666bcaaa 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+@@ -313,6 +313,290 @@ kernel void kernel_mul_mm_w64(
  
  typedef decltype(kernel_mul_mm_w64<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_w64_t;
-+
+ 
 +// The expert GEMM, same treatment as kernel_mul_mm_w64 above: one wave owns a tile instead of
 +// two virtual 32-lane halves, so a wave covers 32 columns and the column index falls out of the
 +// lane id. The dispatch already hands this kernel 128 threads flat, which is two whole waves.
@@ -101,7 +125,7 @@
 +    // an expert narrower than the tile leaves whole waves on padding columns; they still
 +    // load and hit the barriers, they just skip the products
 +    const bool sg_live = NLR != 8 || 32*sgitg < nr1;
- 
++
 +    float acc[NLR][NCC];
 +    for (short i = 0; i < NLR; i++) { for (short j = 0; j < NCC; j++) { acc[i][j] = 0.f; } }
 +
@@ -297,17 +321,7 @@
  template [[host_name("kernel_mul_mm_f16_f32_w_w64")]]     kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   half4x4,       1,     dequantize_f16,     half,   half4x4,   float, float2x4, 8>;
  template [[host_name("kernel_mul_mm_q5_0_f32_w_w64")]]    kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_0,    2,     dequantize_q5_0,    float,  float4x4,  float, float2x4, 8>;
  template [[host_name("kernel_mul_mm_q5_1_f32_w_w64")]]    kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_1,    2,     dequantize_q5_1,    float,  float4x4,  float, float2x4, 8>;
- template [[host_name("kernel_mul_mm_q8_0_f32_w_w64")]]    kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q8_0,    2,     dequantize_q8_0,    float,  float4x4,  float, float2x4, 8>;
- template [[host_name("kernel_mul_mm_q2_K_f32_w_w64")]]    kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  float, float2x4, 8>;
- template [[host_name("kernel_mul_mm_q3_K_f32_w_w64")]]    kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  float, float2x4, 8>;
- template [[host_name("kernel_mul_mm_q5_K_f32_w_w64")]]    kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_K,    QK_NL, dequantize_q5_K,    float,  float4x4,  float, float2x4, 8>;
- template [[host_name("kernel_mul_mm_q6_K_f32_w_w64")]]    kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q6_K,    QK_NL, dequantize_q6_K,    float,  float4x4,  float, float2x4, 8>;
-@@ -382,8 +666,81 @@
- template [[host_name("kernel_mul_mm_iq3_s_f16_w64")]]   kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq3_s,   QK_NL, dequantize_iq3_s,   float,  float4x4,  half, half2x4>;
- template [[host_name("kernel_mul_mm_iq2_s_f16_w64")]]   kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq2_s,   QK_NL, dequantize_iq2_s,   float,  float4x4,  half, half2x4>;
- template [[host_name("kernel_mul_mm_iq1_s_f16_w64")]]   kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq1_s,   QK_NL, dequantize_iq1_s,   float,  float4x4,  half, half2x4>;
- template [[host_name("kernel_mul_mm_iq1_m_f16_w64")]]   kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq1_m,   QK_NL, dequantize_iq1_m,   float,  float4x4,  half, half2x4>;
- template [[host_name("kernel_mul_mm_iq4_nl_f16_w64")]]  kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
+@@ -387,3 +671,76 @@ template [[host_name("kernel_mul_mm_iq4_nl_f16_w64")]]  kernel mul_mm_w64_t kern
  template [[host_name("kernel_mul_mm_iq4_xs_f16_w64")]]  kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
  template [[host_name("kernel_mul_mm_tq2_0_f16_w64")]]   kernel mul_mm_w64_t kernel_mul_mm_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq2_0,   QK_NL, dequantize_tq2_0,   float,  float4x4,  half, half2x4>;
  // end
@@ -384,29 +398,3 @@
 +template [[host_name("kernel_mul_mm_id_iq4_nl_f16_w64")]]  kernel mul_mm_id_w64_t kernel_mul_mm_id_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
 +template [[host_name("kernel_mul_mm_id_iq4_xs_f16_w64")]]  kernel mul_mm_id_w64_t kernel_mul_mm_id_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
 +template [[host_name("kernel_mul_mm_id_tq2_0_f16_w64")]]   kernel mul_mm_id_w64_t kernel_mul_mm_id_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq2_0,   QK_NL, dequantize_tq2_0,   float,  float4x4,  half, half2x4>;
---- a/ggml/src/ggml-metal/ggml-metal-device.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1610,17 +1610,22 @@
-             case GGML_TYPE_IQ1_M:
-             case GGML_TYPE_IQ2_XXS:
-             case GGML_TYPE_IQ2_XS:
-             case GGML_TYPE_IQ3_XXS: break;
-             default: wide = false; break;
-         }
-     }
- 
--    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "");
-+    // the 64-lane twin lives in mul_mm_w64.metal, beside the dense one
-+    const int simd_width_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
-+    const bool w64 = simd_width_id == 64 && use_mm_manual &&
-+                     getenv("TOSH_MMID_W64_DISABLE") == nullptr;
-+
-+    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
-     snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d", base, bc_inp, use_mm_manual, acc_f32);
- 
-     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
-     if (!res.pipeline) {
-         ggml_metal_cv_t cv = ggml_metal_cv_init();
- 
-         ggml_metal_cv_set_bool(cv, bc_inp,        FC_MUL_MM + 0);
-         ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);

@@ -1,12 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:09 -0400
+Subject: [PATCH] 0011-mgpu-tensor-parallel-groups
+
+---
+ ggml/src/ggml-backend-meta.cpp |  6 ++--
+ src/llama.cpp                  | 56 ++++++++++++++++++++++++++++------
+ 2 files changed, 50 insertions(+), 12 deletions(-)
+
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index d5da672a4..ed69328ed 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -249,22 +249,24 @@
- //
- 
- struct ggml_backend_meta_buffer_type_context {
-     std::vector<ggml_backend_buffer_type_t> simple_bufts;
- 
+@@ -254,12 +254,14 @@ struct ggml_backend_meta_buffer_type_context {
      std::string name;
  
      ggml_backend_meta_buffer_type_context(std::vector<ggml_backend_buffer_type_t> simple_bufts) : simple_bufts(std::move(simple_bufts)) {
@@ -23,20 +29,11 @@ diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
          }
          name += ")";
      }
- 
-     bool operator<(const ggml_backend_meta_buffer_type_context & other) const {
-         return simple_bufts < other.simple_bufts;
-     }
- };
 diff --git a/src/llama.cpp b/src/llama.cpp
+index ad8e44388..da2ef8f2f 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -148,16 +148,40 @@
- void llama_backend_free(void) {
-     ggml_quantize_free();
- }
- 
- int64_t llama_time_us(void) {
+@@ -154,6 +154,30 @@ int64_t llama_time_us(void) {
      return ggml_time_us();
  }
  
@@ -67,17 +64,7 @@ diff --git a/src/llama.cpp b/src/llama.cpp
  // returns true on success
  static bool llama_prepare_model_devices(const llama_model_params & params, llama_model * model) {
      // create list of devices to use with this model
-     if (params.devices) {
-         if (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
-             size_t n_devs = 0;
-             while (params.devices[n_devs]) {
-                 n_devs++;
-@@ -165,22 +189,28 @@
-             if (n_devs == 0) {
-                 LLAMA_LOG_ERROR("%s: LLAMA_SPLIT_MODE_TENSOR needs >= 1 devices\n", __func__);
-                 return false;
-             }
-             LLAMA_LOG_INFO("%s: creating a Meta device with %zu devices\n", __func__, n_devs);
+@@ -171,12 +195,18 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
              for (size_t i = 0; i < n_devs; ++i) {
                  LLAMA_LOG_INFO("%s: - device %zu: %s\n", __func__, i, ggml_backend_dev_name(params.devices[i]));
              }
@@ -101,17 +88,7 @@ diff --git a/src/llama.cpp b/src/llama.cpp
          } else {
              for (ggml_backend_dev_t * dev = params.devices; *dev; ++dev) {
                  model->devices.push_back({false, *dev});
-             }
-         }
-     } else {
-         // default device selection
- 
-@@ -206,22 +236,28 @@
-             }
- 
-             LLAMA_LOG_INFO("%s: creating a Meta device for tensor parallelism from %zu devices:\n", __func__, devs.size());
-             for (size_t i = 0; i < devs.size(); ++i) {
-                 LLAMA_LOG_INFO("%s: - device %zu: %s (%s)\n", __func__, i, ggml_backend_dev_name(devs[i]), ggml_backend_dev_description(devs[i]));
+@@ -212,12 +242,18 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
              }
  
              GGML_ASSERT(!devs.empty());
@@ -135,8 +112,3 @@ diff --git a/src/llama.cpp b/src/llama.cpp
          } else {
              for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
                  ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                 switch (ggml_backend_dev_type(dev)) {
-                     case GGML_BACKEND_DEVICE_TYPE_CPU:
-                     case GGML_BACKEND_DEVICE_TYPE_ACCEL:
-                         // skip CPU backends since they are handled separately
-                         break;

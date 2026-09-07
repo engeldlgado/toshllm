@@ -1,11 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:14 -0400
+Subject: [PATCH] 0036-metal-a-separate-file-for-the-64-lane-kernels
+
+---
+ ggml/src/ggml-metal/CMakeLists.txt           |   1 +
+ ggml/src/ggml-metal/ggml-metal-device.m      |   1 +
+ ggml/src/ggml-metal/kernels/mul_mv_w64.metal | 147 +++++++++++++++++++
+ 3 files changed, 149 insertions(+)
+ create mode 100644 ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+
+diff --git a/ggml/src/ggml-metal/CMakeLists.txt b/ggml/src/ggml-metal/CMakeLists.txt
+index c49ef206e..f59be3aa0 100644
 --- a/ggml/src/ggml-metal/CMakeLists.txt
 +++ b/ggml/src/ggml-metal/CMakeLists.txt
-@@ -33,16 +33,17 @@
- if (TOSH_ENABLE_DYNAMIC_MOE)
-     configure_file(${CMAKE_SOURCE_DIR}/tosh-moe/tosh-moe-lru.metal
-                    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tosh_moe.metal COPYONLY)
- endif()
- 
+@@ -38,6 +38,7 @@ endif()
  set(METALLIB_KERNEL_SOURCES
      kernels/fa.metal
      kernels/mul_mv.metal
@@ -13,19 +22,11 @@
      kernels/mul_mm.metal
      kernels/quantize.metal
      kernels/softmax.metal
-     kernels/norm.metal
-     kernels/unary.metal
-     kernels/binbcast.metal
-     kernels/reduce.metal
-     kernels/tri.metal
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 09f092903..da9e7e58d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -112,16 +112,17 @@
- // Single source of truth for the per-kind metal libraries. The order here
- // defines the enum values and every per-kind table below, so adding a library
- // is a one-line change here (plus adding its source to CMakeLists.txt).
- //   X(suffix, name): name is both the kernels/<name>.metal basename and the
- //   ggml_metallib_<name>_{start,end} embed-symbol stem.
+@@ -119,6 +119,7 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
  #define GGML_METAL_LIBS \
      X(FA,              fa)             \
      X(MUL_MV,          mul_mv)         \
@@ -33,11 +34,9 @@
      X(MUL_MM,          mul_mm)         \
      X(QUANTIZE,        quantize)       \
      X(SOFTMAX,         softmax)        \
-     X(NORM,            norm)           \
-     X(UNARY,           unary)          \
-     X(BINBCAST,        binbcast)       \
-     X(REDUCE,          reduce)         \
-     X(TRI,             tri)            \
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+new file mode 100644
+index 000000000..08bc2ecf3
 --- /dev/null
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 @@ -0,0 +1,147 @@

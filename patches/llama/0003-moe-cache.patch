@@ -1,3 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:06 -0400
+Subject: [PATCH] 0003-moe-cache
+
+---
+ ggml/src/ggml-turbo-quant.c | 1030 +++++++++++++++++++++++++++++++++++
+ tests/test-turbo-quant.c    |  125 +++++
+ tosh-moe/tosh-moe-cache.cpp |  579 ++++++++++++++++++++
+ tosh-moe/tosh-moe-fill.cpp  |  164 ++++++
+ tosh-moe/tosh-moe-lru.metal |  238 ++++++++
+ tosh-moe/tosh-moe.h         |  152 ++++++
+ 6 files changed, 2288 insertions(+)
+ create mode 100644 ggml/src/ggml-turbo-quant.c
+ create mode 100644 tests/test-turbo-quant.c
+ create mode 100644 tosh-moe/tosh-moe-cache.cpp
+ create mode 100644 tosh-moe/tosh-moe-fill.cpp
+ create mode 100644 tosh-moe/tosh-moe-lru.metal
+ create mode 100644 tosh-moe/tosh-moe.h
+
 diff --git a/ggml/src/ggml-turbo-quant.c b/ggml/src/ggml-turbo-quant.c
 new file mode 100644
 index 000000000..c10b750d1

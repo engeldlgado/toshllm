@@ -1,13 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:08 -0400
+Subject: [PATCH] 0008-metal-comm-allreduce-fail-loud
+
+---
+ ggml/src/ggml-metal/ggml-metal.cpp | 31 +++++++++++++++++++++++-------
+ 1 file changed, 24 insertions(+), 7 deletions(-)
+
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index ca47f3c60..ae80721e6 100644
+index 7b4672f12..ee28b63f7 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -1117,59 +1117,76 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
- 
-     // Bailing out is only safe while no device has reduced anything: past that the generic
-     // path would add the partial sums a second time.
-     bool reduced = false;
-     auto push = [&](size_t j_src, size_t j_dst, size_t step, bool hold) {
+@@ -1125,13 +1125,23 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
          view_tmp(j_dst, step);
          const bool ok = ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
                                                                tensors[j_src], &tmp[j_dst], prefer_events, hold);
@@ -33,12 +37,7 @@ index ca47f3c60..ae80721e6 100644
      };
  
      const size_t offset_max = ggml_backend_metal_comm_offset_max(n_backends);
- 
-     size_t step = 0;
-     if (n_backends > 2*offset_max) {
-         for (size_t j_src = 2*offset_max; j_src < n_backends; j_src++) {
-             if (!push(j_src, j_src - 2*offset_max, step, hold_dst)) {
-                 return false;
+@@ -1144,7 +1154,9 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
              }
          }
          for (size_t j_src = 2*offset_max; j_src < n_backends; j_src++) {
@@ -49,13 +48,7 @@ index ca47f3c60..ae80721e6 100644
          }
          step++;
      }
- 
-     // Every exchange of a step must read the partner's tensor before its own add rewrites it,
-     // so the copies all go out before any of the adds.
-     for (size_t offset = offset_max; offset >= 1; offset /= 2) {
-         for (size_t j = 0; j < 2*offset_max; j++) {
-             if (!push(j, j ^ offset, step, hold_dst)) {
-                 return false;
+@@ -1158,16 +1170,21 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
              }
          }
          for (size_t j = 0; j < 2*offset_max; j++) {
@@ -81,8 +74,3 @@ index ca47f3c60..ae80721e6 100644
      }
  
      return true;
- }
- 
- static ggml_backend_buffer_type_t * ggml_backend_metal_device_get_extra_bufts(ggml_backend_dev_t device) {
-     ggml_metal_device_t ctx_dev = (ggml_metal_device_t) device->context;
- 

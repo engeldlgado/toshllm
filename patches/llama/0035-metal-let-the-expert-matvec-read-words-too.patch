@@ -1,11 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:15 -0400
+Subject: [PATCH] 0038-metal-let-the-expert-matvec-read-words-too
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 928f580b4..0bd714a46 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1683,29 +1683,36 @@
-         if (helper) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float)*nr0; }
-         else if (sr) { nw = (int16_t) props_id->simd_width; }
-         else if (lut) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float); }
-     }
- 
+@@ -1630,8 +1630,14 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
      const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
                        getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
  
@@ -21,11 +27,7 @@
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
-         ggml_metal_cv_t cv = ggml_metal_cv_init();
- 
-         ggml_metal_cv_set_int16(cv, nsg, FC_MUL_MV + 0);
-         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 2);
-         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 3);
+@@ -1643,6 +1649,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
          ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 4);
          ggml_metal_cv_set_int16(cv, nw,  FC_MUL_MV + 5);
          ggml_metal_cv_set_bool (cv, row4, FC_MUL_MV + 6);
@@ -33,8 +35,3 @@
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
-         ggml_metal_cv_free(cv);
-     }
- 
-     res.nr0  = nr0;
-     res.nr1  = nr1;

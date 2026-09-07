@@ -1,43 +1,18 @@
-llms: route a MoE batch through the device when its experts fit the ring
-
-With a split bank only the ring can admit an expert, so the pick left the rest at
--1 and the batch read outside the bank. Bound the batch by the ring, and skip the
-host staging when it fits, which more than doubles generation.
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:10 -0400
+Subject: [PATCH] 0022-moe-ring-bound-batch
 
 ---
---- a/src/llama-graph.cpp
-+++ b/src/llama-graph.cpp
-@@ -2099,17 +2099,21 @@
-         moe_cached = bank && n_bank_experts > 0 && need <= tosh_moe_ids_room(n_bank_experts);
-     }
-     if (moe_cached) {
-         ggml_tensor * bank = (ggml_tensor *) tosh_moe_ram_of(moe_first);
-         const int n_bank_experts = tosh_moe_experts_of(moe_first);
-         const bool whole_bank = bank && n_bank_experts > 0 && moe_first->ne[2] >= n_bank_experts;
-         const bool split_wide = tosh_moe_fixed_of(moe_first) > 0 &&
-             getenv("TOSH_MOE_BOUNDED_STAGE") != nullptr;
--        moe_cached = whole_bank || split_wide || n_tokens*n_expert_used <= moe_first->ne[2];
-+        // A split bank can only admit experts into the ring, so that is the bound, not the
-+        // slot count: past it the pick leaves ids at -1 and the batch reads outside the bank.
-+        const int n_fixed = tosh_moe_fixed_of(moe_first);
-+        const int64_t room = n_fixed > 0 ? moe_first->ne[2] - n_fixed : moe_first->ne[2];
-+        moe_cached = whole_bank || split_wide || n_tokens*n_expert_used <= room;
-     }
- 
-     ggml_tensor * expert_ids = selected_experts;
-     if (!moe_cached) {
-         gate_up_exps = tosh_moe_bank_of(gate_up_exps);
-         gate_exps    = tosh_moe_bank_of(gate_exps);
-         up_exps      = tosh_moe_bank_of(up_exps);
-         down_exps    = tosh_moe_bank_of(down_exps);
+ ggml/src/ggml-metal/ggml-metal-context.m | 9 +++++++++
+ src/llama-graph.cpp                      | 6 +++++-
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 6dfbaa356..539753b5b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -1948,16 +1948,25 @@
-             const char * threshold_mb = getenv("TOSH_MOE_BOUNDED_STAGE_THRESHOLD_MB");
-             if (threshold_mb != NULL) {
-                 const unsigned long long value = strtoull(threshold_mb, NULL, 10);
-                 if (value > 0 && value <= SIZE_MAX/(1024ULL*1024ULL)) {
-                     bounded_threshold = (size_t) value*1024ULL*1024ULL;
+@@ -1603,6 +1603,15 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
                  }
              }
              staged_moe = bounded_forced || bounded_bank_size > bounded_threshold;
@@ -53,8 +28,20 @@ host staging when it fits, which more than doubles generation.
              break;
          }
      }
-     if (staged_moe) {
-         static bool logged = false;
-         if (!logged) {
-             GGML_LOG_WARN("%s: Dynamic MoE bounded staging active: bank %.2f GiB, threshold %.2f GiB%s\n",
-                 __func__, bounded_bank_size/(1024.0*1024.0*1024.0),
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index d0b971e55..ebe1fa78b 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -2156,7 +2156,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         const bool whole_bank = bank && n_bank_experts > 0 && moe_first->ne[2] >= n_bank_experts;
+         const bool split_wide = tosh_moe_fixed_of(moe_first) > 0 &&
+             getenv("TOSH_MOE_BOUNDED_STAGE") != nullptr;
+-        moe_cached = whole_bank || split_wide || n_tokens*n_expert_used <= moe_first->ne[2];
++        // A split bank can only admit experts into the ring, so that is the bound, not the
++        // slot count: past it the pick leaves ids at -1 and the batch reads outside the bank.
++        const int n_fixed = tosh_moe_fixed_of(moe_first);
++        const int64_t room = n_fixed > 0 ? moe_first->ne[2] - n_fixed : moe_first->ne[2];
++        moe_cached = whole_bank || split_wide || n_tokens*n_expert_used <= room;
+     }
+ 
+     ggml_tensor * expert_ids = selected_experts;

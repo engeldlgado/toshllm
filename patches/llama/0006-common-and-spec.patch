@@ -1,13 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:08 -0400
+Subject: [PATCH] 0006-common-and-spec
+
+---
+ common/arg.cpp         |  20 ++++
+ common/common.cpp      |  20 ++++
+ common/common.h        |   3 +
+ common/fit.cpp         |   4 +-
+ common/speculative.cpp | 231 ++++++++++++++++++++++++++++++++++++++++-
+ 5 files changed, 272 insertions(+), 6 deletions(-)
+
 diff --git a/common/arg.cpp b/common/arg.cpp
-index e346863e5..ce7032c87 100644
+index 015196ca1..6c5d44a23 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -256,16 +256,33 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
-     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-         auto * dev = ggml_backend_dev_get(i);
-         auto * buft = ggml_backend_dev_buffer_type(dev);
-         if (buft) {
-             buft_list[ggml_backend_buft_name(buft)] = buft;
+@@ -261,6 +261,23 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
          }
      }
  
@@ -31,17 +39,7 @@ index e346863e5..ce7032c87 100644
      for (const auto & override : string_split<std::string>(value, ',')) {
          std::string::size_type pos = override.find('=');
          if (pos == std::string::npos) {
-             throw std::invalid_argument("invalid value");
-         }
-         std::string tensor_name = override.substr(0, pos);
-         std::string buffer_type = override.substr(pos + 1);
- 
-@@ -306,16 +323,19 @@ const std::vector<ggml_type> kv_cache_types = {
-     GGML_TYPE_F16,
-     GGML_TYPE_BF16,
-     GGML_TYPE_Q8_0,
-     GGML_TYPE_Q4_0,
-     GGML_TYPE_Q4_1,
+@@ -311,6 +328,9 @@ const std::vector<ggml_type> kv_cache_types = {
      GGML_TYPE_IQ4_NL,
      GGML_TYPE_Q5_0,
      GGML_TYPE_Q5_1,
@@ -51,21 +49,11 @@ index e346863e5..ce7032c87 100644
  };
  
  static ggml_type kv_cache_type_from_str(const std::string & s) {
-     for (const auto & type : kv_cache_types) {
-         if (ggml_type_name(type) == s) {
-             return type;
-         }
-     }
 diff --git a/common/common.cpp b/common/common.cpp
-index 347e8e9fc..4e225bd98 100644
+index d162a3880..046476c3d 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -389,24 +389,44 @@ void common_init() {
- #endif
- 
-     common_log_set_prefix(common_log_main(), true);
-     common_log_set_timestamps(common_log_main(), true);
- 
+@@ -394,6 +394,18 @@ void common_init() {
      llama_log_set(common_log_default_callback, NULL);
  }
  
@@ -84,8 +72,7 @@ index 347e8e9fc..4e225bd98 100644
  void common_params_print_info(const common_params & params, bool print_devices) {
  #ifdef NDEBUG
      const char * build_type = "";
- #else
-     const char * build_type = " (debug)";
+@@ -402,6 +414,14 @@ void common_params_print_info(const common_params & params, bool print_devices)
  #endif
      COM_TRC("%s: build %d (%s) with %s for %s%s\n", __func__, llama_build_number(), llama_commit(), llama_compiler(), llama_build_target(), build_type);
  
@@ -100,21 +87,11 @@ index 347e8e9fc..4e225bd98 100644
      const int verbosity = common_log_get_verbosity_thold();
      COM_INF("%s: verbosity = %d (adjust with the `-lv N` CLI arg)\n", __func__, verbosity);
  
-     // device enumeration creates a primary context on CUDA backends, skip it when the caller does not own any device
-     if (print_devices && verbosity >= LOG_LEVEL_TRACE) {
-         COM_TRC("%s", "device_info:\n");
-         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-             auto * dev = ggml_backend_dev_get(i);
 diff --git a/common/common.h b/common/common.h
-index a333f702a..29c051742 100644
+index 63d0badd0..65b0ea26b 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -759,16 +759,19 @@ struct common_params {
- 
- // call once at the start of a program if it uses libcommon
- // initializes the logging system and prints info about the build
- void common_init();
- 
+@@ -765,6 +765,9 @@ void common_init();
  void common_params_print_info(const common_params & params, bool print_devices = true);
  std::string common_params_get_system_info(const common_params & params);
  
@@ -124,21 +101,11 @@ index a333f702a..29c051742 100644
  bool parse_cpu_range(const std::string & range, bool(&boolmask)[GGML_MAX_N_THREADS]);
  bool parse_cpu_mask(const std::string & mask, bool(&boolmask)[GGML_MAX_N_THREADS]);
  void postprocess_cpu_params(common_cpu_params & cpuparams, const common_cpu_params * role_model = nullptr);
- bool set_process_priority(enum ggml_sched_priority prio);
- 
- //
- // String utils
- //
 diff --git a/common/fit.cpp b/common/fit.cpp
 index c601fe405..7d58c5986 100644
 --- a/common/fit.cpp
 +++ b/common/fit.cpp
-@@ -175,17 +175,17 @@ common_device_memory_data_vec common_get_device_memory_data(
-     return ret;
- }
- 
- static void common_params_fit_impl(
-         const char * path_model, struct llama_model_params * mparams, struct llama_context_params * cparams,
+@@ -180,7 +180,7 @@ static void common_params_fit_impl(
          float * tensor_split, struct llama_model_tensor_buft_override * tensor_buft_overrides,
          size_t * margins_s, uint32_t n_ctx_min, const common_fit_extra_model * extra, enum ggml_log_level log_level) {
      if (mparams->split_mode == LLAMA_SPLIT_MODE_TENSOR) {
@@ -147,17 +114,7 @@ index c601fe405..7d58c5986 100644
      }
      constexpr int64_t MiB = 1024*1024;
      typedef std::vector<llama_device_memory_data> dmds_t;
-     const llama_model_params default_mparams = llama_model_default_params();
- 
-     std::vector<ggml_backend_dev_t> devs;
-     uint32_t hp_ngl = 0; // hparams.n_gpu_layers
-     uint32_t hp_nct = 0; // hparams.n_ctx_train
-@@ -886,17 +886,17 @@ enum common_params_fit_status common_fit_params(
-         const common_fit_extra_model * extra,
-         ggml_log_level log_level) {
-     const int64_t t0_us = llama_time_us();
-     common_params_fit_status status = COMMON_PARAMS_FIT_STATUS_SUCCESS;
-     try {
+@@ -891,7 +891,7 @@ enum common_params_fit_status common_fit_params(
          common_params_fit_impl(path_model, mparams, cparams, tensor_split, tensor_buft_overrides, margins, n_ctx_min, extra, log_level);
          LOG_TRC("%s: successfully fit params to free device memory\n", __func__);
      } catch (const common_params_fit_exception & e) {
@@ -166,23 +123,13 @@ index c601fe405..7d58c5986 100644
          status = COMMON_PARAMS_FIT_STATUS_FAILURE;
      } catch (const std::runtime_error & e) {
          LOG_ERR("%s: encountered an error while trying to fit params to free device memory: %s\n", __func__, e.what());
-         status = COMMON_PARAMS_FIT_STATUS_ERROR;
-     }
-     const int64_t t1_us = llama_time_us();
-     LOG_TRC("%s: fitting params to free memory took %.2f seconds\n", __func__, (t1_us - t0_us) * 1e-6);
-     return status;
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index d34d1c9c5..a86f3ae58 100644
+index 851a47b9a..d57fbff66 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -939,16 +939,25 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
-     bool causal_attn = false;
- 
+@@ -941,6 +941,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
      const int32_t * target_layer_ids   = nullptr; // model_dft's extract layer indices
      uint32_t        target_layer_ids_n = 0;
- 
-     // scratch buffer for concatenated target features [n_tokens, n_embd_enc]
-     std::vector<float> features_buf;
  
 +    // acceptance backoff: when recent acceptance stays low, skip the draft block (fall back to
 +    // AR) except for periodic probes, so unpredictable content stops paying the draft cost
@@ -196,17 +143,7 @@ index d34d1c9c5..a86f3ae58 100644
      common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
              common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
          : common_speculative_impl(type, n_seq, params.draft.n_max)
-         , params(params.draft)
-         , is_dspark(type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK)
-     {
-         auto * ctx_tgt = this->params.ctx_tgt;
-         auto * ctx_dft = this->params.ctx_dft;
-@@ -1048,16 +1057,17 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
-         // turn on extraction of the target layers' input embeddings
-         for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
-             llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
-         }
- 
+@@ -1050,6 +1059,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
          // DFlash2 reads its selector lattice from h_nextn and never consumes raw logits.
          llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ !is_dflash2);
          llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
@@ -214,17 +151,7 @@ index d34d1c9c5..a86f3ae58 100644
      }
  
      ~common_speculative_impl_draft_dflash() override {
-         auto * ctx_dft = this->params.ctx_dft;
-         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) backend_chains.size(); ++seq_id) {
-             if (backend_chains[seq_id] == nullptr) {
-                 continue;
-             }
-@@ -1218,33 +1228,62 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
- 
-         common_batch_clear(batch);
- 
-         // build one batch holding every drafting sequence's noise block into a single decode)
-         // record where each block starts and its size
+@@ -1183,23 +1193,52 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
          std::vector<int32_t> i_block_beg(n_seq, -1);
          std::vector<int32_t> n_block    (n_seq,  0);
  
@@ -279,17 +206,7 @@ index d34d1c9c5..a86f3ae58 100644
              }
          }
  
-         if (batch.n_tokens == 0) {
-             return;
-         }
- 
-         // decode all sequence's noise block in a single batch
-@@ -1351,22 +1390,38 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
-             }
- 
-             if (result.size() < (size_t) params.n_min) {
-                 result.clear();
-             }
+@@ -1316,12 +1355,28 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
          }
      }
  
@@ -320,17 +237,7 @@ index d34d1c9c5..a86f3ae58 100644
      common_params_speculative_draft params; // reuses the draft-model params slot (ctx_tgt/ctx_dft)
  
      llama_batch batch;
- 
-     std::vector<common_sampler_ptr> smpls;
- 
-     // backend sampler chain per seq, attached to ctx_dft
-     std::vector<llama_sampler *> backend_chains;
-@@ -1392,16 +1447,29 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-     // Hidden rows from the most recent target verification batch, grouped by seq.
-     // Row 0 corresponds to the sampled token, row N to the Nth accepted draft token.
-     std::vector<std::vector<float>> verify_h;
-     std::vector<int32_t> verify_h_rows;
- 
+@@ -1357,6 +1412,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
      std::vector<int>                i_last;
      std::vector<std::vector<float>> chain_h;
  
@@ -350,17 +257,7 @@ index d34d1c9c5..a86f3ae58 100644
      common_speculative_impl_draft_mtp(const common_params_speculative & params, uint32_t n_seq)
          : common_speculative_impl(COMMON_SPECULATIVE_TYPE_DRAFT_MTP, n_seq, params.draft.n_max)
          , params(params.draft)
-     {
-         auto * ctx_tgt = this->params.ctx_tgt;
-         auto * ctx_dft = this->params.ctx_dft;
-         GGML_ASSERT(ctx_tgt && ctx_dft && "MTP requires ctx_tgt and ctx_dft to be set");
- 
-@@ -1464,16 +1532,26 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-             for (auto & c : chain_h) {
-                 c.reserve((size_t) (this->params.n_max + 1) * n_embd);
-             }
-         }
-         this->n_max = this->params.n_max;
+@@ -1429,6 +1497,16 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
  
          pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
  
@@ -377,17 +274,7 @@ index d34d1c9c5..a86f3ae58 100644
          i_last.assign(n_seq, -1);
          i_batch_beg.assign(n_seq, -1);
          i_batch_end.assign(n_seq, -1);
- 
-         verify_h.assign(n_seq, {});
-         verify_h_rows.assign(n_seq, 0);
-     }
- 
-@@ -1492,22 +1570,78 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
- 
-         if (batch.token != nullptr) {
-             free(batch.token);
-             batch.token = nullptr;
-         }
+@@ -1457,12 +1535,68 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          llama_batch_free(batch);
      }
  
@@ -456,17 +343,7 @@ index d34d1c9c5..a86f3ae58 100644
          auto * ctx_dft = this->params.ctx_dft;
          const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id);
  
-         if (pos_max < N - 1 && !is_mem_shared) {
-             SPC_WRN("ctx_dft pos_max=%d < N-1=%d - "
-                     "process() hook may not have run on every prefill ubatch "
-                     "(need_embd / logits=1 on every prompt position?). "
-                     "Drafts may degrade.\n",
-@@ -1544,16 +1678,28 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-             }
-         }
- 
-         auto * ctx_tgt = this->params.ctx_tgt;
-         auto * ctx_dft = this->params.ctx_dft;
+@@ -1509,6 +1643,18 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
  
          const size_t row_bytes = (size_t) n_embd * sizeof(float);
  
@@ -485,17 +362,7 @@ index d34d1c9c5..a86f3ae58 100644
          // if kv is shared with target (e.g Gemma4), then we can skip this catch-up decode
          if (!is_mem_shared) {
              common_batch_clear(batch);
- 
-             for (int k = 0; k < n_tokens; ++k) {
-                 common_batch_add(batch, batch_in.token[k], batch_in.pos[k], { batch_in.seq_id[k][0] }, 0);
-             }
- 
-@@ -1577,16 +1723,48 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-                     continue;
-                 }
- 
-                 set_h(i_batch_beg[seq_id], pending_h[seq_id].data());
-             }
+@@ -1542,6 +1688,38 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
  
              auto * mem_dft = llama_get_memory(ctx_dft);
  
@@ -534,17 +401,7 @@ index d34d1c9c5..a86f3ae58 100644
              bool ok = true;
              for (int head = 0; head < n_mtp_layers; ++head) {
                  if (chain_heads) {
-                     // ref: https://github.com/ggml-org/llama.cpp/pull/24340/changes#r3413498544
-                     for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-                         if (i_batch_beg[seq_id] < 0) {
-                             continue;
-                         }
-@@ -1607,16 +1785,24 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-             if (chain_heads) {
-                 llama_set_nextn_layer_offset(ctx_dft, 0); // restore default for non-draft decodes
-             }
-             if (!ok) {
-                 return false;
+@@ -1572,6 +1750,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              }
          }
  
@@ -559,17 +416,7 @@ index d34d1c9c5..a86f3ae58 100644
          for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
              if (i_batch_end[seq_id] < 0) {
                  continue;
-             }
- 
-             const int32_t n_rows = i_batch_end[seq_id] - i_batch_beg[seq_id] + 1;
-             verify_h_rows[seq_id] = n_rows;
-             verify_h[seq_id].resize((size_t) n_rows * n_embd);
-@@ -1636,28 +1822,54 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-     void draft(common_speculative_draft_params_vec & dparams) override {
-         auto & ctx_dft = params.ctx_dft;
- 
-         common_batch_clear(batch);
- 
+@@ -1601,9 +1787,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          // keep track of which sequences are still drafting
          int n_drafting = 0;
          std::vector<bool> drafting(n_seq);
@@ -589,7 +436,7 @@ index d34d1c9c5..a86f3ae58 100644
          for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
              auto & dp = dparams[seq_id];
  
-             if (!dp.drafting) {
+@@ -1611,8 +1807,24 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                  continue;
              }
  
@@ -614,17 +461,7 @@ index d34d1c9c5..a86f3ae58 100644
              common_sampler_reset(smpls[seq_id].get());
  
              common_batch_add(batch, dp.id_last, dp.n_past, { seq_id }, true);
-             std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, pending_h[seq_id].data(), row_bytes);
- 
-             i_last[seq_id] = batch.n_tokens - 1;
- 
-             if (chain_heads) {
-@@ -1776,24 +1988,35 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-             auto & dp = dparams[seq_id];
-             if (!dp.drafting) {
-                 continue;
-             }
- 
+@@ -1741,6 +1953,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              if (dp.result->size() < (size_t) params.n_min) {
                  dp.result->clear();
              }
@@ -634,8 +471,7 @@ index d34d1c9c5..a86f3ae58 100644
          }
      }
  
-     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
-         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+@@ -1749,6 +1964,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              return;
          }
  
@@ -650,8 +486,3 @@ index d34d1c9c5..a86f3ae58 100644
          const int32_t n_rows = verify_h_rows[seq_id];
          if (n_rows <= 0) {
              return;
-         }
- 
-         const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
-         const size_t row_bytes = (size_t) n_embd * sizeof(float);
-         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);

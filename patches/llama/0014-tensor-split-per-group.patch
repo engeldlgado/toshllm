@@ -1,12 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Engelbert <direccion@marketingweb.com.mx>
+Date: Mon, 7 Sep 2026 02:14:09 -0400
+Subject: [PATCH] 0014-tensor-split-per-group
+
+---
+ src/llama-model.cpp | 11 +++++++++--
+ src/llama-model.h   |  9 +++++++++
+ src/llama.cpp       | 22 ++++++++++++++++------
+ 3 files changed, 34 insertions(+), 8 deletions(-)
+
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index b1e7f88e8..0133eb91a 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -802,7 +802,8 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+         std::vector<float> tensor_split_scan;
+         tensor_split_scan.reserve(ud->n_devices);
+         for (size_t j = 0; j < ud->n_devices; j++) {
+-            tensor_split_scan.push_back(tensor_split == nullptr ? 0.0f : tensor_split[(j + tc.rotation) % ud->n_devices]);
++            tensor_split_scan.push_back(tensor_split == nullptr ? 0.0f :
++                    tensor_split[ud->dev_offset + (j + tc.rotation) % ud->n_devices]);
+             if (j > 0) {
+                 tensor_split_scan[j] += tensor_split_scan[j - 1];
+             }
+@@ -1472,7 +1473,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+             splits[i] = free;
+         }
+     } else {
+-        std::copy(tensor_split, tensor_split + n_devices(), splits.begin());
++        // a group's share is the sum of its devices'
++        for (size_t i = 0; i < n_devices(); ++i) {
++            splits[i] = 0.0f;
++            for (size_t k = 0; k < tensor_group_size; ++k) {
++                splits[i] += tensor_split[i*tensor_group_size + k];
++            }
++        }
+     }
+ 
+     // sum and normalize the splits to get the split points
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 4c4a30e01..2dca2de87 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -601,6 +601,9 @@ struct llama_device {
+ 
+ struct llama_meta_device_get_split_state_userdata {
+     size_t                     n_devices;
++    // where this group starts in the global --tensor-split list; groups past the first would
++    // otherwise all read the same leading entries
++    size_t                     dev_offset;
+     const struct llama_model * model;
+ };
+ 
+@@ -709,6 +712,12 @@ struct llama_model {
+     // statically allocated context for assigning
+     struct llama_meta_device_get_split_state_userdata get_split_state_ud;
+ 
++    // one per group, so each carries its own offset; the single-group case still uses the above
++    std::vector<llama_meta_device_get_split_state_userdata> get_split_state_uds;
++
++    // devices per tensor-parallel group, 1 when there are no groups
++    size_t tensor_group_size = 1;
++
+     int64_t t_load_us  = 0;
+     int64_t t_start_us = 0;
+ 
 diff --git a/src/llama.cpp b/src/llama.cpp
+index da2ef8f2f..395e5b8dc 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -193,22 +193,27 @@
-             LLAMA_LOG_INFO("%s: creating a Meta device with %zu devices\n", __func__, n_devs);
-             for (size_t i = 0; i < n_devs; ++i) {
-                 LLAMA_LOG_INFO("%s: - device %zu: %s\n", __func__, i, ggml_backend_dev_name(params.devices[i]));
-             }
-             const size_t n_group = llama_tensor_group_size(n_devs);
+@@ -199,12 +199,17 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
              if (n_group < n_devs) {
                  LLAMA_LOG_INFO("%s: grouping them into %zu Meta devices of %zu\n", __func__, n_devs/n_group, n_group);
              }
@@ -27,17 +90,7 @@ diff --git a/src/llama.cpp b/src/llama.cpp
                  });
              }
          } else {
-             for (ggml_backend_dev_t * dev = params.devices; *dev; ++dev) {
-                 model->devices.push_back({false, *dev});
-             }
-         }
-     } else {
-@@ -236,26 +241,31 @@
-             }
- 
-             LLAMA_LOG_INFO("%s: creating a Meta device for tensor parallelism from %zu devices:\n", __func__, devs.size());
-             for (size_t i = 0; i < devs.size(); ++i) {
-                 LLAMA_LOG_INFO("%s: - device %zu: %s (%s)\n", __func__, i, ggml_backend_dev_name(devs[i]), ggml_backend_dev_description(devs[i]));
+@@ -242,16 +247,21 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
              }
  
              GGML_ASSERT(!devs.empty());
@@ -62,102 +115,3 @@ diff --git a/src/llama.cpp b/src/llama.cpp
                  });
              }
          } else {
-             for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-                 ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                 switch (ggml_backend_dev_type(dev)) {
-                     case GGML_BACKEND_DEVICE_TYPE_CPU:
-                     case GGML_BACKEND_DEVICE_TYPE_ACCEL:
-diff --git a/src/llama-model.cpp b/src/llama-model.cpp
---- a/src/llama-model.cpp
-+++ b/src/llama-model.cpp
-@@ -793,17 +793,18 @@
-     tensor_config tc = get_tensor_config();
-     split_state.axis = tc.axis;
-     if (split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS) {
-         const int64_t blck_size = ggml_blck_size(tc.tensor_axis_0->type);
-         const float * tensor_split = ud->model->tensor_split();
-         std::vector<float> tensor_split_scan;
-         tensor_split_scan.reserve(ud->n_devices);
-         for (size_t j = 0; j < ud->n_devices; j++) {
--            tensor_split_scan.push_back(tensor_split == nullptr ? 0.0f : tensor_split[(j + tc.rotation) % ud->n_devices]);
-+            tensor_split_scan.push_back(tensor_split == nullptr ? 0.0f :
-+                    tensor_split[ud->dev_offset + (j + tc.rotation) % ud->n_devices]);
-             if (j > 0) {
-                 tensor_split_scan[j] += tensor_split_scan[j - 1];
-             }
-         }
-         const std::vector<std::pair<int64_t, uint32_t>> segments = get_split_segments(split_state.axis, tc.il);
-         const std::vector<int64_t> granularity = get_split_granularity(blck_size, tc.il, segments);
-         for (size_t is = 0; is < segments.size(); is++) {
-             const int64_t  ne_s = segments[is].first;
-@@ -1455,17 +1456,23 @@
-             // have any to report. in this case, we will use the host memory as a fallback
-             // fixes: https://github.com/ggml-org/llama.cpp/issues/18577
-             if (free == 0 && total == 0) {
-                 ggml_backend_dev_memory(cpu_dev, &free, &total);
-             }
-             splits[i] = free;
-         }
-     } else {
--        std::copy(tensor_split, tensor_split + n_devices(), splits.begin());
-+        // a group's share is the sum of its devices'
-+        for (size_t i = 0; i < n_devices(); ++i) {
-+            splits[i] = 0.0f;
-+            for (size_t k = 0; k < tensor_group_size; ++k) {
-+                splits[i] += tensor_split[i*tensor_group_size + k];
-+            }
-+        }
-     }
- 
-     // sum and normalize the splits to get the split points
-     float split_sum = 0.0f;
-     for (size_t i = 0; i < n_devices(); ++i) {
-         split_sum += splits[i];
-         splits[i] = split_sum;
-     }
-diff --git a/src/llama-model.h b/src/llama-model.h
---- a/src/llama-model.h
-+++ b/src/llama-model.h
-@@ -594,16 +594,19 @@
- struct llama_device {
-     bool is_meta;
- 
-     ggml_backend_dev_t dev;
- };
- 
- struct llama_meta_device_get_split_state_userdata {
-     size_t                     n_devices;
-+    // where this group starts in the global --tensor-split list; groups past the first would
-+    // otherwise all read the same leading entries
-+    size_t                     dev_offset;
-     const struct llama_model * model;
- };
- 
- struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata);
- 
- struct llama_model {
-     llm_type type = LLM_TYPE_UNKNOWN;
-     llm_arch arch = LLM_ARCH_UNKNOWN;
-@@ -702,16 +705,22 @@
-     std::vector<std::pair<std::string, struct ggml_tensor *>> tensors_by_name;
- 
-     // for keeping track of associated LoRA adapters
-     std::unordered_set<llama_adapter_lora *> loras;
- 
-     // statically allocated context for assigning
-     struct llama_meta_device_get_split_state_userdata get_split_state_ud;
- 
-+    // one per group, so each carries its own offset; the single-group case still uses the above
-+    std::vector<llama_meta_device_get_split_state_userdata> get_split_state_uds;
-+
-+    // devices per tensor-parallel group, 1 when there are no groups
-+    size_t tensor_group_size = 1;
-+
-     int64_t t_load_us  = 0;
-     int64_t t_start_us = 0;
- 
-     explicit llama_model(const llama_model_params & params);
-     virtual ~llama_model();
- 
-     std::string arch_name() const;
-     std::string type_name() const;
