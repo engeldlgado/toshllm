@@ -304,10 +304,7 @@ private struct ServerConfigurationWorkspace: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 14) { serverSettingsCard; engineCard }
-                VStack(spacing: 14) { serverSettingsCard; engineCard }
-            }
+            AdaptiveTwoUp(threshold: 900) { serverSettingsCard } second: { engineCard }
             modelConfigurationCard
             HStack {
                 if server.profile != nil {
@@ -397,16 +394,7 @@ private struct ServerConfigurationWorkspace: View {
     private var modelConfigurationCard: some View {
         DetailPanel(title: loc.t("Configuración del modelo", "Model configuration"),
                     subtitle: loc.t("Parámetros específicos del modelo seleccionado.", "Model-specific parameters for the selected model."), icon: "cube") {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 12) {
-                    modelRuntimeGroup
-                    modelAccelerationGroup
-                }
-                VStack(spacing: 12) {
-                    modelRuntimeGroup
-                    modelAccelerationGroup
-                }
-            }
+            AdaptiveTwoUp(threshold: 820, spacing: 12) { modelRuntimeGroup } second: { modelAccelerationGroup }
             if !settings.modelPath.isEmpty {
                 HStack(spacing: 10) {
                     Label(loc.t("Detectado", "Detected"), systemImage: "checkmark.seal")
@@ -726,10 +714,7 @@ private struct ServerPerformanceWorkspace: View {
     @EnvironmentObject private var loc: Localizer
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 14) { throughput; resources }
-            VStack(spacing: 14) { throughput; resources }
-        }
+        AdaptiveTwoUp(threshold: 820) { throughput } second: { resources }
     }
 
     private var throughput: some View {
@@ -778,10 +763,7 @@ private struct ServerAPIWorkspace: View {
 
     var body: some View {
         let settings = server.effectiveSettings()
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 14) { endpointCard(settings); routesCard }
-            VStack(spacing: 14) { endpointCard(settings); routesCard }
-        }
+        AdaptiveTwoUp(threshold: 820) { endpointCard(settings) } second: { routesCard }
     }
 
     private func endpointCard(_ settings: ServerSettings) -> some View {

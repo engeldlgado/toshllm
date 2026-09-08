@@ -98,8 +98,8 @@ struct AudioControls: View {
                             "Choosing the language improves accuracy; Automatic is useful when it is unknown."))
 
                 if operation == .translateLocal {
-                    TextField(loc.t("Idioma de destino", "Target language"), text: $targetLanguage)
-                        .workspaceTextField()
+                    DeferredSettingsTextField(loc.t("Idioma de destino", "Target language"),
+                                              text: $targetLanguage)
                         .help(loc.t("Escribe el idioma final, por ejemplo Español, Coreano o Francés.",
                                     "Enter the final language, such as Spanish, Korean, or French."))
                     chatRequirement

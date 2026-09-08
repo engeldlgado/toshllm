@@ -43,6 +43,7 @@ struct BenchmarksView: View {
     private var busy: Bool { bench.running || bench.sweeping || bench.optimizingDynamicMoe }
 
     var body: some View {
+
         ScrollView {
             VStack(spacing: 16) {
                 compactRunCard
@@ -680,10 +681,7 @@ struct BenchmarksView: View {
                 Text(flag).foregroundStyle(.tertiary)
             }
             .font(.system(size: 9, weight: .semibold)).tracking(0.5).foregroundStyle(.secondary)
-            TextField("", value: value, format: .number.grouping(.never))
-                .textFieldStyle(.plain)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .monospacedDigit().multilineTextAlignment(.trailing)
+            BenchmarkIntegerField(value: value, pointSize: 15)
                 .padding(.horizontal, 9).padding(.vertical, 7)
                 .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(WorkspaceStyle.border))
@@ -1456,6 +1454,7 @@ private struct BenchmarkLoadMoreButton: View {
 /// otherwise invalidate the history, comparisons and charts around this field.
 private struct BenchmarkIntegerField: NSViewRepresentable {
     @Binding var value: Int
+    var pointSize: CGFloat = 13
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1465,8 +1464,16 @@ private struct BenchmarkIntegerField: NSViewRepresentable {
         field.isBordered = false
         field.drawsBackground = false
         field.alignment = .right
-        field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        field.font = .monospacedDigitSystemFont(ofSize: pointSize, weight: .semibold)
         field.focusRingType = .none
+        // A formatter rejects non-digits before they are inserted. Filtering in
+        // controlTextDidChange instead means reassigning stringValue mid-edit,
+        // which tears down the field editor and moves the caret on every key.
+        let digits = NumberFormatter()
+        digits.numberStyle = .none
+        digits.allowsFloats = false
+        digits.minimum = 0
+        field.formatter = digits
         return field
     }
 
@@ -1479,23 +1486,12 @@ private struct BenchmarkIntegerField: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: BenchmarkIntegerField
-        private var draft = ""
         init(_ parent: BenchmarkIntegerField) { self.parent = parent }
-
-        func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextField else { return }
-            let filtered = field.stringValue.filter { $0 >= "0" && $0 <= "9" }
-            if field.stringValue != filtered { field.stringValue = filtered }
-            draft = filtered
-        }
 
         func controlTextDidEndEditing(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
-            if let number = Int(draft.isEmpty ? field.stringValue : draft) {
-                parent.value = number
-            }
+            if let number = Int(field.stringValue) { parent.value = number }
             field.stringValue = String(parent.value)
-            draft = ""
         }
     }
 }

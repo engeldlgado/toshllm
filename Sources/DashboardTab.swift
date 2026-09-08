@@ -278,9 +278,7 @@ struct DashboardView: View {
                     Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Puerto", "Port")).font(.callout)
                     Spacer(minLength: 8)
-                    TextField("", value: $port, format: .number.grouping(.never))
-                        .multilineTextAlignment(.trailing).frame(width: 72)
-                        .workspaceTextField()
+                    DeferredNumberField("", value: $port, width: 72)
                         .disabled(serverBusy)
                 }
                 .help(loc.t("Puerto local del servidor (API y chat web).",
@@ -391,9 +389,8 @@ struct DashboardView: View {
                     Image(systemName: "terminal").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Argumentos extra", "Extra arguments")).font(.callout)
                     Spacer(minLength: 8)
-                    TextField("", text: $extraArgs, prompt: Text(verbatim: "--no-warmup -np 2"))
-                        .workspaceTextField()
-                        .font(.system(.callout, design: .monospaced))
+                    DeferredSettingsTextField("", text: $extraArgs,
+                                              prompt: "--no-warmup -np 2", monospaced: true)
                         .autocorrectionDisabled()
                         .frame(maxWidth: 220)
                         .disabled(serverBusy)

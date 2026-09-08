@@ -39,9 +39,10 @@ struct SettingsRow<Control: View>: View {
                 .controlSize(.mini)
                 .frame(minHeight: 26, alignment: .center)
         }
-        .modifier(OptionalInfoTip(text: help))
-        .padding(.horizontal, 14)
+        .padding(.leading, 14)
         .padding(.vertical, 7)
+        .modifier(OptionalInfoTip(text: help))
+        .padding(.trailing, 14)
         .frame(minHeight: 42)
     }
 }
@@ -64,23 +65,26 @@ private struct OptionalInfoTip: ViewModifier {
 struct DeferredSettingsTextField: View {
     @Binding var text: String
     let placeholder: String
+    var prompt: String? = nil
     var width: CGFloat? = nil
     var monospaced = false
 
     @State private var draft: String
     @FocusState private var focused: Bool
 
-    init(_ placeholder: String, text: Binding<String>, width: CGFloat? = nil,
-         monospaced: Bool = false) {
+    init(_ placeholder: String, text: Binding<String>, prompt: String? = nil,
+         width: CGFloat? = nil, monospaced: Bool = false) {
         self.placeholder = placeholder
         self._text = text
+        self.prompt = prompt
         self.width = width
         self.monospaced = monospaced
         self._draft = State(initialValue: text.wrappedValue)
     }
 
     var body: some View {
-        TextField(placeholder, text: $draft)
+        TextField(placeholder, text: $draft,
+                  prompt: prompt.map { Text(verbatim: $0) })
             .font(monospaced ? .system(.caption, design: .monospaced) : .body)
             .focused($focused)
             .onSubmit(commit)
@@ -92,6 +96,43 @@ struct DeferredSettingsTextField: View {
     private func commit() {
         guard draft != text else { return }
         text = draft
+    }
+}
+
+/// Numeric sibling of the deferred field. Typing into a value backed by
+/// UserDefaults writes on every keystroke, which redraws every view watching
+/// that key, so the value is only committed on submit or when focus leaves.
+struct DeferredNumberField<Value: LosslessStringConvertible & Equatable>: View {
+    @Binding var value: Value
+    let placeholder: String
+    var width: CGFloat? = nil
+
+    @State private var draft: String
+    @FocusState private var focused: Bool
+
+    init(_ placeholder: String, value: Binding<Value>, width: CGFloat? = nil) {
+        self.placeholder = placeholder
+        self._value = value
+        self.width = width
+        self._draft = State(initialValue: String(value.wrappedValue))
+    }
+
+    var body: some View {
+        TextField(placeholder, text: $draft)
+            .multilineTextAlignment(.trailing)
+            .focused($focused)
+            .onSubmit(commit)
+            .onChange(of: focused) { _, active in if !active { commit() } }
+            .onChange(of: value) { _, new in if !focused { draft = String(new) } }
+            .workspaceTextField(width: width)
+    }
+
+    private func commit() {
+        if let parsed = Value(draft) {
+            if parsed != value { value = parsed }
+        } else {
+            draft = String(value)   // reject what does not parse
+        }
     }
 }
 
@@ -145,8 +186,11 @@ struct SettingsRowGroup<Content: View>: View {
             content
         }
         .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // A Shape in an overlay hit-tests its filled path, so an undecorated
+        // border would sit on top of every row and eat hover and clicks.
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .strokeBorder(WorkspaceStyle.border))
+            .strokeBorder(WorkspaceStyle.border)
+            .allowsHitTesting(false))
     }
 }
 
@@ -200,5 +244,34 @@ struct SettingsCompactToggleStyle: ToggleStyle {
 extension View {
     func settingsGlyph(_ icon: String) -> some View {
         modifier(SettingsGlyphModifier(icon: icon))
+    }
+}
+
+/// The name field owns its own state so typing does not recompute the whole
+/// Settings body, which probes the selected GGUF on every pass.
+struct ProfileNameField: View {
+    @EnvironmentObject private var loc: Localizer
+    @EnvironmentObject private var profileStore: ProfileStore
+    @State private var name = ""
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
+
+    var body: some View {
+        HStack {
+            TextField(loc.t("Nombre del perfil (p. ej. Código, Chat rápido)",
+                            "Profile name (e.g. Coding, Quick chat)"), text: $name)
+                .workspaceTextField()
+                .onSubmit(save)
+            Button(loc.t("Guardar actual", "Save current"), action: save)
+                .disabled(trimmed.isEmpty)
+                .infoTip(loc.t("Guarda toda la configuración actual (modelo incluido) con este nombre.",
+                               "Saves the entire current configuration (model included) under this name."))
+        }
+    }
+
+    private func save() {
+        guard !trimmed.isEmpty else { return }
+        profileStore.saveCurrent(name: trimmed)
+        name = ""
     }
 }

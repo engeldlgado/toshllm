@@ -3097,9 +3097,7 @@ struct NativeChatView: View {
                     HStack {
                         Text(loc.t("Semilla", "Seed"))
                         Spacer()
-                        TextField("-1", value: $seed, format: .number)
-                            .workspaceTextField()
-                            .frame(width: 90)
+                        DeferredNumberField("-1", value: $seed, width: 90)
                     }
                     GroupBox(loc.t("Temperatura dinámica y XTC", "Dynamic temperature and XTC")) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -3147,8 +3145,7 @@ struct NativeChatView: View {
                     HStack {
                         Text(loc.t("Máximo de imagen (MP)", "Maximum image size (MP)"))
                         Spacer()
-                        TextField("0", value: $maxImageMegapixels, format: .number)
-                            .workspaceTextField().frame(width: 80)
+                        DeferredNumberField("0", value: $maxImageMegapixels, width: 80)
                     }
                     Toggle(loc.t("PDF como imágenes para modelos con visión",
                                  "PDF as images for vision models"), isOn: $pdfAsImages)

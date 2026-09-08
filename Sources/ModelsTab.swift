@@ -239,12 +239,10 @@ private struct FeaturedModelBanner: View {
                 }
                 Text(recommendation.model.detail(loc.isSpanish))
                     .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) { metrics; actions }
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack(spacing: 8) { metrics }
-                        actions
-                    }
+                AdaptiveTwoUp(threshold: 560, spacing: 10, alignment: .center) {
+                    metrics
+                } second: {
+                    actions
                 }
             }
             .padding(.horizontal, 22).padding(.vertical, 18)

@@ -130,9 +130,9 @@ struct ChatAdvancedSettingsSection: View {
                     numberField(loc.t("Semilla", "Seed"), value: $seed,
                                 help: loc.t("Semilla del generador aleatorio. -1 usa una distinta cada vez; fija un número para respuestas reproducibles con los mismos parámetros.",
                                             "Random seed. -1 picks a new one each time; set a number for reproducible answers with the same parameters."))
-                    TextField(loc.t("Orden de muestreo", "Sampler order"), text: $samplers,
-                              prompt: Text("top_k;typ_p;top_p;min_p;temperature"))
-                        .workspaceTextField()
+                    DeferredSettingsTextField(loc.t("Orden de muestreo", "Sampler order"),
+                                              text: $samplers,
+                                              prompt: "top_k;typ_p;top_p;min_p;temperature")
                         .infoTip(loc.t("Orden en que se aplican los muestreadores, separados por ';'. Déjalo vacío para el orden por defecto del motor.",
                                        "Order the samplers are applied in, separated by ';'. Leave empty for the engine's default order."))
                     Toggle(loc.t("Muestreo en backend", "Backend sampling"), isOn: $backendSampling)
@@ -261,10 +261,7 @@ struct ChatAdvancedSettingsSection: View {
                                                "If you paste text longer than this (in characters), it becomes an attachment instead of filling the input box. 0 disables it."))
                     LabeledContent(loc.t("Tamaño máximo de imagen (MP)", "Maximum image size (MP)")) {
                         HStack(spacing: 8) {
-                            TextField("1", value: $maxImageMegapixels, format: .number)
-                                .workspaceTextField()
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 90)
+                            DeferredNumberField("1", value: $maxImageMegapixels, width: 90)
                                 .onChange(of: maxImageMegapixels) { _, value in
                                     let clamped = min(4, max(0.25, value))
                                     if clamped != value { maxImageMegapixels = clamped }
