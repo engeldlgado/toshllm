@@ -12,7 +12,7 @@ struct MCPSettingsSection: View {
     @State private var status: [UUID: String] = [:]
 
     var body: some View {
-        Section("MCP") {
+        VStack(alignment: .leading, spacing: 12) {
             if servers.isEmpty {
                 HStack(spacing: 12) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
@@ -31,10 +31,16 @@ struct MCPSettingsSection: View {
                     Button(loc.t("Añadir", "Add"), systemImage: "plus") {
                         editing = MCPServer(name: "MCP", url: "http://127.0.0.1:3000/mcp")
                     }
-                    .buttonStyle(.bordered)
+                    .glassButton()
                 }
-                .padding(.vertical, 6)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(WorkspaceStyle.border)
+                    .allowsHitTesting(false))
             } else {
+                SettingsRowGroup {
                 ForEach($servers) { $server in
                     HStack(spacing: 10) {
                         Toggle(isOn: $server.enabled) { EmptyView() }
@@ -52,25 +58,34 @@ struct MCPSettingsSection: View {
                         Button(loc.t("Probar", "Test"), systemImage: "stethoscope") {
                             test(server)
                         }
-                        .labelStyle(.iconOnly).help(loc.t("Probar conexión", "Test connection"))
+                        .labelStyle(.iconOnly).buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help(loc.t("Probar conexión", "Test connection"))
                         Button(loc.t("Editar", "Edit"), systemImage: "pencil") { editing = server }
-                            .labelStyle(.iconOnly)
+                            .labelStyle(.iconOnly).buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
                         Button(loc.t("Eliminar", "Delete"), systemImage: "trash", role: .destructive) {
                             delete(server)
                         }
-                            .labelStyle(.iconOnly)
+                            .labelStyle(.iconOnly).buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                }
                 }
             }
             if !servers.isEmpty {
                 Button(loc.t("Añadir servidor MCP", "Add MCP server"), systemImage: "plus") {
                     editing = MCPServer(name: "MCP", url: "http://127.0.0.1:3000/mcp")
                 }
+                .glassButton()
             }
             Text(loc.t("Las cabeceras de autenticación se guardan en el Llavero de macOS. Las herramientas MCP usan la misma autorización por llamada que las herramientas locales.",
                        "Authentication headers are stored in the macOS Keychain. MCP tools use the same per-call permission flow as local tools."))
                 .font(.caption).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { servers = MCPServerStore.load() }
         .sheet(item: $editing) { server in
             MCPServerEditor(server: server) { updated, headers in

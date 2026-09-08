@@ -14,7 +14,8 @@ struct SpeechModelsSettingsSection: View {
     private var selected: WhisperModel { WhisperModel.model(id: selectedID) }
 
     var body: some View {
-        Section(loc.t("Voz y transcripción", "Speech & transcription")) {
+        // The panel header above already names this category.
+        Section {
             Picker(loc.t("Método del micrófono", "Microphone method"), selection: $methodRaw) {
                 Text(loc.t("Elegir…", "Choose…")).tag("")
                 Text(loc.t("Dictado de Apple", "Apple Dictation")).tag(SpeechInputMethod.apple.rawValue)

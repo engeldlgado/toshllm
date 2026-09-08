@@ -208,19 +208,19 @@ struct BenchmarksView: View {
                         Label(loc.t("Avanzado", "Advanced"),
                               systemImage: showAdvanced ? "chevron.up" : "slider.horizontal.3")
                     }
-                    .buttonStyle(.bordered).controlSize(.small)
+                    .glassButton().controlSize(.small)
 
                     Button { rememberWorkload(); bench.runReal(settings: cfg) } label: {
                         Label(loc.t("Generación real", "Real generation"), systemImage: "text.bubble")
                     }
-                    .buttonStyle(.bordered).controlSize(.small)
+                    .glassButton().controlSize(.small)
                     .disabled(busy || cfg.modelPath.isEmpty
                               || server.state == .running || server.state == .starting)
 
                     Button { showShareSheet = true } label: {
                         Label(loc.t("Compartir", "Share"), systemImage: "person.3")
                     }
-                    .buttonStyle(.bordered).controlSize(.small)
+                    .glassButton().controlSize(.small)
                     .disabled(busy || cfg.modelPath.isEmpty)
 
                     if busy {
@@ -229,7 +229,7 @@ struct BenchmarksView: View {
                             else if bench.sweeping { bench.cancelSweep() }
                             else { bench.cancel() }
                         }
-                        .buttonStyle(.bordered).controlSize(.small)
+                        .glassButton().controlSize(.small)
                     } else {
                         Button {
                             ServerSettings.rememberNcmoe(cfg.ncmoe, forModel: cfg.modelPath)

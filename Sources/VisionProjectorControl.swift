@@ -81,7 +81,7 @@ struct VisionProjectorControl: View {
                     }
                     .font(.caption)
                 }
-                .menuStyle(.button).buttonStyle(.bordered).controlSize(.small).fixedSize()
+                .menuStyle(.button).glassButton().controlSize(.small).fixedSize()
             } else {
                 Text(loc.t("solo texto", "text-only")).font(.caption).foregroundStyle(.secondary)
             }

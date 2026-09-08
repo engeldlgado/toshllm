@@ -5,6 +5,8 @@
 import SwiftUI
 
 struct ChatAdvancedSettingsSection: View {
+    let destination: ChatSettingsDestination
+
     @EnvironmentObject private var loc: Localizer
     @AppStorage(SettingsKeys.chatAutoCompact) private var autoCompact = true
     @AppStorage(SettingsKeys.smoothTyping) private var smoothTyping = true
@@ -50,49 +52,49 @@ struct ChatAdvancedSettingsSection: View {
     @State private var customExpanded = false
 
     var body: some View {
-        Section {
-            Toggle(loc.t("Autocompactar conversaciones largas", "Auto-compact long conversations"),
-                   isOn: $autoCompact)
-                .infoTip(loc.t("Cuando la conversación se acerca al límite de contexto, resume los mensajes viejos automáticamente para seguir respondiendo sin perder el hilo.",
-                               "When the conversation nears the context limit, older messages are summarized automatically so it can keep answering without losing the thread."))
-            Toggle(loc.t("Animación de escritura fluida", "Smooth typing animation"),
-                   isOn: $smoothTyping)
-                .infoTip(loc.t("Anima la aparición del texto token a token. Desactívalo si prefieres que el texto aparezca de golpe o notas parpadeo.",
-                               "Animates the text appearing token by token. Turn it off if you prefer text to appear at once or notice flicker."))
-
-            LabeledContent(loc.t("Tamaño del texto del chat", "Chat text size")) {
-                HStack(spacing: 10) {
-                    Text("\(Int((chatFontScale * 100).rounded()))%")
-                        .monospacedDigit().frame(minWidth: 46, alignment: .trailing)
-                    Slider(value: $chatFontScale, in: ChatFont.range, step: ChatFont.step)
-                        .frame(minWidth: 160, idealWidth: 220, maxWidth: 280)
-                    Button(loc.t("100%", "100%")) { chatFontScale = 1 }
-                        .buttonStyle(.borderless)
-                        .disabled(chatFontScale == 1)
-                    InfoTip(text: loc.t("Tamaño de los mensajes y del campo de escritura, sin tocar el resto de la interfaz. También con ⌘+ y ⌘− desde el chat, y ⌘0 para volver al 100%.",
-                                        "Size of the messages and the input field, leaving the rest of the interface alone. Also ⌘+ and ⌘− from the chat, and ⌘0 to go back to 100%."))
+        VStack(alignment: .leading, spacing: 14) {
+            if destination == .general {
+            SettingsRowGroup {
+                SettingsRow(icon: "arrow.down.right.and.arrow.up.left",
+                            title: loc.t("Autocompactar conversaciones largas", "Auto-compact long conversations"),
+                            help: loc.t("Cuando la conversación se acerca al límite de contexto, resume los mensajes viejos automáticamente para seguir respondiendo sin perder el hilo.",
+                                        "When the conversation nears the context limit, older messages are summarized automatically so it can keep answering without losing the thread.")) {
+                    SettingsToggle(isOn: $autoCompact)
                 }
-            }
-
-            LabeledContent(loc.t("Historial", "History")) {
-                HStack(spacing: 10) {
-                    Button(role: .destructive) { confirmDeleteAll = true } label: {
-                        Label(loc.t("Borrar todas las conversaciones…", "Delete all conversations…"),
-                              systemImage: "trash")
+                SettingsRow(icon: "text.cursor",
+                            title: loc.t("Animación de escritura fluida", "Smooth typing animation"),
+                            help: loc.t("Anima la aparición del texto token a token. Desactívalo si prefieres que el texto aparezca de golpe o notas parpadeo.",
+                                        "Animates the text appearing token by token. Turn it off if you prefer text to appear at once or notice flicker.")) {
+                    SettingsToggle(isOn: $smoothTyping)
+                }
+                SettingsRow(icon: "textformat.size",
+                            title: loc.t("Tamaño del texto del chat", "Chat text size"),
+                            help: loc.t("Tamaño de los mensajes y del campo de escritura, sin tocar el resto de la interfaz. También con ⌘+ y ⌘− desde el chat, y ⌘0 para volver al 100%.",
+                                        "Size of the messages and the input field, leaving the rest of the interface alone. Also ⌘+ and ⌘− from the chat, and ⌘0 to go back to 100%.")) {
+                    HStack(spacing: 12) {
+                        Slider(value: $chatFontScale, in: ChatFont.range, step: ChatFont.step)
+                            .frame(width: 180)
+                        Text("\(Int((chatFontScale * 100).rounded()))%")
+                            .font(.system(.body, design: .monospaced))
+                            .frame(width: 56, alignment: .trailing)
                     }
-                    .buttonStyle(.bordered)
+                    .frame(width: Self.controlColumn, alignment: .trailing)
+                }
+                SettingsRow(icon: "clock.arrow.circlepath",
+                            title: loc.t("Historial", "History"),
+                            help: loc.t("No se puede deshacer. Exporta antes desde el menú junto al buscador de chats si quieres una copia.",
+                                        "This cannot be undone. Export first from the menu next to the chat search box if you want a copy.")) {
+                    Button(role: .destructive) { confirmDeleteAll = true } label: {
+                        Label(loc.t("Borrar todas…", "Delete all…"), systemImage: "trash")
+                    }
+                    .glassButton()
                     .tint(.red)
-                    .help(loc.t("Elimina todas las conversaciones y sus cachés de contexto guardadas en disco. Los proyectos y sus prompts se conservan.",
-                                "Deletes every conversation and its saved context caches on disk. Projects and their prompts are kept."))
-                    InfoTip(text: loc.t("No se puede deshacer. Exporta antes desde el menú junto al buscador de chats si quieres una copia.",
-                                        "This cannot be undone. Export first from the menu next to the chat search box if you want a copy."))
                 }
             }
+            }
 
-            ChatSettingsDisclosureGroup(
-                title: loc.t("Prompt de sistema global", "Global system prompt"),
-                isExpanded: $promptExpanded
-            ) {
+            if destination == .general {
+                ChatSettingsGroup(title: loc.t("Prompt de sistema global", "Global system prompt")) {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField(loc.t("Instrucciones permanentes para el modelo…",
                                     "Permanent instructions for the model…"),
@@ -106,14 +108,14 @@ struct ChatAdvancedSettingsSection: View {
                                "Used when neither the conversation nor its project has its own prompt."))
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                .padding(.top, 10)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            }
 
-            ChatSettingsDisclosureGroup(
-                title: loc.t("Muestreo", "Sampling"),
-                isExpanded: $samplingExpanded
-            ) {
+            if destination == .sampling {
+                ChatSettingsGroup(title: loc.t("Muestreo", "Sampling")) {
                 VStack(alignment: .leading, spacing: 12) {
                     parameterSlider("Top P", value: $topP, range: 0...1,
                                     help: loc.t("Núcleo de probabilidad: solo considera los tokens más probables cuya suma llega a P. 1.0 lo desactiva; bajarlo recorta la cola improbable.",
@@ -130,22 +132,26 @@ struct ChatAdvancedSettingsSection: View {
                     numberField(loc.t("Semilla", "Seed"), value: $seed,
                                 help: loc.t("Semilla del generador aleatorio. -1 usa una distinta cada vez; fija un número para respuestas reproducibles con los mismos parámetros.",
                                             "Random seed. -1 picks a new one each time; set a number for reproducible answers with the same parameters."))
-                    DeferredSettingsTextField(loc.t("Orden de muestreo", "Sampler order"),
-                                              text: $samplers,
-                                              prompt: "top_k;typ_p;top_p;min_p;temperature")
-                        .infoTip(loc.t("Orden en que se aplican los muestreadores, separados por ';'. Déjalo vacío para el orden por defecto del motor.",
-                                       "Order the samplers are applied in, separated by ';'. Leave empty for the engine's default order."))
-                    Toggle(loc.t("Muestreo en backend", "Backend sampling"), isOn: $backendSampling)
-                        .infoTip(loc.t("Ejecuta el muestreo en la GPU en vez de la CPU. Puede ser más rápido, pero no todos los muestreadores (XTC, DRY) están soportados en backend.",
-                                       "Runs sampling on the GPU instead of the CPU. Can be faster, but not every sampler (XTC, DRY) is supported on the backend."))
+                    SettingsRow(icon: "list.number",
+                                title: loc.t("Orden de muestreo", "Sampler order"),
+                                help: loc.t("Orden en que se aplican los muestreadores, separados por ';'. Déjalo vacío para el orden por defecto del motor.",
+                                            "Order the samplers are applied in, separated by ';'. Leave empty for the engine's default order.")) {
+                        DeferredSettingsTextField("", text: $samplers,
+                                                  prompt: "top_k;typ_p;top_p;min_p;temperature",
+                                                  width: Self.controlColumn)
+                    }
+                    SettingsRow(icon: "cpu",
+                                title: loc.t("Muestreo en backend", "Backend sampling"),
+                                help: loc.t("Ejecuta el muestreo en la GPU en vez de la CPU. Puede ser más rápido, pero no todos los muestreadores (XTC, DRY) están soportados en backend.",
+                                       "Runs sampling on the GPU instead of the CPU. Can be faster, but not every sampler (XTC, DRY) is supported on the backend.")) {
+                        SettingsToggle(isOn: $backendSampling)
+                    }
                 }
-                .padding(.top, 10)
+            }
             }
 
-            ChatSettingsDisclosureGroup(
-                title: loc.t("Penalizaciones", "Penalties"),
-                isExpanded: $penaltiesExpanded
-            ) {
+            if destination == .sampling {
+                ChatSettingsGroup(title: loc.t("Penalizaciones", "Penalties")) {
                 VStack(alignment: .leading, spacing: 12) {
                     parameterSlider(loc.t("Repetición", "Repeat"), value: $repeatPenalty, range: 0.5...2,
                                     help: loc.t("Penaliza repetir tokens ya usados. 1.0 lo desactiva; por encima reduce la repetición, demasiado alto degrada la coherencia.",
@@ -161,13 +167,11 @@ struct ChatAdvancedSettingsSection: View {
                                    help: loc.t("Cuántos tokens recientes miran las penalizaciones de repetición. 0 lo desactiva.",
                                                "How many recent tokens the repetition penalties look at. 0 disables it."))
                 }
-                .padding(.top, 10)
+            }
             }
 
-            ChatSettingsDisclosureGroup(
-                title: loc.t("Temperatura dinámica y XTC", "Dynamic temperature and XTC"),
-                isExpanded: $dynamicExpanded
-            ) {
+            if destination == .sampling {
+                ChatSettingsGroup(title: loc.t("Temperatura dinámica y XTC", "Dynamic temperature and XTC")) {
                 VStack(alignment: .leading, spacing: 12) {
                     parameterSlider(loc.t("Rango dinámico", "Dynamic range"), value: $dynatempRange, range: 0...2,
                                     help: loc.t("Temperatura dinámica: varía la temperatura por token según la certeza del modelo. 0 la deja fija.",
@@ -182,10 +186,11 @@ struct ChatAdvancedSettingsSection: View {
                                     help: loc.t("Umbral mínimo de probabilidad para que XTC considere quitar un token. Solo actúa con Probabilidad XTC > 0.",
                                                 "Minimum probability threshold for XTC to consider removing a token. Only active when XTC probability > 0."))
                 }
-                .padding(.top, 10)
+            }
             }
 
-            ChatSettingsDisclosureGroup(title: "DRY", isExpanded: $dryExpanded) {
+            if destination == .sampling {
+                ChatSettingsGroup(title: "DRY") {
                 VStack(alignment: .leading, spacing: 12) {
                     parameterSlider(loc.t("Multiplicador", "Multiplier"), value: $dryMultiplier, range: 0...2,
                                     help: loc.t("Fuerza de la penalización DRY, que corta la repetición de secuencias enteras. 0 lo desactiva.",
@@ -202,58 +207,84 @@ struct ChatAdvancedSettingsSection: View {
                                    help: loc.t("Cuántos tokens recientes examina DRY. 0 lo desactiva.",
                                                "How many recent tokens DRY scans. 0 disables it."))
                 }
-                .padding(.top, 10)
+            }
             }
 
-            ChatSettingsDisclosureGroup(
-                title: loc.t("Agentes y adjuntos", "Agents and attachments"),
-                isExpanded: $agentsExpanded
-            ) {
+            if destination == .agents {
+                ChatSettingsGroup(title: loc.t("Herramientas", "Tools")) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle(loc.t("Herramientas locales para agentes", "Local agent tools"),
-                           isOn: $agentToolsEnabled)
-                        .infoTip(loc.t("Deja que el modelo lea o edite archivos y ejecute comandos mediante herramientas. Cada operación sensible pide permiso.",
-                                       "Lets the model read or edit files and run commands via tools. Every sensitive operation asks for permission."))
-                    if agentToolsEnabled {
-                        Label(loc.t("Las herramientas pueden modificar archivos o ejecutar comandos; cada operación sensible solicita autorización.",
-                                    "Tools can modify files or run commands; every sensitive operation requests permission."),
-                              systemImage: "exclamationmark.shield.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                        Button(loc.t("Revocar permisos permanentes", "Revoke persistent permissions"),
-                               systemImage: "lock.rotation", action: ChatToolsService.revokeAllPermissions)
-                        TextField(loc.t("Aislar herramientas en", "Isolate tools in"),
-                                  text: $toolsRuntime, prompt: Text(verbatim: "docker:alpine"))
-                            .workspaceTextField()
-                            .infoTip(loc.t("Ejecuta las herramientas fuera de tu Mac, en un contenedor o por SSH, para que no toquen tus archivos. Formatos: docker:imagen, podman:imagen, docker-container:id, ssh:destino. Vacío las ejecuta aquí mismo.",
-                                           "Runs the tools off your Mac, in a container or over SSH, so they cannot touch your files. Formats: docker:image, podman:image, docker-container:id, ssh:target. Empty runs them right here."))
+                    SettingsRow(icon: "hammer",
+                                title: loc.t("Herramientas locales para agentes", "Local agent tools"),
+                                help: loc.t("Deja que el modelo lea o edite archivos y ejecute comandos mediante herramientas. Cada operación sensible pide permiso.",
+                                       "Lets the model read or edit files and run commands via tools. Every sensitive operation asks for permission.")) {
+                        SettingsToggle(isOn: $agentToolsEnabled)
                     }
-                    Toggle(loc.t("Sandbox JavaScript para agentes", "JavaScript sandbox for agents"),
-                           isOn: $jsSandboxEnabled)
-                        .infoTip(loc.t("Añade una herramienta que ejecuta JavaScript en un entorno aislado para cálculos o transformaciones de datos.",
-                                       "Adds a tool that runs JavaScript in a sandbox for calculations or data transforms."))
-                    Toggle(loc.t("Memoria de la conversación", "Conversation memory"),
-                           isOn: $memoryToolsEnabled)
-                        .infoTip(loc.t("Da al modelo tres herramientas para gestionar su propio contexto: listar la conversación, archivar lo terminado y recuperarlo cuando vuelve a hacer falta. Desactívalo si usas un servidor de memoria externo y el modelo confunde los dos.",
-                                       "Gives the model three tools to manage its own context: list the conversation, archive what is finished and recall it when it matters again. Turn it off if you use an external memory server and the model confuses the two."))
-                    if memoryToolsEnabled {
-                        TextField(loc.t("Enviar lo archivado a", "Send archived turns to"),
-                                  text: $archiveHookURL, prompt: Text(verbatim: "https://127.0.0.1:8000/hook"))
-                            .workspaceTextField()
-                            .autocorrectionDisabled()
-                            .infoTip(loc.t("Cada vez que el modelo archiva turnos, se envían a esta dirección en JSON para que un índice externo los guarde. Vacío lo desactiva. Los envíos se guardan en disco y se reintentan, así que un receptor caído no pierde nada ni frena el chat.",
-                                           "Every time the model archives turns they are posted to this address as JSON, so an external index can keep them. Empty turns it off. Deliveries are stored on disk and retried, so a receiver that is down loses nothing and does not hold up the chat."))
-                        TextField(loc.t("Token del receptor (opcional)", "Receiver token (optional)"),
-                                  text: $archiveHookSecret)
-                            .workspaceTextField()
-                            .autocorrectionDisabled()
-                            .infoTip(loc.t("Se envía como Authorization: Bearer en cada entrega, para receptores que lo pidan.",
-                                           "Sent as Authorization: Bearer with each delivery, for receivers that ask for one."))
+                    if agentToolsEnabled {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label(loc.t("Las herramientas pueden modificar archivos o ejecutar comandos; cada operación sensible solicita autorización.",
+                                        "Tools can modify files or run commands; every sensitive operation requests permission."),
+                                  systemImage: "exclamationmark.shield.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(loc.t("Revocar permisos permanentes", "Revoke persistent permissions"),
+                                   systemImage: "lock.rotation", action: ChatToolsService.revokeAllPermissions)
+                                .glassButton()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        SettingsRow(icon: "shippingbox",
+                                    title: loc.t("Aislar herramientas en", "Isolate tools in"),
+                                    help: loc.t("Ejecuta las herramientas fuera de tu Mac, en un contenedor o por SSH, para que no toquen tus archivos. Formatos: docker:imagen, podman:imagen, docker-container:id, ssh:destino. Vacío las ejecuta aquí mismo.",
+                                                "Runs the tools off your Mac, in a container or over SSH, so they cannot touch your files. Formats: docker:image, podman:image, docker-container:id, ssh:target. Empty runs them right here.")) {
+                            DeferredSettingsTextField("", text: $toolsRuntime,
+                                                      prompt: "docker:alpine", width: 220)
+                        }
+                    }
+                    SettingsRow(icon: "curlybraces",
+                                title: loc.t("Sandbox JavaScript para agentes", "JavaScript sandbox for agents"),
+                                help: loc.t("Añade una herramienta que ejecuta JavaScript en un entorno aislado para cálculos o transformaciones de datos.",
+                                       "Adds a tool that runs JavaScript in a sandbox for calculations or data transforms.")) {
+                        SettingsToggle(isOn: $jsSandboxEnabled)
                     }
                     integerStepper(loc.t("Turnos máximos del agente", "Maximum agent turns"),
                                    value: $agenticMaxTurns, range: 1...100,
                                    help: loc.t("Máximo de rondas herramienta→respuesta que el agente encadena en un turno antes de detenerse.",
                                                "Maximum tool→response rounds the agent chains in one turn before stopping."))
+                }
+            }
+
+            if destination == .agents {
+                ChatSettingsGroup(title: loc.t("Memoria", "Memory")) {
+                    SettingsRow(icon: "brain.head.profile",
+                                title: loc.t("Memoria de la conversación", "Conversation memory"),
+                                help: loc.t("Da al modelo tres herramientas para gestionar su propio contexto: listar la conversación, archivar lo terminado y recuperarlo cuando vuelve a hacer falta. Desactívalo si usas un servidor de memoria externo y el modelo confunde los dos.",
+                                       "Gives the model three tools to manage its own context: list the conversation, archive what is finished and recall it when it matters again. Turn it off if you use an external memory server and the model confuses the two.")) {
+                        SettingsToggle(isOn: $memoryToolsEnabled)
+                    }
+                    if memoryToolsEnabled {
+                        SettingsRow(icon: "paperplane",
+                                    title: loc.t("Enviar lo archivado a", "Send archived turns to"),
+                                    help: loc.t("Cada vez que el modelo archiva turnos, se envían a esta dirección en JSON para que un índice externo los guarde. Vacío lo desactiva. Los envíos se guardan en disco y se reintentan, así que un receptor caído no pierde nada ni frena el chat.",
+                                                "Every time the model archives turns they are posted to this address as JSON, so an external index can keep them. Empty turns it off. Deliveries are stored on disk and retried, so a receiver that is down loses nothing and does not hold up the chat.")) {
+                            DeferredSettingsTextField("", text: $archiveHookURL,
+                                                      prompt: "https://127.0.0.1:8000/hook", width: 220)
+                                .autocorrectionDisabled()
+                        }
+                        SettingsRow(icon: "key",
+                                    title: loc.t("Token del receptor (opcional)", "Receiver token (optional)"),
+                                    help: loc.t("Se envía como Authorization: Bearer en cada entrega, para receptores que lo pidan.",
+                                                "Sent as Authorization: Bearer with each delivery, for receivers that ask for one.")) {
+                            DeferredSettingsTextField("", text: $archiveHookSecret, width: 220)
+                                .autocorrectionDisabled()
+                        }
+                    }
+                }
+            }
+
+            if destination == .general {
+                ChatSettingsGroup(title: loc.t("Adjuntos", "Attachments")) {
                     integerStepper(loc.t("Texto pegado a archivo", "Paste text to file"),
                                    value: $pasteLongTextLength, range: 0...100_000, step: 500,
                                    zeroLabel: loc.t("Desactivado", "Off"),
@@ -270,18 +301,18 @@ struct ChatAdvancedSettingsSection: View {
                                                 "Downsizes attached images to this megapixel maximum before sending, to save vision tokens (0.25–4)."))
                         }
                     }
-                    Toggle(loc.t("PDF como imágenes para modelos con visión", "PDF as images for vision models"),
-                           isOn: $pdfAsImages)
-                        .infoTip(loc.t("Envía cada página del PDF como imagen al modelo de visión en vez de extraer su texto. Útil para PDF escaneados o con diagramas.",
-                                       "Sends each PDF page as an image to the vision model instead of extracting its text. Useful for scanned or diagram-heavy PDFs."))
+                    SettingsRow(icon: "doc.richtext",
+                                title: loc.t("PDF como imágenes para modelos con visión", "PDF as images for vision models"),
+                                help: loc.t("Envía cada página del PDF como imagen al modelo de visión en vez de extraer su texto. Útil para PDF escaneados o con diagramas.",
+                                       "Sends each PDF page as an image to the vision model instead of extracting its text. Useful for scanned or diagram-heavy PDFs.")) {
+                        SettingsToggle(isOn: $pdfAsImages)
+                    }
                 }
-                .padding(.top, 10)
+            }
             }
 
-            ChatSettingsDisclosureGroup(
-                title: loc.t("Petición personalizada", "Custom request"),
-                isExpanded: $customExpanded
-            ) {
+            if destination == .advanced {
+                ChatSettingsGroup(title: loc.t("Petición personalizada", "Custom request")) {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField(loc.t("Objeto JSON para reemplazar parámetros…",
                                     "JSON object that overrides parameters…"),
@@ -302,19 +333,19 @@ struct ChatAdvancedSettingsSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                .padding(.top, 10)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            }
 
-            Button(loc.t("Restaurar opciones avanzadas del chat", "Reset advanced chat settings"),
-                   systemImage: "arrow.counterclockwise", action: reset)
-                .buttonStyle(GlassPillButtonStyle())
-        } header: {
-            Label(loc.t("Chat", "Chat"), systemImage: "bubble.left.and.bubble.right")
-        } footer: {
-            Text(loc.t("Los controles habituales permanecen junto al chat; aquí están los ajustes de uso menos frecuente.",
-                       "Common controls remain beside the chat; less frequently used options live here."))
+            if destination == .advanced {
+                Button(loc.t("Restaurar opciones avanzadas del chat", "Reset advanced chat settings"),
+                       systemImage: "arrow.counterclockwise", action: reset)
+                    .buttonStyle(GlassPillButtonStyle())
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .confirmationDialog(
             loc.t("¿Borrar todas las conversaciones?", "Delete all conversations?"),
             isPresented: $confirmDeleteAll, titleVisibility: .visible
@@ -339,44 +370,46 @@ struct ChatAdvancedSettingsSection: View {
         return false
     }
 
-    private func parameterSlider(_ title: String, value: Binding<Double>,
+    /// Every row ends its control in the same column, so sliders, steppers and
+    /// fields do not each stop at a different place.
+    private static let controlColumn: CGFloat = 250
+
+    private func parameterSlider(_ title: String, icon: String = "dial.medium",
+                                 value: Binding<Double>,
                                  range: ClosedRange<Double>, help: String) -> some View {
-        LabeledContent(title) {
+        SettingsRow(icon: icon, title: title, help: help) {
             HStack(spacing: 12) {
-                Slider(value: value, in: range)
-                    .frame(minWidth: 160, idealWidth: 260, maxWidth: 340)
+                Slider(value: value, in: range).frame(width: 180)
                 Text(value.wrappedValue, format: .number.precision(.fractionLength(2)))
                     .font(.system(.body, design: .monospaced))
                     .frame(width: 56, alignment: .trailing)
-                InfoTip(text: help)
             }
+            .frame(width: Self.controlColumn, alignment: .trailing)
         }
     }
 
-    private func integerStepper(_ title: String, value: Binding<Int>, range: ClosedRange<Int>,
+    private func integerStepper(_ title: String, icon: String = "number",
+                                value: Binding<Int>, range: ClosedRange<Int>,
                                 step: Int = 1, zeroLabel: String? = nil, help: String) -> some View {
-        LabeledContent(title) {
+        SettingsRow(icon: icon, title: title, help: help) {
             HStack(spacing: 10) {
                 Text(value.wrappedValue == 0 ? (zeroLabel ?? "0") : value.wrappedValue.formatted())
-                    .monospacedDigit()
-                    .frame(minWidth: 72, alignment: .trailing)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(width: 56, alignment: .trailing)
                 Stepper(title, value: value, in: range, step: step)
                     .labelsHidden()
+                    .controlSize(.regular)   // rows shrink their controls; steppers need the room
                     .fixedSize()
-                InfoTip(text: help)
             }
+            .frame(width: Self.controlColumn, alignment: .trailing)
         }
     }
 
-    private func numberField(_ title: String, value: Binding<Int>, help: String) -> some View {
-        LabeledContent(title) {
-            HStack(spacing: 10) {
-                TextField(title, value: value, format: .number)
-                    .workspaceTextField()
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 100)
-                InfoTip(text: help)
-            }
+    private func numberField(_ title: String, icon: String = "number",
+                             value: Binding<Int>, help: String) -> some View {
+        SettingsRow(icon: icon, title: title, help: help) {
+            DeferredNumberField(title, value: value, width: 100)
+                .frame(width: Self.controlColumn, alignment: .trailing)
         }
     }
 

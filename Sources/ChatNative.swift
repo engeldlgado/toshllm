@@ -3217,7 +3217,7 @@ struct NativeChatView: View {
                 Label(loc.t("Abrir ajustes avanzados del chat…", "Open advanced chat settings…"),
                       systemImage: "gearshape.2")
             }
-            .buttonStyle(.bordered)
+            .glassButton()
 
             HStack(spacing: 10) {
                 Button {

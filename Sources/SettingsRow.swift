@@ -35,8 +35,6 @@ struct SettingsRow<Control: View>: View {
             }
             Spacer(minLength: 12)
             control
-                .toggleStyle(.switch)
-                .controlSize(.mini)
                 .frame(minHeight: 26, alignment: .center)
         }
         .padding(.leading, 14)
@@ -177,13 +175,23 @@ struct DeferredSettingsIntegerField: View {
     }
 }
 
-/// Stacks rows into one card with hairline separators between them.
+/// Stacks rows into one card, drawing the hairline separators itself so callers
+/// do not have to interleave them by hand.
 struct SettingsRowGroup<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(spacing: 0) {
-            content
+            if #available(macOS 15, *) {
+                Group(subviews: content) { rows in
+                    ForEach(rows.indices, id: \.self) { index in
+                        if index > 0 { SettingsRowDivider() }
+                        rows[index]
+                    }
+                }
+            } else {
+                content
+            }
         }
         .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         // A Shape in an overlay hit-tests its filled path, so an undecorated
@@ -257,12 +265,15 @@ struct ProfileNameField: View {
     private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
 
     var body: some View {
-        HStack {
+        HStack(spacing: 10) {
             TextField(loc.t("Nombre del perfil (p. ej. Código, Chat rápido)",
                             "Profile name (e.g. Coding, Quick chat)"), text: $name)
                 .workspaceTextField()
+                .lineLimit(1)
                 .onSubmit(save)
             Button(loc.t("Guardar actual", "Save current"), action: save)
+                .glassButton()
+                .fixedSize()
                 .disabled(trimmed.isEmpty)
                 .infoTip(loc.t("Guarda toda la configuración actual (modelo incluido) con este nombre.",
                                "Saves the entire current configuration (model included) under this name."))
@@ -273,5 +284,19 @@ struct ProfileNameField: View {
         guard !trimmed.isEmpty else { return }
         profileStore.saveCurrent(name: trimmed)
         name = ""
+    }
+}
+
+/// The switch used in settings rows. Rows no longer shrink their whole control,
+/// because controlSize travels through the environment and shrank the text of
+/// fields and pop-ups sitting in the same row.
+struct SettingsToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle("", isOn: $isOn)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.mini)
     }
 }

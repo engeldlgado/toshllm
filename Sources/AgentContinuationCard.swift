@@ -21,7 +21,7 @@ struct AgentContinuationCard: View {
                     .buttonStyle(.borderedProminent)
                 Button(loc.t("Detener", "Stop"), systemImage: "stop.fill",
                        role: .destructive, action: stopAction)
-                    .buttonStyle(.bordered)
+                    .glassButton()
             }
         }
         .padding(12)

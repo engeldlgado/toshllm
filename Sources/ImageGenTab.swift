@@ -484,7 +484,7 @@ struct QueueFeedView: View {
                 initImageChip
                 Spacer()
                 Button(action: add) { Label(loc.t("Añadir", "Add"), systemImage: "plus") }
-                    .buttonStyle(.bordered)
+                    .glassButton()
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             if !pool.queue.isEmpty || pool.queueActive {
@@ -1030,7 +1030,7 @@ struct ImageInstanceForm: View {
                       systemImage: "paintbrush.pointed")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered).controlSize(.small)
+            .glassButton().controlSize(.small)
             .disabled(cfg.initImagePath.isEmpty)
             .help(loc.t("Pinta la máscara sobre la imagen inicial en vez de preparar un PNG aparte.",
                         "Paint the mask over the init image instead of preparing a separate PNG."))

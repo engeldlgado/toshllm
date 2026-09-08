@@ -382,7 +382,7 @@ struct SettingsView: View {
     }
 
     private var settingsCategoryGuide: some View {
-        SettingsCategoryGuide(destination: settingsDestination)
+        SettingsCategoryGuide(content: settingsDestination.guideContent(loc))
     }
 
     private var categoryPanelContent: (icon: String, title: String, subtitle: String) {
@@ -443,10 +443,99 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var settingsForm: some View {
-        if settingsDestination == .general {
-            generalSettings
-        } else {
-            otherSettingsForm
+        switch settingsDestination {
+        case .general: generalSettings
+        case .advanced: advancedSettings
+        default: otherSettingsForm
+        }
+    }
+
+    private var advancedSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+
+                SettingsRowGroup {
+                    SettingsRow(icon: "number", title: loc.t("Puerto", "Port"),
+                                help: loc.t("Puerto local del servidor (API compatible con OpenAI y chat web).",
+                                            "Local server port (OpenAI-compatible API and web chat).")) {
+                        DeferredSettingsIntegerField(value: $port, in: 1...65_535, width: 120)
+                    }
+                    SettingsRow(icon: "engine.combustion",
+                                title: loc.t("Motor de inferencia", "Inference engine"),
+                                help: loc.t("Integrado: llama.cpp oficial con los kernels Metal para AMD, recomendado. Externo: cualquier llama-server tuyo.",
+                                            "Bundled: official llama.cpp with the Metal kernels for AMD, recommended. External: any llama-server of yours.")) {
+                        ToshDropdown(selection: engineSelection, options: [
+                            .init(value: "bundled", title: loc.t("Integrado (oficial)", "Bundled (official)")),
+                            .init(value: "custom", title: loc.t("Externo…", "External…"))
+                        ], width: 200)
+                    }
+                    if engineSelection.wrappedValue != "custom" {
+                        SettingsRow(icon: "externaldrive",
+                                    title: loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"),
+                                    help: loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
+                                                "Saves each conversation's KV cache to disk, so reopening a chat or restarting the app skips re-processing the prompt (saves several seconds per turn on long prompts). Requires the AMD Flash Attention kernel; with quantized KV (q8_0/q4_0) the file is smaller and restore is faster. Files live in Application Support and are removed when you delete the conversation.")) {
+                            SettingsToggle(isOn: $persistCache)
+                                .disabled(!amdFlashActive)
+                        }
+                    }
+                    if engineSelection.wrappedValue == "custom" {
+                        SettingsRow(icon: "terminal",
+                                    title: loc.t("Ruta del llama-server externo", "External llama-server path"),
+                                    help: loc.t("Ruta a un llama-server alternativo para probar otras builds.",
+                                                "Path to an alternative llama-server to test other builds.")) {
+                            DeferredSettingsTextField("", text: $serverBinary,
+                                                      width: 240, monospaced: true)
+                        }
+                    }
+                    SettingsRow(icon: "point.3.connected.trianglepath.dotted",
+                                title: loc.t("Servidor de embeddings (--embeddings)", "Embeddings server (--embeddings)"),
+                                help: loc.t("Sirve /v1/embeddings para clientes RAG (p. ej. Obsidian Copilot), que sin esto reciben un error 501. Ojo: llama-server dedica el proceso a embeddings, así que actívalo con un modelo de embeddings; para chatear a la vez, añade un segundo servidor en Inicio con esta opción.",
+                                            "Serves /v1/embeddings for RAG clients (e.g. Obsidian Copilot), which otherwise get a 501 error. Note: llama-server dedicates the process to embeddings, so enable it with an embedding model; to keep chatting, add a second server on Home with this option.")) {
+                        SettingsToggle(isOn: $embeddings)
+                    }
+                    SettingsRow(icon: "terminal",
+                                title: loc.t("Argumentos extra", "Extra arguments"),
+                                help: loc.t("Argumentos adicionales de llama-server separados por espacios. Un token CLAVE=VALOR se aplica como variable de entorno. Para mostrar la configuración privada de Dynamic MoE escribe TOSH_MOE_UI=1. En tarjetas GCN/Vega con texto corrupto, GGML_METAL_WAVE64_SAFEMODE=1 fuerza la ruta segura.",
+                                            "Additional llama-server arguments, space-separated. A KEY=VALUE token is applied as an environment variable. To reveal the private Dynamic MoE settings, enter TOSH_MOE_UI=1. On GCN/Vega cards with corrupted text, GGML_METAL_WAVE64_SAFEMODE=1 forces the safe path.")) {
+                        DeferredSettingsTextField("", text: $extraArgs,
+                                                  width: 240, monospaced: true)
+                    }
+                }
+
+                if engineSelection.wrappedValue != "custom" {
+                    if currentModelIsVision {
+                        Label(loc.t("Con la visión activada (ojo) se omite en silencio: llama.cpp no permite guardar/restaurar slots con mmproj cargado. Con el ojo desactivado funciona normal.",
+                                    "Silently skipped while vision is on (the eye): llama.cpp cannot save/restore slots with mmproj loaded. With the eye off it works normally."),
+                              systemImage: "info.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else if !amdFlashActive {
+                        Label(loc.t("Requiere activar el kernel Flash Attention AMD (arriba).",
+                                    "Requires enabling the AMD Flash Attention kernel (above)."),
+                              systemImage: "info.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text(loc.t("Los cambios se aplican al reiniciar el servidor.",
+                           "Changes take effect when the server restarts."))
+                    .font(.caption).foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(loc.t("Registro del servidor", "Server log"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                    Button { control.section = .logs } label: {
+                        Label(loc.t("Abrir registro completo", "Open full log"),
+                              systemImage: "list.bullet.rectangle")
+                    }
+                    .glassButton()
+                    .infoTip(loc.t("El registro del servidor, con búsqueda, filtros y exportación, está en la pestaña Registro.",
+                                   "The server log — with search, filters and export — lives in the Logs tab."))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -464,7 +553,6 @@ struct SettingsView: View {
                             .init(value: $0, title: loc.displayName($0))
                         })
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "paintpalette",
                                 title: loc.t("Color de la app", "App color"),
                                 help: loc.t("Color de marca de botones, iconos y controles de toda la app. Independiente del color de acento del sistema.",
@@ -474,14 +562,12 @@ struct SettingsView: View {
                                   swatch: AppTheme.swatchImage($0.color))
                         })
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "menubar.rectangle",
                                 title: loc.t("Icono en la barra de menús", "Menu bar icon"),
                                 help: loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
                                             "Shows a menu bar icon with server status and quick controls, even with the window closed.")) {
-                        Toggle("", isOn: $menuBarIcon).labelsHidden()
+                        SettingsToggle(isOn: $menuBarIcon)
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "memorychip",
                                 title: loc.t("VRAM de la GPU en la barra", "GPU VRAM in the menu bar"),
                                 help: loc.t("Dónde mostrar el uso de VRAM: junto al icono (porcentaje agregado) o como barras por GPU al abrir el panel.",
@@ -493,36 +579,31 @@ struct SettingsView: View {
                         ])
                         .disabled(!menuBarIcon)
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "play.circle",
                                 title: loc.t("Iniciar servidor al abrir la app", "Start server on app launch"),
                                 help: loc.t("Arranca automáticamente el último modelo configurado al abrir ToshLLM.",
                                             "Automatically starts the last configured model when ToshLLM opens.")) {
-                        Toggle("", isOn: $autoStart).labelsHidden()
+                        SettingsToggle(isOn: $autoStart)
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "arrow.triangle.2.circlepath",
                                 title: loc.t("Buscar actualizaciones cada hora", "Check for updates hourly"),
                                 help: loc.t("Además del chequeo al abrir la app, revisa en silencio cada hora mientras esté abierta y enciende el aviso de actualización si hay versión nueva. No descarga ni instala nada solo.",
                                             "Besides the launch check, silently re-checks every hour while the app is open and lights the update badge when a new version exists. Never downloads or installs on its own.")) {
-                        Toggle("", isOn: $updateAutoCheck).labelsHidden()
+                        SettingsToggle(isOn: $updateAutoCheck)
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "key",
                                 title: loc.t("Proteger la API con clave", "Protect the API with a key"),
                                 help: loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
                                             "Generates a key (stored in the Keychain) required on every request. The in-app chat uses it automatically; useful on shared Macs.")) {
-                        Toggle("", isOn: $apiKeyEnabled).labelsHidden()
+                        SettingsToggle(isOn: $apiKeyEnabled)
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "network",
                                 title: loc.t("Descubrible en red local", "Discoverable on local network"),
                                 help: loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour como 'ToshLLM API'. Actívalo solo en redes confiables; reinicia el servidor si está activo.",
                                             "Makes the server listen on the local network and advertises it with Bonjour as 'ToshLLM API'. Enable only on trusted networks; restarts the server if it's running.")) {
-                        Toggle("", isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
-                            .labelsHidden()
+                        SettingsToggle(isOn: Binding(get: { localNetworkDiscovery },
+                                                     set: setDiscoverable))
                     }
-                    SettingsRowDivider()
                     SettingsRow(icon: "folder",
                                 title: loc.t("Carpeta de modelos", "Models folder"),
                                 subtitle: models.directory.path,
@@ -534,9 +615,10 @@ struct SettingsView: View {
                                     modelsDir = ""
                                     models.refresh()
                                 }
-                                .buttonStyle(.borderless)
+                                .glassButton()
                             }
                             Button(loc.t("Cambiar…", "Change…")) { chooseModelsFolder() }
+                                .glassButton()
                         }
                     }
                 }
@@ -583,21 +665,34 @@ struct SettingsView: View {
             Section(loc.t("Perfiles", "Profiles")) {
                 ProfileNameField()
                 ForEach(profileStore.profiles) { p in
-                    HStack {
+                    HStack(spacing: 10) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 26, height: 26)
+                            .background(WorkspaceStyle.field, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(WorkspaceStyle.border))
+                            .allowsHitTesting(false)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(p.name).fontWeight(.medium)
                             Text(URL(fileURLWithPath: p.modelPath).lastPathComponent)
                                 .font(.caption2).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
                         }
-                        Spacer()
+                        Spacer(minLength: 12)
                         Button(loc.t("Aplicar", "Apply")) { profileStore.apply(p) }
+                            .glassButton()
+                            .fixedSize()
                             .infoTip(loc.t("Carga esta configuración. Reinicia el servidor para usarla.",
                                         "Loads this configuration. Restart the server to use it."))
-                        Button { profileStore.delete(p) } label: { Label(loc.t("Borrar", "Delete"), systemImage: "trash") }
+                        Button(role: .destructive) { profileStore.delete(p) } label: {
+                            Label(loc.t("Borrar", "Delete"), systemImage: "trash")
+                        }
                             .labelStyle(.iconOnly)
-                            .buttonStyle(.borderless).foregroundStyle(.secondary)
+                            .glassButton()
+                            .tint(.red)
                             .accessibilityLabel(loc.t("Eliminar el perfil", "Delete the profile"))
-                            .infoTip(loc.t("Eliminar este perfil.", "Delete this profile."))
                     }
                 }
             }
@@ -905,7 +1000,7 @@ struct SettingsView: View {
                         }
                         Spacer(minLength: 8)
                         Button(loc.t("Aplicar", "Apply")) { cacheTypeK = s.k; cacheTypeV = s.v }
-                            .buttonStyle(.bordered)
+                            .glassButton()
                             .controlSize(.small)
                             .help(loc.t("Pone las claves en %@ y los valores en %@.",
                                         "Sets keys to %@ and values to %@.", s.k, s.v))
@@ -926,7 +1021,7 @@ struct SettingsView: View {
                             Button(loc.t("Usar %@ / %@", "Use %@ / %@", "\(s.k)", "\(s.v)")) {
                                 cacheTypeK = s.k; cacheTypeV = s.v
                             }
-                            .buttonStyle(.bordered)
+                            .glassButton()
                             .controlSize(.small)
                             .help(loc.t("Cambia a una combinación válida y medida.",
                                         "Switches to a valid, measured combination."))
@@ -1013,72 +1108,6 @@ struct SettingsView: View {
             }
             }
 
-            if settingsDestination == .advanced {
-            Section {
-                LabeledContent(loc.t("Puerto", "Port")) {
-                    DeferredSettingsIntegerField(value: $port, in: 1...65_535, width: 120)
-                }
-                    .settingsGlyph("number")
-                    .infoTip(loc.t("Puerto local del servidor (API compatible con OpenAI y chat web).",
-                                "Local server port (OpenAI-compatible API and web chat)."))
-                LabeledContent(loc.t("Motor de inferencia", "Inference engine")) {
-                    ToshDropdown(selection: engineSelection, options: [
-                        .init(value: "bundled", title: loc.t("Integrado (oficial)", "Bundled (official)")),
-                        .init(value: "custom", title: loc.t("Externo…", "External…"))
-                    ])
-                }
-                .infoTip(loc.t("Integrado: llama.cpp oficial con los kernels Metal para AMD, recomendado. Externo: cualquier llama-server tuyo.",
-                            "Bundled: official llama.cpp with the Metal kernels for AMD, recommended. External: any llama-server of yours."))
-                if engineSelection.wrappedValue != "custom" {
-                    Toggle(loc.t("Recordar conversaciones (caché en disco)", "Remember conversations (disk cache)"), isOn: $persistCache)
-                        .disabled(!amdFlashActive)
-                        .infoTip(loc.t("Guarda en disco la caché KV de cada conversación, así al reabrir un chat o reiniciar la app no se reprocesa el prompt (en un prompt largo ahorra varios segundos por turno). Requiere el kernel Flash Attention AMD activo; con KV cuantizado (q8_0/q4_0) el archivo es más pequeño y la restauración más rápida. Los archivos viven en Application Support y se borran al eliminar la conversación.",
-                                    "Saves each conversation's KV cache to disk, so reopening a chat or restarting the app skips re-processing the prompt (saves several seconds per turn on long prompts). Requires the AMD Flash Attention kernel; with quantized KV (q8_0/q4_0) the file is smaller and restore is faster. Files live in Application Support and are removed when you delete the conversation."))
-                    if currentModelIsVision {
-                        Label(loc.t("Con la visión activada (ojo) se omite en silencio: llama.cpp no permite guardar/restaurar slots con mmproj cargado. Con el ojo desactivado funciona normal.",
-                                    "Silently skipped while vision is on (the eye): llama.cpp cannot save/restore slots with mmproj loaded. With the eye off it works normally."),
-                              systemImage: "info.circle")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else if !amdFlashActive {
-                        Label(loc.t("Requiere activar el kernel Flash Attention AMD (arriba).",
-                                    "Requires enabling the AMD Flash Attention kernel (above)."),
-                              systemImage: "info.circle")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                if engineSelection.wrappedValue == "custom" {
-                    DeferredSettingsTextField(
-                        loc.t("Ruta del llama-server externo", "External llama-server path"),
-                        text: $serverBinary, monospaced: true)
-                        .infoTip(loc.t("Ruta a un llama-server alternativo para probar otras builds.",
-                                    "Path to an alternative llama-server to test other builds."))
-                }
-                Toggle(loc.t("Servidor de embeddings (--embeddings)",
-                             "Embeddings server (--embeddings)"), isOn: $embeddings)
-                    .settingsGlyph("point.3.connected.trianglepath.dotted")
-                    .infoTip(loc.t("Sirve /v1/embeddings para clientes RAG (p. ej. Obsidian Copilot), que sin esto reciben un error 501. Ojo: llama-server dedica el proceso a embeddings, así que actívalo con un modelo de embeddings; para chatear a la vez, añade un segundo servidor en Inicio con esta opción.",
-                                "Serves /v1/embeddings for RAG clients (e.g. Obsidian Copilot), which otherwise get a 501 error. Note: llama-server dedicates the process to embeddings, so enable it with an embedding model; to keep chatting, add a second server on Home with this option."))
-                DeferredSettingsTextField(
-                    loc.t("Argumentos extra", "Extra arguments"),
-                    text: $extraArgs, monospaced: true)
-                    .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios. Un token CLAVE=VALOR se aplica como variable de entorno. Para mostrar la configuración privada de Dynamic MoE escribe TOSH_MOE_UI=1. En tarjetas GCN/Vega con texto corrupto, GGML_METAL_WAVE64_SAFEMODE=1 fuerza la ruta segura.",
-                                "Additional llama-server arguments, space-separated. A KEY=VALUE token is applied as an environment variable. To reveal the private Dynamic MoE settings, enter TOSH_MOE_UI=1. On GCN/Vega cards with corrupted text, GGML_METAL_WAVE64_SAFEMODE=1 forces the safe path."))
-                Text(loc.t("Los cambios se aplican al reiniciar el servidor.",
-                           "Changes take effect when the server restarts."))
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section(loc.t("Registro del servidor", "Server log")) {
-                Button {
-                    control.section = .logs
-                } label: {
-                    Label(loc.t("Abrir registro completo", "Open full log"),
-                          systemImage: "list.bullet.rectangle")
-                }
-                .infoTip(loc.t("El registro del servidor, con búsqueda, filtros y exportación, está en la pestaña Registro.",
-                            "The server log — with search, filters and export — lives in the Logs tab."))
-            }
-            }
         }
         .formStyle(.grouped)
         .toggleStyle(SettingsCompactToggleStyle())
