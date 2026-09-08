@@ -85,6 +85,10 @@ struct ToshDropdown<Value: Hashable>: View {
                 }
                 .padding(6)
             }
+            // The list is its own container: without this it inherits a smaller
+            // control size from rows that shrink their controls.
+            .controlSize(.regular)
+            .font(.body)
             .frame(width: listWidth ?? max(width, 250),
                    height: min(max(CGFloat(options.count) * 39 + 12, 56), maximumListHeight))
             .background(WorkspaceStyle.surface)
