@@ -13,9 +13,20 @@ struct GPUStat: Identifiable, Sendable, Equatable {
     let name: String
     let usedMB: Double
     let totalMB: Double
+    /// Whole-device load reported by IOAccelerator. Some drivers omit it, so
+    /// callers must keep the unavailable state instead of inventing a zero.
+    var activityPercent: Double?
+    var temperatureC: Double?
+    var powerW: Double?
     var peerGroupID: UInt64 = 0
     var freeMB: Double { max(0, totalMB - usedMB) }
     var fraction: Double { totalMB > 0 ? min(usedMB / totalMB, 1) : 0 }
+}
+
+struct SystemTelemetrySample: Sendable, Equatable {
+    var gpus: [GPUStat] = []
+    var memoryUsedMB: Double = 0
+    var memoryTotalMB: Double = Double(ProcessInfo.processInfo.physicalMemory) / 1_048_576
 }
 
 /// Polls per-GPU VRAM directly from the IOAccelerator registry... no process
@@ -23,9 +34,15 @@ struct GPUStat: Identifiable, Sendable, Equatable {
 /// accelerator node by registry ID, so two identical GPUs stay distinct.
 @MainActor
 final class VRAMMonitor: ObservableObject {
-    @Published var gpus: [GPUStat] = []
+    @Published private(set) var sample = SystemTelemetrySample()
     private var timer: Timer?
     private var polls = 0
+
+    var gpus: [GPUStat] { sample.gpus }
+    var memoryUsedMB: Double { sample.memoryUsedMB }
+    var memoryTotalMB: Double { sample.memoryTotalMB }
+    var memoryFraction: Double { memoryTotalMB > 0 ? min(memoryUsedMB / memoryTotalMB, 1) : 0 }
+    var activityPercent: Double? { gpus.compactMap(\.activityPercent).max() }
 
     // Aggregate across all GPUs, kept for the single-bar toolbar/menubar readouts.
     var usedMB: Double { gpus.reduce(0) { $0 + $1.usedMB } }
@@ -47,11 +64,15 @@ final class VRAMMonitor: ObservableObject {
         let rescan = polls % 10 == 1   // catch an eGPU coming or going, without paying every tick
         Task.detached(priority: .utility) {
             let stats = Self.readAllGPUs(rescanDevices: rescan)
+            let memory = Self.readSystemMemory()
+            let next = SystemTelemetrySample(gpus: stats,
+                                             memoryUsedMB: memory.used,
+                                             memoryTotalMB: memory.total)
             await MainActor.run { [weak self] in
                 // Publishing an identical sample would invalidate every view that
                 // draws a VRAM bar, three times a minute, for nothing.
-                guard let self, self.gpus != stats else { return }
-                self.gpus = stats
+                guard let self, self.sample != next else { return }
+                self.sample = next
             }
         }
     }
@@ -61,8 +82,12 @@ final class VRAMMonitor: ObservableObject {
     nonisolated private static func readAllGPUs(rescanDevices: Bool) -> [GPUStat] {
         MetalDeviceCache.devices(rescan: rescanDevices).enumerated().map { i, dev in
             let totalMB = Double(dev.recommendedMaxWorkingSetSize) / 1_048_576
-            let usedMB = usedBytes(forRegistryID: dev.registryID).map { $0 / 1_048_576 } ?? 0
+            let registry = registryStats(forRegistryID: dev.registryID)
+            let usedMB = (registry.usedBytes ?? 0) / 1_048_576
             return GPUStat(id: i, name: dev.name, usedMB: usedMB, totalMB: totalMB,
+                           activityPercent: registry.activityPercent,
+                           temperatureC: registry.temperatureC,
+                           powerW: registry.powerW,
                            peerGroupID: dev.peerGroupID)
         }
     }
@@ -70,10 +95,11 @@ final class VRAMMonitor: ObservableObject {
     /// In-use VRAM bytes for the GPU with this Metal registry ID. Walks the
     /// accelerator subtree under the matching IOService node; the stat lives either
     /// at the top level or inside "PerformanceStatistics" depending on the driver.
-    nonisolated private static func usedBytes(forRegistryID registryID: UInt64) -> Double? {
+    nonisolated private static func registryStats(forRegistryID registryID: UInt64)
+        -> (usedBytes: Double?, activityPercent: Double?, temperatureC: Double?, powerW: Double?) {
         let entry = IOServiceGetMatchingService(kIOMainPortDefault,
                                                 IORegistryEntryIDMatching(registryID))
-        guard entry != 0 else { return nil }
+        guard entry != 0 else { return (nil, nil, nil, nil) }
         defer { IOObjectRelease(entry) }
 
         let recursive = IOOptionBits(kIORegistryIterateRecursively)
@@ -84,14 +110,41 @@ final class VRAMMonitor: ObservableObject {
             return (cf as? NSNumber)?.doubleValue
         }
 
-        if let used = search("inUseVidMemoryBytes") { return used }
-        if let perf = IORegistryEntrySearchCFProperty(entry, kIOServicePlane,
-                                                       "PerformanceStatistics" as CFString,
-                                                       kCFAllocatorDefault, recursive) as? [String: Any],
-           let used = (perf["inUseVidMemoryBytes"] as? NSNumber)?.doubleValue {
-            return used
+        let perf = IORegistryEntrySearchCFProperty(entry, kIOServicePlane,
+                                                    "PerformanceStatistics" as CFString,
+                                                    kCFAllocatorDefault, recursive) as? [String: Any]
+        func number(_ keys: [String]) -> Double? {
+            for key in keys {
+                if let value = (perf?[key] as? NSNumber)?.doubleValue { return value }
+                if let value = search(key) { return value }
+            }
+            return nil
         }
-        return nil
+        return (number(["inUseVidMemoryBytes"]),
+                number(["Device Utilization %", "GPU Activity(%)"]),
+                number(["Temperature(C)"]),
+                number(["Total Power(W)"]))
+    }
+
+    /// Active + wired + compressed pages gives a stable, useful approximation
+    /// of memory currently occupied. It intentionally excludes inactive/cache
+    /// pages that macOS can reclaim immediately.
+    nonisolated private static func readSystemMemory() -> (used: Double, total: Double) {
+        let total = Double(ProcessInfo.processInfo.physicalMemory) / 1_048_576
+        var info = vm_statistics64()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return (0, total) }
+        var pageSize: vm_size_t = 0
+        host_page_size(mach_host_self(), &pageSize)
+        let pages = UInt64(info.active_count) + UInt64(info.wire_count)
+            + UInt64(info.compressor_page_count)
+        return (Double(pages * UInt64(pageSize)) / 1_048_576, total)
     }
 }
 

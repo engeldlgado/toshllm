@@ -3,12 +3,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import SwiftUI
-import Charts
 
 // MARK: - Home
 
 struct DashboardView: View {
     @EnvironmentObject var server: ServerController
+    @EnvironmentObject var control: ControlPanelState
+    @State private var showServerConfiguration = false
+    @State private var showHardware = false
     @EnvironmentObject var manager: ServerManager
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
@@ -34,28 +36,57 @@ struct DashboardView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 16) {
+                    if control.serverAnchor == nil {
                     updateBanner
-                    // Cards flow into as many columns as the window fits, so extra servers
-                    // fill the width instead of stacking in one tall column.
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 16, alignment: .top)],
-                              spacing: 16) {
-                        MachineCard()
-                        GPUsCard()
-                        serverCard
-                        // Array(...) not the ArraySlice from dropFirst(): a slice keeps its
-                        // parent's 1-based indices, which ForEach mishandles (the first added
-                        // server would never refresh its state).
-                        ForEach(Array(manager.servers.dropFirst()), id: \.id) { c in
-                            AddedServerCard(c: c).environmentObject(manager).id(c.id)
+                    HStack {
+                        Label(loc.t("Tu equipo", "Your machine"), systemImage: "desktopcomputer")
+                            .font(.system(size: 17, weight: .semibold))
+                        Spacer()
+                        Button { showHardware.toggle() } label: {
+                            Label(loc.t("Detalles del hardware", "Hardware details"), systemImage: "info.circle")
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .popover(isPresented: $showHardware) {
+                            ScrollView {
+                                VStack(spacing: 14) { MachineCard(); GPUsCard() }.padding(20)
+                            }
+                            .frame(width: 600, height: 480)
                         }
                     }
-                    recommendationCard
+                    DashboardMetricsView()
+                    DashboardMultiGPUOverview()
+                    }
+                    if let selectedID = control.serverAnchor,
+                       let selected = manager.servers.first(where: { $0.id == selectedID }) {
+                        ServerDetailView(server: selected)
+                            .id(selected.id)
+                    } else {
+                        ForEach(manager.servers, id: \.id) { instance in
+                            ServerOverviewView(server: instance, configure: {
+                                control.focusServer(instance.id)
+                            }, onDelete: instance.profile == nil ? nil : {
+                                manager.removeServer(instance.id)
+                            })
+                            .id(instance.id)
+                        }
+                    }
+                    if control.serverAnchor == nil { recommendationCard }
+
                 }
-                .padding()
+                .padding(24)
+                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity)
             }
-            .overlay(alignment: .bottomTrailing) {
-                floatingAddButton(proxy).padding(20)
+            .background(WorkspaceStyle.canvas)
+            .onChange(of: manager.servers.map(\.id)) { _, ids in
+                if let selected = control.serverAnchor, !ids.contains(selected) { control.serverAnchor = nil }
+            }
+            .onChange(of: control.serverNavigationID) { _, _ in
+                if let anchor = control.serverAnchor { proxy.scrollTo(anchor, anchor: .top) }
+            }
+            .onAppear {
+                if let anchor = control.serverAnchor { proxy.scrollTo(anchor, anchor: .top) }
             }
         }
     }
@@ -142,34 +173,8 @@ struct DashboardView: View {
                     "Loads a saved profile. If the server is running, it stops so the profile applies."))
     }
 
-    // Floating action button with the macOS 26 glass look (material fallback below).
-    private func floatingAddButton(_ proxy: ScrollViewProxy) -> some View {
-        Button {
-            let n = manager.servers.count + 1
-            let new = withAnimation(.snappy) {
-                manager.addServer(name: loc.t("Servidor %@", "Server %@", "\(n)"), from: nil)
-            }
-            // The card is appended at the end of the grid, often below the fold;
-            // scroll to it so the click visibly produces something.
-            withAnimation(.snappy) { proxy.scrollTo(new.id, anchor: .center) }
-        } label: {
-            Label(loc.t("Agregar servidor", "Add server"), systemImage: "plus")
-                .font(.body.weight(.medium))
-                .padding(.horizontal, 18).padding(.vertical, 12)
-                // Interactive glass installs its own press gesture that competes
-                // with the Button and sometimes eats the click; feedback comes from
-                // PressableButtonStyle instead.
-                .glassSurface(in: Capsule(), tint: Color.appAccent)
-                .contentShape(Capsule())
-                .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-        }
-        .buttonStyle(PressableButtonStyle())
-        .help(loc.t("Crea otro servidor independiente, con su propia GPU, modelo y puerto.",
-                    "Creates another independent server with its own GPU, model and port."))
-    }
-
     private var serverCard: some View {
-        Card(title: loc.t("Servidor", "Server"), icon: "server.rack", fill: true,
+        Card(title: manager.displayName(for: server, loc: loc), icon: "server.rack",
              trailing: { if !profileStore.profiles.isEmpty { profileMenu } }) {
             if routerMode {
                 HStack(spacing: 8) {
@@ -202,55 +207,57 @@ struct DashboardView: View {
                     .disabled(server.state == .running || server.state == .starting)
                 }
             }
-            if hardware.gpus.count > 1 {
-                HStack(spacing: 8) {
-                    Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
-                    GPUSelectionMenu(gpuIndex: $gpuIndex, gpuList: Binding(
-                        get: { ServerSettings.gpuList(fromCSV: gpuListCSV) },
-                        set: { gpuListCSV = $0.map(String.init).joined(separator: ",") }))
-                        .disabled(server.state == .running || server.state == .starting)
-                }
-            }
-            if ServerSettings.modelIsMoE(at: modelPath) {
-                HStack(spacing: 8) {
-                    Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
-                    Text(loc.t("Expertos MoE en CPU: %@", "MoE experts on CPU: %@", "\(ncmoe)")).font(.callout)
-                    Spacer(minLength: 8)
-                    Stepper("", value: Binding(get: { ncmoe }, set: { v in
-                        ncmoe = v
-                        ServerSettings.rememberNcmoe(v, forModel: modelPath)
-                    }), in: 0...99)
-                        .labelsHidden()
-                        .disabled(server.state == .running || server.state == .starting)
-                }
-                .help(loc.t("Capas MoE cuyos expertos corren en CPU (RAM). Súbelo si la VRAM se satura, bájalo si te sobra. Se aplica al reiniciar el servidor.",
-                            "MoE layers whose experts run on the CPU (RAM). Raise it if VRAM saturates, lower it if you have headroom. Applies when the server restarts."))
-                HStack(spacing: 8) {
-                    Image(systemName: "square.stack.3d.down.right").frame(width: 18).foregroundStyle(.secondary)
-                    Text(loc.t("Micro-lote", "Micro-batch")).font(.callout)
-                    Spacer(minLength: 8)
-                    Picker("", selection: $ubatch) {
-                        ForEach(ServerSettings.ubatchOptions, id: \.self) { n in
-                            Text(ServerSettings.ubatchLabel(n, loc: loc)).tag(n)
-                        }
+            DisclosureGroup(loc.t("Configuración del modelo", "Model configuration")) {
+                if hardware.gpus.count > 1 {
+                    HStack(spacing: 8) {
+                        Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
+                        GPUSelectionMenu(gpuIndex: $gpuIndex, gpuList: Binding(
+                            get: { ServerSettings.gpuList(fromCSV: gpuListCSV) },
+                            set: { gpuListCSV = $0.map(String.init).joined(separator: ",") }))
+                            .disabled(server.state == .running || server.state == .starting)
                     }
-                    .labelsHidden().fixedSize()
-                    .disabled(server.state == .running || server.state == .starting)
                 }
-                .help(loc.t("Tokens de prompt que la GPU procesa de una vez. Uno más grande lee el prompt más rápido a cambio de VRAM, cerca de 0,5 GB por cada 512. Se aplica al reiniciar el servidor.",
-                            "Prompt tokens the GPU processes at once. A larger one reads the prompt faster in exchange for VRAM, around 0.5 GB per 512. Applies when the server restarts."))
-            }
-            if !modelPath.isEmpty && !routerMode {
-                if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
-                    row("gauge.with.needle", loc.t("Límite: ancho de banda de RAM",
-                                                   "Limit: RAM bandwidth"))
-                        .help(loc.t("Los expertos en CPU se leen desde la RAM en cada token, y eso marca la velocidad de generación: una GPU más potente no la mejora, RAM más rápida (DDR5) sí. La aceleración MTP y bajar ncmoe reducen esas lecturas.",
-                                    "CPU experts are read from RAM on every token, and that sets generation speed: a stronger GPU won't raise it, faster RAM (DDR5) will. MTP acceleration and a lower ncmoe reduce those reads."))
-                } else {
-                    row("gauge.with.needle", loc.t("Límite: ancho de banda de VRAM",
-                                                   "Limit: VRAM bandwidth"))
-                        .help(loc.t("Con el modelo completo en la GPU, cada token relee los pesos desde la VRAM: la velocidad de generación depende del ancho de banda de la tarjeta y del tamaño del archivo (una cuantización menor genera más rápido).",
-                                    "With the whole model on the GPU, every token re-reads the weights from VRAM: generation speed depends on the card's bandwidth and the file size (a smaller quantization generates faster)."))
+                if ServerSettings.modelIsMoE(at: modelPath) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
+                        Text(loc.t("Expertos MoE en CPU: %@", "MoE experts on CPU: %@", "\(ncmoe)")).font(.callout)
+                        Spacer(minLength: 8)
+                        Stepper("", value: Binding(get: { ncmoe }, set: { v in
+                            ncmoe = v
+                            ServerSettings.rememberNcmoe(v, forModel: modelPath)
+                        }), in: 0...99)
+                            .labelsHidden()
+                            .disabled(server.state == .running || server.state == .starting)
+                    }
+                    .help(loc.t("Capas MoE cuyos expertos corren en CPU (RAM). Súbelo si la VRAM se satura, bájalo si te sobra. Se aplica al reiniciar el servidor.",
+                                "MoE layers whose experts run on the CPU (RAM). Raise it if VRAM saturates, lower it if you have headroom. Applies when the server restarts."))
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.stack.3d.down.right").frame(width: 18).foregroundStyle(.secondary)
+                        Text(loc.t("Micro-lote", "Micro-batch")).font(.callout)
+                        Spacer(minLength: 8)
+                        Picker("", selection: $ubatch) {
+                            ForEach(ServerSettings.ubatchOptions, id: \.self) { n in
+                                Text(ServerSettings.ubatchLabel(n, loc: loc)).tag(n)
+                            }
+                        }
+                        .labelsHidden().fixedSize()
+                        .disabled(server.state == .running || server.state == .starting)
+                    }
+                    .help(loc.t("Tokens de prompt que la GPU procesa de una vez. Uno más grande lee el prompt más rápido a cambio de VRAM, cerca de 0,5 GB por cada 512. Se aplica al reiniciar el servidor.",
+                                "Prompt tokens the GPU processes at once. A larger one reads the prompt faster in exchange for VRAM, around 0.5 GB per 512. Applies when the server restarts."))
+                }
+                if !modelPath.isEmpty && !routerMode {
+                    if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
+                        row("gauge.with.needle", loc.t("Límite: ancho de banda de RAM",
+                                                       "Limit: RAM bandwidth"))
+                            .help(loc.t("Los expertos en CPU se leen desde la RAM en cada token, y eso marca la velocidad de generación: una GPU más potente no la mejora, RAM más rápida (DDR5) sí. La aceleración MTP y bajar ncmoe reducen esas lecturas.",
+                                        "CPU experts are read from RAM on every token, and that sets generation speed: a stronger GPU won't raise it, faster RAM (DDR5) will. MTP acceleration and a lower ncmoe reduce those reads."))
+                    } else {
+                        row("gauge.with.needle", loc.t("Límite: ancho de banda de VRAM",
+                                                       "Limit: VRAM bandwidth"))
+                            .help(loc.t("Con el modelo completo en la GPU, cada token relee los pesos desde la VRAM: la velocidad de generación depende del ancho de banda de la tarjeta y del tamaño del archivo (una cuantización menor genera más rápido).",
+                                        "With the whole model on the GPU, every token re-reads the weights from VRAM: generation speed depends on the card's bandwidth and the file size (a smaller quantization generates faster)."))
+                    }
                 }
             }
             row("number", loc.t("Peticiones: %@", "Requests: %@", "\(server.requestCount)"))
@@ -265,66 +272,73 @@ struct DashboardView: View {
                 ? loc.t(" Se aplica al reiniciar el servidor.", " Applies when the server restarts.")
                 : ""
             Divider().padding(.vertical, 3)
-            HStack(spacing: 8) {
-                Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
-                Text(loc.t("Puerto", "Port")).font(.callout)
-                Spacer(minLength: 8)
-                TextField("", value: $port, format: .number.grouping(.never))
-                    .multilineTextAlignment(.trailing).frame(width: 72)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(serverBusy)
-            }
-            .help(loc.t("Puerto local del servidor (API y chat web).",
-                        "Local server port (API and web chat).") + restartNote)
-            HStack(spacing: 8) {
-                Image(systemName: "doc.plaintext").frame(width: 18).foregroundStyle(.secondary)
-                Text(loc.t("Contexto", "Context")).font(.callout)
-                Spacer(minLength: 8)
-                Picker("", selection: $ctx) {
-                    ForEach([4096, 8192, 16384, 32768, 65536, 131072, 262144], id: \.self) { n in
-                        Text("\(n / 1024)k").tag(n)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 24)],
+                      alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "number.square").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Puerto", "Port")).font(.callout)
+                    Spacer(minLength: 8)
+                    TextField("", value: $port, format: .number.grouping(.never))
+                        .multilineTextAlignment(.trailing).frame(width: 72)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(serverBusy)
+                }
+                .help(loc.t("Puerto local del servidor (API y chat web).",
+                            "Local server port (API and web chat).") + restartNote)
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.plaintext").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Contexto", "Context")).font(.callout)
+                    Spacer(minLength: 8)
+                    Picker("", selection: $ctx) {
+                        ForEach([4096, 8192, 16384, 32768, 65536, 131072, 262144], id: \.self) { n in
+                            Text("\(n / 1024)k").tag(n)
+                        }
                     }
+                    .labelsHidden().fixedSize().disabled(serverBusy)
                 }
-                .labelsHidden().fixedSize().disabled(serverBusy)
-            }
-            .help(loc.t("Contexto máximo del servidor: cuántos tokens caben entre prompt e historial. Más contexto ocupa más memoria para la caché KV.",
-                        "The server's maximum context: how many tokens fit across the prompt and the history. More context takes more memory for the KV cache.") + restartNote)
-            HStack(spacing: 8) {
-                Image(systemName: "wifi").frame(width: 18).foregroundStyle(.secondary)
-                Text(loc.t("Descubrible en red local", "Discoverable on local network")).font(.callout)
-                // Inline ⓘ (no extra row → no vertical jump). Styled, reliable popover.
-                if localNetworkDiscovery && !apiKeyEnabled {
-                    InfoTip(text: loc.t("Recomendado: protege la API con clave antes de exponerla en la red local.",
-                                        "Recommended: protect the API with a key before exposing it on the local network."))
-                }
-                Spacer(minLength: 8)
-                Toggle("", isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
-                    .labelsHidden().toggleStyle(.switch).controlSize(.small)
-            }
-            .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour. Reinicia el servidor si está activo.",
-                        "Makes the server listen on the local network and advertises it via Bonjour. Restarts the server if it's running."))
-            // Vision-capable models: the mmproj menu is the single control —
-            // pick a projector, auto-pair, or "No vision" to run text-only.
-            if ServerSettings.mightSupportVision(modelPath: modelPath) {
+                .help(loc.t("Contexto máximo del servidor: cuántos tokens caben entre prompt e historial. Más contexto ocupa más memoria para la caché KV.",
+                            "The server's maximum context: how many tokens fit across the prompt and the history. More context takes more memory for the KV cache.") + restartNote)
                 HStack(spacing: 8) {
-                    Image(systemName: "photo").frame(width: 18).foregroundStyle(.secondary)
-                    Text(loc.t("Visión", "Vision")).font(.callout)
+                    Image(systemName: "wifi").frame(width: 18).foregroundStyle(.secondary)
+                    Text(loc.t("Descubrible en red local", "Discoverable on local network")).font(.callout)
+                    // Inline ⓘ (no extra row → no vertical jump). Styled, reliable popover.
+                    if localNetworkDiscovery && !apiKeyEnabled {
+                        InfoTip(text: loc.t("Recomendado: protege la API con clave antes de exponerla en la red local.",
+                                            "Recommended: protect the API with a key before exposing it on the local network."))
+                    }
                     Spacer(minLength: 8)
-                    VisionProjectorControl(modelPath: modelPath)
+                    Toggle("", isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
                 }
-                .help(loc.t("Proyector de visión: elige un archivo, deja que se empareje solo, o 'Sin visión' para correr solo texto y liberar la VRAM del codificador.",
-                            "Vision projector: choose a file, let it auto-pair, or 'No vision' to run text-only and free the encoder's VRAM.") + restartNote)
-            }
-            if ServerSettings.dflashDraftPath(forModel: modelPath) != nil {
-                HStack(spacing: 8) {
-                    Image(systemName: "bolt").frame(width: 18).foregroundStyle(.secondary)
-                    Text(loc.t("Aceleración DFlash", "DFlash acceleration")).font(.callout)
-                    Spacer(minLength: 8)
-                    DflashControl(modelPath: modelPath)
+                .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour. Reinicia el servidor si está activo.",
+                            "Makes the server listen on the local network and advertises it via Bonjour. Restarts the server if it's running."))
+                // Vision-capable models: the mmproj menu is the single control —
+                // pick a projector, auto-pair, or "No vision" to run text-only.
+                if ServerSettings.mightSupportVision(modelPath: modelPath) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "photo").frame(width: 18).foregroundStyle(.secondary)
+                        Text(loc.t("Visión", "Vision")).font(.callout)
+                        Spacer(minLength: 8)
+                        VisionProjectorControl(modelPath: modelPath)
+                    }
+                    .help(loc.t("Proyector de visión: elige un archivo, deja que se empareje solo, o 'Sin visión' para correr solo texto y liberar la VRAM del codificador.",
+                                "Vision projector: choose a file, let it auto-pair, or 'No vision' to run text-only and free the encoder's VRAM.") + restartNote)
+                }
+                if ServerSettings.dflashDraftPath(forModel: modelPath) != nil {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bolt").frame(width: 18).foregroundStyle(.secondary)
+                        Text(loc.t("Aceleración DFlash", "DFlash acceleration")).font(.callout)
+                        Spacer(minLength: 8)
+                        DflashControl(modelPath: modelPath)
+                    }
                 }
             }
             SpecMetricsView(port: port)
-            DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(loc.t("Servicios y opciones avanzadas", "Services and advanced options"),
+                      systemImage: "slider.horizontal.3")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Divider().opacity(0.45)
                 HStack(spacing: 8) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
                         .frame(width: 18).foregroundStyle(.secondary)
@@ -389,10 +403,10 @@ struct DashboardView: View {
                 .help(loc.t("Banderas que se pasan al motor. Las mismas que el campo de Ajustes: cambiarlas aquí las cambia allí.",
                             "Flags passed to the engine. The same field as in Settings: changing it here changes it there."))
                 .padding(.top, 4)
-            } label: {
-                Text(loc.t("Opciones avanzadas", "Advanced options"))
-                    .font(.caption).foregroundStyle(.secondary)
             }
+            .padding(12)
+            .background(WorkspaceStyle.inset.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(WorkspaceStyle.border))
 
             HStack {
                 ServerStateBadge(state: server.state)
@@ -422,55 +436,22 @@ struct DashboardView: View {
     private var recommendationCard: some View {
         let recs = Catalog.recommendations(for: hardware)
         if !recs.isEmpty {
-            Card(title: loc.t("Recomendado para tu equipo", "Recommended for your machine"),
-                 icon: "star.fill") {
-                Text(loc.t("Tu equipo corre bien varios modelos; elige según lo que necesites.",
-                           "Your machine runs several models well — pick by what you need."))
-                    .font(.caption).foregroundStyle(.secondary)
-                VStack(spacing: 0) {
-                    ForEach(Array(recs.enumerated()), id: \.element.id) { idx, rec in
-                        if idx > 0 { Divider().padding(.vertical, 9) }
-                        recommendationRow(rec)
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(loc.t("Recomendado para tu equipo", "Recommended for your machine"), systemImage: "star.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                    Text(loc.t("Modelos adecuados para tu hardware. Las velocidades son estimaciones.",
+                               "Models suited to your hardware. Speeds are estimates."))
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
+                }
+                VStack(spacing: 8) {
+                    ForEach(recs, id: \.id) { rec in
+                        DashboardRecommendationRow(rec: rec)
                     }
                 }
-                .padding(.top, 4)
             }
-        }
-    }
-
-    private func recommendationRow(_ rec: Catalog.Recommendation) -> some View {
-        let style = roleStyle(rec.role)
-        return HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Label(style.text, systemImage: style.icon)
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(style.color.opacity(0.18), in: Capsule())
-                        .foregroundStyle(style.color)
-                        .fixedSize()
-                    Text(ModelName(rec.model.name).title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Text(String(format: "%.1f GB", rec.model.spec.fileGB))
-                        .font(.caption2).foregroundStyle(.secondary)
-                    if rec.model.spec.isMoE { MoEBadge() }
-                }
-                Text(rec.model.detail(loc.isSpanish))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                EstimateLine(est: rec.est)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            CatalogActionButton(model: rec.model, est: rec.est)
-                .fixedSize()
-        }
-    }
-
-    private func roleStyle(_ role: Catalog.Recommendation.Role) -> (text: String, icon: String, color: Color) {
-        switch role {
-        case .fast:     return (loc.t("Más rápido", "Fastest"), "hare.fill", .green)
-        case .balanced: return (loc.t("Equilibrado", "Balanced"), "scalemass.fill", .blue)
-        case .quality:  return (loc.t("Máxima calidad", "Top quality"), "sparkles", .purple)
-        case .coding:   return (loc.t("Programación", "Coding"), "chevron.left.forwardslash.chevron.right", .orange)
+            .padding(20)
+            .cardSurface()
         }
     }
 
@@ -479,6 +460,19 @@ struct DashboardView: View {
             Image(systemName: icon).frame(width: 18).foregroundStyle(.secondary)
             Text(text).font(.callout).lineLimit(1)
             Spacer(minLength: 0)
+        }
+    }
+}
+
+/// Restores the former per-device view on the main dashboard when more than one
+/// Metal device is present. The wrapper keeps the extra UI absent on single-GPU
+/// machines and reacts when an eGPU is connected after launch.
+private struct DashboardMultiGPUOverview: View {
+    @EnvironmentObject private var vram: VRAMMonitor
+
+    var body: some View {
+        if vram.gpus.count > 1 || hardware.splitEligibleGPUs.count > 1 {
+            GPUsCard()
         }
     }
 }
@@ -805,7 +799,7 @@ struct AddedServerCard: View {
         let busy = c.state == .running || c.state == .starting
         let modelPath = isPinned(Profile.Pin.model) ? (c.profile?.modelPath ?? "") : gModelPath
         let routerMode = isPinned(Profile.Pin.router) ? (c.profile?.routerMode ?? false) : gRouterMode
-        Card(title: c.name, icon: "server.rack", fill: true, trailing: { accessory }) {
+        Card(title: manager.displayName(for: c, loc: loc), icon: "server.rack", trailing: { accessory }) {
             if routerMode {
                 HStack(spacing: 8) {
                     Image(systemName: "shippingbox.and.arrow.backward").frame(width: 18).foregroundStyle(.secondary)
@@ -815,26 +809,7 @@ struct AddedServerCard: View {
             } else {
                 HStack(spacing: 8) {
                     Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
-                    // Same ncmoe seeding as the primary server's picker.
-                    Picker("", selection: Binding(get: { modelPath }, set: { p in
-                        c.profile?.modelPath = p
-                        c.profile?.ncmoe = Estimator.ncmoeForSelection(path: p, models: models.models)
-                        pin(Profile.Pin.model)
-                        manager.persist()
-                    })) {
-                        Text(loc.t("Sin modelo", "No model")).tag("")
-                        ForEach(ModelFamilyGroup.grouped(models.models)) { group in
-                            Section(group.isOther ? loc.t("Otros", "Others") : group.family) {
-                                ForEach(group.models) {
-                                    Text(ModelName.forPath($0.url.path).display
-                                         + (ModelTraitsCache.cached(for: $0.url.path)?
-                                                .pickerSuffix(spanish: loc.isSpanish) ?? ""))
-                                        .tag($0.url.path)
-                                }
-                            }
-                        }
-                    }
-                    .labelsHidden().disabled(busy)
+                    ServerModelPicker(server: c)
                 }
             }
             HStack(spacing: 8) {
@@ -936,7 +911,11 @@ struct AddedServerCard: View {
                                  : loc.t("Activar la visión", "Turn vision on"))
                 }
             }
-            DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(loc.t("Servicios y opciones avanzadas", "Services and advanced options"),
+                      systemImage: "slider.horizontal.3")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Divider().opacity(0.45)
                 HStack(spacing: 8) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
                         .frame(width: 18).foregroundStyle(.secondary)
@@ -1014,10 +993,10 @@ struct AddedServerCard: View {
                 .help(loc.t("Banderas que se pasan al motor solo en este servidor. Hereda las de Ajustes hasta que las cambies aquí.",
                             "Flags passed to the engine for this server only. Follows Settings until you change them here."))
                 .padding(.top, 4)
-            } label: {
-                Text(loc.t("Opciones avanzadas", "Advanced options"))
-                    .font(.caption).foregroundStyle(.secondary)
             }
+            .padding(12)
+            .background(WorkspaceStyle.inset.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(WorkspaceStyle.border))
             HStack {
                 ServerStateBadge(state: c.state)
                 Spacer()
@@ -1049,19 +1028,14 @@ struct AddedServerCard: View {
                 .help(loc.t("Carga un perfil guardado en este servidor.",
                             "Loads a saved profile into this server."))
             }
-            if c.profile?.pinned?.isEmpty != true {
-                Button { c.profile?.pinned = []; manager.persist() } label: {
+            if c.profile?.pinned != [Profile.Pin.model] {
+                Button { c.profile?.pinned = [Profile.Pin.model]; manager.persist() } label: {
                     Image(systemName: "pin.slash").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help(loc.t("Vuelve a heredar todos los ajustes globales (conserva nombre y puerto).",
-                            "Inherits every global setting again (keeps name and port)."))
+                .help(loc.t("Vuelve a heredar los ajustes globales, conservando el modelo de esta instancia, su nombre y puerto.",
+                            "Inherits global settings again, keeping this instance’s model, name and port."))
             }
-            Button { manager.removeServer(c.id) } label: {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .iconHelp(loc.t("Eliminar este servidor.", "Remove this server."))
         }
     }
 
@@ -1070,6 +1044,7 @@ struct AddedServerCard: View {
         var np = p
         np.name = c.name
         np.port = c.profile?.port ?? p.port
+        np.selectInstanceModel(path: np.modelPath, ncmoe: np.ncmoe)
         c.profile = np
         manager.persist()
     }
@@ -1118,8 +1093,8 @@ struct Card<Content: View, Trailing: View>: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 Label(title, systemImage: icon)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
                 if Trailing.self != EmptyView.self {
                     Spacer(minLength: 8)
                     trailing
@@ -1129,16 +1104,19 @@ struct Card<Content: View, Trailing: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: fill ? .infinity : nil, alignment: .topLeading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .cardSurface()
     }
 }
 
 /// Tactile press feedback for plain/glass buttons that otherwise show none.
 struct PressableButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.92 : 1))
             .opacity(configuration.isPressed ? 0.85 : 1)
-            .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.6),
+                       value: configuration.isPressed)
     }
 }

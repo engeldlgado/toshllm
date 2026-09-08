@@ -1,0 +1,65 @@
+[
+  {
+    "key": "qwen",
+    "organization": "Qwen",
+    "page": "https://huggingface.co/Qwen",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/6215ca5692c0ecfba9186921/hrRM50-6XcdWgg2AKpENG.jpeg",
+    "bytes": 2832
+  },
+  {
+    "key": "glm",
+    "organization": "zai-org",
+    "page": "https://huggingface.co/zai-org",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/62dc173789b4cf157d36ebee/i_pxzM2ZDo3Ub-BEgIkE9.png",
+    "bytes": 2506
+  },
+  {
+    "key": "gemma",
+    "organization": "google",
+    "page": "https://huggingface.co/google",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/5dd96eb166059660ed1ee413/WtA3YYitedOr9n02eHfJe.png",
+    "bytes": 7100
+  },
+  {
+    "key": "llama",
+    "organization": "meta-llama",
+    "page": "https://huggingface.co/meta-llama",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/646cf8084eefb026fb8fd8bc/oCTqufkdTkjyGodsx1vo1.png",
+    "bytes": 8108
+  },
+  {
+    "key": "mistral",
+    "organization": "mistralai",
+    "page": "https://huggingface.co/mistralai",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/634c17653d11eaedd88b314d/9OgyfKstSZtbmsmuG8MbU.png",
+    "bytes": 2656
+  },
+  {
+    "key": "openai",
+    "organization": "openai",
+    "page": "https://huggingface.co/openai",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/68783facef79a05727260de3/UPX5RQxiPGA-ZbBmArIKq.png",
+    "bytes": 5194
+  },
+  {
+    "key": "deepseek",
+    "organization": "deepseek-ai",
+    "page": "https://huggingface.co/deepseek-ai",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/6538815d1bdb3c40db94fbfa/xMBly9PUMphrFVMxLX4kq.png",
+    "bytes": 3682
+  },
+  {
+    "key": "phi",
+    "organization": "microsoft",
+    "page": "https://huggingface.co/microsoft",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/1583646260758-5e64858c87403103f9f1055d.png",
+    "bytes": 626
+  },
+  {
+    "key": "smol",
+    "organization": "HuggingFaceTB",
+    "page": "https://huggingface.co/HuggingFaceTB",
+    "asset": "https://cdn-avatars.huggingface.co/v1/production/uploads/651e96991b97c9f33d26bde6/e4VK7uW5sTeCYupD0s_ob.png",
+    "bytes": 16378
+  }
+]

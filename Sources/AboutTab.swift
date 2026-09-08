@@ -31,11 +31,7 @@ struct AboutView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
-                if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-                   let icon = NSImage(contentsOf: iconURL) {
-                    Image(nsImage: icon)
-                        .resizable().frame(width: 110, height: 110)
-                }
+                ToshLLMLogo(size: 110)
                 VStack(spacing: 4) {
                     Text("ToshLLM").font(.largeTitle.weight(.bold))
                     HStack(spacing: 6) {

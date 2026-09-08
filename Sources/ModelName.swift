@@ -220,13 +220,21 @@ struct ModelName {
             || l.contains("moe") || l.contains("-oss") || l.contains("gpt-oss")
     }
 
-    /// Titles from the embedded `general.name` when local; quant/flags stay from the filename.
+    /// Titles from the embedded `general.name` when local. Quantization comes from
+    /// `general.file_type`; filenames are only the fallback for incomplete metadata.
     static func forPath(_ path: String) -> ModelName {
         let byFile = ModelName(URL(fileURLWithPath: path).lastPathComponent)
-        guard !path.isEmpty, FileManager.default.fileExists(atPath: path),
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return byFile }
+        let metadata = GGUFMetadataCache.metadata(at: path)
+        let headerQuant = metadata?.fileTypeLabel
+        guard
               let meta = ServerSettings.ggufString("general.name", at: path)?
                   .trimmingCharacters(in: .whitespaces),
-              !meta.isEmpty else { return byFile }
+              !meta.isEmpty else {
+            guard let headerQuant else { return byFile }
+            return ModelName(title: byFile.title, quant: headerQuant,
+                             badges: byFile.badges, sizeToken: byFile.sizeToken)
+        }
         // Some converters preserve the Hugging Face repository as owner/model.
         // Only the model component belongs in the title.
         let metadataName = meta.split(separator: "/").last.map(String.init) ?? meta
@@ -239,7 +247,7 @@ struct ModelName {
             badges.append(badge)
         }
         return ModelName(title: title,
-                         quant: byFile.quant.isEmpty ? byMeta.quant : byFile.quant,
+                         quant: headerQuant ?? (byFile.quant.isEmpty ? byMeta.quant : byFile.quant),
                          badges: badges,
                          sizeToken: byMeta.sizeToken.isEmpty ? byFile.sizeToken : byMeta.sizeToken)
     }

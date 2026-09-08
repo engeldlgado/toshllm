@@ -351,6 +351,7 @@ final class DownloadItem: NSObject, ObservableObject, Identifiable, URLSessionDa
 @MainActor
 final class ModelStore: ObservableObject {
     @Published var models: [LocalModel] = []
+    @Published private(set) var modelGroups: [ModelFamilyGroup] = []
     @Published var downloads: [DownloadItem] = []
 
     /// Scan the folder up front so the list is populated as soon as the app
@@ -477,6 +478,7 @@ final class ModelStore: ObservableObject {
     func refresh() {
         ModelTraitsCache.invalidate()
         models = LocalModel.scan(in: directory)
+        modelGroups = ModelFamilyGroup.grouped(models)
         presentFiles = Set((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
         ModelTraitsCache.warm(paths: models.map(\.url.path)) { [weak self] in
             self?.objectWillChange.send()

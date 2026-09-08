@@ -18,14 +18,17 @@ struct ModelsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            GlassSegmentedControl(selection: $tab, segments: [
-                .init(value: .recommended, title: loc.t("Recomendados", "Recommended"), systemImage: "star"),
-                .init(value: .browse, title: loc.t("Buscar", "Browse"), systemImage: "magnifyingglass"),
+            ModelSectionSwitcher(selection: $tab, items: [
+                .init(value: .recommended, title: loc.t("Recomendados", "Recommended"),
+                      subtitle: loc.t("Elegidos para este Mac", "Matched to this Mac"), systemImage: "sparkles"),
+                .init(value: .browse, title: loc.t("Explorar", "Explore"),
+                      subtitle: "Hugging Face · GGUF", systemImage: "magnifyingglass"),
                 .init(value: .mine, title: loc.t("Mis modelos", "My models"),
-                      systemImage: models.downloads.contains { $0.phase == .downloading }
-                          ? "arrow.down.circle.fill" : "internaldrive"),
+                      subtitle: loc.t("Biblioteca local", "Local library"), systemImage: "internaldrive",
+                      badge: models.downloads.contains { $0.phase == .downloading } ? loc.t("Descargando", "Downloading") : "\(models.models.count)"),
             ])
-            .padding(12)
+            .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
             Divider()
 
             ScrollView {
@@ -68,89 +71,500 @@ struct ModelsView: View {
     }
 }
 
-/// Adaptive grid of model cards used across the tabs.
-private struct ModelGrid<Content: View>: View {
-    @ViewBuilder let content: Content
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: CardMetrics.minWidth), spacing: 12)],
-                  alignment: .leading, spacing: 12) {
-            content
-        }
-    }
-}
-
 // MARK: - Recommended tab
 
 private struct RecommendedTab: View {
     @EnvironmentObject var loc: Localizer
     @State private var filter: CatalogFilter = .all
+    @State private var query = ""
+    @State private var selectedID: String?
+    @State private var featuredIndex = 0
+    @State private var compactLayout = false
 
-    enum CatalogFilter: CaseIterable, Hashable { case all, vision, coder, moe }
+    enum CatalogFilter: CaseIterable, Hashable { case all, text, vision, coder, moe, reasoning }
 
     private func label(_ f: CatalogFilter) -> String {
         switch f {
         case .all: return loc.t("Todos", "All")
+        case .text: return loc.t("Texto", "Text")
         case .vision: return loc.t("Visión", "Vision")
         case .coder: return "Coder"
         case .moe: return "MoE"
+        case .reasoning: return loc.t("Razonamiento", "Reasoning")
         }
     }
     private func icon(_ f: CatalogFilter) -> String {
         switch f {
         case .all: return "square.grid.2x2"
+        case .text: return "text.alignleft"
         case .vision: return "eye"
         case .coder: return "chevron.left.forwardslash.chevron.right"
         case .moe: return "square.stack.3d.up"
+        case .reasoning: return "brain.head.profile"
         }
     }
     private func matches(_ m: CatalogModel) -> Bool {
         switch filter {
         case .all: return true
+        case .text: return !m.isVision
         case .vision: return m.isVision
         case .coder: return m.isCoder
         case .moe: return m.isMoE
+        case .reasoning:
+            return m.name.localizedCaseInsensitiveContains("GPT-OSS") ||
+                m.detail(false).localizedCaseInsensitiveContains("reasoning")
         }
     }
 
+    private func matchesSearch(_ model: CatalogModel) -> Bool {
+        query.isEmpty || model.name.localizedCaseInsensitiveContains(query) ||
+            model.detail(loc.isSpanish).localizedCaseInsensitiveContains(query)
+    }
+
     var body: some View {
-        let recs = Catalog.recommendations(for: hardware).filter { matches($0.model) }
-        let recIDs = Set(recs.map(\.id))
-        let rest = Catalog.models.filter { !recIDs.contains($0.id) && matches($0) }
+        let allRecommendations = Catalog.recommendations(for: hardware)
+        let visibleModels = Catalog.models.filter { matches($0) && matchesSearch($0) }
+        let visibleIDs = Set(visibleModels.map(\.id))
+        let recs = allRecommendations.filter { visibleIDs.contains($0.model.id) }
+        let safeIndex = allRecommendations.isEmpty ? 0 : min(featuredIndex, allRecommendations.count - 1)
+        let featuredID = allRecommendations.isEmpty ? nil : allRecommendations[safeIndex].model.id
+        let rest = visibleModels.filter { $0.id != featuredID }
+        let selected = Catalog.models.first { $0.id == selectedID }
+            ?? recs.first?.model ?? visibleModels.first
 
-        VStack(alignment: .leading, spacing: 16) {
-            GlassSegmentedControl(selection: $filter, segments: CatalogFilter.allCases.map {
-                .init(value: $0, title: label($0), systemImage: icon($0))
-            })
-
-            if !recs.isEmpty {
-                SectionHeader(icon: "star.fill",
-                              title: loc.t("Para tu equipo", "For your machine"),
-                              subtitle: loc.t("Elegidos según tu GPU/RAM, según lo que necesites.",
-                                              "Picked for your GPU/RAM, by what you need."))
-                ModelGrid {
-                    ForEach(recs) { rec in
-                        CatalogCard(model: rec.model,
-                                    est: rec.est,
-                                    role: rec.role)
-                    }
+        VStack(alignment: .leading, spacing: 18) {
+            if !allRecommendations.isEmpty {
+                let featured = allRecommendations[safeIndex]
+                FeaturedModelBanner(recommendation: featured,
+                                    currentIndex: safeIndex, total: allRecommendations.count,
+                                    previous: { changeFeatured(to: (safeIndex - 1 + allRecommendations.count) % allRecommendations.count) },
+                                    next: { changeFeatured(to: (safeIndex + 1) % allRecommendations.count) }) {
+                    selectedID = featured.model.id
                 }
             }
 
-            if !rest.isEmpty {
-                SectionHeader(icon: "square.grid.2x2",
-                              title: loc.t("Resto del catálogo", "Rest of the catalog"),
-                              subtitle: loc.t("Modelos curados con estimaciones medidas para tu equipo.",
-                                              "Curated models with measured estimates for your machine."))
-                ModelGrid {
-                    ForEach(rest) { m in
-                        CatalogCard(model: m,
-                                    est: Estimator.estimateCurrent(spec: m.spec, hw: hardware),
-                                    role: nil)
+            ModelSearchAndFilters(placeholder: loc.t("Buscar modelos…", "Search models…"), text: $query) {
+                ModelFilterBar(selection: $filter, filters: CatalogFilter.allCases.map {
+                    .init(value: $0, title: label($0), systemImage: icon($0),
+                          count: $0 == .all ? Catalog.models.count : nil)
+                })
+            }
+
+            if visibleModels.isEmpty {
+                ContentUnavailableView.search(text: query)
+            } else {
+                Group {
+                    if compactLayout {
+                        VStack(alignment: .leading, spacing: 16) {
+                            catalogResults(rest, selected: selected)
+                            if let selected { inspector(selected).frame(maxWidth: .infinity) }
+                        }
+                    } else {
+                        HStack(alignment: .top, spacing: 16) {
+                            catalogResults(rest, selected: selected)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                            if let selected { inspector(selected).frame(width: 320) }
+                        }
+                    }
+                }
+                .onGeometryChange(for: Bool.self) { geometry in
+                    geometry.size.width < 830
+                } action: { compactLayout = $0 }
+            }
+        }
+        .padding(16)
+    }
+
+    @ViewBuilder private func catalogResults(_ models: [CatalogModel], selected: CatalogModel?) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(icon: "square.grid.2x2",
+                          title: loc.t("Catálogo de modelos", "Model catalog"),
+                          subtitle: loc.t("Selecciona un modelo para revisar sus detalles.",
+                                          "Select a model to inspect its details."))
+            if models.isEmpty {
+                Text(loc.t("Las coincidencias actuales están disponibles en el carrusel superior.",
+                           "The current matches are available in the carousel above."))
+                    .font(.caption).foregroundStyle(.secondary).padding(.vertical, 16)
+            } else {
+                CatalogList {
+                    ForEach(models) { model in
+                        CatalogModelRow(model: model,
+                                        est: Estimator.estimateCurrent(spec: model.spec, hw: hardware),
+                                        role: nil, selected: selected?.id == model.id) {
+                            selectedID = model.id
+                        }
                     }
                 }
             }
         }
-        .padding(16)
+    }
+
+    private func inspector(_ model: CatalogModel) -> some View {
+        CatalogModelInspector(model: model,
+                              estimate: Estimator.estimateCurrent(spec: model.spec, hw: hardware))
+    }
+
+    private func changeFeatured(to index: Int) {
+        withAnimation(.easeInOut(duration: 0.18)) { featuredIndex = index }
+    }
+}
+
+private struct FeaturedModelBanner: View {
+    let recommendation: Catalog.Recommendation
+    let currentIndex: Int
+    let total: Int
+    let previous: () -> Void
+    let next: () -> Void
+    let select: () -> Void
+    @EnvironmentObject private var loc: Localizer
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            WorkspaceHeroArtwork()
+            LinearGradient(colors: [WorkspaceStyle.surface.opacity(0.99),
+                                    WorkspaceStyle.surface.opacity(0.88),
+                                    WorkspaceStyle.surface.opacity(0.12)],
+                           startPoint: .leading, endPoint: .trailing)
+            VStack(alignment: .leading, spacing: 12) {
+                Label(loc.t("RECOMENDADO PARA TU EQUIPO", "RECOMMENDED FOR YOUR MACHINE"),
+                      systemImage: "seal.fill")
+                    .font(.system(size: 10, weight: .bold)).foregroundStyle(Color.appAccent)
+                HStack(spacing: 9) {
+                    Text(ModelName(recommendation.model.name).title)
+                        .font(.system(size: 25, weight: .bold)).lineLimit(1)
+                    RoleChip(role: recommendation.role)
+                    if recommendation.model.isVision {
+                        TagBadge(text: loc.t("Visión", "Vision"), icon: "eye", color: .purple)
+                    }
+                }
+                Text(recommendation.model.detail(loc.isSpanish))
+                    .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { metrics; actions }
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(spacing: 8) { metrics }
+                        actions
+                    }
+                }
+            }
+            .padding(.horizontal, 22).padding(.vertical, 18)
+            .frame(maxWidth: 850, alignment: .leading)
+        }
+        .frame(minHeight: 176)
+        .background(WorkspaceStyle.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).strokeBorder(Color.appAccent.opacity(0.25)))
+        .overlay(alignment: .bottomTrailing) {
+            HStack(spacing: 9) {
+                HStack(spacing: 5) {
+                    ForEach(0..<total, id: \.self) { index in
+                        Capsule().fill(index == currentIndex ? Color.white : Color.white.opacity(0.25))
+                            .frame(width: index == currentIndex ? 14 : 5, height: 5)
+                    }
+                }
+                Button(action: previous) { Image(systemName: "chevron.left") }
+                    .buttonStyle(.plain).frame(width: 28, height: 28)
+                    .background(.black.opacity(0.20), in: Circle())
+                Button(action: next) { Image(systemName: "chevron.right") }
+                    .buttonStyle(.plain).frame(width: 28, height: 28)
+                    .background(.black.opacity(0.20), in: Circle())
+            }
+            .foregroundStyle(.white).padding(14)
+        }
+        .contentTransition(.opacity)
+    }
+
+    @ViewBuilder private var metrics: some View {
+        HeroMetric(icon: "bolt.fill", value: recommendation.est.expectedSpeed,
+                   label: loc.t("Velocidad est.", "Speed est."), color: .appAccent)
+        HeroMetric(icon: "memorychip", value: String(format: "%.1f GB", recommendation.est.vramGB),
+                   label: "VRAM", color: .secondary)
+        HeroMetric(icon: "circle.fill", value: compatibilityText,
+                   label: loc.t("Compatibilidad", "Compatibility"), color: compatibilityColor)
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            CatalogActionButton(model: recommendation.model, est: recommendation.est)
+            Button(loc.t("Ver detalles", "View details"), systemImage: "info.circle", action: select)
+                .glassButton()
+        }
+    }
+
+    private var compatibilityText: String {
+        switch recommendation.est.level {
+        case .ideal: return loc.t("GPU completa", "Full GPU")
+        case .good: return loc.t("Híbrido", "Hybrid")
+        case .slow: return loc.t("Lento", "Slow")
+        case .no: return loc.t("No cabe", "Won't fit")
+        }
+    }
+
+    private var compatibilityColor: Color {
+        recommendation.est.level == .ideal ? .green : recommendation.est.level == .no ? .red : .orange
+    }
+}
+
+private struct HeroMetric: View {
+    let icon: String
+    let value: String
+    let label: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon).foregroundStyle(color)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(value).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(WorkspaceStyle.inset.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
+    }
+}
+
+/// One shared 900 px JPEG (~20 KB on disk, ~1.4 MB decoded) replaces the
+/// previous geometry Canvas and stays crisp at the banner's rendered size.
+struct WorkspaceHeroArtwork: View {
+    private static let image: NSImage? = Bundle.main.url(forResource: "model-hero", withExtension: "jpg")
+        .flatMap(NSImage.init(contentsOf:))
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let image = Self.image {
+                Image(nsImage: image)
+                    .resizable().scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+            } else {
+                LinearGradient(colors: [WorkspaceStyle.surface, Color.purple.opacity(0.22)],
+                               startPoint: .leading, endPoint: .trailing)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct CatalogModelInspector: View {
+    enum Tab: CaseIterable { case overview, performance, files, details }
+
+    let model: CatalogModel
+    let estimate: MemoryEstimate
+    @State private var tab: Tab = .overview
+    @EnvironmentObject private var loc: Localizer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                ModelBrandIcon(name: model.name, size: 44)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(ModelName(model.name).title).font(.headline).lineLimit(2)
+                    Text("\(repositoryOwner) · \(String(format: "%.1f GB", model.spec.fileGB))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(14)
+
+            CatalogActionButton(model: model, est: estimate)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.horizontal, 14).padding(.bottom, 12)
+
+            HStack(spacing: 0) {
+                ForEach(Tab.allCases, id: \.self) { item in
+                    Button(tabTitle(item)) { tab = item }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: tab == item ? .semibold : .regular))
+                        .foregroundStyle(tab == item ? Color.appAccent : Color.secondary)
+                        .frame(maxWidth: .infinity).padding(.vertical, 9)
+                        .overlay(alignment: .bottom) {
+                            if tab == item { Rectangle().fill(Color.appAccent).frame(height: 2) }
+                        }
+                }
+            }
+            Divider()
+
+            Group {
+                switch tab {
+                case .overview: overview
+                case .performance: performance
+                case .files: files
+                case .details: details
+                }
+            }
+            .padding(14)
+        }
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(WorkspaceStyle.border))
+        .id(model.id)
+    }
+
+    private var overview: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(model.detail(loc.isSpanish)).font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            tags
+            HStack(spacing: 8) {
+                InspectorMetric(value: estimate.expectedSpeed, label: loc.t("Velocidad est.", "Speed est."), icon: "bolt.fill")
+                InspectorMetric(value: String(format: "%.1f GB", estimate.vramGB), label: "VRAM", icon: "memorychip")
+            }
+            detailRows
+        }
+    }
+
+    private var performance: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            InspectorMetric(value: estimate.expectedSpeed,
+                            label: loc.t("Generación estimada", "Estimated generation"), icon: "bolt.fill")
+            InspectorMetric(value: String(format: "%.1f GB VRAM · %.1f GB RAM", estimate.vramGB, estimate.ramGB),
+                            label: loc.t("Memoria estimada", "Estimated memory"), icon: "memorychip")
+            Text(loc.t("Las cifras son estimaciones para este Mac y pueden variar según el contexto.",
+                       "Figures are estimates for this Mac and can vary with context."))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var files: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            InspectorRow(label: loc.t("Archivo", "File"), value: model.fileName)
+            InspectorRow(label: loc.t("Tamaño", "Size"), value: String(format: "%.1f GB", model.spec.fileGB))
+            InspectorRow(label: loc.t("Cuantización", "Quantization"), value: quantization)
+            Button("Hugging Face", systemImage: "safari") { openRepository() }
+                .glassButton().controlSize(.small)
+        }
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            detailRows
+            Button(loc.t("Abrir repositorio", "Open repository"), systemImage: "arrow.up.right.square") {
+                openRepository()
+            }
+            .glassButton().controlSize(.small)
+        }
+    }
+
+    private var tags: some View {
+        HStack(spacing: 6) {
+            if model.isVision { TagBadge(text: loc.t("Visión", "Vision"), icon: "eye", color: .purple) }
+            if model.isCoder { TagBadge(text: "Coder", icon: "chevron.left.forwardslash.chevron.right", color: .blue) }
+            if model.isMoE { MoEBadge() }
+            if !model.isVision && !model.isCoder && !model.isMoE {
+                TagBadge(text: loc.t("Texto", "Text"), icon: "text.alignleft", color: .secondary)
+            }
+        }
+    }
+
+    private var detailRows: some View {
+        VStack(spacing: 0) {
+            InspectorRow(label: loc.t("Autor", "Author"), value: repositoryOwner)
+            InspectorRow(label: loc.t("Familia", "Family"), value: modelFamily)
+            InspectorRow(label: loc.t("Parámetros", "Parameters"), value: String(format: "%.1fB", model.spec.paramsB))
+            InspectorRow(label: loc.t("Cuantización", "Quantization"), value: quantization)
+            InspectorRow(label: loc.t("Arquitectura", "Architecture"), value: model.isMoE ? "MoE" : loc.t("Densa", "Dense"))
+        }
+    }
+
+    private func tabTitle(_ item: Tab) -> String {
+        switch item {
+        case .overview: return loc.t("Resumen", "Overview")
+        case .performance: return loc.t("Rendimiento", "Performance")
+        case .files: return loc.t("Archivos", "Files")
+        case .details: return loc.t("Detalles", "Details")
+        }
+    }
+
+    private var repositoryURL: URL? {
+        guard let url = URL(string: model.urlString),
+              let resolve = url.pathComponents.firstIndex(of: "resolve") else { return nil }
+        let path = url.pathComponents[1..<resolve].joined(separator: "/")
+        return URL(string: "https://huggingface.co/\(path)")
+    }
+    private var repositoryOwner: String { repositoryURL?.pathComponents.dropFirst().first ?? "—" }
+    private var quantization: String { ModelName.forPath(model.fileName).quant }
+    private var modelFamily: String { ModelName(model.name).title.split(separator: " ").first.map(String.init) ?? model.name }
+    private func openRepository() { if let repositoryURL { NSWorkspace.shared.open(repositoryURL) } }
+}
+
+private struct InspectorMetric: View {
+    let value: String
+    let label: String
+    let icon: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(value, systemImage: icon).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+        }
+        .padding(9).frame(maxWidth: .infinity, alignment: .leading)
+        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct InspectorRow: View {
+    let label: String
+    let value: String
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer(minLength: 6)
+            Text(value).lineLimit(1).truncationMode(.middle)
+        }
+        .font(.system(size: 11)).padding(.vertical, 7)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
+private struct ModelCollectionHero: View {
+    let eyebrow: String
+    let icon: String
+    let title: String
+    let detail: String
+    let primaryValue: String
+    let primaryLabel: String
+    let secondaryValue: String
+    let secondaryLabel: String
+    var actionTitle: String?
+    var actionIcon = "arrow.up.right.square"
+    var action: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 25, weight: .medium))
+                .foregroundStyle(Color.appAccent)
+                .frame(width: 52, height: 52)
+                .background(Color.appAccent.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+            VStack(alignment: .leading, spacing: 5) {
+                Text(eyebrow.uppercased())
+                    .font(.system(size: 9, weight: .bold)).tracking(1.2).foregroundStyle(Color.appAccent)
+                Text(title).font(.system(size: 19, weight: .semibold))
+                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 16)
+            collectionStat(primaryValue, label: primaryLabel)
+            Divider().frame(height: 38)
+            collectionStat(secondaryValue, label: secondaryLabel)
+            if let actionTitle, let action {
+                Button(actionTitle, systemImage: actionIcon, action: action)
+                    .glassButton().controlSize(.small)
+            }
+        }
+        .padding(17)
+        .background {
+            LinearGradient(colors: [Color.appAccent.opacity(0.10), WorkspaceStyle.surface],
+                           startPoint: .leading, endPoint: .trailing)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private func collectionStat(_ value: String, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value).font(.system(size: 16, weight: .semibold)).monospacedDigit()
+            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 72, alignment: .leading)
     }
 }
 
@@ -180,6 +594,21 @@ private struct BrowseTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            ModelCollectionHero(
+                eyebrow: "Hugging Face · GGUF", icon: "network",
+                title: loc.t("Explora modelos de la comunidad", "Explore community models"),
+                detail: loc.t("Busca repositorios GGUF, revisa sus cuantizaciones y descarga solo los archivos que necesites.",
+                              "Search GGUF repositories, inspect their quantizations, and download only the files you need."),
+                primaryValue: "\(search.didSearch ? search.results.count : search.trending.count)",
+                primaryLabel: loc.t("resultados", "results"),
+                secondaryValue: "GGUF", secondaryLabel: loc.t("formato local", "local format"),
+                actionTitle: "Hugging Face"
+            ) {
+                if let url = URL(string: "https://huggingface.co/models?library=gguf") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+
             HStack(spacing: 8) {
                 GlassSearchField(placeholder: loc.t("Buscar GGUF en Hugging Face…", "Search GGUF on Hugging Face…"),
                                  text: $search.query)
@@ -197,8 +626,10 @@ private struct BrowseTab: View {
                 .opacity(search.searching ? 0.6 : 1)
             }
 
-            HStack(spacing: 10) {
-                GlassSegmentedControl(selection: $search.sort, segments: HFSortOrder.allCases.map {
+            HStack(alignment: .center, spacing: 10) {
+                Text(loc.t("Ordenar", "Sort by"))
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                ModelFilterBar(selection: $search.sort, filters: HFSortOrder.allCases.map {
                     .init(value: $0, title: sortTitle($0), systemImage: sortIcon($0))
                 })
                 .onChange(of: search.sort) { Task { await search.reload() } }
@@ -463,6 +894,7 @@ private struct MyModelsTab: View {
     @State private var pendingDelete: LocalModel?
     @State private var pendingUpdate: LocalModel?
     @State private var filter: LocalFilter = .all
+    @State private var query = ""
 
     enum LocalFilter: CaseIterable, Hashable { case all, vision, mtp, dflash, moe }
 
@@ -486,26 +918,52 @@ private struct MyModelsTab: View {
         }
     }
 
-    private var shown: [LocalModel] {
-        guard filter != .all else { return models.models }
-        return models.models.filter { model in
-            let traits = ModelTraitsCache.cached(for: model.url.path) ?? .unknown
-            switch filter {
-            case .all: return true
-            case .vision: return traits.hasVision
-            case .mtp: return traits.hasMTP
-            case .dflash: return traits.hasDflash
-            case .moe: return traits.isMoE
-            }
-        }
+    private struct LibraryIndex {
+        var visible: [LocalModel] = []
+        var counts: [LocalFilter: Int] = [:]
+        var totalBytes: Int64 = 0
     }
 
-    private var modelsFolderShort: String {
-        (models.directory.path as NSString).abbreviatingWithTildeInPath
+    /// One pass and one cache lookup per model. Previously every filter count
+    /// traversed the whole library, which was visible as stutter on large folders.
+    private var libraryIndex: LibraryIndex {
+        var result = LibraryIndex()
+        result.counts[.all] = models.models.count
+        for model in models.models {
+            result.totalBytes += model.sizeBytes
+            let traits = ModelTraitsCache.cached(for: model.url.path) ?? .unknown
+            let matches: [LocalFilter] = [
+                traits.hasVision ? .vision : nil,
+                traits.hasMTP ? .mtp : nil,
+                traits.hasDflash ? .dflash : nil,
+                traits.isMoE ? .moe : nil,
+            ].compactMap { $0 }
+            for match in matches { result.counts[match, default: 0] += 1 }
+            let matchesFilter = filter == .all || matches.contains(filter)
+            let matchesQuery = query.isEmpty || model.name.localizedCaseInsensitiveContains(query)
+            if matchesFilter && matchesQuery {
+                result.visible.append(model)
+            }
+        }
+        return result
     }
 
     var body: some View {
+        let library = libraryIndex
         VStack(alignment: .leading, spacing: 16) {
+            ModelCollectionHero(
+                eyebrow: loc.t("EN ESTE MAC", "ON THIS MAC"), icon: "internaldrive",
+                title: loc.t("Tu biblioteca local", "Your local library"),
+                detail: loc.t("Administra modelos, configuraciones y archivos descargados desde un solo lugar.",
+                              "Manage downloaded models, settings, and files in one place."),
+                primaryValue: "\(models.models.count)", primaryLabel: loc.t("modelos", "models"),
+                secondaryValue: ByteCountFormatter.string(fromByteCount: library.totalBytes, countStyle: .file),
+                secondaryLabel: loc.t("almacenamiento", "storage"),
+                actionTitle: loc.t("Mostrar carpeta", "Show folder"), actionIcon: "folder"
+            ) {
+                NSWorkspace.shared.open(models.directory)
+            }
+
             if !models.downloads.isEmpty {
                 SectionHeader(icon: "arrow.down.circle", title: loc.t("Descargas", "Downloads"), subtitle: nil)
                 VStack(spacing: 8) {
@@ -518,45 +976,53 @@ private struct MyModelsTab: View {
                 .controlSize(.small)
             }
 
-            SectionHeader(icon: "internaldrive",
-                          title: loc.t("Archivos locales en %@", "Local files in %@", "\(modelsFolderShort)"),
-                          subtitle: nil)
             if !models.models.isEmpty {
-                GlassSegmentedControl(selection: $filter, segments: LocalFilter.allCases.map {
-                    .init(value: $0, title: label($0), systemImage: icon($0))
-                })
+                ModelSearchAndFilters(placeholder: loc.t("Buscar en tu biblioteca…", "Search your library…"), text: $query) {
+                    ModelFilterBar(selection: $filter, filters: LocalFilter.allCases.map {
+                        .init(value: $0, title: label($0), systemImage: icon($0), count: library.counts[$0, default: 0])
+                    })
+                }
             }
             if models.models.isEmpty {
                 ContentUnavailableView(loc.t("Todavía no hay modelos", "No models yet"),
                                        systemImage: "internaldrive",
                                        description: Text(loc.t("Descarga uno desde Recomendados o Buscar y aparecerá aquí.",
                                                                "Download one from Recommended or Browse and it will show up here.")))
-            } else if shown.isEmpty {
+            } else if library.visible.isEmpty {
                 ContentUnavailableView(loc.t("Ningún modelo con esa característica", "No model with that trait"),
                                        systemImage: icon(filter),
                                        description: Text(loc.t("Ninguno de tus modelos descargados la tiene.",
                                                                "None of your downloaded models has it.")))
             } else {
-                ModelGrid {
-                    ForEach(shown) { m in
+                LazyVStack(spacing: 1) {
+                    ForEach(library.visible) { m in
                         LocalModelCard(model: m, pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate)
                     }
                 }
+                .background(WorkspaceStyle.border)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
             }
 
-            SectionHeader(icon: "link",
-                          title: loc.t("URL personalizada (GGUF directo)", "Custom URL (direct GGUF)"),
-                          subtitle: nil)
-            HStack {
-                TextField("https://huggingface.co/…/resolve/main/model.gguf", text: $customURL)
-                    .textFieldStyle(.roundedBorder)
-                Button(loc.t("Descargar", "Download"), systemImage: "arrow.down.circle") {
-                    models.download(urlString: customURL)
-                    customURL = ""
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeader(icon: "link",
+                              title: loc.t("Descarga directa", "Direct download"),
+                              subtitle: loc.t("Añade un archivo GGUF desde una URL.", "Add a GGUF file from a URL."))
+                HStack {
+                    TextField("https://huggingface.co/…/resolve/main/model.gguf", text: $customURL)
+                        .textFieldStyle(.plain).padding(.horizontal, 11).padding(.vertical, 8)
+                        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
+                    Button(loc.t("Descargar", "Download"), systemImage: "arrow.down.circle") {
+                        models.download(urlString: customURL)
+                        customURL = ""
+                    }
+                    .glassButton(prominent: true)
+                    .disabled(!customURL.hasPrefix("http"))
                 }
-                .glassButton(prominent: true)
-                .disabled(!customURL.hasPrefix("http"))
             }
+            .padding(14)
+            .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
         }
         .padding(16)
         .task { await modelUpdates.checkIfStale(models.models) }
@@ -594,38 +1060,99 @@ private struct MyModelsTab: View {
     }
 }
 
-// MARK: - Cards
+// MARK: - Catalog
 
-/// A catalog model as a card: optional recommendation role chip, name, size,
-/// MoE badge, blurb, fit estimate and the download/use action.
-private struct CatalogCard: View {
+/// Native-style catalog container: dense rows scan faster and avoid the large
+/// empty areas created by a three-column card grid.
+private struct CatalogList<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        LazyVStack(spacing: 1) { content }
+            .background(WorkspaceStyle.border)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+}
+
+private struct CatalogModelRow: View {
     let model: CatalogModel
     let est: MemoryEstimate
     let role: Catalog.Recommendation.Role?
-    @EnvironmentObject var loc: Localizer
+    var selected = false
+    var onSelect: (() -> Void)?
+    @EnvironmentObject private var loc: Localizer
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                if let role { RoleChip(role: role) }
-                if model.isMoE { MoEBadge() }
-                if model.isVision { TagBadge(text: loc.t("Visión", "Vision"), icon: "eye", color: .purple) }
-                if model.isCoder { TagBadge(text: "Coder", icon: "chevron.left.forwardslash.chevron.right", color: .blue) }
-                Spacer(minLength: 0)
-                Text(String(format: "%.1f GB", model.spec.fileGB))
-                    .font(.caption).foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 18) {
+                identity.frame(minWidth: 260, maxWidth: .infinity, alignment: .leading)
+                estimateColumn(est.expectedSpeed, label: loc.t("Velocidad", "Speed"), icon: "bolt")
+                    .frame(width: 120, alignment: .leading)
+                estimateColumn(String(format: "%.1f GB", est.vramGB), label: "VRAM", icon: "memorychip")
+                    .frame(width: 90, alignment: .leading)
+                compatibility.frame(width: 105, alignment: .leading)
+                CatalogActionButton(model: model, est: est).frame(width: 108, alignment: .trailing)
             }
-            Text(ModelName(model.name).title).font(.headline)
-            Text(model.detail(loc.isSpanish))
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            EstimateLine(est: est)
-            Spacer(minLength: 2)
-            HStack { Spacer(); CatalogActionButton(model: model, est: est) }
+            HStack(alignment: .center, spacing: 14) {
+                identity
+                Spacer(minLength: 8)
+                CatalogActionButton(model: model, est: est)
+            }
         }
-        .padding(CardMetrics.padding)
-        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
-        .cardSurface()
+        .padding(.horizontal, 16).padding(.vertical, 13)
+        .background(selected ? Color.appAccent.opacity(0.10) : WorkspaceStyle.surface)
+        .overlay(alignment: .leading) {
+            if selected { Rectangle().fill(Color.appAccent).frame(width: 2) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect?() }
+        .help(model.detail(loc.isSpanish))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var identity: some View {
+        HStack(spacing: 13) {
+            ModelBrandIcon(name: model.name, size: 38)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(ModelName(model.name).title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    if let role { RoleChip(role: role) }
+                    if model.isVision { TagBadge(text: loc.t("Visión", "Vision"), icon: "eye", color: .purple) }
+                    if model.isCoder { TagBadge(text: "Coder", icon: "chevron.left.forwardslash.chevron.right", color: .blue) }
+                    if model.isMoE { MoEBadge() }
+                }
+                Text(model.detail(loc.isSpanish))
+                    .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                Text(String(format: "%.1f GB", model.spec.fileGB))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var compatibility: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(compatibilityText, systemImage: est.level == .no ? "xmark.circle" : "circle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(est.level == .ideal ? .green : est.level == .no ? .red : .orange)
+            Text(loc.t("Compatibilidad", "Compatibility")).font(.system(size: 10)).foregroundStyle(.tertiary)
+        }
+    }
+
+    private var compatibilityText: String {
+        switch est.level {
+        case .ideal: return loc.t("GPU completa", "Full GPU")
+        case .good: return loc.t("Híbrido", "Hybrid")
+        case .slow: return loc.t("Lento", "Slow")
+        case .no: return loc.t("No cabe", "Won't fit")
+        }
+    }
+
+    private func estimateColumn(_ value: String, label: String, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(value, systemImage: icon).font(.system(size: 11, weight: .medium)).lineLimit(1)
+            Text(label).font(.system(size: 10)).foregroundStyle(.tertiary)
+        }
     }
 }
 

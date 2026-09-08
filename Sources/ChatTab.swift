@@ -13,6 +13,19 @@ import Charts
 final class ControlPanelState: ObservableObject {
     @Published var section: Section_ = .dashboard
     @Published var settingsAnchor: SettingsAnchor?
+    @Published var serverAnchor: UUID?
+    @Published var serverNavigationID = UUID()
+
+    func focusServer(_ id: UUID) {
+        section = .dashboard
+        serverAnchor = id
+        serverNavigationID = UUID()
+    }
+
+    func visibleServers(from servers: [ServerController]) -> [ServerController] {
+        guard let serverAnchor else { return servers }
+        return servers.filter { $0.id == serverAnchor }
+    }
 
     func openSettings(_ anchor: SettingsAnchor) {
         settingsAnchor = anchor
@@ -91,6 +104,7 @@ struct ChatMainView: View {
                 .keyboardShortcut("=", modifiers: .command)
                 .opacity(0)
         }
+        .background(WorkspaceStyle.canvas)
         .navigationTitle("ToshLLM")
         .navigationSubtitle(modeSubtitle)
         .toolbar {

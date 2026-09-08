@@ -62,7 +62,9 @@ enum ModelTraitsCache {
     static func warm(paths: [String], then done: @escaping () -> Void) {
         DispatchQueue.global(qos: .utility).async {
             for path in paths {
-                _ = traits(for: path)
+                autoreleasepool {
+                    _ = traits(for: path)
+                }
                 DispatchQueue.main.async(execute: done)
             }
         }

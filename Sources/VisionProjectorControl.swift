@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 /// Per-model vision control: an on/off switch plus, when on, the projector to
 /// pin or auto-pair. `inline` is one compact row; `settings` is a form section.
 struct VisionProjectorControl: View {
-    enum Layout { case inline, settings }
+    enum Layout { case inline, settings, detail }
 
     let modelPath: String
     /// Anchor the switch to the leading edge (model cards, left-aligned) or the
@@ -16,6 +16,7 @@ struct VisionProjectorControl: View {
     /// shifts the switch's position.
     var switchLeading: Bool = false
     var layout: Layout = .inline
+    var loadEnabled: Binding<Bool>? = nil
     @EnvironmentObject var loc: Localizer
     @State private var version = 0
 
@@ -23,16 +24,42 @@ struct VisionProjectorControl: View {
     var body: some View {
         let _ = version
         let override = ServerSettings.mmprojOverride(forModel: modelPath)
-        let enabled = override != ""   // nil (auto) or a pinned path = on; "" = off
+        let enabled = override != "" && (loadEnabled?.wrappedValue ?? true)
         let resolved = ServerSettings.mmprojPath(forModel: modelPath)
         let mismatch = resolved.map { ServerSettings.mmprojIncompatible(model: modelPath, projector: $0) } ?? false
         let current = resolved.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
             ?? loc.t("automático", "automatic")
         if layout == .settings {
             settingsRows(enabled: enabled, current: current, mismatch: mismatch)
+        } else if layout == .detail {
+            detailRow(override: override, current: current, mismatch: mismatch)
         } else {
             inlineRow(enabled: enabled, current: current, mismatch: mismatch)
         }
+    }
+
+    private func detailRow(override: String?, current: String, mismatch: Bool) -> some View {
+        let selected = override == "" ? "off" : (override == nil ? "auto" : "custom")
+        var options: [ToshDropdown<String>.Option] = [
+            .init(value: "auto", title: loc.t("Automático", "Automatic"), subtitle: current, systemImage: "wand.and.stars"),
+            .init(value: "off", title: loc.t("Solo texto", "Text only"), subtitle: loc.t("No cargar proyector", "Do not load a projector"), systemImage: "eye.slash")
+        ]
+        if let override, !override.isEmpty {
+            options.append(.init(value: "custom", title: loc.t("Proyector personalizado", "Custom projector"),
+                                 subtitle: URL(fileURLWithPath: override).lastPathComponent, systemImage: "doc"))
+        }
+        options.append(.init(value: "choose", title: loc.t("Elegir archivo…", "Choose file…"),
+                             subtitle: loc.t("Selecciona un archivo mmproj GGUF", "Select an mmproj GGUF file"), systemImage: "folder"))
+        return ToshDropdown(selection: Binding(get: { selected }, set: { value in
+            switch value {
+            case "off": set("")
+            case "auto": set(nil)
+            case "choose": pick()
+            default: break
+            }
+        }), options: options,
+            placeholder: mismatch ? loc.t("Proyector incompatible", "Incompatible projector") : loc.t("Seleccionar visión", "Select vision"),
+            width: 220, listWidth: 320)
     }
 
     private func inlineRow(enabled: Bool, current: String, mismatch: Bool) -> some View {
@@ -95,6 +122,7 @@ struct VisionProjectorControl: View {
 
     private func set(_ value: String?) {
         ServerSettings.setMmprojOverride(value, forModel: modelPath)
+        loadEnabled?.wrappedValue = value != ""
         // Enabling (auto or a file) re-arms the vision load path.
         if value != "" { UserDefaults.standard.set(true, forKey: SettingsKeys.loadVision) }
         version += 1

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import Darwin
 
 struct GGUFMetadata: Sendable {
     fileprivate let strings: [String: String]
@@ -18,6 +19,13 @@ struct GGUFMetadata: Sendable {
         return value.flatMap(UInt32.init(exactly:))
     }
 
+    /// Quantization declared by the GGUF header. This is more reliable than
+    /// `general.name`, which converters often leave as the base model's BF16 name.
+    var fileTypeLabel: String? {
+        guard let value = integerValues["general.file_type"] else { return nil }
+        return Self.fileTypeLabels[value]
+    }
+
     var isMoE: Bool {
         if let experts = uint32(forSuffix: "expert_count") { return experts > 0 }
         guard let architecture = string(for: "general.architecture") else { return false }
@@ -26,6 +34,19 @@ struct GGUFMetadata: Sendable {
 
     private static let moeArchitectures: Set<String> = [
         "olmoe", "deepseek", "deepseek2", "deepseek2-ocr", "deepseek32", "deepseek4",
+    ]
+
+    private static let fileTypeLabels: [UInt64: String] = [
+        0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1",
+        7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
+        10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L",
+        14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M",
+        18: "Q6_K", 19: "IQ2_XXS", 20: "IQ2_XS", 21: "Q2_K_S",
+        22: "IQ3_XS", 23: "IQ3_XXS", 24: "IQ1_S", 25: "IQ4_NL",
+        26: "IQ3_S", 27: "IQ3_M", 28: "IQ2_S", 29: "IQ2_M",
+        30: "IQ4_XS", 31: "IQ1_M", 32: "BF16",
+        36: "TQ1_0", 37: "TQ2_0", 38: "MXFP4", 39: "NVFP4",
+        40: "Q1_0", 41: "Q2_0",
     ]
 }
 
@@ -137,9 +158,21 @@ enum GGUFMetadataCache {
     }
 
     private static func readPrefix(at path: String, limit: Int) -> Data? {
-        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
-        defer { try? handle.close() }
-        return try? handle.read(upToCount: limit)
+        let descriptor = path.withCString { Darwin.open($0, O_RDONLY) }
+        guard descriptor >= 0 else { return nil }
+        defer { Darwin.close(descriptor) }
+
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_size > 0 else { return nil }
+        let count = min(limit, Int(status.st_size))
+        let pointer = mmap(nil, count, PROT_READ, MAP_PRIVATE, descriptor, 0)
+        guard pointer != MAP_FAILED, let pointer else { return nil }
+
+        // Parsing only touches the GGUF header. A private read-only mapping avoids
+        // allocating an 8/32 MB heap buffer for every model in the catalogue.
+        return Data(bytesNoCopy: pointer, count: count, deallocator: .custom { memory, length in
+            munmap(memory, length)
+        })
     }
 
     private static func parseMetadata(at path: String) -> GGUFMetadata? {
@@ -358,8 +391,14 @@ private struct GGUFDataCursor {
     mutating func readString(maxLength: Int) -> String? {
         guard let rawLength = readUInt64(), rawLength <= UInt64(maxLength),
               let length = Int(exactly: rawLength),
-              let bytes = readBytes(count: length) else { return nil }
-        return String(data: bytes, encoding: .utf8)
+              skipIsValid(count: length) else { return nil }
+
+        // Data slices may retain the complete multi-megabyte GGUF header. Make the
+        // comparatively tiny metadata string own its bytes before caching it.
+        let range = offset..<(offset + length)
+        let bytes = Array(data[range])
+        offset += length
+        return String(bytes: bytes, encoding: .utf8)
     }
 
     mutating func skip(count: Int) -> Bool {

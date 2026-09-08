@@ -3,6 +3,16 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **The interface has been redesigned throughout without dropping the existing controls.** Home, Models, Servers, Benchmarks, Logs and Settings now share the same navigation, fields, menus, cards and responsive layout, while dense screens build and refresh less work. In reference idle measurements, memory use fell from roughly 600 MB in the previous interface to about 120 MB; the exact figure varies with the open screen, benchmark history and active servers.
+
+### Fixed
+
+- **Images: LoRAs apply to f16 models instead of ending the render with an error.** Adding one to a checkpoint whose weights are f16, an SDXL safetensors file among them, stopped generation on cards without unified memory. Reported in #93.
+
 ## [0.87.0] - 2026-09-07
 
 ### Improved

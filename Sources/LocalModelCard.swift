@@ -4,7 +4,7 @@
 
 import SwiftUI
 
-/// A downloaded model in the grid; its per-model configuration lives in the popover.
+/// A downloaded model in the local library; its settings live in the popover.
 struct LocalModelCard: View {
     let model: LocalModel
     @Binding var pendingDelete: LocalModel?
@@ -25,68 +25,75 @@ struct LocalModelCard: View {
         let updatable = modelUpdates.state(for: model).isAvailable
             && models.downloadItem(fileName: model.name) == nil
 
-        VStack(alignment: .leading, spacing: CardMetrics.spacing) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(parsed.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .help(model.name)
-                Spacer(minLength: 4)
-                if !parsed.quant.isEmpty {
-                    Text(parsed.quant)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1).fixedSize()
-                }
-                Text(model.sizeGB)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).fixedSize()
-            }
+        HStack(spacing: 16) {
+            identity(parsed: parsed, traits: traits, active: active)
+                .frame(minWidth: 270, maxWidth: .infinity, alignment: .leading)
+            metric(est.expectedSpeed, label: loc.t("Velocidad", "Speed"), icon: "bolt")
+                .frame(width: 115, alignment: .leading)
+            metric(model.sizeGB, label: loc.t("Tamaño", "Size"), icon: "internaldrive")
+                .frame(width: 85, alignment: .leading)
+            actions(path: path, traits: traits, active: active, updatable: updatable)
+                .frame(width: 142, alignment: .trailing)
+        }
+        .padding(.horizontal, 15).padding(.vertical, 12)
+        .frame(minHeight: 60)
+        .background(active ? Color.green.opacity(0.055) : WorkspaceStyle.surface)
+    }
 
-            HStack(spacing: 6) {
-                ModelTraitBadges(traits: traits)
-                Spacer(minLength: 0)
-            }
-
-            EstimateLine(est: est)
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 8) {
-                if active {
-                    Label(loc.t("Activo", "Active"), systemImage: "checkmark.circle.fill")
-                        .font(.callout).foregroundStyle(.green)
-                } else {
-                    UseModelButton(path: path, modelName: model.name).controlSize(.small)
-                }
-                if updatable {
-                    Button(loc.t("Actualizar", "Update"), systemImage: "arrow.down.circle") {
-                        pendingUpdate = model
-                    }
-                    .glassButton()
-                    .controlSize(.small)
-                    .help(loc.t("Su repositorio publica una versión distinta de este archivo.",
-                                "Its repo publishes a different version of this file."))
-                }
-                Spacer(minLength: 0)
-                if traits.hasDflash || ServerSettings.mightSupportVision(modelPath: path) {
-                    Button(loc.t("Ajustes del modelo", "Model settings"), systemImage: "slider.horizontal.3") {
-                        showingSettings = true
-                    }
-                    .buttonStyle(.borderless).labelStyle(.iconOnly)
-                    .help(loc.t("Visión y borrador DFlash para este modelo.",
-                                "Vision and DFlash draft for this model."))
-                    .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
-                        LocalModelSettingsPopover(model: model, traits: traits)
+    private func identity(parsed: ModelName, traits: ModelTraits, active: Bool) -> some View {
+        HStack(spacing: 12) {
+            ModelBrandIcon(name: model.name, size: 36)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Text(parsed.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    if active {
+                        Label(loc.t("Activo", "Active"), systemImage: "checkmark.circle.fill")
+                            .font(.caption).foregroundStyle(.green)
                     }
                 }
-                LocalModelMenu(model: model, traits: traits, updatable: updatable,
-                               pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate)
+                HStack(spacing: 7) {
+                    if !parsed.quant.isEmpty {
+                        Text(parsed.quant).font(.caption.monospaced()).foregroundStyle(.secondary)
+                    }
+                    ModelTraitBadges(traits: traits)
+                }
             }
         }
-        .padding(CardMetrics.padding)
-        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
-        .cardSurface(tint: active ? .green : nil)
+        .help(model.name)
+    }
+
+    private func metric(_ value: String, label: String, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label(value, systemImage: icon).font(.system(size: 11, weight: .medium)).lineLimit(1)
+            Text(label).font(.system(size: 10)).foregroundStyle(.tertiary)
+        }
+    }
+
+    private func actions(path: String, traits: ModelTraits, active: Bool, updatable: Bool) -> some View {
+        HStack(spacing: 8) {
+            if !active {
+                UseModelButton(path: path, modelName: model.name).controlSize(.small)
+            }
+            if updatable {
+                Button(loc.t("Actualizar", "Update"), systemImage: "arrow.down.circle") {
+                    pendingUpdate = model
+                }
+                .glassButton().controlSize(.small)
+            }
+            if traits.hasDflash || ServerSettings.mightSupportVision(modelPath: path) {
+                Button { showingSettings = true } label: {
+                    Label(loc.t("Ajustes del modelo", "Model settings"), systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(.borderless).labelStyle(.iconOnly)
+                .iconHelp(loc.t("Ajustes del modelo", "Model settings"))
+                .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
+                    LocalModelSettingsPopover(model: model, traits: traits)
+                }
+            }
+            LocalModelMenu(model: model, traits: traits, updatable: updatable,
+                           pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate)
+        }
+        .fixedSize()
     }
 }
 

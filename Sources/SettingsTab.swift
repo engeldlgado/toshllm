@@ -7,6 +7,10 @@ import Charts
 
 // MARK: - Settings
 
+private enum SettingsDestination: Hashable {
+    case general, models, inference, speech, advanced
+}
+
 struct SettingsView: View {
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var manager: ServerManager
@@ -66,6 +70,7 @@ struct SettingsView: View {
     @State private var profileName = ""
     @State private var showResetConfirm = false
     @State private var settingsTransferMessage: String?
+    @State private var settingsDestination: SettingsDestination = .general
 
     private var availableKVTypes: [String] {
         // Only f16/q8_0/q4_0 have an FA-AMD KV kernel; the other quant types fall
@@ -253,36 +258,31 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 14) {
+                        settingsNavigation
+                        Spacer(minLength: 16)
+                        settingsActions
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        ScrollView(.horizontal) { settingsNavigation }
+                            .scrollIndicators(.hidden)
+                        HStack { Spacer(minLength: 0); settingsActions }
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+
                 if manager.servers.count > 1 {
-                    Label(loc.t("Los servidores añadidos heredan estos ajustes, salvo lo que cambies en su tarjeta del Dashboard.",
-                                "Added servers inherit these settings, except what you change on their Dashboard card."),
+                    Label(loc.t("Los servidores añadidos heredan estos ajustes, salvo lo que cambies en su configuración.",
+                                "Added servers inherit these settings except what you change in their configuration."),
                           systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary)
+                        .padding(.horizontal, 24).padding(.bottom, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Spacer()
-                Button(loc.t("Importar", "Import"), systemImage: "square.and.arrow.down") {
-                    importSettings()
-                }
-                .buttonStyle(.bordered)
-                Button(loc.t("Exportar", "Export"), systemImage: "square.and.arrow.up") {
-                    exportSettings()
-                }
-                .buttonStyle(.bordered)
-                Button(role: .destructive) { showResetConfirm = true } label: {
-                    Label(loc.t("Restablecer opciones por defecto", "Reset options to defaults"),
-                          systemImage: "arrow.counterclockwise")
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .help(loc.t("Devuelve todas las opciones (motor, GPU, inferencia, chat) a sus valores por defecto. No elimina modelos ni cambia la carpeta de modelos.",
-                            "Returns every option (engine, GPU, inference, chat) to its default value. It does not delete models or change the models folder."))
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
 
-            settingsForm
+            settingsContent
         }
         .confirmationDialog(
             loc.t("¿Restablecer todas las opciones a sus valores por defecto?",
@@ -303,6 +303,177 @@ struct SettingsView: View {
             Button("OK") { settingsTransferMessage = nil }
         } message: {
             Text(settingsTransferMessage ?? "")
+        }
+    }
+
+    private var settingsNavigation: some View {
+        GlassSegmentedControl(selection: $settingsDestination, segments: [
+            .init(value: .general, title: loc.t("General", "General"), systemImage: "gearshape"),
+            .init(value: .models, title: loc.t("Modelos", "Models"), systemImage: "shippingbox"),
+            .init(value: .inference, title: loc.t("Inferencia", "Inference"), systemImage: "point.3.connected.trianglepath.dotted"),
+            .init(value: .speech, title: loc.t("Voz y audio", "Speech & Audio"), systemImage: "waveform"),
+            .init(value: .advanced, title: loc.t("Avanzado", "Advanced"), systemImage: "slider.horizontal.3")
+        ])
+    }
+
+    private var settingsActions: some View {
+        GlassActionGroup {
+            Button(loc.t("Importar", "Import"), systemImage: "square.and.arrow.down") {
+                importSettings()
+            }
+            .glassButton()
+            Button(loc.t("Exportar", "Export"), systemImage: "square.and.arrow.up") {
+                exportSettings()
+            }
+            .glassButton()
+            Button(role: .destructive) { showResetConfirm = true } label: {
+                Label(loc.t("Restablecer", "Reset to defaults"),
+                      systemImage: "arrow.counterclockwise")
+            }
+            .glassButton()
+            .tint(.red)
+            .help(loc.t("Devuelve todas las opciones (motor, GPU, inferencia, chat) a sus valores por defecto. No elimina modelos ni cambia la carpeta de modelos.",
+                        "Returns every option (engine, GPU, inference, chat) to its default value. It does not delete models or change the models folder."))
+        }
+    }
+
+    private var settingsContent: some View {
+        VStack(spacing: 0) {
+            settingsPanelHeader
+            Divider().opacity(0.65)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 0) {
+                    settingsForm
+                        .frame(minWidth: 610, maxWidth: .infinity, maxHeight: .infinity)
+                    Divider().opacity(0.65)
+                    settingsCategoryGuide
+                        .frame(width: 340)
+                        .frame(maxHeight: .infinity)
+                }
+                .frame(minWidth: 930)
+                settingsForm
+            }
+        }
+        .background(WorkspaceStyle.surface.opacity(0.72),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(WorkspaceStyle.border))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, 20)
+        .padding(.bottom, 18)
+    }
+
+    private var settingsPanelHeader: some View {
+        let content = categoryPanelContent
+        return HStack(spacing: 12) {
+            SectionGlyph(systemName: content.icon)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(content.title).font(.headline)
+                Text(content.subtitle)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var settingsCategoryGuide: some View {
+        let content = categoryGuideContent
+        return ZStack {
+            WorkspaceHeroArtwork()
+                .opacity(0.42)
+            LinearGradient(colors: [WorkspaceStyle.surface.opacity(0.18),
+                                    WorkspaceStyle.surface.opacity(0.90),
+                                    WorkspaceStyle.surface],
+                           startPoint: .topTrailing, endPoint: .bottomLeading)
+            VStack(alignment: .leading, spacing: 16) {
+                SectionGlyph(systemName: content.icon)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(content.title).font(.headline)
+                    Text(content.detail)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 22)
+                Divider().opacity(0.55)
+                Label(content.note, systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(20)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .clipped()
+    }
+
+    private var categoryPanelContent: (icon: String, title: String, subtitle: String) {
+        switch settingsDestination {
+        case .general:
+            return ("desktopcomputer",
+                    loc.t("Aplicación", "Application"),
+                    loc.t("Ajustes generales de la aplicación y su comportamiento.",
+                          "General application settings and behavior."))
+        case .models:
+            return ("memorychip",
+                    loc.t("Modelos, GPU y memoria", "Models, GPU & memory"),
+                    loc.t("Perfiles y opciones para cargar los modelos en tu hardware.",
+                          "Profiles and options for loading models on your hardware."))
+        case .inference:
+            return ("square.stack.3d.up",
+                    loc.t("Inferencia y contexto", "Inference & context"),
+                    loc.t("Contexto, caché y comportamiento de generación.",
+                          "Context, cache, and generation behavior."))
+        case .speech:
+            return ("waveform",
+                    loc.t("Voz y transcripción", "Speech & transcription"),
+                    loc.t("Entrada de audio y transcripción local.",
+                          "Local audio input and transcription."))
+        case .advanced:
+            return ("slider.horizontal.3",
+                    loc.t("Servicios y motor", "Services & engine"),
+                    loc.t("Motor, red, embeddings y opciones adicionales.",
+                          "Engine, network, embeddings, and additional options."))
+        }
+    }
+
+    private var categoryGuideContent: (icon: String, title: String, detail: String, note: String) {
+        switch settingsDestination {
+        case .general:
+            return ("paintbrush",
+                    loc.t("Personaliza tu experiencia", "Personalize your experience"),
+                    loc.t("Ajusta la interfaz, el inicio, la seguridad y dónde vive tu biblioteca local.",
+                          "Adjust the interface, startup, security, and where your local library lives."),
+                    loc.t("Estos cambios afectan la aplicación y su comportamiento al abrirse.",
+                          "These settings affect the application and its startup behavior."))
+        case .models:
+            return ("memorychip",
+                    loc.t("Modelos, GPU y memoria", "Models, GPU, and memory"),
+                    loc.t("Guarda configuraciones y decide cómo cargar pesos, expertos y modelos entre tus GPUs.",
+                          "Save configurations and decide how weights, experts, and models load across your GPUs."),
+                    loc.t("Los cambios del motor se aplican al reiniciar el servidor.",
+                          "Engine changes take effect after restarting the server."))
+        case .inference:
+            return ("square.stack.3d.up",
+                    loc.t("Inferencia y contexto", "Inference and context"),
+                    loc.t("Configura contexto, caché KV, Flash Attention, concurrencia y comportamiento del chat.",
+                          "Configure context, KV cache, Flash Attention, concurrency, and chat behavior."),
+                    loc.t("Un contexto mayor y cachés de más precisión requieren más RAM o VRAM.",
+                          "Longer context and higher-precision caches require more RAM or VRAM."))
+        case .speech:
+            return ("waveform",
+                    loc.t("Voz local, control completo", "Local voice, full control"),
+                    loc.t("Configura la entrada de audio, la carga de Whisper y el perfil de transcripción.",
+                          "Configure audio input, Whisper loading, and the transcription profile."),
+                    loc.t("El audio y el texto permanecen en este Mac.",
+                          "Audio and text stay on this Mac."))
+        case .advanced:
+            return ("wrench.and.screwdriver",
+                    loc.t("Servicios y motor", "Services and engine"),
+                    loc.t("Controla el puerto, el motor externo, embeddings, caché persistente y argumentos adicionales.",
+                          "Control the port, external engine, embeddings, persistent cache, and extra arguments."),
+                    loc.t("Usa argumentos adicionales solo cuando conozcas la opción de llama.cpp que necesitas.",
+                          "Use extra arguments only when you know which llama.cpp option you need."))
         }
     }
 
@@ -335,7 +506,8 @@ struct SettingsView: View {
 
     private var settingsForm: some View {
         Form {
-            Section(loc.t("Aplicación", "Application")) {
+            if settingsDestination == .general {
+            Section {
                 Picker(loc.t("Idioma", "Language"), selection: $loc.language) {
                     ForEach(loc.availableLanguages, id: \.self) { code in
                         Text(loc.displayName(code)).tag(code)
@@ -426,9 +598,13 @@ struct SettingsView: View {
                         .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                 }
             }
+            }
 
+            if settingsDestination == .speech {
             SpeechModelsSettingsSection()
+            }
 
+            if settingsDestination == .models {
             Section(loc.t("Perfiles", "Profiles")) {
                 HStack {
                     TextField(loc.t("Nombre del perfil (p. ej. Código, Chat rápido)",
@@ -693,8 +869,10 @@ struct SettingsView: View {
                 .infoTip(loc.t("Cuántos tokens puede ocupar una imagen en los modelos con visión. Por defecto manda el modelo. La memoria del codificador de visión crece con el cuadrado de este número, así que bajarlo la recorta mucho, a costa de detalle: es lo que permite cargar un modelo con visión en tarjetas donde ese buffer no cabe.",
                             "How many tokens one image may take on vision models. The model decides by default. The vision encoder's memory grows with the square of this number, so lowering it cuts memory a lot at the cost of detail: it is what makes a vision model load on cards where that buffer does not fit."))
             }
+            }
 
-            Section(loc.t("Inferencia y contexto", "Inference & context")) {
+            if settingsDestination == .inference {
+            Section {
                 Picker(loc.t("Contexto", "Context"), selection: $ctx) {
                     ForEach([4096, 8192, 16384, 32768, 65536, 131072, 262144], id: \.self) { n in
                         Text("\(n / 1024)k tokens").tag(n)
@@ -843,8 +1021,10 @@ struct SettingsView: View {
                     .infoTip(loc.t("Usa la plantilla de chat oficial del modelo (formato de mensajes, herramientas). Déjalo activado salvo problemas con un modelo concreto.",
                                 "Uses the model's official chat template (message format, tools). Keep it on unless a specific model misbehaves."))
             }
+            }
 
-            Section(loc.t("Avanzado", "Advanced")) {
+            if settingsDestination == .advanced {
+            Section {
                 TextField(loc.t("Puerto", "Port"), value: $port, format: .number.grouping(.never))
                     .infoTip(loc.t("Puerto local del servidor (API compatible con OpenAI y chat web).",
                                 "Local server port (OpenAI-compatible API and web chat)."))
@@ -900,8 +1080,11 @@ struct SettingsView: View {
                 .infoTip(loc.t("El registro del servidor, con búsqueda, filtros y exportación, está en la pestaña Registro.",
                             "The server log — with search, filters and export — lives in the Logs tab."))
             }
+            }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .frame(maxWidth: .infinity)
     }
 }
 

@@ -10,7 +10,7 @@ import SwiftUI
 /// materials on macOS 14–15 — and, importantly, when built with an SDK older
 /// than macOS 26 (e.g. CI runners). `#available` is only a *runtime* check; it
 /// does not help if the build SDK lacks `glassEffect`/`Glass` symbols at all,
-/// so the new API is additionally gated behind `#if compiler(>=6.2)` — the
+/// so the new API is additionally gated behind `#if compiler(>=6.2) && !TOSH_LEGACY_UI` — the
 /// toolchain that ships the macOS 26 SDK. Reserve `glassSurface` for floating,
 /// interactive controls (composer, jump-to-bottom button); applying it to
 /// every message bubble would stack many GPU-backed blurs and hurt scrolling.
@@ -39,7 +39,7 @@ private struct GlassSurface<S: InsettableShape>: ViewModifier {
                 .background(.background, in: shape)
                 .overlay(shape.strokeBorder(.primary.opacity(contrast == .increased ? 0.45 : 0.18)))
         } else {
-            #if compiler(>=6.2)
+            #if compiler(>=6.2) && !TOSH_LEGACY_UI
             if #available(macOS 26.0, *) {
                 content.glassEffect(makeToshGlass(tint: tint, interactive: interactive), in: shape)
             } else {
@@ -57,7 +57,7 @@ private struct GlassSurface<S: InsettableShape>: ViewModifier {
     }
 }
 
-#if compiler(>=6.2)
+#if compiler(>=6.2) && !TOSH_LEGACY_UI
 @available(macOS 26.0, *)
 private func makeToshGlass(tint: Color?, interactive: Bool) -> Glass {
     var glass: Glass = .regular
@@ -142,27 +142,30 @@ extension Color {
 
 // MARK: - Buttons in the macOS 26 idiom (capsules and circles over glass)
 
-/// Capsule button over glass. `prominent` fills the surface with the app
-/// accent and switches the label to white, like a prominent bordered button.
+/// Reusable action button matching the compact rounded controls used throughout
+/// the workspace. Its dimensions do not collapse when a parent becomes narrow.
 struct GlassPillButtonStyle: ButtonStyle {
     var prominent = false
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         let accent = AppTheme.accent(accentRaw)
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
         configuration.label
-            .font(.callout.weight(.semibold))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
+            .font(.system(size: 12, weight: .semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 13)
+            .frame(minHeight: 30)
             .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .background(prominent ? AnyShapeStyle(accent.opacity(0.88)) : AnyShapeStyle(.clear),
-                        in: Capsule())
-            .glassSurface(in: Capsule(), tint: prominent ? accent : nil, interactive: true)
-            .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
-            .contentShape(Capsule())
+            .background(prominent ? AnyShapeStyle(accent.opacity(0.90)) : AnyShapeStyle(WorkspaceStyle.inset),
+                        in: shape)
+            .glassSurface(in: shape, tint: prominent ? accent : nil, interactive: true)
+            .overlay(shape.strokeBorder(prominent ? Color.white.opacity(0.10) : WorkspaceStyle.border))
+            .contentShape(shape)
             .opacity(configuration.isPressed ? 0.65 : 1)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.98 : 1))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -170,6 +173,7 @@ struct GlassPillButtonStyle: ButtonStyle {
 struct GlassIconButtonStyle: ButtonStyle {
     var active = false
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         let accent = AppTheme.accent(accentRaw)
@@ -182,8 +186,8 @@ struct GlassIconButtonStyle: ButtonStyle {
             .overlay(Circle().strokeBorder(.primary.opacity(0.07)))
             .contentShape(Circle())
             .opacity(configuration.isPressed ? 0.65 : 1)
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.94 : 1))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -247,46 +251,25 @@ extension View {
 // MARK: - Cards and controls in the macOS 26 idiom
 
 enum CardMetrics {
-    static let corner: CGFloat = 16
+    static let corner: CGFloat = 12
     static let padding: CGFloat = 14
     static let spacing: CGFloat = 8
     static let minWidth: CGFloat = 320
 }
 
 extension View {
-    /// Content card. Glass is reserved for the controls on top of it: a grid of
-    /// blurred surfaces costs too much to scroll, and a tinted one drowns the card.
+    /// Static cards stay opaque. They update while tokens and telemetry stream,
+    /// so turning every card into a GPU-backed blur wastes rendering work.
     func cardSurface(tint: Color? = nil) -> some View {
         let shape = RoundedRectangle(cornerRadius: CardMetrics.corner)
-        return background(tint.map { AnyShapeStyle($0.opacity(0.10)) } ?? AnyShapeStyle(.background.secondary),
-                          in: shape)
-            .overlay(shape.strokeBorder(tint?.opacity(0.35) ?? .primary.opacity(0.08)))
+        return background(tint.map { AnyShapeStyle($0.opacity(0.10)) }
+                          ?? AnyShapeStyle(WorkspaceStyle.surface), in: shape)
+            .overlay(shape.strokeBorder(tint?.opacity(0.35) ?? WorkspaceStyle.border))
     }
 
     /// The one button identity in the app: same shape everywhere, tinted with the
     /// accent chosen in Settings.
     func glassButton(prominent: Bool = false) -> some View {
-        modifier(GlassButtonIdentity(prominent: prominent))
-    }
-}
-
-private struct GlassButtonIdentity: ViewModifier {
-    let prominent: Bool
-    @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        // Only the primary action carries the accent; tinting the rest makes every
-        // button in a row look like the same call to action.
-        let tinted = prominent ? content.tint(AppTheme.accent(accentRaw)) : content.tint(.primary)
-        #if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            if prominent { tinted.buttonStyle(.glassProminent) } else { tinted.buttonStyle(.glass) }
-        } else {
-            if prominent { tinted.buttonStyle(.borderedProminent) } else { tinted.buttonStyle(.bordered) }
-        }
-        #else
-        if prominent { tinted.buttonStyle(.borderedProminent) } else { tinted.buttonStyle(.bordered) }
-        #endif
+        buttonStyle(GlassPillButtonStyle(prominent: prominent))
     }
 }

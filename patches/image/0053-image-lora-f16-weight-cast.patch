@@ -1,0 +1,44 @@
+diff --git a/src/model/adapter/lora.hpp b/src/model/adapter/lora.hpp
+index 8eb88d5..e7ce748 100644
+--- a/src/model/adapter/lora.hpp
++++ b/src/model/adapter/lora.hpp
+@@ -924,17 +924,19 @@ struct LoraModel : public GGMLRunner {
+ 
+             ggml_tensor* original_tensor = model_tensor;
+             if (!sd_backend_is_cpu(runtime_backend) && ggml_backend_buffer_is_host(original_tensor->buffer)) {
+                 model_tensor = ggml_dup_tensor(compute_ctx, model_tensor);
+                 set_backend_tensor_data(model_tensor, original_tensor->data);
+             }
+ 
+             ggml_tensor* final_tensor;
+-            if (model_tensor->type != GGML_TYPE_F32 && model_tensor->type != GGML_TYPE_F16) {
++            // f16 takes the same f32 round trip as the quantized types: the diff is f32, and a
++            // backend without host-visible weights cannot fall back to the CPU for a mixed add.
++            if (model_tensor->type != GGML_TYPE_F32) {
+                 final_tensor = ggml_ext_cast_f32(compute_ctx, runtime_backend, model_tensor);
+                 final_tensor = ggml_add_inplace(compute_ctx, final_tensor, diff);
+                 final_tensor = ggml_cpy(compute_ctx, final_tensor, model_tensor);
+             } else {
+                 final_tensor = ggml_add_inplace(compute_ctx, model_tensor, diff);
+             }
+             ggml_build_forward_expand(gf, final_tensor);
+             if (!sd_backend_is_cpu(runtime_backend) && ggml_backend_buffer_is_host(original_tensor->buffer)) {
+@@ -1015,17 +1017,17 @@ public:
+ 
+     ggml_tensor* patch_weight(ggml_context* ctx, ggml_backend_t backend, ggml_tensor* weight, const std::string& weight_name, bool with_lora_and_lokr) {
+         for (auto& lora_model : lora_models) {
+             ggml_tensor* diff = lora_model->get_weight_diff(weight_name, backend, ctx, weight, with_lora_and_lokr);
+             if (diff == nullptr) {
+                 continue;
+             }
+ 
+-            if (weight->type != GGML_TYPE_F32 && weight->type != GGML_TYPE_F16) {
++            if (weight->type != GGML_TYPE_F32) {
+                 weight = ggml_ext_cast_f32(ctx, backend, weight);
+             }
+             weight = ggml_add(ctx, weight, diff);
+         }
+         return weight;
+     }
+ 
+     ggml_tensor* patch_weight(ggml_context* ctx, ggml_backend_t backend, ggml_tensor* weight, const std::string& weight_name) override {

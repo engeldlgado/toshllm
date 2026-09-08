@@ -30,25 +30,25 @@ struct GlassSegmentedControl<Value: Hashable>: View {
                 } label: {
                     label(for: segment)
                         .font(.callout)
-                        .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                         .padding(.horizontal, 13)
                         .padding(.vertical, 5)
                         .background {
                             if selected {
-                                Capsule()
-                                    .fill(accent.gradient)
+                                RoundedRectangle(cornerRadius: 7)
+                                    .fill(accent.opacity(0.20))
                                     .matchedGeometryEffect(id: "selection", in: namespace)
                             }
                         }
-                        .contentShape(Capsule())
+                        .contentShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
             }
         }
         .padding(3)
-        .glassSurface(in: Capsule())
-        .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
+        .glassSurface(in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(.primary.opacity(0.07)))
         .fixedSize()
     }
 

@@ -89,10 +89,40 @@ struct SweepSample: Identifiable {
     var id: Int { ncmoe }
 }
 
+/// High-frequency benchmark text lives outside BenchmarkController's published
+/// state so process output does not redraw configuration, charts and history.
+@MainActor
+final class BenchmarkOutputBuffer: ObservableObject {
+    @Published private(set) var text = ""
+    private var pending = ""
+    private var flushTask: Task<Void, Never>?
+
+    func replace(with value: String) {
+        flushTask?.cancel()
+        flushTask = nil
+        pending = ""
+        text = value
+    }
+
+    func append(_ value: String) {
+        pending += value
+        guard flushTask == nil else { return }
+        flushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard let self, !Task.isCancelled else { return }
+            text += pending
+            pending = ""
+            flushTask = nil
+        }
+    }
+}
+
 @MainActor
 final class BenchmarkController: ObservableObject {
     @Published var running = false
-    @Published var output = ""
+    private(set) var output = ""
+    @Published private(set) var hasOutput = false
+    let outputBuffer = BenchmarkOutputBuffer()
     @Published var history: [BenchResult] = []
     @Published var sweeping = false
     @Published var sweepStatus = ""
@@ -115,6 +145,18 @@ final class BenchmarkController: ObservableObject {
 
     init() { load() }
 
+    private func replaceOutput(_ value: String) {
+        output = value
+        hasOutput = !value.isEmpty
+        outputBuffer.replace(with: value)
+    }
+
+    private func appendOutput(_ value: String) {
+        output += value
+        if !hasOutput { hasOutput = true }
+        outputBuffer.append(value)
+    }
+
     /// Run header with date, GPU and the exact config — the same text shown on
     /// screen and written to the log file, so a shared log is self-describing.
     private func header(for settings: ServerSettings) -> String {
@@ -136,18 +178,18 @@ final class BenchmarkController: ObservableObject {
         let benchPath = URL(fileURLWithPath: settings.serverBinary)
             .deletingLastPathComponent().appendingPathComponent("llama-bench").path
         guard FileManager.default.fileExists(atPath: benchPath) else {
-            output = "llama-bench no encontrado / not found: \(benchPath)"
+            replaceOutput("llama-bench no encontrado / not found: \(benchPath)")
             return
         }
         guard FileManager.default.fileExists(atPath: settings.modelPath) else {
-            output = "Modelo no encontrado / model not found"
+            replaceOutput("Modelo no encontrado / model not found")
             return
         }
 
         // Header so both the on-screen log and the saved file record which GPU and
         // config produced the run.
         let head = header(for: settings)
-        output = head
+        replaceOutput(head)
         fileLog.append(head)
         running = true
 
@@ -164,7 +206,7 @@ final class BenchmarkController: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             log.append(text)
-            Task { @MainActor in self?.output += text }
+            Task { @MainActor in self?.appendOutput(text) }
         }
         p.terminationHandler = { [weak self] _ in
             Task { @MainActor in self?.finish(settings: settings) }
@@ -174,7 +216,7 @@ final class BenchmarkController: ObservableObject {
             try p.run()
             process = p
         } catch {
-            output = error.localizedDescription
+            replaceOutput(error.localizedDescription)
             running = false
         }
     }
@@ -199,11 +241,11 @@ final class BenchmarkController: ObservableObject {
     func runReal(settings base: ServerSettings) {
         guard !running, !sweeping else { return }
         guard FileManager.default.fileExists(atPath: base.serverBinary) else {
-            output = "llama-server no encontrado / not found: \(base.serverBinary)"
+            replaceOutput("llama-server no encontrado / not found: \(base.serverBinary)")
             return
         }
         guard FileManager.default.fileExists(atPath: base.modelPath) else {
-            output = "Modelo no encontrado / model not found"
+            replaceOutput("Modelo no encontrado / model not found")
             return
         }
 
@@ -213,7 +255,7 @@ final class BenchmarkController: ObservableObject {
         s.localNetworkDiscovery = false
 
         let head = header(for: s).replacingOccurrences(of: "args:", with: "mode:   real generation (llama-server)\nargs:")
-        output = head
+        replaceOutput(head)
         fileLog.append(head)
         running = true
 
@@ -277,7 +319,7 @@ final class BenchmarkController: ObservableObject {
     }
 
     private func emit(_ text: String) {
-        output += text
+        appendOutput(text)
         fileLog.append(text)
     }
 

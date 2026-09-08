@@ -2,397 +2,449 @@
 // Copyright (C) 2026 Engelbert Delgado <engeldlgado@gmail.com>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import AppKit
 import SwiftUI
 
-// MARK: - Logs
-
-/// Picks which server's log to view (when more than one exists) and shows it.
 struct LogsView: View {
-    @EnvironmentObject var manager: ServerManager
+    @EnvironmentObject private var manager: ServerManager
+    @EnvironmentObject private var loc: Localizer
     @State private var selectedID: UUID?
 
     private var selected: ServerController {
         manager.servers.first { $0.id == selectedID } ?? manager.servers[0]
     }
+    private var serverSelection: Binding<UUID> {
+        Binding(get: { selected.id }, set: { selectedID = $0 })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             if manager.servers.count > 1 {
-                GlassSegmentedControl(selection: Binding(get: { selected.id }, set: { selectedID = $0 }),
-                                      segments: manager.servers.map { .init(value: $0.id, title: $0.name) })
-                    .padding(.horizontal, 12).padding(.top, 10)
+                HStack {
+                    Label(loc.t("Instancia", "Instance"), systemImage: "server.rack")
+                        .font(.callout.bold())
+                    ToshDropdown(selection: serverSelection,
+                                 options: manager.servers.map {
+                                     .init(value: $0.id,
+                                           title: manager.displayName(for: $0, loc: loc),
+                                           subtitle: ModelName.forPath($0.effectiveSettings().modelPath).display,
+                                           systemImage: "circle.fill")
+                                 }, width: 280)
+                    Spacer()
+                }
+                .padding(.horizontal, 20).padding(.vertical, 10)
+                Divider()
             }
-            ServerLogView(server: selected)
+            ServerLogView(server: selected).id(selected.id)
         }
     }
 }
 
-/// Dedicated, full-height server-log viewer with search, severity filtering,
-/// toggleable auto-follow, copy and diagnostics export. The wrapper (`LogsView`)
-/// picks which server and passes it in as an observed object.
 struct ServerLogView: View {
     @ObservedObject var server: ServerController
-    @EnvironmentObject var models: ModelStore
-    @EnvironmentObject var loc: Localizer
-    @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
-    @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
+    @ObservedObject private var logBuffer: ServerLogBuffer
+    @EnvironmentObject private var loc: Localizer
 
     @State private var query = ""
-    /// Minimum severity to show: 0 = everything, 1 = warnings+, 2 = errors only.
-    @State private var minLevel = 0
+    @State private var selectedLevel = "all"
     @State private var autoFollow = true
     @State private var copied = false
-    /// Which engine's log to show: the chat server, the image studio or the video one.
     @State private var logSource = "server"
     @State private var imageLog = ""
     @State private var videoLog = ""
+    @State private var lines: [PresentedLogLine] = []
+    @State private var displayLimit = 400
     @StateObject private var checker = EngineChecker()
     @State private var checkVerdict: String?
 
-    /// The raw log for the selected source. The image log is read from disk (the
-    /// image studio runs in another window).
+    init(server: ServerController) {
+        self.server = server
+        self._logBuffer = ObservedObject(wrappedValue: server.logBuffer)
+    }
+
     private var rawLog: String {
         switch logSource {
-        case "images": return imageLog
-        case "video":  return videoLog
-        default:       return server.log
+        case "images": imageLog
+        case "video": videoLog
+        default: server.log
         }
     }
-    private func reloadImageLog() {
-        imageLog = ImageGenerator.latestLogURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+    private var parseToken: String {
+        "\(logSource)|\(rawLog.utf8.count)|\(rawLog.suffix(48))"
     }
-    private func reloadVideoLog() {
-        videoLog = VideoGenerator.latestLogURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+    private var matchingLines: [PresentedLogLine] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selectedLevel == "all" && needle.isEmpty { return lines }
+        return lines.filter {
+            (selectedLevel == "all" || levelKey($0.level) == selectedLevel) &&
+            (needle.isEmpty || $0.raw.localizedCaseInsensitiveContains(needle))
+        }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            controls
-            Divider()
-            logBody
+        ScrollView {
+            VStack(spacing: 14) {
+                serverSummary
+                sourceSwitcher
+                statistics
+                logConsole
+            }
+            .padding(16)
         }
-        // The image log lives in a file written by the other window; poll it while shown.
-        .onReceive(Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()) { _ in
-            if logSource == "images" { reloadImageLog() }
-            if logSource == "video" { reloadVideoLog() }
-        }
+        .background(WorkspaceStyle.canvas)
+        .task(id: logSource) { await pollExternalLog() }
+        .task(id: parseToken) { await parseCurrentLog() }
         .sheet(isPresented: .constant(checker.running)) { engineCheckSheet }
         .alert(loc.t("Comprobación del motor", "Engine check"),
                isPresented: Binding(get: { checkVerdict != nil }, set: { if !$0 { checkVerdict = nil } })) {
             Button(loc.t("Aceptar", "OK"), role: .cancel) {}
-        } message: {
-            Text(checkVerdict ?? "")
+        } message: { Text(checkVerdict ?? "") }
+    }
+
+    private var settings: ServerSettings { server.effectiveSettings() }
+    private var modelName: ModelName { ModelName.forPath(settings.modelPath) }
+
+    private var serverSummary: some View {
+        HStack(spacing: 16) {
+            ModelBrandIcon(name: modelName.title, size: 42)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(modelName.title.isEmpty ? server.name : modelName.title)
+                        .font(.title3.bold()).lineLimit(1)
+                    statusPill
+                }
+                HStack(spacing: 0) {
+                    summaryValue(modelName.quant.isEmpty ? "GGUF" : modelName.quant)
+                    summaryValue("\(hardware.bestGPU?.vramGB ?? 0) GB VRAM")
+                    summaryValue("\(loc.t("Puerto", "Port")) \(settings.port)")
+                    summaryValue("\(compactContext(settings.ctx)) context")
+                    summaryValue(settings.serverBinary == ServerSettings.defaultBinary ? "llama.cpp" : loc.t("Motor externo", "External engine"), last: true)
+                }
+            }
+            Spacer(minLength: 12)
+            serverAction
+        }
+        .padding(16)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private func summaryValue(_ value: String, last: Bool = false) -> some View {
+        HStack(spacing: 10) {
+            Text(value).font(.callout.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
+            if !last { Divider().frame(height: 18) }
+        }
+        .padding(.trailing, last ? 0 : 10)
+    }
+
+    private var statusPill: some View {
+        let presentation = statePresentation
+        return Label(presentation.title, systemImage: presentation.icon)
+            .font(.caption.bold()).foregroundStyle(presentation.color)
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(presentation.color.opacity(0.12), in: Capsule())
+    }
+
+    @ViewBuilder private var serverAction: some View {
+        switch server.state {
+        case .running, .starting:
+            Button(loc.t("Detener servidor", "Stop server"), systemImage: "stop.fill", role: .destructive) { server.stop() }
+                .glassButton(prominent: true)
+        default:
+            Button(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill") { server.start(settings) }
+                .glassButton(prominent: true).disabled(settings.modelPath.isEmpty)
         }
     }
 
-    // MARK: engine check
-
-    private var engineCheckReady: Bool {
-        server.state != .running && server.state != .starting
-            && EngineCheck.isAvailable(serverBinary: ServerSettings.fromDefaults().serverBinary)
-    }
-
-    private var engineCheckHelp: String {
-        if server.state == .running || server.state == .starting {
-            return loc.t("Detén el servidor antes de comprobar: la prueba ocupa la GPU entera.",
-                         "Stop the server before checking: the test uses the whole GPU.")
-        }
-        if !EngineCheck.isAvailable(serverBinary: ServerSettings.fromDefaults().serverBinary) {
-            return loc.t("Este motor no incluye la herramienta de comprobación.",
-                         "This engine does not ship the check tool.")
-        }
-        return loc.t("Ejecuta las pruebas de operaciones del motor en tu tarjeta y las añade al diagnóstico. Tarda varios minutos y usa la GPU al máximo.",
-                     "Runs the engine's operator tests on your card and adds them to the diagnostics. Takes several minutes and drives the GPU hard.")
-    }
-
-    private var engineCheckSheet: some View {
-        VStack(spacing: 14) {
-            ProgressView().controlSize(.large)
-            Text(loc.t("Comprobando el motor…", "Checking the engine…")).font(.headline)
-            Text(loc.t("%@ operaciones probadas%@", "%@ operations tested%@", "\(checker.testCount)", "\(checker.currentOp.isEmpty ? "" : " · \(checker.currentOp)")"))
-                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-            Text(loc.t("Tarda varios minutos. La pantalla puede ir a tirones mientras dura.",
-                       "This takes several minutes. The screen may stutter while it runs."))
-                .font(.caption).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { checker.cancel() }
-                .keyboardShortcut(.cancelAction)
-        }
-        .padding(24)
-        .frame(minWidth: 340)
-    }
-
-    private func startEngineCheck() {
-        checker.start(settings: ServerSettings.fromDefaults()) { result in
-            guard !result.cancelled else { return }
-            // Save first: the panel is modal, and the verdict alert would race it.
-            saveDiagnostics(extra: EngineCheck.report(result, localized: loc.t),
-                            name: "toshllm-engine-check.txt")
-            checkVerdict = EngineCheck.verdict(result, localized: loc.t)
+    private var statePresentation: (title: String, icon: String, color: Color) {
+        switch server.state {
+        case .running: (loc.t("Ejecutándose", "Running"), "checkmark.circle.fill", .green)
+        case .starting: (loc.t("Iniciando", "Starting"), "clock.fill", .orange)
+        case .failed: (loc.t("Error", "Failed"), "xmark.circle.fill", .red)
+        case .stopped: (loc.t("Detenido", "Stopped"), "circle", .secondary)
         }
     }
+    private func compactContext(_ value: Int) -> String {
+        value >= 1024 && value % 1024 == 0 ? "\(value / 1024)k" : "\(value)"
+    }
 
-    // MARK: controls
-
-    private var controls: some View {
-        VStack(spacing: 8) {
+    private var sourceSwitcher: some View {
+        HStack {
             GlassSegmentedControl(selection: $logSource, segments: [
                 .init(value: "server", title: loc.t("Servidor", "Server"), systemImage: "server.rack"),
                 .init(value: "images", title: loc.t("Imágenes", "Images"), systemImage: "photo"),
                 .init(value: "video", title: loc.t("Vídeo", "Video"), systemImage: "film"),
             ])
-            .help(loc.t("Registro del servidor de chat, del motor de imágenes o del de vídeo.",
-                        "Chat server log, image engine log or video engine log."))
-            .onChange(of: logSource) {
-                if logSource == "images" { reloadImageLog() }
-                if logSource == "video" { reloadVideoLog() }
+            Spacer()
+            Button(loc.t("Logs en Finder", "Logs in Finder"), systemImage: "folder") { revealCurrentLog() }
+                .glassButton().controlSize(.small)
+        }
+    }
+
+    private var statistics: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 10)], spacing: 10) {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                statisticCard(icon: "bolt.fill", title: loc.t("Tiempo activo", "Uptime"), value: uptime, tint: Color.appAccent)
             }
-            serverControls
-            HStack(spacing: 10) {
-                GlassSearchField(placeholder: loc.t("Filtrar en el registro…", "Filter the log…"), text: $query)
+            statisticCard(icon: "doc.text.fill", title: loc.t("Total de líneas", "Total lines"), value: lines.count.formatted(), tint: .secondary)
+            statisticCard(icon: "exclamationmark.triangle.fill", title: loc.t("Avisos", "Warnings"), value: warningCount.formatted(), tint: .orange)
+            statisticCard(icon: "xmark.octagon.fill", title: loc.t("Errores", "Errors"), value: errorCount.formatted(), tint: .red)
+        }
+    }
 
-                GlassSegmentedControl(selection: $minLevel, segments: [
-                    .init(value: 0, title: loc.t("Todo", "All")),
-                    .init(value: 1, title: loc.t("Avisos", "Warnings"), systemImage: "exclamationmark.triangle"),
-                    .init(value: 2, title: loc.t("Errores", "Errors"), systemImage: "xmark.octagon"),
-                ])
-                .help(loc.t("Filtra por severidad mínima de cada línea.",
-                            "Filter by each line's minimum severity."))
+    private func statisticCard(icon: String, title: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).font(.title3).foregroundStyle(tint)
+                .frame(width: 38, height: 38).background(tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.caption).foregroundStyle(.secondary)
+                Text(value).font(.title3.bold()).monospacedDigit()
             }
+            Spacer()
+        }
+        .padding(14)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(WorkspaceStyle.border))
+    }
 
-            HStack(spacing: 12) {
-                Toggle(isOn: $autoFollow) {
-                    Label(loc.t("Seguir", "Follow"), systemImage: "arrow.down.to.line")
-                }
-                .toggleStyle(.button)
-                .glassButton()
-                .controlSize(.small)
-                .help(loc.t("Sigue automáticamente las líneas nuevas al final.",
-                            "Automatically follow new lines at the bottom."))
+    private var warningCount: Int { lines.lazy.filter { $0.level == .warning }.count }
+    private var errorCount: Int { lines.lazy.filter { $0.level == .error }.count }
+    private var uptime: String {
+        guard let start = server.startedAt else { return "—" }
+        let seconds = max(0, Int(Date().timeIntervalSince(start)))
+        if seconds >= 3600 { return "\(seconds / 3600)h \((seconds % 3600) / 60)m" }
+        if seconds >= 60 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds)s"
+    }
 
-                Spacer()
-
-                Text(loc.t("^[%@ línea](inflect: true)", "^[%@ line](inflect: true)", "\(matchCount)"))
+    private var logConsole: some View {
+        let matches = matchingLines
+        let visible = matches.suffix(displayLimit)
+        return VStack(spacing: 0) {
+            consoleToolbar
+            Divider()
+            logTable(matches: matches, visible: visible)
+            Divider()
+            HStack {
+                Text(loc.t("Mostrando %@ de %@ líneas", "Showing %@ of %@ lines", visible.count.formatted(), matches.count.formatted()))
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-
-                Button(copied ? loc.t("Copiado", "Copied") : loc.t("Copiar", "Copy"),
-                       systemImage: copied ? "checkmark" : "doc.on.doc") { copy() }
-                    .glassButton()
-                    .controlSize(.small)
-                    .contentTransition(.symbolEffect(.replace))
-                    .help(loc.t("Copia lo que se muestra (con los filtros aplicados).",
-                                "Copies what's shown (with filters applied)."))
-
-                Menu(loc.t("Más acciones", "More actions"), systemImage: "ellipsis") {
-                    Button(loc.t("Logs en Finder", "Logs in Finder"), systemImage: "folder") {
-                        let file: URL
-                        switch logSource {
-                        case "images": file = ImageGenerator.latestLogURL ?? server.logsDirectory
-                        case "video":  file = VideoGenerator.latestLogURL ?? server.logsDirectory
-                        default:       file = server.logFileURL
-                        }
-                        revealInFinder(file: file, folder: server.logsDirectory)
-                    }
-                    Button(loc.t("Exportar diagnóstico…", "Export diagnostics…"),
-                           systemImage: "square.and.arrow.up") { exportDiagnostics() }
-                    Button(loc.t("Comprobar el motor y exportar…", "Check the engine and export…"),
-                           systemImage: "checkmark.seal") { startEngineCheck() }
-                        .disabled(!engineCheckReady)
-                        .help(engineCheckHelp)
-                    Divider()
-                    Button(loc.t("Limpiar en pantalla", "Clear on screen"),
-                           systemImage: "trash", role: .destructive) {
-                        switch logSource {
-                        case "images": imageLog = ""
-                        case "video":  videoLog = ""
-                        default:       server.log = ""
-                        }
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                    .labelStyle(.iconOnly)
-                .fixedSize()
-                .help(loc.t("Abrir la carpeta de registros, exportar un diagnóstico o vaciar la vista. El archivo en disco se conserva.",
-                            "Open the logs folder, export diagnostics, or clear the view. The file on disk is kept."))
+                Spacer()
+                Label(footerStatus.title, systemImage: "circle.fill")
+                    .font(.caption).foregroundStyle(footerStatus.color)
             }
-            .font(.callout)
+            .padding(.horizontal, 14).padding(.vertical, 9)
+        }
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private var consoleToolbar: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                searchField
+                levelFilter
+                Spacer(minLength: 8)
+                consoleActions
+            }
+            VStack(spacing: 10) {
+                HStack { searchField; Spacer(minLength: 8); moreMenu }
+                HStack { levelFilter; Spacer(minLength: 8); compactConsoleActions }
+            }
         }
         .padding(12)
+        .onChange(of: query) { displayLimit = 400 }
+        .onChange(of: selectedLevel) { displayLimit = 400 }
     }
 
-    // MARK: server controls
+    private var searchField: some View {
+        GlassSearchField(placeholder: loc.t("Buscar en los logs…", "Search logs…"), text: $query)
+            .frame(minWidth: 220, idealWidth: 320, maxWidth: 360)
+    }
 
-    /// Start/stop the server and pick a model right here, so you can drive a debug
-    /// session without leaving the log you're watching.
-    private var serverControls: some View {
+    private var levelFilter: some View {
+        GlassSegmentedControl(selection: $selectedLevel, segments: [
+            .init(value: "all", title: loc.t("Todos", "All")),
+            .init(value: "info", title: "Info", systemImage: "info.circle.fill"),
+            .init(value: "warning", title: loc.t("Avisos", "Warnings"), systemImage: "exclamationmark.triangle.fill"),
+            .init(value: "error", title: loc.t("Errores", "Errors"), systemImage: "xmark.octagon.fill"),
+        ])
+    }
+
+    private func levelKey(_ level: PresentedLogLevel) -> String {
+        switch level { case .info: "info"; case .warning: "warning"; case .error: "error" }
+    }
+
+    private var footerStatus: (title: String, color: Color) {
+        guard logSource == "server" else { return (loc.t("Actualización automática", "Auto refresh"), .green) }
+        switch server.state {
+        case .running, .starting: return (loc.t("En vivo", "Live"), .green)
+        case .failed: return (loc.t("Error", "Failed"), .red)
+        case .stopped: return (loc.t("Detenido", "Stopped"), .secondary)
+        }
+    }
+
+    private var consoleActions: some View {
         HStack(spacing: 10) {
-            // The model picker edits the global config, so only the primary server can
-            // change its model here; an added server shows its own model read-only.
-            if server.profile == nil {
-                Menu {
-                    if models.models.isEmpty {
-                        Text(loc.t("No hay modelos descargados", "No downloaded models"))
-                    } else {
-                        ForEach(models.models) { m in
-                            Button {
-                                modelPath = m.url.path
-                                ncmoe = Estimator.estimateCurrent(spec: Catalog.spec(forLocal: m), hw: hardware).suggestedNcmoe
-                            } label: {
-                                Label(m.name + (ModelTraitsCache.cached(for: m.url.path)?.pickerSuffix(spanish: loc.isSpanish) ?? ""),
-                                      systemImage: modelPath == m.url.path ? "checkmark" : "cpu")
+            Toggle(loc.t("Seguir", "Follow"), isOn: $autoFollow).toggleStyle(.switch).controlSize(.small)
+            Button(loc.t("Limpiar", "Clear"), systemImage: "trash") { clearVisibleLog() }.glassButton().controlSize(.small)
+            Button(loc.t("Exportar", "Export"), systemImage: "square.and.arrow.up") { exportDiagnostics() }.glassButton().controlSize(.small)
+            moreMenu
+        }
+    }
+
+    private var compactConsoleActions: some View {
+        HStack(spacing: 10) {
+            Toggle(loc.t("Seguir", "Follow"), isOn: $autoFollow).toggleStyle(.switch).controlSize(.small)
+            Button(loc.t("Limpiar", "Clear"), systemImage: "trash") { clearVisibleLog() }.glassButton().controlSize(.small)
+            Button(loc.t("Exportar", "Export"), systemImage: "square.and.arrow.up") { exportDiagnostics() }.glassButton().controlSize(.small)
+        }
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            Button(copied ? loc.t("Copiado", "Copied") : loc.t("Copiar líneas visibles", "Copy visible lines"),
+                   systemImage: copied ? "checkmark" : "doc.on.doc") { copy() }
+            Button(loc.t("Comprobar motor y exportar…", "Check engine and export…"), systemImage: "checkmark.seal") { startEngineCheck() }
+                .disabled(!engineCheckReady).help(engineCheckHelp)
+            Button(loc.t("Logs en Finder", "Logs in Finder"), systemImage: "folder") { revealCurrentLog() }
+        } label: { Image(systemName: "ellipsis") }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help(loc.t("Más acciones", "More actions"))
+    }
+
+    @ViewBuilder private func logTable(matches: [PresentedLogLine],
+                                       visible: ArraySlice<PresentedLogLine>) -> some View {
+        if matches.isEmpty {
+            emptyState.frame(minHeight: 310)
+        } else {
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    logHeader
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            if matches.count > displayLimit {
+                                Button { displayLimit += 400 } label: {
+                                    Label(loc.t("Cargar %@ líneas anteriores", "Load %@ earlier lines",
+                                                min(400, matches.count - displayLimit).formatted()), systemImage: "arrow.up.circle")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.plain).foregroundStyle(Color.appAccent).padding(12)
                             }
+                            ForEach(visible) { line in PresentedLogRow(line: line) }
+                            Color.clear.frame(height: 1).id("logEnd")
                         }
                     }
-                } label: {
-                    Label(selectedModelName, systemImage: "cpu")
-                        .lineLimit(1).truncationMode(.middle)
+                    .frame(minHeight: 320, idealHeight: 470)
+                    .onChange(of: lines.count) { if autoFollow { proxy.scrollTo("logEnd", anchor: .bottom) } }
+                    .onChange(of: autoFollow) { if autoFollow { proxy.scrollTo("logEnd", anchor: .bottom) } }
+                    .task { if autoFollow { proxy.scrollTo("logEnd", anchor: .bottom) } }
                 }
-                .menuStyle(.button)
-                .glassButton()
-                .controlSize(.small)
-                .fixedSize()
-                .help(loc.t("Selecciona el modelo a cargar.", "Pick the model to load."))
-            } else {
-                Label(selectedModelName, systemImage: "cpu")
-                    .lineLimit(1).truncationMode(.middle)
-            }
-
-            Spacer()
-
-            statusDot
-            switch server.state {
-            case .running, .starting:
-                Button(loc.t("Detener", "Stop"), systemImage: "stop.fill", role: .destructive) {
-                    server.stop()
-                }
-                .glassButton()
-            default:
-                Button(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill") {
-                    server.start(server.effectiveSettings())
-                }
-                .glassButton(prominent: true)
-                .disabled(server.effectiveSettings().modelPath.isEmpty)
             }
         }
-        .font(.callout)
-        .padding(.bottom, 2)
     }
 
-    private func copy() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(filteredLog, forType: .string)
-        copied = true
-        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
-    }
-
-    private var selectedModelName: String {
-        let mp = server.effectiveSettings().modelPath
-        guard !mp.isEmpty else { return loc.t("Seleccionar modelo…", "Select model…") }
-        return URL(fileURLWithPath: mp).lastPathComponent
-    }
-
-    @ViewBuilder private var statusDot: some View {
-        switch server.state {
-        case .running:  Circle().fill(.green).frame(width: 8, height: 8)
-        case .starting: Circle().fill(.orange).frame(width: 8, height: 8)
-        case .failed:   Circle().fill(.red).frame(width: 8, height: 8)
-        case .stopped:  Circle().fill(.secondary).frame(width: 8, height: 8)
+    private var logHeader: some View {
+        HStack(spacing: 12) {
+            Text(loc.t("Tiempo", "Time")).frame(width: 106, alignment: .leading)
+            Text(loc.t("Nivel", "Level")).frame(width: 74, alignment: .leading)
+            Text(loc.t("Fuente", "Source")).frame(width: 90, alignment: .leading)
+            Divider().frame(height: 18)
+            Text(loc.t("Mensaje", "Message")); Spacer()
         }
-    }
-
-    // MARK: log body
-
-    @ViewBuilder
-    private var logBody: some View {
-        if filteredLog.isEmpty {
-            emptyState
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(.background.secondary)
-        } else {
-            scrollingLog
-        }
-    }
-
-    private var scrollingLog: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                Text(filteredLog)
-                    .font(.caption.monospaced())
-                    .lineSpacing(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(12)
-                    .id("logEnd")
-            }
-            .background(.background.secondary)
-            .onChange(of: server.log) { _, _ in
-                if autoFollow { proxy.scrollTo("logEnd", anchor: .bottom) }
-            }
-            .onChange(of: autoFollow) { _, on in
-                if on { proxy.scrollTo("logEnd", anchor: .bottom) }
-            }
-            .onAppear { proxy.scrollTo("logEnd", anchor: .bottom) }
-        }
+        .font(.caption.bold()).foregroundStyle(.secondary)
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(WorkspaceStyle.inset.opacity(0.55))
     }
 
     @ViewBuilder private var emptyState: some View {
         if rawLog.isEmpty {
-            ContentUnavailableView(loc.t("Sin registro todavía", "No log yet"),
-                                   systemImage: "text.alignleft",
-                                   description: Text(loc.t("Inicia el servidor y su salida aparecerá aquí en vivo.",
-                                                           "Start the server and its output shows up here live.")))
+            ContentUnavailableView(loc.t("Sin actividad todavía", "No activity yet"), systemImage: "text.alignleft",
+                                   description: Text(loc.t("La salida del motor aparecerá aquí cuando se ejecute.", "Engine output will appear here when it runs.")))
         } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
             ContentUnavailableView.search(text: query)
         } else {
-            ContentUnavailableView(loc.t("Nada en este nivel", "Nothing at this level"),
-                                   systemImage: "line.3.horizontal.decrease.circle",
-                                   description: Text(loc.t("El registro no tiene líneas de esa severidad.",
-                                                           "The log has no lines of that severity.")))
+            ContentUnavailableView(loc.t("No hay líneas en este nivel", "No lines at this level"), systemImage: "line.3.horizontal.decrease.circle")
         }
     }
 
-    // MARK: filtering
+    private func parseCurrentLog() async {
+        let snapshot = rawLog
+        let source = logSource == "server" ? "Engine" : (logSource == "images" ? "Image" : "Video")
+        let parsed = await Task.detached(priority: .utility) { LogPresentationParser.parse(snapshot, fallbackSource: source) }.value
+        guard !Task.isCancelled else { return }
+        lines = parsed
+    }
 
-    /// llama-server prefixes each line with a timestamp then a severity char
-    /// (`I`/`W`/`E`). Continuation lines (multi-line dumps, app stdout) have no
-    /// such marker; they count as info so they only show in the "All" view.
-    private func rank(_ line: Substring) -> Int {
-        let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
-        guard parts.count >= 2 else { return 0 }
-        switch parts[1] {
-        case "E": return 2
-        case "W": return 1
-        default:  return 0
+    private func pollExternalLog() async {
+        guard logSource != "server" else { return }
+        while !Task.isCancelled {
+            let source = logSource
+            let url = source == "images" ? ImageGenerator.latestLogURL : VideoGenerator.latestLogURL
+            let text = await Task.detached(priority: .utility) { LogFileTail.read(url) }.value
+            guard !Task.isCancelled, source == logSource else { return }
+            if source == "images" { imageLog = text } else { videoLog = text }
+            try? await Task.sleep(for: .seconds(1.5))
         }
     }
 
-    private var filteredLog: String {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard minLevel > 0 || !q.isEmpty else { return rawLog }
-        let lines = rawLog.split(separator: "\n", omittingEmptySubsequences: false)
-        let out = lines.filter { line in
-            if minLevel > 0, rank(line) < minLevel { return false }
-            if !q.isEmpty, !line.lowercased().contains(q) { return false }
-            return true
+    private func clearVisibleLog() {
+        switch logSource {
+        case "images": imageLog = ""
+        case "video": videoLog = ""
+        default: server.log = ""
         }
-        return out.joined(separator: "\n")
+        lines = []
+    }
+    private func copy() {
+        let visible = matchingLines.suffix(displayLimit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(visible.map(\.raw).joined(separator: "\n"), forType: .string)
+        copied = true
+        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+    }
+    private func revealCurrentLog() {
+        let file: URL
+        switch logSource {
+        case "images": file = ImageGenerator.latestLogURL ?? server.logsDirectory
+        case "video": file = VideoGenerator.latestLogURL ?? server.logsDirectory
+        default: file = server.logFileURL
+        }
+        revealInFinder(file: file, folder: server.logsDirectory)
     }
 
-    private var matchCount: Int {
-        filteredLog.isEmpty ? 0 : filteredLog.split(separator: "\n", omittingEmptySubsequences: false).count
+    private var engineCheckReady: Bool {
+        server.state != .running && server.state != .starting && EngineCheck.isAvailable(serverBinary: ServerSettings.fromDefaults().serverBinary)
     }
-
-    // MARK: diagnostics
-
-    private func exportDiagnostics() {
-        saveDiagnostics(extra: nil, name: "toshllm-diagnostics.txt")
+    private var engineCheckHelp: String {
+        if server.state == .running || server.state == .starting {
+            return loc.t("Detén el servidor antes de comprobar: la prueba ocupa la GPU entera.", "Stop the server before checking: the test uses the whole GPU.")
+        }
+        if !EngineCheck.isAvailable(serverBinary: ServerSettings.fromDefaults().serverBinary) {
+            return loc.t("Este motor no incluye la herramienta de comprobación.", "This engine does not ship the check tool.")
+        }
+        return loc.t("Ejecuta las pruebas del motor y añade el resultado al diagnóstico.", "Runs the engine tests and adds the result to diagnostics.")
     }
-
+    private var engineCheckSheet: some View {
+        VStack(spacing: 14) {
+            ProgressView().controlSize(.large)
+            Text(loc.t("Comprobando el motor…", "Checking the engine…")).font(.headline)
+            Text(loc.t("%@ operaciones probadas%@", "%@ operations tested%@", "\(checker.testCount)",
+                       "\(checker.currentOp.isEmpty ? "" : " · \(checker.currentOp)")"))
+                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { checker.cancel() }.keyboardShortcut(.cancelAction)
+        }
+        .padding(24).frame(minWidth: 340)
+    }
+    private func startEngineCheck() {
+        checker.start(settings: ServerSettings.fromDefaults()) { result in
+            guard !result.cancelled else { return }
+            saveDiagnostics(extra: EngineCheck.report(result, localized: loc.t), name: "toshllm-engine-check.txt")
+            checkVerdict = EngineCheck.verdict(result, localized: loc.t)
+        }
+    }
+    private func exportDiagnostics() { saveDiagnostics(extra: nil, name: "toshllm-diagnostics.txt") }
     private func saveDiagnostics(extra: String?, name: String) {
-        let settings = ServerSettings.fromDefaults()
-        let logTail = (try? String(contentsOf: server.logFileURL, encoding: .utf8))?
-            .split(separator: "\n").suffix(250).joined(separator: "\n") ?? server.log
+        let currentSettings = ServerSettings.fromDefaults()
+        let logTail = LogFileTail.read(server.logFileURL, maxBytes: 256 * 1024)
         let gpu = hardware.bestGPU.map { "\($0.name) (\($0.vramMB) MB VRAM)" } ?? "—"
         let report = """
         ToshLLM \(AppInfo.version) — diagnostics
@@ -405,18 +457,44 @@ struct ServerLogView: View {
         Arch: \(hardware.arch)
 
         ## Configuration
-        model: \(URL(fileURLWithPath: settings.modelPath).lastPathComponent)
-        engine: \(settings.serverBinary)
-        args: \(settings.arguments.joined(separator: " "))
+        model: \(URL(fileURLWithPath: currentSettings.modelPath).lastPathComponent)
+        engine: \(currentSettings.serverBinary)
+        args: \(currentSettings.arguments.joined(separator: " "))
         \(extra.map { "\n\($0)\n" } ?? "")
         ## Recent log
-        \(logTail)
+        \(logTail.isEmpty ? server.log : logTail)
         """
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
         panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        if panel.runModal() == .OK, let url = panel.url {
-            try? report.write(to: url, atomically: true, encoding: .utf8)
+        if panel.runModal() == .OK, let url = panel.url { try? report.write(to: url, atomically: true, encoding: .utf8) }
+    }
+}
+
+private struct PresentedLogRow: View {
+    let line: PresentedLogLine
+    private var tint: Color {
+        switch line.level { case .info: .blue; case .warning: .orange; case .error: .red }
+    }
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(line.time).frame(width: 106, alignment: .leading).foregroundStyle(.secondary)
+            Label(line.level.shortLabel, systemImage: "circle.fill")
+                .labelStyle(LogLevelLabelStyle()).foregroundStyle(tint).frame(width: 74, alignment: .leading)
+            Text(line.source).frame(width: 90, alignment: .leading).foregroundStyle(.secondary)
+            Divider()
+            Text(line.message).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
         }
+        .font(.system(.caption, design: .monospaced))
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        .background(line.level == .error ? Color.red.opacity(0.045) : .clear)
+        .overlay(alignment: .bottom) { Divider().opacity(0.45) }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct LogLevelLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 5) { configuration.icon.font(.system(size: 7)); configuration.title }
     }
 }

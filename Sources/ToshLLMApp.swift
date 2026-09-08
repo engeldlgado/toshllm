@@ -153,6 +153,8 @@ struct ToshLLMApp: App {
                 .frame(minWidth: 980, minHeight: 640)
         }
         .defaultSize(width: 1080, height: 700)
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unifiedCompact)
 
         MenuBarExtra(isInserted: $menuBarIcon) {
             MenuBarView()

@@ -382,9 +382,9 @@ struct ServerSettings {
                 args += ["-md", selection.draft, "--spec-type", "draft-dflash",
                          "-ngld", String(selection.ngld),
                          "-ctkd", "q8_0", "-ctvd", "q8_0"]
-            } else if let draft = Self.mtpDraftPath(forModel: modelPath) {
+            } else if Self.mtpEnabled(forModel: modelPath), let draft = Self.mtpDraftPath(forModel: modelPath) {
                 args += ["-md", draft, "--spec-type", "draft-mtp"]
-            } else if Self.modelHasMTP(at: modelPath) {
+            } else if Self.mtpEnabled(forModel: modelPath), Self.modelHasMTP(at: modelPath) {
                 args += ["--spec-type", "draft-mtp"]
             }
         }
@@ -509,10 +509,10 @@ struct ServerSettings {
                 lines.append("gpu-layers-draft = \(selection.ngld)")
                 lines.append("cache-type-k-draft = q8_0")
                 lines.append("cache-type-v-draft = q8_0")
-            } else if let draft = Self.mtpDraftPath(forModel: path) {
+            } else if Self.mtpEnabled(forModel: path), let draft = Self.mtpDraftPath(forModel: path) {
                 lines.append("model-draft = \(draft)")
                 lines.append("spec-type = draft-mtp")
-            } else if Self.modelHasMTP(at: path) {
+            } else if Self.mtpEnabled(forModel: path), Self.modelHasMTP(at: path) {
                 lines.append("spec-type = draft-mtp")
             }
             sections.append(lines.joined(separator: "\n"))
@@ -1226,6 +1226,16 @@ struct ServerSettings {
         modelHasMTP(at: path) || mtpDraftPath(forModel: path) != nil
     }
 
+    nonisolated static func mtpEnabled(forModel path: String) -> Bool {
+        !(UserDefaults.standard.stringArray(forKey: SettingsKeys.mtpDisabledModels) ?? []).contains(path)
+    }
+
+    nonisolated static func setMTPEnabled(_ enabled: Bool, forModel path: String) {
+        var disabled = Set(UserDefaults.standard.stringArray(forKey: SettingsKeys.mtpDisabledModels) ?? [])
+        if enabled { disabled.remove(path) } else { disabled.insert(path) }
+        UserDefaults.standard.set(Array(disabled), forKey: SettingsKeys.mtpDisabledModels)
+    }
+
     /// True when the model's weights use a TurboQuant type (ggml_type 45/46). Read from
     /// the tensor types: these GGUFs carry no usable `general.file_type`. False on an
     /// unreadable header, so a model we can't parse is never blocked.
@@ -1499,7 +1509,14 @@ final class ServerManager: ObservableObject {
         // Recreate any extra servers the user added, each with its own config.
         if let data = UserDefaults.standard.data(forKey: Self.storeKey),
            let profiles = try? JSONDecoder().decode([Profile].self, from: data) {
-            for p in profiles {
+            for var p in profiles {
+                // Freeze the currently inherited model once, without changing the
+                // model users were seeing before instance selection was restored.
+                if let pins = p.pinned, !pins.contains(Profile.Pin.model) {
+                    let current = ServerSettings.fromDefaults()
+                    p.selectInstanceModel(path: current.modelPath,
+                                          ncmoe: pins.contains(Profile.Pin.moe) ? p.ncmoe : current.ncmoe)
+                }
                 let c = ServerController()
                 c.name = p.name
                 c.profile = p
@@ -1508,6 +1525,7 @@ final class ServerManager: ObservableObject {
         }
         servers = list
         activeID = first.id
+        persist()
     }
 
     var active: ServerController { servers.first { $0.id == activeID } ?? servers[0] }
@@ -1530,8 +1548,9 @@ final class ServerManager: ObservableObject {
         var p = base ?? ServerSettings.fromDefaults().makeProfile(name: name)
         p.name = name
         p.port = freePort()
-        // New servers inherit the globals; a base profile keeps its full snapshot.
-        if base == nil { p.pinned = [] }
+        // Each instance owns its model from creation. Other settings still inherit.
+        if base == nil { p.pinned = [Profile.Pin.model] }
+        p.selectInstanceModel(path: p.modelPath, ncmoe: p.ncmoe)
         let c = ServerController()
         c.name = name
         c.profile = p
@@ -1564,6 +1583,35 @@ final class ServerManager: ObservableObject {
     }
 }
 
+/// Engine output updates much faster than dashboard state. Keeping it in its own
+/// observable prevents every log line from invalidating all server cards.
+@MainActor
+final class ServerLogBuffer: ObservableObject {
+    private(set) var text = ""
+    private var notificationPending = false
+
+    func set(_ value: String) {
+        text = value
+        scheduleNotification()
+    }
+
+    func append(_ value: String, limit: Int = 120_000, retained: Int = 80_000) {
+        text += value
+        if text.count > limit { text = String(text.suffix(retained)) }
+        scheduleNotification()
+    }
+
+    private func scheduleNotification() {
+        guard !notificationPending else { return }
+        notificationPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+            guard let self else { return }
+            self.notificationPending = false
+            self.objectWillChange.send()
+        }
+    }
+}
+
 @MainActor
 final class ServerController: ObservableObject {
     let id = UUID()
@@ -1587,11 +1635,16 @@ final class ServerController: ObservableObject {
     enum State: Equatable { case stopped, starting, running, failed(String) }
 
     @Published var state: State = .stopped
-    @Published var log: String = ""
+    let logBuffer = ServerLogBuffer()
+    var log: String {
+        get { logBuffer.text }
+        set { logBuffer.set(newValue) }
+    }
     @Published var promptSpeed: Double?
     @Published var genSpeed: Double?
     @Published var genHistory: [Double] = []
     @Published var requestCount = 0
+    @Published private(set) var startedAt: Date?
     @Published var dflashWarning: DflashRuntimeWarning?
     /// Model whose running engine actually has DFlash engaged, nil otherwise.
     @Published private(set) var activeDflashModelPath: String?
@@ -1728,6 +1781,7 @@ final class ServerController: ObservableObject {
         discoveryEnabled = settings.localNetworkDiscovery
         stopDiscovery()
         state = .starting
+        startedAt = nil
 
         // A stopped engine can take seconds to die (SIGTERM mid-generation) and still
         // holds the port meanwhile, so wait for the previous PID before binding.
@@ -2010,6 +2064,7 @@ final class ServerController: ObservableObject {
         }
         process = nil
         state = .stopped
+        startedAt = nil
     }
 
     /// Quitting: the engine must be signalled inline, since a detached task does
@@ -2110,6 +2165,7 @@ final class ServerController: ObservableObject {
                    String(data: data, encoding: .utf8)?.contains("ok") == true {
                     await MainActor.run {
                         self?.state = .running
+                        self?.startedAt = Date()
                         self?.startDiscoveryIfNeeded(port: port)
                         self?.startDflashMemoryCheck()
                     }
@@ -2220,8 +2276,7 @@ final class ServerController: ObservableObject {
     }
 
     private func consume(_ text: String) {
-        log += text
-        if log.count > 120_000 { log = String(log.suffix(80_000)) }
+        logBuffer.append(text)
         fileLog.append(text)
 
         for line in text.split(separator: "\n") {

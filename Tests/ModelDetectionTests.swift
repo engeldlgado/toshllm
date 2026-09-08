@@ -233,6 +233,19 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertEqual(parsed.quant, "Q4_K_M")
     }
 
+    func testGGUFFileTypeOverridesStaleBF16MetadataName() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("Qwen3.8-27B-Ridge-3.7bpw.gguf")
+        try writeGGUF(to: url,
+                      strings: ["general.name": "Qwen3.8 27B Bf16"],
+                      uint32: ["general.file_type": 29])
+
+        let parsed = ModelName.forPath(url.path)
+        XCTAssertEqual(parsed.title, "Qwen3.8 27B")
+        XCTAssertEqual(parsed.quant, "IQ2_M")
+    }
+
     func testLegacyProjectorFallbackRequiresUniqueFamilyAndDimension() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -2345,6 +2345,7 @@ struct NativeChatView: View {
             Divider()
             inputArea
         }
+        .background(WorkspaceStyle.canvas)
     }
 
     /// Compact bar over the transcript: project chip + in-place editable title.
@@ -2822,18 +2823,20 @@ struct NativeChatView: View {
     }
 
     private var composerRow: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
+            messageField
+            HStack(alignment: .center, spacing: 10) {
                 paramsButton
                 attachButton
                 if !availableTools.isEmpty { toolsButton }
                 voiceButton
+                Spacer(minLength: 8)
+                sendControls
             }
-            .fixedSize(horizontal: true, vertical: false)
-            .padding(.bottom, 4)
-            messageField
-            sendControls
         }
+        .padding(12)
+        .glassSurface(in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
     }
 
     private var messageField: some View {
@@ -2842,8 +2845,7 @@ struct NativeChatView: View {
             .lineLimit(1...8)
             .textFieldStyle(.plain)
             .chatFont(.body)
-            .padding(.horizontal, 13).padding(.vertical, 8)
-            .glassSurface(in: RoundedRectangle(cornerRadius: 20), interactive: true)
+            .padding(.horizontal, 2).padding(.vertical, 4)
             .focused($inputFocused)
             .onSubmit(send)
             .onChange(of: draft) { _, value in

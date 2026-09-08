@@ -31,7 +31,6 @@ struct BenchmarkShareCard: View {
     @State private var alias = ""
     @State private var phase: Phase = .idle
     @State private var prepared: BenchmarkSharing.Prepared?
-    @State private var showConsent = false
     @State private var showReview = false
     @State private var showIdentity = false
     @State private var showResetConfirm = false
@@ -43,45 +42,16 @@ struct BenchmarkShareCard: View {
     private var working: Bool { phase == .running || phase == .submitting }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(loc.t("Publica el rendimiento de tu equipo en toshllm.com. Nada se envía hasta que revisas un resumen claro y confirmas. El JSON técnico exacto también está disponible. No se mandan rutas, nombres de cuenta ni contenido de tus chats.",
-                       "Publish your machine's performance on toshllm.com. Nothing is sent until you review a clear summary and confirm. The exact technical JSON remains available. No local paths, account names, or chat content are sent."))
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(alignment: .bottom, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(loc.t("MODELO", "MODEL"))
-                        .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
-                    Text(cfg.modelPath.isEmpty
-                         ? loc.t("elige un modelo en Ejecutar benchmark", "pick a model in Run benchmark")
-                         : ModelName.forPath(cfg.modelPath).display)
-                        .font(.callout.weight(.medium))
-                        .foregroundStyle(cfg.modelPath.isEmpty ? .secondary : .primary)
-                        .lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: 360, alignment: .leading)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(loc.t("ALIAS (OPCIONAL)", "ALIAS (OPTIONAL)"))
-                        .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
-                    TextField(loc.t("Anónimo", "Anonymous"), text: $alias)
-                        .textFieldStyle(.roundedBorder).frame(width: 150).disabled(working)
-                }
-                Spacer()
-                shareButton
-            }
-
-            Label(inheritanceLabel, systemImage: "gearshape")
-                .font(.caption).foregroundStyle(.secondary)
-
+        VStack(alignment: .leading, spacing: 16) {
+            intro
+            submissionContents
+            identityNotice
+            shareConfiguration
             statusLine
-            Divider().opacity(0.35)
-            identitySection
-            historySection
-        }
-        .sheet(isPresented: $showConsent) {
-            BenchmarkShareConsentSheet(hasExistingIdentity: sharing.hasIdentity,
-                                       onContinue: startPrepare)
+            HStack(spacing: 18) {
+                identitySection
+                historySection
+            }
         }
         .sheet(isPresented: $showReview) {
             if let prepared {
@@ -98,6 +68,112 @@ struct BenchmarkShareCard: View {
         }
     }
 
+    private var intro: some View {
+        HStack(alignment: .top, spacing: 13) {
+            SectionGlyph(systemName: "checkmark.shield")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(loc.t("Benchmark verificable", "Verifiable benchmark"))
+                    .font(.headline)
+                Text(loc.t("Primero se mide en este Mac. Después revisarás exactamente qué se firmará y enviará.",
+                           "The measurement runs on this Mac first. You will then review exactly what will be signed and uploaded."))
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            Text(sharing.hasIdentity
+                 ? loc.t("IDENTIDAD EXISTENTE", "EXISTING IDENTITY")
+                 : loc.t("NUEVA IDENTIDAD", "NEW IDENTITY"))
+                .font(.system(size: 10, weight: .semibold)).tracking(0.5)
+                .foregroundStyle(sharing.hasIdentity ? Color.green : Color.appAccent)
+                .padding(.horizontal, 9).padding(.vertical, 5)
+                .background((sharing.hasIdentity ? Color.green : Color.appAccent).opacity(0.11), in: Capsule())
+        }
+    }
+
+    private var submissionContents: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(loc.t("Qué se comparte", "What is shared"), systemImage: "doc.text.magnifyingglass")
+                .font(.callout.weight(.semibold))
+            HStack(alignment: .top, spacing: 20) {
+                BenchmarkConsentInfoRow(
+                    title: loc.t("Modelo y medición", "Model and measurement"),
+                    detail: loc.t("Nombre, cuantización, hashes, configuración y resultados. Los archivos no se suben.",
+                                  "Name, quantization, hashes, configuration, and results. Files are not uploaded."),
+                    systemImage: "gauge.with.dots.needle.67percent")
+                BenchmarkConsentInfoRow(
+                    title: loc.t("Tu contenido queda fuera", "Your content stays private"),
+                    detail: loc.t("Sin chats, prompts, cuenta, rutas locales ni contenido de archivos.",
+                                  "No chats, prompts, account name, local paths, or file contents."),
+                    systemImage: "lock.shield", color: .green)
+            }
+        }
+        .padding(14)
+        .cardSurface()
+    }
+
+    private var identityNotice: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: AppCodeSignature.hasStableDeveloperIdentity
+                  ? "checkmark.seal.fill" : "exclamationmark.shield.fill")
+                .foregroundStyle(AppCodeSignature.hasStableDeveloperIdentity ? Color.green : Color.orange)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(AppCodeSignature.hasStableDeveloperIdentity
+                     ? loc.t("Instalación firmada y notarizada", "Signed and notarized installation")
+                     : loc.t("Compilación local", "Local build"))
+                    .font(.callout.weight(.semibold))
+                Text(AppCodeSignature.hasStableDeveloperIdentity
+                     ? loc.t("La identidad estable permite reutilizar la clave del Llavero sin volver a pedir la contraseña normalmente.",
+                             "The stable identity normally reuses the Keychain key without asking for your password again.")
+                     : loc.t("Al recompilar con una firma temporal, macOS podría pedir permiso para reutilizar la clave. ToshLLM nunca recibe tu contraseña.",
+                             "After rebuilding with a temporary signature, macOS may ask to reuse the key. ToshLLM never receives your password."))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background((AppCodeSignature.hasStableDeveloperIdentity ? Color.green : Color.orange).opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(
+            (AppCodeSignature.hasStableDeveloperIdentity ? Color.green : Color.orange).opacity(0.20)))
+    }
+
+    private var shareConfiguration: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .bottom, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    fieldLabel(loc.t("MODELO", "MODEL"))
+                    Text(cfg.modelPath.isEmpty
+                         ? loc.t("Elige un modelo en la configuración", "Choose a model in the configuration")
+                         : ModelName.forPath(cfg.modelPath).display)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(cfg.modelPath.isEmpty ? .secondary : .primary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    fieldLabel(loc.t("ALIAS PÚBLICO (OPCIONAL)", "PUBLIC ALIAS (OPTIONAL)"))
+                    TextField(loc.t("Anónimo", "Anonymous"), text: $alias)
+                        .textFieldStyle(.roundedBorder).frame(width: 180).disabled(working)
+                }
+                shareButton
+            }
+            HStack {
+                Label(inheritanceLabel, systemImage: "gearshape")
+                Spacer()
+                Label(loc.t("Nada se envía hasta la confirmación final", "Nothing uploads until final confirmation"),
+                      systemImage: "lock")
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .cardSurface()
+    }
+
+    private func fieldLabel(_ value: String) -> some View {
+        Text(value).font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
+    }
+
     @ViewBuilder private var shareButton: some View {
         if working {
             HStack(spacing: 8) {
@@ -111,7 +187,7 @@ struct BenchmarkShareCard: View {
                 Label(prepared == nil ? loc.t("Compartir", "Share") : loc.t("Reintentar envío", "Retry upload"),
                       systemImage: prepared == nil ? "square.and.arrow.up" : "arrow.clockwise")
             }
-            .buttonStyle(.borderedProminent)
+            .glassButton(prominent: true)
             .disabled(cfg.modelPath.isEmpty || serverBusy)
             .help(serverBusy
                   ? loc.t("Detén el servidor antes de medir: comparten la VRAM.",
@@ -299,7 +375,7 @@ struct BenchmarkShareCard: View {
         if prepared != nil {
             submit()
         } else {
-            showConsent = true
+            startPrepare()
         }
     }
 

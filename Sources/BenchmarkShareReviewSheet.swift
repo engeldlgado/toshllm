@@ -41,16 +41,14 @@ struct BenchmarkShareReviewSheet: View {
             Divider()
             footer
         }
+        .background(WorkspaceStyle.canvas)
         .frame(minWidth: 680, idealWidth: 760, maxWidth: 880,
                minHeight: 620, idealHeight: 720, maxHeight: 860)
     }
 
     private var header: some View {
         HStack(spacing: 14) {
-            Image(systemName: "checkmark.shield.fill")
-                .font(.title2)
-                .foregroundStyle(.green)
-                .accessibilityHidden(true)
+            SectionGlyph(systemName: "checkmark.shield")
             VStack(alignment: .leading, spacing: 3) {
                 Text(loc.t("Revisa antes de firmar", "Review before signing"))
                     .font(.title3)
@@ -196,7 +194,7 @@ struct BenchmarkShareReviewSheet: View {
                             .padding(12)
                     }
                     .frame(minHeight: 180, maxHeight: 280)
-                    .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
+                .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
                     DisclosureGroup(isExpanded: $showBenchmarkLog) {
                         ScrollView([.horizontal, .vertical]) {
                             Text(review.rawOutput)
@@ -206,7 +204,7 @@ struct BenchmarkShareReviewSheet: View {
                                 .padding(12)
                         }
                         .frame(height: 220)
-                        .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
+                        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
                     } label: {
                         Text(loc.t("Log completo del benchmark", "Complete benchmark log"))
                     }
@@ -227,9 +225,10 @@ struct BenchmarkShareReviewSheet: View {
                 .foregroundStyle(.secondary)
             Spacer()
             Button(loc.t("Cancelar", "Cancel"), role: .cancel, action: onCancel)
+                .glassButton()
             Button(loc.t("Firmar y enviar benchmark", "Sign and send benchmark"),
                    systemImage: "paperplane.fill", action: onSubmit)
-                .buttonStyle(.borderedProminent)
+                .glassButton(prominent: true)
                 .keyboardShortcut(.defaultAction)
         }
         .padding(16)

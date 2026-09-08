@@ -20,7 +20,7 @@ enum Section_: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var icon: String {
         switch self {
-        case .dashboard: return "gauge.with.dots.needle.50percent"
+        case .dashboard: return "house"
         case .chat: return "bubble.left.and.bubble.right"
         case .models: return "shippingbox"
         case .benchmarks: return "speedometer"
@@ -53,47 +53,72 @@ let hardware = HardwareInfo.detect()
 struct ControlPanelView: View {
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var control: ControlPanelState
+    @EnvironmentObject private var manager: ServerManager
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        NavigationSplitView {
-            // Selection drawn by the app so it follows the theme accent
-            // instead of the system one (same as the chat sidebar).
-            List(Section_.allCases.filter { $0 != .chat }) { s in
-                Label(s.title(loc), systemImage: s.icon)
-                    .padding(.vertical, 4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { control.section = s }
-                    .listRowBackground(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(control.section == s
-                                  ? Color.appAccent.opacity(0.26) : Color.clear)
-                            .padding(.horizontal, 4))
-            }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 185, max: 220)
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            WorkspaceSidebar()
+                .navigationSplitViewColumnWidth(min: 220, ideal: 244, max: 290)
         } detail: {
-            switch control.section {
-            case .dashboard, .chat: DashboardView()
-            case .models: ModelsView()
-            case .benchmarks: BenchmarksView()
-            case .docs: DocsView()
-            case .logs: LogsView()
-            case .chatSettings: ChatSettingsView()
-            case .settings: SettingsView()
-            case .about: AboutView()
+            VStack(spacing: 0) {
+                HStack(spacing: 14) {
+                    if selectedServer != nil {
+                        Button {
+                            control.serverAnchor = nil
+                        } label: {
+                            Label(loc.t("Volver a servidores", "Back to servers"), systemImage: "chevron.left")
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 13, weight: .medium))
+                    } else {
+                        SectionGlyph(systemName: control.section.icon)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(selectedServerTitle).font(.title2.bold())
+                            Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 12)
+                    ServerStatsToolbar().environmentObject(selectedServer ?? manager.servers[0])
+                }
+                .padding(.horizontal, 24).padding(.vertical, 16)
+                Divider().padding(.horizontal, 24)
+                WorkspaceDestinationView(section: control.section, serverID: control.serverAnchor)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .scrollContentBackground(.hidden)
             }
+            .background(WorkspaceStyle.canvas)
         }
         .tint(AppTheme.accent(accentRaw))
-        // Rebuild on theme change so static accent reads refresh everywhere.
         .id(accentRaw)
-        .navigationTitle(loc.t("Configuración", "Configuration"))
-        // Telemetry rides in the glass title bar (macOS 26), shared across all
-        // sections, instead of a flat strip beneath the large title.
-        .toolbar {
-            ToolbarItem(placement: .automatic) { ServerStatsToolbar() }
+        .navigationTitle("ToshLLM")
+    }
+
+    private var selectedServer: ServerController? {
+        guard control.section == .dashboard, let id = control.serverAnchor else { return nil }
+        return manager.servers.first { $0.id == id }
+    }
+
+    private var selectedServerTitle: String {
+        selectedServer.map { manager.displayName(for: $0, loc: loc) }
+            ?? control.section.title(loc)
+    }
+
+    private var subtitle: String {
+        if selectedServer != nil { return loc.t("Modelo y configuración de esta instancia.", "Model and settings for this instance.") }
+        switch control.section {
+        case .dashboard, .chat: return loc.t("Tu equipo y tu IA, de un vistazo.", "Your machine and AI status at a glance.")
+        case .models: return loc.t("Encuentra, descarga y gestiona tus modelos locales.", "Discover, download and manage your local models.")
+        case .benchmarks: return loc.t("Mide el rendimiento de tu equipo.", "Measure performance on your hardware.")
+        case .settings, .chatSettings: return loc.t("Control completo sobre tu experiencia local.", "Fine-tune your local AI experience.")
+        case .logs: return loc.t("Actividad y diagnóstico de los motores.", "Engine activity and diagnostics.")
+        case .docs: return loc.t("Guías y referencia de ToshLLM.", "ToshLLM guides and reference.")
+        case .about: return loc.t("IA local, hecha para tu Mac.", "Local AI, built for your Mac.")
         }
     }
+
 }
 
 /// First-run guidance shown when no models are installed yet.
@@ -104,8 +129,7 @@ struct OnboardingSheet: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "cpu.fill")
-                .font(.system(size: 40)).foregroundStyle(Color.appAccent)
+            ToshLLMLogo(size: 72)
             Text(loc.t("Bienvenido a ToshLLM", "Welcome to ToshLLM"))
                 .font(.title.bold())
             Text(loc.t("Modelos de lenguaje corriendo en tu GPU, sin nube y sin cuentas.",
@@ -161,18 +185,19 @@ struct ServerStatsToolbar: View {
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        HStack(spacing: 14) {
-            stat("Prompt", server.promptSpeed)
-            stat(loc.t("Generación", "Generation"), server.genSpeed)
-            HStack(spacing: 5) {
-                Image(systemName: "memorychip").font(.caption).foregroundStyle(.secondary)
-                ProgressView(value: min(vram.fraction, 1)).frame(width: 56)
-                    .tint(vram.fraction > 0.9 ? .red : vram.fraction > 0.75 ? .orange : .accentColor)
-                Text(String(format: "%.1f/%.0f", vram.usedMB / 1024, vram.totalMB / 1024))
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                stat("Prompt", server.promptSpeed)
+                stat(loc.t("Generación", "Generation"), server.genSpeed)
+                Divider().frame(height: 18)
+                statusBadge
             }
-            statusBadge
+            .fixedSize()
+            statusBadge.fixedSize()
         }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .glassSurface(in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(WorkspaceStyle.border))
     }
 
     private func stat(_ label: String, _ value: Double?) -> some View {

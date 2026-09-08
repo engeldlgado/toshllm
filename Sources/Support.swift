@@ -5,6 +5,7 @@
 import Foundation
 import CryptoKit
 import os
+import Security
 
 // MARK: - Settings keys (single source of truth)
 
@@ -54,6 +55,7 @@ enum SettingsKeys {
     /// Legacy model paths whose downloaded DFlash draft was turned off.
     static let dflashDisabled = "dflashDisabled"
     static let dflashModes = "dflashModes"
+    static let mtpDisabledModels = "mtpDisabledModels"
     static let dflashWarningAcknowledged = "dflashWarningAcknowledged"
     static let port = "port"
     static let ngl = "ngl"
@@ -239,7 +241,7 @@ enum SettingsKeys {
         extraArgs, embeddings, agentToolsEnabled, toolsRuntime, jsSandboxEnabled,
         memoryToolsEnabled, mcpServers, uiMcpProxy,
         cacheTypeK, cacheTypeV, mlock, cacheRAM,
-        parallelSlots, reasoningInline, specMTP, faAmd, prefetchExperts, ubatch,
+        parallelSlots, reasoningInline, specMTP, mtpDisabledModels, faAmd, prefetchExperts, ubatch,
         dynamicMoe, dynamicMoeSlots, dynamicMoePrefetch, dynamicMoePolicy, routerMode, routerModelsMax,
         persistCache, multiGPU, multiGPUCount, splitMode, splitGroupSize, mgpuEvents, mgpuPeer,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,
@@ -596,4 +598,23 @@ enum Keychain {
         set(key, account: "api-key")
         return key
     }
+}
+
+/// A notarized release has a stable Developer ID team. Local ad-hoc builds do
+/// not, which is the only case where rebuilding can make Keychain ask whether
+/// the changed app may reuse an existing benchmark identity.
+enum AppCodeSignature {
+    static let hasStableDeveloperIdentity: Bool = {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return false }
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation),
+                                            &information) == errSecSuccess,
+              let values = information as? [String: Any],
+              let team = values[kSecCodeInfoTeamIdentifier as String] as? String else { return false }
+        return !team.isEmpty
+    }()
 }

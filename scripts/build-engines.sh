@@ -316,6 +316,9 @@ build_image_engine() {
     # rejects every op that touches them, and a weight already placed in the device
     # buffer aborts the load instead of falling back.
     git apply -p1 "$ROOT/patches/image/0052-image-bf16-promote-without-bfloat.patch"
+    # Cast an f16 weight to f32 before adding a LoRA diff: the diff is f32, Metal wants both
+    # operands in one type, and a weight in private VRAM cannot fall back to the CPU for the add.
+    git apply -p1 "$ROOT/patches/image/0053-image-lora-f16-weight-cast.patch"
     echo "applied ggml-metal hunks of 0001 + 0003 + core fallback 0004 + ext wave64 0008 to stable-diffusion.cpp"
 
     # This ggml is on a different commit, so an ambiguous hunk can land on the wrong

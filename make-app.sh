@@ -109,8 +109,13 @@ if ls Assets/lang/*.json >/dev/null 2>&1; then
     done
 fi
 
+# Local provider icons: no network requests while rendering the UI.
+mkdir -p "$APP/Contents/Resources/model-icons"
+cp Assets/model-icons/*.webp Assets/model-icons/sources.json "$APP/Contents/Resources/model-icons/"
+
 # Binance Pay QR (cropped) for the donations popup
 [ -f Assets/binance-qr.png ] && cp Assets/binance-qr.png "$APP/Contents/Resources/binance-qr.png"
+[ -f Assets/model-hero.jpg ] && cp Assets/model-hero.jpg "$APP/Contents/Resources/model-hero.jpg"
 
 
 # Image generation engine (stable-diffusion.cpp; optional)

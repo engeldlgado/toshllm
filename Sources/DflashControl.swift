@@ -7,7 +7,7 @@ import SwiftUI
 /// Per-model DFlash policy, shown only when a compatible downloaded draft exists.
 /// `inline` is one compact row; `settings` is a form section.
 struct DflashControl: View {
-    enum Layout { case inline, settings }
+    enum Layout { case inline, settings, detail }
 
     let modelPath: String
     var switchLeading: Bool = false
@@ -21,7 +21,19 @@ struct DflashControl: View {
 
     @ViewBuilder
     var body: some View {
-        if layout == .settings { settingsRows } else { inlineRow }
+        if layout == .settings { settingsRows }
+        else if layout == .detail { detailRow }
+        else { inlineRow }
+    }
+
+    private var detailRow: some View {
+        ToshDropdown(selection: $mode, options: [
+            .init(value: .off, title: loc.t("Apagado", "Off"), systemImage: "bolt.slash"),
+            .init(value: .auto, title: "Auto", subtitle: loc.t("Respeta la reserva de VRAM", "Respects the VRAM reserve"), systemImage: "wand.and.stars"),
+            .init(value: .forced, title: loc.t("Forzado", "Forced"), subtitle: loc.t("Ignora la reserva de seguridad", "Ignores the safety reserve"), systemImage: "bolt.fill")
+        ], width: 220, listWidth: 300)
+        .onAppear { mode = ServerSettings.dflashMode(forModel: modelPath) }
+        .onChange(of: mode) { _, value in ServerSettings.setDflashMode(value, forModel: modelPath) }
     }
 
     private var settingsRows: some View {

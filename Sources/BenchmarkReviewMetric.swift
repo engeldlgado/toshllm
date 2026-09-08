@@ -23,6 +23,7 @@ struct BenchmarkReviewMetric: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(WorkspaceStyle.border))
     }
 }

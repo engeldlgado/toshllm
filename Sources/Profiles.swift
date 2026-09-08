@@ -62,6 +62,7 @@ struct Profile: Codable, Identifiable {
         static let uiMcpProxy  = "uiMcpProxy"
         static let router     = "router"
         static let ubatch     = "ubatch"
+        static let parallelSlots = "parallelSlots"
         static let extraArgs  = "extraArgs"
     }
 }
@@ -274,6 +275,7 @@ extension ServerSettings {
         if pinned.contains(Profile.Pin.moe) { ncmoe = p.ncmoe }
         if pinned.contains(Profile.Pin.ctx) { ctx = p.ctx }
         if pinned.contains(Profile.Pin.ubatch), let v = p.ubatch { ubatch = v }
+        if pinned.contains(Profile.Pin.parallelSlots), let v = p.parallelSlots { parallelSlots = v }
         if pinned.contains(Profile.Pin.gpu) { gpuIndex = p.gpuIndex; gpuList = p.gpuList ?? [] }
         if pinned.contains(Profile.Pin.discovery), let v = p.localNetworkDiscovery { localNetworkDiscovery = v }
         if pinned.contains(Profile.Pin.vision), let v = p.loadVision { loadVision = v }
