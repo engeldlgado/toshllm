@@ -154,7 +154,7 @@ struct BenchmarkShareCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     fieldLabel(loc.t("ALIAS PÚBLICO (OPCIONAL)", "PUBLIC ALIAS (OPTIONAL)"))
                     TextField(loc.t("Anónimo", "Anonymous"), text: $alias)
-                        .textFieldStyle(.roundedBorder).frame(width: 180).disabled(working)
+                        .workspaceTextField().frame(width: 180).disabled(working)
                 }
                 shareButton
             }

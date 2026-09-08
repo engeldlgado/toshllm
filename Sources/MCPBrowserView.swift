@@ -52,7 +52,7 @@ struct MCPBrowserView: View {
             }
             .pickerStyle(.segmented).padding()
             TextField(loc.t("Buscar", "Search"), text: $query, prompt: Text(loc.t("Nombre o URI", "Name or URI")))
-                .textFieldStyle(.roundedBorder).padding(.horizontal)
+                .workspaceTextField().padding(.horizontal)
             Group {
                 if loading {
                     ProgressView(loc.t("Consultando servidores…", "Loading servers…"))
@@ -247,6 +247,7 @@ private struct MCPPromptForm: View {
                                   text: Binding(get: { values[argument.name] ?? "" },
                                                 set: { values[argument.name] = $0 }),
                                   prompt: argument.description.map(Text.init))
+                            .workspaceTextField()
                     }
                 }
             }

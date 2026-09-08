@@ -343,6 +343,9 @@ struct WorkspaceHeroArtwork: View {
             }
         }
         .accessibilityHidden(true)
+        // scaledToFill overflows the frame and clipped() does not clip hit-testing,
+        // so without this the artwork swallows clicks on whatever sits beside it.
+        .allowsHitTesting(false)
     }
 }
 

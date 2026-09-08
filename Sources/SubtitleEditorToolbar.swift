@@ -13,8 +13,10 @@ struct SubtitleEditorToolbar: View {
     var body: some View {
         HStack(spacing: 8) {
             TextField(loc.t("Buscar", "Find"), text: $searchText)
+                .workspaceTextField()
                 .help(loc.t("Filtra los segmentos por texto.", "Filters segments by text."))
             TextField(loc.t("Reemplazar con", "Replace with"), text: $replacement)
+                .workspaceTextField()
                 .help(loc.t("Texto que sustituirá todas las coincidencias.",
                             "Text that will replace all matches."))
             Button(loc.t("Reemplazar todo", "Replace all"), systemImage: "text.badge.checkmark") {

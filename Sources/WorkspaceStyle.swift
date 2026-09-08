@@ -42,4 +42,14 @@ extension View {
     func workspaceTextField(width: CGFloat? = nil) -> some View {
         modifier(WorkspaceTextFieldModifier(width: width))
     }
+
+    /// Neutral surface for multiline fields whose height is controlled by their content.
+    func workspaceFieldSurface(cornerRadius: CGFloat = 8) -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(WorkspaceStyle.field,
+                        in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(WorkspaceStyle.border, lineWidth: 1))
+    }
 }

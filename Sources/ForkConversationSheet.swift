@@ -22,7 +22,7 @@ struct ForkConversationSheet: View {
                 .foregroundStyle(.secondary)
             TextField(loc.t("Título (opcional)", "Title (optional)"), text: $title,
                       prompt: Text(loc.t("Bifurcación de %@", "Fork of %@", "\(sourceTitle)")))
-                .textFieldStyle(.roundedBorder)
+                .workspaceTextField()
             Toggle(loc.t("Incluir archivos, imágenes, audio y video",
                          "Include files, images, audio and video"),
                    isOn: $includeAttachments)

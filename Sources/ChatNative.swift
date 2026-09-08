@@ -3098,7 +3098,7 @@ struct NativeChatView: View {
                         Text(loc.t("Semilla", "Seed"))
                         Spacer()
                         TextField("-1", value: $seed, format: .number)
-                            .textFieldStyle(.roundedBorder)
+                            .workspaceTextField()
                             .frame(width: 90)
                     }
                     GroupBox(loc.t("Temperatura dinámica y XTC", "Dynamic temperature and XTC")) {
@@ -3131,7 +3131,7 @@ struct NativeChatView: View {
                     TextField(loc.t("Orden: top_k;typ_p;top_p;min_p;temperature",
                                     "Order: top_k;typ_p;top_p;min_p;temperature"),
                               text: $samplers)
-                        .textFieldStyle(.roundedBorder)
+                        .workspaceTextField()
                     Toggle(loc.t("Muestreo en backend", "Backend sampling"),
                            isOn: $backendSampling)
                     Stepper(value: $agenticMaxTurns, in: 1...100) {
@@ -3148,7 +3148,7 @@ struct NativeChatView: View {
                         Text(loc.t("Máximo de imagen (MP)", "Maximum image size (MP)"))
                         Spacer()
                         TextField("0", value: $maxImageMegapixels, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 80)
+                            .workspaceTextField().frame(width: 80)
                     }
                     Toggle(loc.t("PDF como imágenes para modelos con visión",
                                  "PDF as images for vision models"), isOn: $pdfAsImages)

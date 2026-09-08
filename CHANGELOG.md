@@ -9,7 +9,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **The interface has been redesigned throughout without dropping the existing controls.** Home, Models, Servers, Benchmarks, Logs and Settings now share the same navigation, fields, menus, cards and responsive layout, while dense screens build and refresh less work. In reference idle measurements, memory use fell from roughly 600 MB in the previous interface to about 120 MB; the exact figure varies with the open screen, benchmark history and active servers.
 
+- **Text and number fields respond immediately and use one neutral surface throughout the app.** Large settings screens keep edits local until the field is confirmed, preventing every keystroke from rebuilding the full screen; numeric fields also reject non-numeric characters as they are typed.
+
 ### Fixed
+
+- **Settings keeps one consistent text size and its help cards remain usable with the pointer.** Compact switches no longer shrink the labels around them, and a help popover stays open while the pointer moves from its icon into the explanation.
 
 - **Images: LoRAs apply to f16 models instead of ending the render with an error.** Adding one to a checkpoint whose weights are f16, an SDXL safetensors file among them, stopped generation on cards without unified memory. Reported in #93.
 

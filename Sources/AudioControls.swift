@@ -99,12 +99,16 @@ struct AudioControls: View {
 
                 if operation == .translateLocal {
                     TextField(loc.t("Idioma de destino", "Target language"), text: $targetLanguage)
+                        .workspaceTextField()
                         .help(loc.t("Escribe el idioma final, por ejemplo Español, Coreano o Francés.",
                                     "Enter the final language, such as Spanish, Korean, or French."))
                     chatRequirement
                     translationModelControl
                     TextField(loc.t("Glosario: término = traducción", "Glossary: term = translation"),
                               text: $glossary, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .padding(8)
+                        .workspaceFieldSurface()
                         .lineLimit(2...5)
                         .help(loc.t("Fija nombres, marcas y términos, uno por línea, para mantenerlos iguales durante todo el vídeo.",
                                     "Pins names, brands and terminology, one per line, to keep them consistent throughout the video."))

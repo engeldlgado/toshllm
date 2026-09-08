@@ -12,6 +12,7 @@ struct ToshDropdown<Value: Hashable>: View {
         let title: String
         var subtitle: String? = nil
         var systemImage: String? = nil
+        var swatch: NSImage? = nil
         var id: Value { value }
     }
 
@@ -30,7 +31,9 @@ struct ToshDropdown<Value: Hashable>: View {
     var body: some View {
         Button { presented.toggle() } label: {
             HStack(spacing: 9) {
-                if let image = selected?.systemImage {
+                if let swatch = selected?.swatch {
+                    Image(nsImage: swatch)
+                } else if let image = selected?.systemImage {
                     Image(systemName: image).foregroundStyle(.secondary).frame(width: 16)
                 }
                 Text(selected?.title ?? placeholder)
@@ -53,7 +56,9 @@ struct ToshDropdown<Value: Hashable>: View {
                     ForEach(options) { option in
                         Button { choose(option.value) } label: {
                             HStack(spacing: 10) {
-                                if let image = option.systemImage {
+                                if let swatch = option.swatch {
+                                    Image(nsImage: swatch).frame(width: 18)
+                                } else if let image = option.systemImage {
                                     Image(systemName: image).foregroundStyle(.secondary).frame(width: 18)
                                 }
                                 VStack(alignment: .leading, spacing: 2) {

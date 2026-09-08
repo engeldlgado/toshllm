@@ -136,8 +136,8 @@ private struct MCPServerEditor: View {
         VStack(alignment: .leading, spacing: 16) {
             Text(loc.t("Servidor MCP", "MCP server")).font(.title2.weight(.semibold))
             Form {
-                TextField(loc.t("Nombre", "Name"), text: $server.name)
-                TextField("URL", text: $server.url)
+                TextField(loc.t("Nombre", "Name"), text: $server.name).workspaceTextField()
+                TextField("URL", text: $server.url).workspaceTextField()
                 Picker(loc.t("Transporte", "Transport"), selection: $server.transport) {
                     Text(loc.t("Automático", "Automatic")).tag(MCPTransport.automatic)
                     Text("Streamable HTTP").tag(MCPTransport.streamableHTTP)
@@ -150,6 +150,7 @@ private struct MCPServerEditor: View {
                     Text(loc.t("Cabeceras HTTP (JSON, opcional)", "HTTP headers (optional JSON)"))
                     TextEditor(text: $headers)
                         .font(.system(.caption, design: .monospaced)).frame(height: 90)
+                        .workspaceFieldSurface()
                     Text(#"{"Authorization":"Bearer …"}"#)
                         .font(.caption2).foregroundStyle(.tertiary)
                 }

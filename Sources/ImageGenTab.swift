@@ -479,7 +479,7 @@ struct QueueFeedView: View {
                 HStack(spacing: 4) {
                     Text(loc.t("Semilla", "Seed")).font(.caption).foregroundStyle(.secondary)
                     TextField("-1", value: $draftSeed, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 68)
+                        .workspaceTextField().frame(width: 68)
                 }
                 initImageChip
                 Spacer()
@@ -930,7 +930,7 @@ struct ImageInstanceForm: View {
                 Text("CFG").font(.callout)
                 Spacer(minLength: 8)
                 TextField("", value: $cfg.customCfg, format: .number)
-                    .textFieldStyle(.roundedBorder).frame(width: 70)
+                    .workspaceTextField().frame(width: 70)
                     .help(loc.t("Guía. Modelos turbo ~1, normales ~7. Según la ficha del modelo.",
                                 "Guidance. Turbo models ~1, normal ~7. Per the model's card."))
             }
@@ -1103,7 +1103,7 @@ struct ImageInstanceForm: View {
                     loc.t("Proporción libre como 21:9 (cine) o 3:2. El lado largo respeta el Tamaño base y la VRAM: no fija píxeles arbitrarios, así no cuelga la GPU.",
                           "Free ratio like 21:9 (cinema) or 3:2. The long edge respects the Base size and VRAM: it sets no arbitrary pixel count, so the GPU can't hang.")) {
                     TextField("21:9", text: $cfg.customAspect)
-                        .textFieldStyle(.roundedBorder).frame(width: 96)
+                        .workspaceTextField().frame(width: 96)
                 }
             }
             row(loc.t("Tamaño base", "Base size"),
@@ -1154,7 +1154,7 @@ struct ImageInstanceForm: View {
             row(loc.t("Semilla", "Seed"),
                 loc.t("-1 = aleatoria. Fija un número para reproducir la misma imagen; distinta semilla = variación.",
                       "-1 = random. Set a number to reproduce the same image; a different seed = a variation.")) {
-                TextField("", value: $cfg.seed, format: .number).textFieldStyle(.roundedBorder).frame(width: 96)
+                TextField("", value: $cfg.seed, format: .number).workspaceTextField().frame(width: 96)
             }
             row(loc.t("Formato", "Format"),
                 loc.t("JPG pesa mucho menos; PNG es sin pérdida.",

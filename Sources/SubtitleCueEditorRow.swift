@@ -87,6 +87,9 @@ struct SubtitleCueEditorRow: View {
     private func cueText(_ text: String, translated: Bool, label: String) -> some View {
         if editing {
             TextField(label, text: translated ? $translatedDraft : $originalDraft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .padding(8)
+                .workspaceFieldSurface()
                 .lineLimit(1...5)
                 .onSubmit {
                     studio.updateCue(id: original.id,

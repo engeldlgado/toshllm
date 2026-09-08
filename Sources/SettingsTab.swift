@@ -381,30 +381,105 @@ struct SettingsView: View {
     private var settingsCategoryGuide: some View {
         let content = categoryGuideContent
         return ZStack {
-            WorkspaceHeroArtwork()
-                .opacity(0.42)
-            LinearGradient(colors: [WorkspaceStyle.surface.opacity(0.18),
-                                    WorkspaceStyle.surface.opacity(0.90),
-                                    WorkspaceStyle.surface],
+            SettingsGuideArtwork()
+            LinearGradient(colors: [Color.black.opacity(0.18),
+                                    Color.black.opacity(0.58),
+                                    WorkspaceStyle.surface.opacity(0.94)],
                            startPoint: .topTrailing, endPoint: .bottomLeading)
-            VStack(alignment: .leading, spacing: 16) {
-                SectionGlyph(systemName: content.icon)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(content.title).font(.headline)
+                .allowsHitTesting(false)
+            VStack(alignment: .leading, spacing: 14) {
+                Image(systemName: content.icon)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(Color.appAccent)
+                    .frame(width: 44, height: 44)
+                    .background(Color.appAccent.opacity(0.12),
+                                in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(Color.appAccent.opacity(0.22)))
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(content.title).font(.title2.weight(.bold))
                     Text(content.detail)
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 22)
-                Divider().opacity(0.55)
+                VStack(alignment: .leading, spacing: 13) {
+                    ForEach(categoryGuideItems) { item in
+                        HStack(alignment: .center, spacing: 11) {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Color.appAccent)
+                                .frame(width: 32, height: 32)
+                                .background(Color.appAccent.opacity(0.11),
+                                            in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title).font(.callout.weight(.semibold))
+                                Text(item.detail).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Spacer(minLength: 8)
                 Label(content.note, systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.black.opacity(0.16),
+                                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(WorkspaceStyle.border.opacity(0.8)))
             }
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .clipped()
+    }
+
+    private struct GuideItem: Identifiable {
+        let icon: String
+        let title: String
+        let detail: String
+        var id: String { title }
+    }
+
+    private var categoryGuideItems: [GuideItem] {
+        switch settingsDestination {
+        case .general:
+            return [
+                .init(icon: "desktopcomputer", title: loc.t("Interfaz", "Interface"), detail: loc.t("Idioma, color y barra de menús.", "Language, color, and menu bar.")),
+                .init(icon: "gearshape", title: loc.t("Inicio", "Startup"), detail: loc.t("Arranque, actualizaciones y comportamiento.", "Launch, updates, and behavior.")),
+                .init(icon: "shield", title: loc.t("Seguridad", "Security"), detail: loc.t("Protege tu API y tus datos.", "Keep your API and data safe.")),
+                .init(icon: "shippingbox", title: loc.t("Biblioteca", "Library"), detail: loc.t("Elige dónde viven tus modelos.", "Choose where your models live."))
+            ]
+        case .models:
+            return [
+                .init(icon: "doc.text", title: loc.t("Perfiles", "Profiles"), detail: loc.t("Guarda configuraciones para reutilizarlas.", "Save configurations for reuse.")),
+                .init(icon: "memorychip", title: "GPU", detail: loc.t("Elige una tarjeta o reparte el modelo.", "Choose a card or split the model.")),
+                .init(icon: "externaldrive", title: loc.t("Memoria", "Memory"), detail: loc.t("Controla VRAM, RAM y cachés.", "Control VRAM, RAM, and caches.")),
+                .init(icon: "point.3.connected.trianglepath.dotted", title: "Multi-GPU", detail: loc.t("Configura capas, tensores y enlaces.", "Configure layers, tensors, and links."))
+            ]
+        case .inference:
+            return [
+                .init(icon: "text.document", title: loc.t("Contexto", "Context"), detail: loc.t("Ajusta el límite de tokens.", "Set the token limit.")),
+                .init(icon: "square.stack.3d.up", title: loc.t("Caché KV", "KV cache"), detail: loc.t("Equilibra precisión y memoria.", "Balance precision and memory.")),
+                .init(icon: "bolt", title: "Flash Attention", detail: loc.t("Usa el kernel adecuado para tu GPU.", "Use the right kernel for your GPU.")),
+                .init(icon: "arrow.triangle.branch", title: loc.t("Concurrencia", "Concurrency"), detail: loc.t("Controla solicitudes y plantilla de chat.", "Control requests and chat templates."))
+            ]
+        case .speech:
+            return [
+                .init(icon: "mic", title: loc.t("Entrada", "Input"), detail: loc.t("Elige dictado de Apple o Whisper.", "Choose Apple Dictation or Whisper.")),
+                .init(icon: "waveform", title: "Whisper.cpp", detail: loc.t("Transcripción acelerada por GPU.", "GPU-accelerated transcription.")),
+                .init(icon: "arrow.down.circle", title: loc.t("Carga", "Loading"), detail: loc.t("Bajo demanda o siempre disponible.", "On demand or always available.")),
+                .init(icon: "lock.shield", title: loc.t("Privacidad", "Privacy"), detail: loc.t("Audio y texto permanecen en tu Mac.", "Audio and text stay on your Mac."))
+            ]
+        case .advanced:
+            return [
+                .init(icon: "server.rack", title: loc.t("Motor", "Engine"), detail: loc.t("Usa el integrado o uno externo.", "Use the bundled or an external engine.")),
+                .init(icon: "network", title: loc.t("API y red", "API & network"), detail: loc.t("Configura puerto y acceso local.", "Configure port and local access.")),
+                .init(icon: "point.3.connected.trianglepath.dotted", title: "Embeddings", detail: loc.t("Expone servicios para clientes RAG.", "Expose services for RAG clients.")),
+                .init(icon: "terminal", title: loc.t("Diagnóstico", "Diagnostics"), detail: loc.t("Argumentos adicionales y registro.", "Additional arguments and logs."))
+            ]
+        }
     }
 
     private var categoryPanelContent: (icon: String, title: String, subtitle: String) {
@@ -504,55 +579,105 @@ struct SettingsView: View {
         }
     }
 
-    private var settingsForm: some View {
-        Form {
-            if settingsDestination == .general {
-            Section {
-                Picker(loc.t("Idioma", "Language"), selection: $loc.language) {
-                    ForEach(loc.availableLanguages, id: \.self) { code in
-                        Text(loc.displayName(code)).tag(code)
+    @ViewBuilder private var settingsForm: some View {
+        if settingsDestination == .general {
+            generalSettings
+        } else {
+            otherSettingsForm
+        }
+    }
+
+    /// General is laid out by hand: the platform form cannot give rows a glyph or
+    /// the workspace field surfaces the rest of the window uses.
+    private var generalSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsRowGroup {
+                    SettingsRow(icon: "globe",
+                                title: loc.t("Idioma", "Language"),
+                                help: loc.t("Idioma de toda la interfaz de ToshLLM. Los idiomas aportados por la comunidad aparecen automáticamente.",
+                                            "Language for the entire ToshLLM interface. Community-contributed languages appear here automatically.")) {
+                        ToshDropdown(selection: $loc.language, options: loc.availableLanguages.map {
+                            .init(value: $0, title: loc.displayName($0))
+                        })
                     }
-                }
-                .infoTip(loc.t("Idioma de toda la interfaz de ToshLLM. Los idiomas aportados por la comunidad aparecen automáticamente.",
-                            "Language for the entire ToshLLM interface. Community-contributed languages appear here automatically."))
-                Picker(selection: $appAccentRaw) {
-                    ForEach(AppTheme.palette, id: \.key) { entry in
-                        Label {
-                            Text(AppTheme.label(entry.key, loc))
-                        } icon: {
-                            Image(nsImage: AppTheme.swatchImage(entry.color))
+                    SettingsRowDivider()
+                    SettingsRow(icon: "paintpalette",
+                                title: loc.t("Color de la app", "App color"),
+                                help: loc.t("Color de marca de botones, iconos y controles de toda la app. Independiente del color de acento del sistema.",
+                                            "Brand color for buttons, icons and controls across the app. Independent from the system accent color.")) {
+                        ToshDropdown(selection: $appAccentRaw, options: AppTheme.palette.map {
+                            .init(value: $0.key, title: AppTheme.label($0.key, loc),
+                                  swatch: AppTheme.swatchImage($0.color))
+                        })
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(icon: "menubar.rectangle",
+                                title: loc.t("Icono en la barra de menús", "Menu bar icon"),
+                                help: loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
+                                            "Shows a menu bar icon with server status and quick controls, even with the window closed.")) {
+                        Toggle("", isOn: $menuBarIcon).labelsHidden()
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(icon: "memorychip",
+                                title: loc.t("VRAM de la GPU en la barra", "GPU VRAM in the menu bar"),
+                                help: loc.t("Dónde mostrar el uso de VRAM: junto al icono (porcentaje agregado) o como barras por GPU al abrir el panel.",
+                                            "Where to show VRAM usage: next to the icon (aggregate percentage) or as per-GPU bars when the panel opens.")) {
+                        ToshDropdown(selection: $menuBarGPU, options: [
+                            .init(value: "off", title: loc.t("Oculta", "Hidden")),
+                            .init(value: "icon", title: loc.t("En el icono", "In the icon")),
+                            .init(value: "panel", title: loc.t("En el panel", "In the panel"))
+                        ])
+                        .disabled(!menuBarIcon)
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(icon: "play.circle",
+                                title: loc.t("Iniciar servidor al abrir la app", "Start server on app launch"),
+                                help: loc.t("Arranca automáticamente el último modelo configurado al abrir ToshLLM.",
+                                            "Automatically starts the last configured model when ToshLLM opens.")) {
+                        Toggle("", isOn: $autoStart).labelsHidden()
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(icon: "arrow.triangle.2.circlepath",
+                                title: loc.t("Buscar actualizaciones cada hora", "Check for updates hourly"),
+                                help: loc.t("Además del chequeo al abrir la app, revisa en silencio cada hora mientras esté abierta y enciende el aviso de actualización si hay versión nueva. No descarga ni instala nada solo.",
+                                            "Besides the launch check, silently re-checks every hour while the app is open and lights the update badge when a new version exists. Never downloads or installs on its own.")) {
+                        Toggle("", isOn: $updateAutoCheck).labelsHidden()
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(icon: "key",
+                                title: loc.t("Proteger la API con clave", "Protect the API with a key"),
+                                help: loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
+                                            "Generates a key (stored in the Keychain) required on every request. The in-app chat uses it automatically; useful on shared Macs.")) {
+                        Toggle("", isOn: $apiKeyEnabled).labelsHidden()
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(icon: "network",
+                                title: loc.t("Descubrible en red local", "Discoverable on local network"),
+                                help: loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour como 'ToshLLM API'. Actívalo solo en redes confiables; reinicia el servidor si está activo.",
+                                            "Makes the server listen on the local network and advertises it with Bonjour as 'ToshLLM API'. Enable only on trusted networks; restarts the server if it's running.")) {
+                        Toggle("", isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
+                            .labelsHidden()
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(icon: "folder",
+                                title: loc.t("Carpeta de modelos", "Models folder"),
+                                subtitle: models.directory.path,
+                                help: loc.t("Carpeta donde se descargan, buscan y eliminan los modelos .gguf. Por defecto es ~/models. Al cambiarla, los modelos ya descargados en la carpeta anterior no se mueven; muévelos a mano si los quieres en la nueva.",
+                                            "Folder where .gguf models are downloaded, scanned and deleted. Defaults to ~/models. When you change it, models already in the old folder are not moved; move them yourself if you want them in the new one.")) {
+                        HStack(spacing: 8) {
+                            if !modelsDir.isEmpty {
+                                Button(loc.t("Restablecer", "Reset")) {
+                                    modelsDir = ""
+                                    models.refresh()
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            Button(loc.t("Cambiar…", "Change…")) { chooseModelsFolder() }
                         }
-                        .tag(entry.key)
                     }
-                } label: {
-                    Text(loc.t("Color de la app", "App color"))
                 }
-                .infoTip(loc.t("Color de marca de botones, iconos y controles de toda la app. Independiente del color de acento del sistema.",
-                            "Brand color for buttons, icons and controls across the app. Independent from the system accent color."))
-                Toggle(loc.t("Icono en la barra de menús", "Menu bar icon"), isOn: $menuBarIcon)
-                    .infoTip(loc.t("Muestra un icono en la barra de menús con el estado del servidor y controles rápidos, aunque la ventana esté cerrada.",
-                                "Shows a menu bar icon with server status and quick controls, even with the window closed."))
-                Picker(loc.t("VRAM de la GPU en la barra", "GPU VRAM in the menu bar"), selection: $menuBarGPU) {
-                    Text(loc.t("Oculta", "Hidden")).tag("off")
-                    Text(loc.t("En el icono", "In the icon")).tag("icon")
-                    Text(loc.t("En el panel", "In the panel")).tag("panel")
-                }
-                .disabled(!menuBarIcon)
-                .infoTip(loc.t("Dónde mostrar el uso de VRAM: junto al icono (porcentaje agregado) o como barras por GPU al abrir el panel.",
-                            "Where to show VRAM usage: next to the icon (aggregate percentage) or as per-GPU bars when the panel opens."))
-                Toggle(loc.t("Iniciar servidor al abrir la app", "Start server on app launch"), isOn: $autoStart)
-                    .infoTip(loc.t("Arranca automáticamente el último modelo configurado al abrir ToshLLM.",
-                                "Automatically starts the last configured model when ToshLLM opens."))
-                Toggle(loc.t("Buscar actualizaciones cada hora", "Check for updates hourly"), isOn: $updateAutoCheck)
-                    .infoTip(loc.t("Además del chequeo al abrir la app, revisa en silencio cada hora mientras esté abierta y enciende el aviso de actualización si hay versión nueva. No descarga ni instala nada solo.",
-                                "Besides the launch check, silently re-checks every hour while the app is open and lights the update badge when a new version exists. Never downloads or installs on its own."))
-                Toggle(loc.t("Proteger la API con clave", "Protect the API with a key"), isOn: $apiKeyEnabled)
-                    .infoTip(loc.t("Genera una clave (guardada en el Llavero) que el servidor exige a cada petición. El chat de la app la usa automáticamente; útil en Macs compartidas.",
-                                "Generates a key (stored in the Keychain) required on every request. The in-app chat uses it automatically; useful on shared Macs."))
-                Toggle(loc.t("Descubrible en red local", "Discoverable on local network"),
-                       isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
-                    .infoTip(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour como 'ToshLLM API'. Actívalo solo en redes confiables; reinicia el servidor si está activo.",
-                                "Makes the server listen on the local network and advertises it with Bonjour as 'ToshLLM API'. Enable only on trusted networks; restarts the server if it's running."))
+
                 if localNetworkDiscovery && !apiKeyEnabled {
                     Label(loc.t("Recomendado: activa 'Proteger la API con clave' antes de exponer el servidor en la red local.",
                                 "Recommended: enable 'Protect the API with a key' before exposing the server on the local network."),
@@ -578,27 +703,14 @@ struct SettingsView: View {
                     }
                     .font(.caption)
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(loc.t("Carpeta de modelos", "Models folder"))
-                        Spacer()
-                        Button(loc.t("Cambiar…", "Change…")) { chooseModelsFolder() }
-                        if !modelsDir.isEmpty {
-                            Button(loc.t("Restablecer", "Reset")) {
-                                modelsDir = ""
-                                models.refresh()
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
-                    .infoTip(loc.t("Carpeta donde se descargan, buscan y eliminan los modelos .gguf. Por defecto es ~/models. Al cambiarla, los modelos ya descargados en la carpeta anterior no se mueven; muévelos a mano si los quieres en la nueva.",
-                                "Folder where .gguf models are downloaded, scanned and deleted. Defaults to ~/models. When you change it, models already in the old folder are not moved; move them yourself if you want them in the new one."))
-                    Text(models.directory.path)
-                        .font(.caption).foregroundStyle(.secondary)
-                        .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
-                }
             }
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+    }
+
+    private var otherSettingsForm: some View {
+        Form {
 
             if settingsDestination == .speech {
             SpeechModelsSettingsSection()
@@ -607,9 +719,10 @@ struct SettingsView: View {
             if settingsDestination == .models {
             Section(loc.t("Perfiles", "Profiles")) {
                 HStack {
-                    TextField(loc.t("Nombre del perfil (p. ej. Código, Chat rápido)",
-                                    "Profile name (e.g. Coding, Quick chat)"), text: $profileName)
-                        .textFieldStyle(.roundedBorder)
+                    DeferredSettingsTextField(
+                        loc.t("Nombre del perfil (p. ej. Código, Chat rápido)",
+                              "Profile name (e.g. Coding, Quick chat)"),
+                        text: $profileName)
                     Button(loc.t("Guardar actual", "Save current")) {
                         profileStore.saveCurrent(name: profileName.trimmingCharacters(in: .whitespaces))
                         profileName = ""
@@ -639,12 +752,13 @@ struct SettingsView: View {
             }
 
             Section(loc.t("GPU y memoria", "GPU & memory")) {
-                Picker(loc.t("GPU (Metal)", "GPU (Metal)"), selection: $gpuIndex) {
-                    Text(loc.t("Predeterminada", "Default")).tag(-1)
-                    ForEach(hardware.gpus) { g in
-                        Text("\(g.index): \(g.name) · \(g.vramGB) GB").tag(g.index)
-                    }
+                LabeledContent(loc.t("GPU (Metal)", "GPU (Metal)")) {
+                    ToshDropdown(selection: $gpuIndex, options: [.init(value: -1, title: loc.t("Predeterminada", "Default"))]
+                        + hardware.gpus.map {
+                            .init(value: $0.index, title: "\($0.index): \($0.name) · \($0.vramGB) GB")
+                        }, width: 220)
                 }
+                .settingsGlyph("cpu")
                 .infoTip(loc.t("Qué GPU usa el servidor si tienes varias. 'Predeterminada' deja elegir a Metal.",
                             "Which GPU the server uses if you have several. 'Default' lets Metal choose."))
                 .disabled(multiGPU)
@@ -654,13 +768,15 @@ struct SettingsView: View {
                         .onChange(of: multiGPU) { _, on in
                             if !on { gpuListCSV = "" }
                         }
+                        .settingsGlyph("square.split.2x1")
                         .infoTip(loc.t("Reparte el modelo entre todas las GPUs detectadas (--split-mode) en vez de usar una sola, p. ej. para cargar un modelo que no cabe en una. Anula el selector de arriba.",
                                     "Splits the model across all detected GPUs (--split-mode) instead of using one, e.g. to load a model that doesn't fit on a single card. Overrides the picker above."))
                     if multiGPU && hardware.gpus.count > 2 && splitSelection.count < 2 {
-                        Picker(loc.t("GPUs a usar", "GPUs to use"), selection: $multiGPUCount) {
-                            Text(loc.t("Todas (%@)", "All (%@)", "\(hardware.gpus.count)")).tag(0)
-                            ForEach(2...hardware.gpus.count, id: \.self) { Text("\($0)").tag($0) }
+                        LabeledContent(loc.t("GPUs a usar", "GPUs to use")) {
+                            ToshDropdown(selection: $multiGPUCount, options: [.init(value: 0, title: loc.t("Todas (%@)", "All (%@)", "\(hardware.gpus.count)"))]
+                                + (2...hardware.gpus.count).map { .init(value: $0, title: "\($0)") }, width: 130)
                         }
+                        .settingsGlyph("number")
                         .infoTip(loc.t("Cuántas GPUs repartir. Más GPUs = prompt más rápido; menos GPUs = generación más rápida (menos sincronización entre tarjetas).",
                                     "How many GPUs to split across. More GPUs = faster prompt; fewer GPUs = faster generation (less cross-card sync)."))
                     }
@@ -695,29 +811,33 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                             .labelStyle(.titleAndIcon)
-                        Picker(loc.t("Cómo repartirlo", "How to split it"), selection: $splitMode) {
-                            Text(loc.t("Por capas", "By layers")).tag("layer")
-                            Text(loc.t("Por tensores", "By tensors")).tag("tensor")
+                        LabeledContent(loc.t("Cómo repartirlo", "How to split it")) {
+                            ToshDropdown(selection: $splitMode, options: [
+                                .init(value: "layer", title: loc.t("Por capas", "By layers")),
+                                .init(value: "tensor", title: loc.t("Por tensores", "By tensors"))
+                            ])
                         }
+                        .settingsGlyph("square.split.2x2")
                         .infoTip(loc.t("Por capas: cada GPU se queda unas capas enteras y trabajan por turnos. Es lo más rápido generando y lo más probado. Por tensores: las dos GPUs trabajan a la vez dentro de cada capa, así que leen el prompt mucho más rápido, pero se ponen de acuerdo en cada capa y esa espera cuesta lo mismo por token generado: en un modelo pequeño se come la ganancia, y en uno grande (decenas de GB) sale ganando en las dos cosas.",
                                     "By layers: each GPU keeps whole layers and they take turns. Fastest at generating, and the best tested. By tensors: both GPUs work at once inside every layer, so they read the prompt much faster, but they sync up on every layer and that wait costs the same on each generated token: on a small model it eats the gain, on a big one (tens of GB) it wins at both."))
                         if splitMode == "tensor" && !splitGroupOptions.isEmpty {
-                            Picker(loc.t("TensorMesh: ancho de la malla", "TensorMesh: mesh width"), selection: $splitGroupSize) {
-                                Text(loc.t("Sin malla", "No mesh")).tag(0)
-                                ForEach(splitGroupOptions, id: \.self) { n in
-                                    Text("\(n)").tag(n)
-                                }
+                            LabeledContent(loc.t("TensorMesh: ancho de la malla", "TensorMesh: mesh width")) {
+                                ToshDropdown(selection: $splitGroupSize, options: [.init(value: 0, title: loc.t("Sin malla", "No mesh"))]
+                                    + splitGroupOptions.map { .init(value: $0, title: "\($0)") }, width: 130)
                             }
+                            .settingsGlyph("grid")
                             .infoTip(loc.t("Organiza las GPUs en una malla: dentro de cada fila el modelo se corta por tensores y entre filas por capas. Así cada tarjeta solo espera a las de su fila, no a todas, que es lo que hunde la generación al pasar de dos tarjetas a cuatro. Medido en cuatro Radeon Pro W6800X con un 8B: con filas de dos genera 57 contra 30 con las cuatro juntas. Lo que consigue es usar cuatro tarjetas a la velocidad de dos, no ir más rápido que dos: una fila de dos rinde igual que un reparto por tensores con solo dos tarjetas (1624 contra 1667 leyendo, 57 contra 58 generando). Sirve para ganar la VRAM de cuatro sin pagar su lentitud.",
                                         "Arranges the GPUs as a mesh: inside a row the model is cut by tensors, between rows by layers. Each card then waits only for the others in its row instead of all of them, which is what sinks generation when going from two cards to four. Measured on four Radeon Pro W6800X with an 8B: rows of two generate 57 against 30 with all four together. What it buys is four cards at the speed of two, not more speed than two: a row of two matches a plain tensor split on two cards (1624 against 1667 reading, 57 against 58 generating). Use it to get the VRAM of four without their slowdown."))
                         }
                         Toggle(loc.t("Traspaso rápido entre GPUs",
                                      "Fast hand-off between GPUs"), isOn: $mgpuEvents)
+                            .settingsGlyph("bolt.horizontal")
                             .infoTip(loc.t("Pasa los datos de una GPU a otra sin vaciar las colas de las dos en cada copia. Repartiendo por capas no cambia nada; repartiendo por tensores es la mayor parte de la velocidad de generación (medido +59% en dos GPUs). Apágalo solo para diagnosticar.",
                                         "Hands data from one GPU to the other without draining both queues on every copy. It changes nothing when splitting by layers; when splitting by tensors it is most of the generation speed (measured +59% on two GPUs). Turn it off only to diagnose."))
                         Toggle(loc.t("Infinity Fabric Link entre GPUs",
                                      "Infinity Fabric Link between GPUs"), isOn: $mgpuPeer)
                             .disabled(!hasPeerLink)
+                            .settingsGlyph("link")
                             .infoTip(loc.t("Si dos GPUs del reparto comparten un puente Infinity Fabric (las dos mitades de una W6800X Duo o Vega II Duo), copia las activaciones directamente entre ellas en vez de pasar por la RAM del sistema. Repartiendo por tensores acelera la lectura del prompt un 16% sin costar generación, medido en cuatro Radeon Pro Vega II. Necesita el traspaso rápido encendido: por sí solo baja la generación a la mitad. Si el equipo no lo soporta, la copia vuelve sola al método seguro.",
                                         "If two GPUs in the split share an Infinity Fabric bridge (the two halves of a W6800X Duo or Vega II Duo, or two cards joined by the external bridge), copies activations directly between them instead of through system RAM. When splitting by tensors it reads the prompt 16% faster at no cost to generation, measured on four Radeon Pro Vega II. It needs the fast hand-off on: on its own it halves generation. If the machine doesn't support it, the copy falls back to the safe path on its own."))
                         if !hasPeerLink {
@@ -746,11 +866,13 @@ struct SettingsView: View {
                 if ServerController.hasExternalGPU() {
                     Toggle(loc.t("Pesos residentes en VRAM (recomendado para eGPU)",
                                  "VRAM-resident weights (recommended for eGPU)"), isOn: $forcePrivateBuffers)
+                        .settingsGlyph("internaldrive")
                         .infoTip(loc.t("El motor Metal usa memoria compartida (del sistema) en GPUs externas, lo que transfiere los pesos por Thunderbolt en cada operación y desploma la velocidad (~0.8 t/s). Esto fuerza buffers privados en VRAM. Si fijas una eGPU en el selector de arriba ya se activa solo; usa esto cuando dejas 'Predeterminada' y macOS elige la eGPU.",
                                     "The Metal backend uses shared (system) memory on external GPUs, which streams weights over Thunderbolt every op and tanks speed (~0.8 t/s). This forces private VRAM buffers. If you pin an eGPU in the picker above it's automatic; use this when you leave 'Default' and macOS picks the eGPU."))
                 }
                 Stepper(loc.t("Capas en GPU (-ngl): %@", "GPU layers (-ngl): %@", "\(ngl)"),
                         value: $ngl, in: 0...99)
+                    .settingsGlyph("square.3.layers.3d")
                     .infoTip(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM); bájalo solo si la VRAM se desborda.",
                                 "How many model layers go to the GPU. 99 = all (recommended if they fit in VRAM); lower it only if VRAM overflows."))
                 let modelIsMoE = modelPath.isEmpty || ServerSettings.modelIsMoE(at: modelPath)
@@ -761,6 +883,7 @@ struct SettingsView: View {
                             ncmoe = v
                             ServerSettings.rememberNcmoe(v, forModel: modelPath)
                         }), in: 0...99)
+                    .settingsGlyph("cpu")
                     .infoTip(loc.t("Solo modelos MoE: capas cuyos 'expertos' viven en RAM y los procesa el CPU. Se ajusta solo al elegir modelo; súbelo si la VRAM se satura, bájalo si te sobra. (Deshabilitado en modelos densos, donde el motor lo ignora.)",
                                 "MoE models only: layers whose 'experts' live in RAM and run on the CPU. Auto-set when picking a model; raise if VRAM saturates, lower if you have headroom. (Disabled on dense models, where the engine ignores it.)"))
                     .disabled(!modelIsMoE || dynamicMoeIsEffective)
@@ -768,13 +891,17 @@ struct SettingsView: View {
                     Toggle(loc.t("Dynamic MoE (experimental)", "Dynamic MoE (experimental)"),
                            isOn: $dynamicMoe)
                         .disabled(!modelIsMoE)
+                        .settingsGlyph("wand.and.stars")
                         .infoTip(loc.t("Mantiene todos los expertos cuantizados en RAM y una caché pequeña en VRAM. Está apagado por defecto. Al activarlo usa ncmoe 1, mlock y el override Metal requeridos; desactívalo para volver al camino normal con el mismo binario.",
                                     "Keeps all quantized experts in RAM and a small cache in VRAM. It is off by default. Enabling it applies ncmoe 1, mlock, and the required Metal override; turn it off to return to the normal path with the same binary."))
                     if dynamicMoe {
-                        Picker(loc.t("Política", "Policy"), selection: $dynamicMoePolicy) {
-                            Text(loc.t("Automática", "Automatic")).tag("auto")
-                            Text(loc.t("Caché manual", "Manual cache")).tag("cache")
+                        LabeledContent(loc.t("Política", "Policy")) {
+                            ToshDropdown(selection: $dynamicMoePolicy, options: [
+                                .init(value: "auto", title: loc.t("Automática", "Automatic")),
+                                .init(value: "cache", title: loc.t("Caché manual", "Manual cache"))
+                            ])
                         }
+                        .settingsGlyph("slider.horizontal.3")
                         .infoTip(loc.t("Auto reutiliza el perfil medido por Optimizar dMoE. Puede elegir la ruta directa cuando el banco cabe o la ruta dividida para modelos grandes. Sin perfil usa una configuración conservadora; Caché manual permite experimentar.",
                                     "Auto reuses the profile measured by Optimize dMoE. It can choose the direct route when the bank fits or the split route for large models. Without a profile it uses a conservative configuration; Manual cache remains available for experiments."))
                         if dynamicMoePolicy == "auto" {
@@ -792,11 +919,10 @@ struct SettingsView: View {
                                 HStack {
                                     Text(loc.t("Ranuras en VRAM (K, de %@)", "VRAM slots (K, of %@)", "\(info.expertCount)"))
                                     Spacer()
-                                    TextField("", value: dynamicMoeSlotBinding,
-                                              format: .number.grouping(.never))
-                                        .textFieldStyle(.roundedBorder)
-                                        .frame(width: 64)
-                                        .multilineTextAlignment(.trailing)
+                                    DeferredSettingsIntegerField(
+                                        value: dynamicMoeSlotBinding,
+                                        in: info.activeExpertCount...info.expertCount,
+                                        width: 64)
                                     Stepper("", value: dynamicMoeSlotBinding,
                                             in: info.activeExpertCount...info.expertCount)
                                         .labelsHidden()
@@ -821,12 +947,12 @@ struct SettingsView: View {
                                       systemImage: "exclamationmark.triangle.fill")
                                     .font(.caption).foregroundStyle(.orange)
                             }
-                            Picker(loc.t("Prefetch de Dynamic MoE", "Dynamic MoE prefetch"),
-                                   selection: $dynamicMoePrefetch) {
-                                ForEach([0, 1, 2, 3, 4, 5, 6, 8, 12, 16], id: \.self) { value in
-                                    Text("\(value)").tag(value)
-                                }
+                            LabeledContent(loc.t("Prefetch de Dynamic MoE", "Dynamic MoE prefetch")) {
+                                ToshDropdown(selection: $dynamicMoePrefetch, options: [0, 1, 2, 3, 4, 5, 6, 8, 12, 16].map {
+                                    .init(value: $0, title: "\($0)")
+                                }, width: 130)
                             }
+                            .settingsGlyph("arrow.down.circle")
                             .infoTip(loc.t("Número de bancos anticipados durante el prompt. Cuatro fue el óptimo medido para K8; los demás valores sirven para repetir el barrido desde Benchmarks.",
                                         "Number of banks prefetched during prompt processing. Four was the measured optimum for K8; the other values let you repeat the sweep from Benchmarks."))
                         }
@@ -841,31 +967,37 @@ struct SettingsView: View {
                 }
                 Stepper(loc.t("Reserva de VRAM: %@ MB", "VRAM reserve: %@ MB", "\(vramReserve)"),
                         value: $vramReserve, in: 256...4096, step: 256)
+                    .settingsGlyph("gauge.with.needle")
                     .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. 1024 MB es un margen seguro.",
                                 "VRAM left free for the system and UI. 1024 MB is a safe margin."))
                 Toggle(loc.t("Copiar pesos a VRAM (--no-mmap, recomendado)",
                              "Copy weights to VRAM (--no-mmap, recommended)"), isOn: $noMmap)
+                    .settingsGlyph("arrow.down.to.line")
                     .infoTip(loc.t("Copia los pesos a la VRAM en vez de leerlos por PCIe en cada token. En GPU dedicada multiplica la velocidad (~6×). Desactívalo solo para depurar.",
                                 "Copies weights into VRAM instead of reading them over PCIe per token. On a discrete GPU this multiplies speed (~6×). Disable only for debugging."))
                 Toggle(loc.t("Bloquear modelo en RAM (--mlock)", "Lock model in RAM (--mlock)"), isOn: $mlock)
+                    .settingsGlyph("lock")
                     .infoTip(loc.t("Impide que macOS mueva el modelo a swap o lo comprima: estabilidad de velocidad constante. Útil con modelos MoE grandes; requiere RAM suficiente.",
                                 "Prevents macOS from swapping or compressing the model: consistent speed. Useful with large MoE models; requires enough free RAM."))
-                Picker(loc.t("Caché de prompts en RAM", "Prompt cache in RAM"), selection: $cacheRAM) {
-                    Text(loc.t("Desactivada", "Disabled")).tag(0)
-                    Text("1 GB").tag(1024)
-                    Text("2 GB").tag(2048)
-                    Text("4 GB").tag(4096)
-                    Text("8 GB").tag(8192)
+                LabeledContent(loc.t("Caché de prompts en RAM", "Prompt cache in RAM")) {
+                    ToshDropdown(selection: $cacheRAM, options: [
+                        .init(value: 0, title: loc.t("Desactivada", "Disabled")),
+                        .init(value: 1024, title: "1 GB"), .init(value: 2048, title: "2 GB"),
+                        .init(value: 4096, title: "4 GB"), .init(value: 8192, title: "8 GB")
+                    ])
                 }
+                .settingsGlyph("memorychip")
                 .infoTip(loc.t("RAM extra donde el motor recuerda conversaciones recientes para no reprocesarlas al cambiar de chat o cliente. Sin límite el motor usa hasta 8 GB: junto a un modelo grande lleva al equipo a swap y la velocidad se degrada con el uso. 2 GB es un buen equilibrio.",
                             "Extra RAM where the engine remembers recent conversations to avoid reprocessing them when switching chats or clients. Unlimited, the engine uses up to 8 GB: next to a large model that pushes the machine into swap and speed degrades over time. 2 GB is a good balance."))
 
-                Picker(loc.t("Tope de tokens por imagen", "Image token cap"), selection: $imageMaxTokens) {
-                    Text(loc.t("Del modelo", "Model's")).tag(0)
-                    Text("4096").tag(4096)
-                    Text("2048").tag(2048)
-                    Text("1024").tag(1024)
+                LabeledContent(loc.t("Tope de tokens por imagen", "Image token cap")) {
+                    ToshDropdown(selection: $imageMaxTokens, options: [
+                        .init(value: 0, title: loc.t("Del modelo", "Model's")),
+                        .init(value: 4096, title: "4096"), .init(value: 2048, title: "2048"),
+                        .init(value: 1024, title: "1024")
+                    ])
                 }
+                .settingsGlyph("photo")
                 .infoTip(loc.t("Cuántos tokens puede ocupar una imagen en los modelos con visión. Por defecto manda el modelo. La memoria del codificador de visión crece con el cuadrado de este número, así que bajarlo la recorta mucho, a costa de detalle: es lo que permite cargar un modelo con visión en tarjetas donde ese buffer no cabe.",
                             "How many tokens one image may take on vision models. The model decides by default. The vision encoder's memory grows with the square of this number, so lowering it cuts memory a lot at the cost of detail: it is what makes a vision model load on cards where that buffer does not fit."))
             }
@@ -873,11 +1005,12 @@ struct SettingsView: View {
 
             if settingsDestination == .inference {
             Section {
-                Picker(loc.t("Contexto", "Context"), selection: $ctx) {
-                    ForEach([4096, 8192, 16384, 32768, 65536, 131072, 262144], id: \.self) { n in
-                        Text("\(n / 1024)k tokens").tag(n)
-                    }
+                LabeledContent(loc.t("Contexto", "Context")) {
+                    ToshDropdown(selection: $ctx, options: [4096, 8192, 16384, 32768, 65536, 131072, 262144].map {
+                        .init(value: $0, title: "\($0 / 1024)k tokens")
+                    })
                 }
+                .settingsGlyph("text.alignleft")
                 .infoTip(loc.t("Tamaño máximo de la conversación en tokens. Más contexto = más memoria para el KV cache (mira los tipos de abajo para compensar).",
                             "Maximum conversation size in tokens. More context = more KV cache memory (see the types below to compensate)."))
                 if ctx >= 131072 {
@@ -887,17 +1020,19 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Picker(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)"), selection: $cacheTypeK) {
-                    ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
+                LabeledContent(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)")) {
+                    ToshDropdown(selection: $cacheTypeK, options: availableKVTypes.map { .init(value: $0, title: $0) }, width: 120)
                 }
+                .settingsGlyph("key")
                 .infoTip(amdFlashActive
                     ? loc.t("Cuantización de las claves del KV cache. Con el kernel Flash Attention AMD, cualquier combinación estándar (f16/q8_0/q4_0 en claves y valores) corre en GPU a velocidad plena, incluida la ruta rápida de prompts largos. Para máximo ahorro de memoria: q8_0/q8_0 (mitad, recomendado) o q4_0/q4_0 (un cuarto); para comprimir solo las claves manteniendo los valores en precisión completa: q8_0/f16 o q4_0/f16.",
                             "Quantization for KV cache keys. With the AMD Flash Attention kernel, any standard combination (f16/q8_0/q4_0 for keys and values) runs on the GPU at full speed, including the fast long-prompt route. For maximum memory savings: q8_0/q8_0 (half, recommended) or q4_0/q4_0 (a quarter); to compress only the keys while keeping values at full precision: q8_0/f16 or q4_0/f16.")
                     : loc.t("Cuantización de las claves del KV cache. En GPU AMD (sin el kernel Flash Attention AMD): q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado), dejando los valores en f16; q4_0 a un cuarto.",
                             "Quantization for KV cache keys. On AMD GPUs (without the AMD Flash Attention kernel): q8_0 halves key memory at almost no speed cost (recommended), keeping values at f16; q4_0 quarters it."))
-                Picker(loc.t("KV cache: valores (-ctv)", "KV cache: values (-ctv)"), selection: $cacheTypeV) {
-                    ForEach(availableKVTypes, id: \.self) { Text($0).tag($0) }
+                LabeledContent(loc.t("KV cache: valores (-ctv)", "KV cache: values (-ctv)")) {
+                    ToshDropdown(selection: $cacheTypeV, options: availableKVTypes.map { .init(value: $0, title: $0) }, width: 120)
                 }
+                .settingsGlyph("number.square")
                 .infoTip(amdFlashActive
                     ? loc.t("Cuantización de los valores del KV cache. Con el kernel Flash Attention AMD cualquier valor estándar (f16/q8_0/q4_0) corre en GPU a velocidad plena, incluida la ruta rápida de prompts largos. Cuantizar los valores ahorra más memoria; dejarlos en f16 (con claves cuantizadas) conserva más calidad... ambos van igual de rápidos.",
                             "Quantization for KV cache values. With the AMD Flash Attention kernel any standard value type (f16/q8_0/q4_0) runs on the GPU at full speed, including the fast long-prompt route. Quantizing values saves more memory; keeping them at f16 (with quantized keys) preserves more quality... both run equally fast.")
@@ -954,16 +1089,18 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Toggle(loc.t("Reuso de caché de prompt (rápido)", "Prompt cache reuse (fast)"), isOn: $cacheReuse)
+                    .settingsGlyph("arrow.triangle.2.circlepath")
                     .infoTip(loc.t("Cuando reescribes/editas el prompt (asistentes de código) o se recorta el razonamiento entre turnos, reutiliza la caché desplazándola en vez de reprocesar — mucho más rápido. Es una aproximación: la salida sigue coherente pero puede variar levemente frente a un cálculo exacto. Desactívalo si quieres resultados idénticos y reproducibles.",
                                 "When the prompt is rewritten/edited (coding assistants) or the reasoning is trimmed between turns, it reuses the cache by shifting it instead of reprocessing — much faster. It's an approximation: output stays coherent but can differ slightly from an exact recompute. Turn it off for identical, reproducible results."))
                 Stepper(loc.t("Hilos de CPU: %@", "CPU threads: %@", "\(threads)"),
                         value: $threads, in: 1...max(1, hardware.logicalCores))
+                    .settingsGlyph("cpu")
                     .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Tu equipo tiene %@ hilos; los núcleos físicos (%@) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
                                 "Threads for the CPU side (MoE experts, tokenization). Your machine has %@ threads; physical cores (%@) are usually optimal; more threads won't help if RAM bandwidth is the limit.",
                                 String(hardware.logicalCores), String(hardware.physicalCores)))
                     .onAppear { if threads > hardware.logicalCores { threads = max(1, hardware.logicalCores) } }
-                Picker(loc.t("Flash Attention estándar (CPU)", "Standard Flash Attention (CPU)"), selection: $flashAttn) {
-                    Text("auto").tag("auto"); Text("on").tag("on"); Text("off").tag("off")
+                LabeledContent(loc.t("Flash Attention estándar (CPU)", "Standard Flash Attention (CPU)")) {
+                    ToshDropdown(selection: $flashAttn, options: ["auto", "on", "off"].map { .init(value: $0, title: $0) }, width: 120)
                 }
                 .disabled(amdFlashActive || kvNeedsFlashAttention)
                 .infoTip(loc.t("Ruta Flash Attention estándar de llama.cpp. En GPU AMD cae en CPU; se fuerza a 'on' cuando el KV está cuantizado. Para atención en GPU usa el kernel AMD de abajo.",
@@ -996,25 +1133,27 @@ struct SettingsView: View {
                         .infoTip(loc.t("Para modelos MoE con expertos en RAM (ncmoe > 0): sube los pesos de expertos a la GPU por una cola Metal paralela, solapando la subida con el cómputo. De 1.8× a 4.4× de velocidad de prompt medida (35B, gemma-4-26B, gpt-oss) sin costo de generación; el primer prompt tras cargar el modelo es algo más lento mientras se preparan los buffers.",
                                     "For MoE models with experts in RAM (ncmoe > 0): uploads expert weights to the GPU through a parallel Metal queue, overlapping the upload with compute. Measured 1.8×-4.4× prompt speed (35B, gemma-4-26B, gpt-oss) at no generation cost; the first prompt after loading the model is slightly slower while buffers warm up."))
                     if routerMode || ServerSettings.modelIsMoE(at: modelPath) {
-                        Picker(loc.t("Micro-lote del prompt", "Prompt micro-batch"), selection: $ubatch) {
-                            ForEach(ServerSettings.ubatchOptions, id: \.self) { n in
-                                Text(ServerSettings.ubatchLabel(n, loc: loc)).tag(n)
-                            }
+                        LabeledContent(loc.t("Micro-lote del prompt", "Prompt micro-batch")) {
+                            ToshDropdown(selection: $ubatch, options: ServerSettings.ubatchOptions.map {
+                                .init(value: $0, title: ServerSettings.ubatchLabel($0, loc: loc))
+                            })
                         }
                         .infoTip(loc.t("Cuántos tokens de prompt procesa la GPU de una vez. Solo aporta en modelos MoE, y cuánto depende de dónde estén los expertos. Con expertos en CPU cada micro-lote los sube por el bus, así que uno más grande paga ese viaje menos veces: medido en una Radeon RX 6700 XT, leer 2048 tokens pasa de 475 a 886 tokens por segundo en un 35B, y de 546 a 1133 en un 30B. Con el modelo entero en la tarjeta la mejora ronda el 10%, igual con una GPU que repartido entre varias. La generación no cambia en ningún caso. A cambio ocupa VRAM, cerca de 0.5 GB por cada 512 tokens de micro-lote, así que si vas justo tendrás que bajar los expertos en CPU para compensar.",
                                     "How many prompt tokens the GPU processes at once. It only helps MoE models, and how much depends on where the experts live. With experts on the CPU every micro-batch uploads them over the bus, so a larger one pays that trip fewer times: measured on a Radeon RX 6700 XT, reading 2048 tokens goes from 475 to 886 tokens per second on a 35B, and from 546 to 1133 on a 30B. With the model whole on the card the gain is around 10%, the same on one GPU as split across several. Generation is unchanged in every case. In exchange it takes VRAM, around 0.5 GB per 512 tokens of micro-batch, so if you are tight you will have to lower the experts on CPU to make room."))
                     }
                 }
-                Picker(loc.t("Peticiones simultáneas", "Concurrent requests"), selection: $parallelSlots) {
-                    Text(loc.t("1 (recomendado)", "1 (recommended)")).tag(1)
-                    Text("2").tag(2)
-                    Text("4").tag(4)
-                    Text("Auto").tag(0)
+                LabeledContent(loc.t("Peticiones simultáneas", "Concurrent requests")) {
+                    ToshDropdown(selection: $parallelSlots, options: [
+                        .init(value: 1, title: loc.t("1 (recomendado)", "1 (recommended)")),
+                        .init(value: 2, title: "2"), .init(value: 4, title: "4"),
+                        .init(value: 0, title: "Auto")
+                    ])
                 }
                 .infoTip(loc.t("Cuántas peticiones procesa el motor a la vez. Con 1, las peticiones hacen cola en vez de competir por la GPU, y un prompt enorme interrumpido por el timeout de un cliente (VS Code) se retoma donde iba al reintentar. Sube el valor solo si varios clientes usan el servidor a la vez.",
                             "How many requests the engine processes at once. With 1, requests queue instead of competing for the GPU, and a huge prompt interrupted by a client timeout (VS Code) resumes where it was on retry. Raise it only if several clients use the server at the same time."))
                 Toggle(loc.t("Razonamiento como texto (clientes externos)",
                              "Reasoning as plain text (external clients)"), isOn: $reasoningInline)
+                    .settingsGlyph("brain")
                     .infoTip(loc.t("Envía el razonamiento dentro de la respuesta (<think>…) en vez del campo aparte reasoning_content. Actívalo si un cliente externo (VS Code, plugins) se queda 'pensando' sin mostrar nada. El chat de la app entiende ambos formatos.",
                                 "Sends the reasoning inline in the response (<think>…) instead of the separate reasoning_content field. Enable it if an external client (VS Code, plugins) appears stuck 'thinking' showing nothing. The in-app chat understands both formats."))
                 Toggle(loc.t("Plantilla de chat (--jinja)", "Chat template (--jinja)"), isOn: $jinja)
@@ -1025,12 +1164,17 @@ struct SettingsView: View {
 
             if settingsDestination == .advanced {
             Section {
-                TextField(loc.t("Puerto", "Port"), value: $port, format: .number.grouping(.never))
+                LabeledContent(loc.t("Puerto", "Port")) {
+                    DeferredSettingsIntegerField(value: $port, in: 1...65_535, width: 120)
+                }
+                    .settingsGlyph("number")
                     .infoTip(loc.t("Puerto local del servidor (API compatible con OpenAI y chat web).",
                                 "Local server port (OpenAI-compatible API and web chat)."))
-                Picker(loc.t("Motor de inferencia", "Inference engine"), selection: engineSelection) {
-                    Text(loc.t("Integrado (oficial)", "Bundled (official)")).tag("bundled")
-                    Text(loc.t("Externo…", "External…")).tag("custom")
+                LabeledContent(loc.t("Motor de inferencia", "Inference engine")) {
+                    ToshDropdown(selection: engineSelection, options: [
+                        .init(value: "bundled", title: loc.t("Integrado (oficial)", "Bundled (official)")),
+                        .init(value: "custom", title: loc.t("Externo…", "External…"))
+                    ])
                 }
                 .infoTip(loc.t("Integrado: llama.cpp oficial con los kernels Metal para AMD, recomendado. Externo: cualquier llama-server tuyo.",
                             "Bundled: official llama.cpp with the Metal kernels for AMD, recommended. External: any llama-server of yours."))
@@ -1052,17 +1196,20 @@ struct SettingsView: View {
                     }
                 }
                 if engineSelection.wrappedValue == "custom" {
-                    TextField(loc.t("Ruta del llama-server externo", "External llama-server path"), text: $serverBinary)
-                        .font(.system(.caption, design: .monospaced))
+                    DeferredSettingsTextField(
+                        loc.t("Ruta del llama-server externo", "External llama-server path"),
+                        text: $serverBinary, monospaced: true)
                         .infoTip(loc.t("Ruta a un llama-server alternativo para probar otras builds.",
                                     "Path to an alternative llama-server to test other builds."))
                 }
                 Toggle(loc.t("Servidor de embeddings (--embeddings)",
                              "Embeddings server (--embeddings)"), isOn: $embeddings)
+                    .settingsGlyph("point.3.connected.trianglepath.dotted")
                     .infoTip(loc.t("Sirve /v1/embeddings para clientes RAG (p. ej. Obsidian Copilot), que sin esto reciben un error 501. Ojo: llama-server dedica el proceso a embeddings, así que actívalo con un modelo de embeddings; para chatear a la vez, añade un segundo servidor en Inicio con esta opción.",
                                 "Serves /v1/embeddings for RAG clients (e.g. Obsidian Copilot), which otherwise get a 501 error. Note: llama-server dedicates the process to embeddings, so enable it with an embedding model; to keep chatting, add a second server on Home with this option."))
-                TextField(loc.t("Argumentos extra", "Extra arguments"), text: $extraArgs)
-                    .font(.system(.caption, design: .monospaced))
+                DeferredSettingsTextField(
+                    loc.t("Argumentos extra", "Extra arguments"),
+                    text: $extraArgs, monospaced: true)
                     .infoTip(loc.t("Argumentos adicionales de llama-server separados por espacios. Un token CLAVE=VALOR se aplica como variable de entorno. Para mostrar la configuración privada de Dynamic MoE escribe TOSH_MOE_UI=1. En tarjetas GCN/Vega con texto corrupto, GGML_METAL_WAVE64_SAFEMODE=1 fuerza la ruta segura.",
                                 "Additional llama-server arguments, space-separated. A KEY=VALUE token is applied as an environment variable. To reveal the private Dynamic MoE settings, enter TOSH_MOE_UI=1. On GCN/Vega cards with corrupted text, GGML_METAL_WAVE64_SAFEMODE=1 forces the safe path."))
                 Text(loc.t("Los cambios se aplican al reiniciar el servidor.",
@@ -1083,8 +1230,32 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .toggleStyle(SettingsCompactToggleStyle())
         .scrollContentBackground(.hidden)
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// One small shared bitmap backs every guide. At 720 px and about 15 KB it
+/// decodes once and avoids five category-specific image allocations.
+private struct SettingsGuideArtwork: View {
+    private static let image: NSImage? = Bundle.main
+        .url(forResource: "settings-guide", withExtension: "jpg")
+        .flatMap(NSImage.init(contentsOf:))
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let image = Self.image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+            } else {
+                WorkspaceStyle.surface
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -1114,9 +1285,9 @@ struct InfoTip: View {
                 if inside {
                     let work = DispatchWorkItem { shown = true }
                     hoverWork = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)  // short hover
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
                 } else if !pinned {
-                    shown = false
+                    scheduleDismiss(after: 0.35)
                 }
             }
             .onTapGesture {
@@ -1131,18 +1302,30 @@ struct InfoTip: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(14)
                     .frame(width: 320)
+                    .onHover { inside in
+                        hoverWork?.cancel()
+                        if !inside && !pinned { scheduleDismiss(after: 0.2) }
+                    }
                     .onDisappear { pinned = false }
             }
             .accessibilityLabel(Text(text))
+    }
+
+    private func scheduleDismiss(after delay: TimeInterval) {
+        hoverWork?.cancel()
+        let work = DispatchWorkItem {
+            if !pinned { shown = false }
+        }
+        hoverWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 }
 
 extension View {
     /// Drop-in replacement for `.help(_:)` that shows a styled, pinnable popover via
-    /// an ⓘ button at the trailing edge of the row. In Settings the ⓘ is always
-    /// visible; pass `revealOnHover: true` elsewhere so the ⓘ only fades in while the
-    /// row is hovered (the styled tooltip without a permanent icon cluttering the UI).
-    func infoTip(_ text: String, revealOnHover: Bool = false) -> some View {
+    /// an ⓘ button at the trailing edge of the row. The ⓘ fades in while the row is
+    /// hovered; pass `revealOnHover: false` where it must stay visible at rest.
+    func infoTip(_ text: String, revealOnHover: Bool = true) -> some View {
         InfoTipRow(text: text, revealOnHover: revealOnHover) { self }
     }
 }

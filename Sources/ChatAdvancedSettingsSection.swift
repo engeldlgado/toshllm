@@ -99,7 +99,9 @@ struct ChatAdvancedSettingsSection: View {
                               text: $systemPrompt, axis: .vertical)
                         .font(.system(.body, design: .monospaced))
                         .lineLimit(5...10)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .padding(8)
+                        .workspaceFieldSurface()
                     Text(loc.t("Se usa cuando la conversación y el proyecto no tienen un prompt propio.",
                                "Used when neither the conversation nor its project has its own prompt."))
                         .font(.caption).foregroundStyle(.secondary)
@@ -130,7 +132,7 @@ struct ChatAdvancedSettingsSection: View {
                                             "Random seed. -1 picks a new one each time; set a number for reproducible answers with the same parameters."))
                     TextField(loc.t("Orden de muestreo", "Sampler order"), text: $samplers,
                               prompt: Text("top_k;typ_p;top_p;min_p;temperature"))
-                        .textFieldStyle(.roundedBorder)
+                        .workspaceTextField()
                         .infoTip(loc.t("Orden en que se aplican los muestreadores, separados por ';'. Déjalo vacío para el orden por defecto del motor.",
                                        "Order the samplers are applied in, separated by ';'. Leave empty for the engine's default order."))
                     Toggle(loc.t("Muestreo en backend", "Backend sampling"), isOn: $backendSampling)
@@ -222,7 +224,7 @@ struct ChatAdvancedSettingsSection: View {
                                systemImage: "lock.rotation", action: ChatToolsService.revokeAllPermissions)
                         TextField(loc.t("Aislar herramientas en", "Isolate tools in"),
                                   text: $toolsRuntime, prompt: Text(verbatim: "docker:alpine"))
-                            .textFieldStyle(.roundedBorder)
+                            .workspaceTextField()
                             .infoTip(loc.t("Ejecuta las herramientas fuera de tu Mac, en un contenedor o por SSH, para que no toquen tus archivos. Formatos: docker:imagen, podman:imagen, docker-container:id, ssh:destino. Vacío las ejecuta aquí mismo.",
                                            "Runs the tools off your Mac, in a container or over SSH, so they cannot touch your files. Formats: docker:image, podman:image, docker-container:id, ssh:target. Empty runs them right here."))
                     }
@@ -237,13 +239,13 @@ struct ChatAdvancedSettingsSection: View {
                     if memoryToolsEnabled {
                         TextField(loc.t("Enviar lo archivado a", "Send archived turns to"),
                                   text: $archiveHookURL, prompt: Text(verbatim: "https://127.0.0.1:8000/hook"))
-                            .textFieldStyle(.roundedBorder)
+                            .workspaceTextField()
                             .autocorrectionDisabled()
                             .infoTip(loc.t("Cada vez que el modelo archiva turnos, se envían a esta dirección en JSON para que un índice externo los guarde. Vacío lo desactiva. Los envíos se guardan en disco y se reintentan, así que un receptor caído no pierde nada ni frena el chat.",
                                            "Every time the model archives turns they are posted to this address as JSON, so an external index can keep them. Empty turns it off. Deliveries are stored on disk and retried, so a receiver that is down loses nothing and does not hold up the chat."))
                         TextField(loc.t("Token del receptor (opcional)", "Receiver token (optional)"),
                                   text: $archiveHookSecret)
-                            .textFieldStyle(.roundedBorder)
+                            .workspaceTextField()
                             .autocorrectionDisabled()
                             .infoTip(loc.t("Se envía como Authorization: Bearer en cada entrega, para receptores que lo pidan.",
                                            "Sent as Authorization: Bearer with each delivery, for receivers that ask for one."))
@@ -260,7 +262,7 @@ struct ChatAdvancedSettingsSection: View {
                     LabeledContent(loc.t("Tamaño máximo de imagen (MP)", "Maximum image size (MP)")) {
                         HStack(spacing: 8) {
                             TextField("1", value: $maxImageMegapixels, format: .number)
-                                .textFieldStyle(.roundedBorder)
+                                .workspaceTextField()
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 90)
                                 .onChange(of: maxImageMegapixels) { _, value in
@@ -289,7 +291,9 @@ struct ChatAdvancedSettingsSection: View {
                               text: $customJSON, axis: .vertical)
                         .font(.system(.body, design: .monospaced))
                         .lineLimit(5...10)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .padding(8)
+                        .workspaceFieldSurface()
                     if customJSONInvalid {
                         Label(loc.t("JSON inválido: debe ser un objeto {…}. Se ignorará hasta corregirlo.",
                                     "Invalid JSON: it must be an object {…}. It will be ignored until fixed."),
@@ -371,7 +375,7 @@ struct ChatAdvancedSettingsSection: View {
         LabeledContent(title) {
             HStack(spacing: 10) {
                 TextField(title, value: value, format: .number)
-                    .textFieldStyle(.roundedBorder)
+                    .workspaceTextField()
                     .multilineTextAlignment(.trailing)
                     .frame(width: 100)
                 InfoTip(text: help)

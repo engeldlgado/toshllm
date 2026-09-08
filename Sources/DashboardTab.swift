@@ -280,7 +280,7 @@ struct DashboardView: View {
                     Spacer(minLength: 8)
                     TextField("", value: $port, format: .number.grouping(.never))
                         .multilineTextAlignment(.trailing).frame(width: 72)
-                        .textFieldStyle(.roundedBorder)
+                        .workspaceTextField()
                         .disabled(serverBusy)
                 }
                 .help(loc.t("Puerto local del servidor (API y chat web).",
@@ -392,7 +392,7 @@ struct DashboardView: View {
                     Text(loc.t("Argumentos extra", "Extra arguments")).font(.callout)
                     Spacer(minLength: 8)
                     TextField("", text: $extraArgs, prompt: Text(verbatim: "--no-warmup -np 2"))
-                        .textFieldStyle(.roundedBorder)
+                        .workspaceTextField()
                         .font(.system(.callout, design: .monospaced))
                         .autocorrectionDisabled()
                         .frame(maxWidth: 220)
@@ -866,7 +866,7 @@ struct AddedServerCard: View {
                 Spacer(minLength: 8)
                 TextField("", value: bind(\.port, 8080), format: .number.grouping(.never))
                     .multilineTextAlignment(.trailing).frame(width: 72)
-                    .textFieldStyle(.roundedBorder).disabled(busy)
+                    .workspaceTextField().disabled(busy)
             }
             HStack(spacing: 8) {
                 Image(systemName: "doc.plaintext").frame(width: 18).foregroundStyle(.secondary)
@@ -982,7 +982,7 @@ struct AddedServerCard: View {
                         get: { isPinned(Profile.Pin.extraArgs) ? (c.profile?.extraArgs ?? gExtraArgs) : gExtraArgs },
                         set: { c.profile?.extraArgs = $0; pin(Profile.Pin.extraArgs); manager.persist() }),
                         prompt: Text(verbatim: "--no-warmup -np 2"))
-                        .textFieldStyle(.roundedBorder)
+                        .workspaceTextField()
                         .font(.system(.callout, design: .monospaced))
                         .autocorrectionDisabled()
                         .frame(maxWidth: 220)

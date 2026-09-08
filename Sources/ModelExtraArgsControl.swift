@@ -12,7 +12,7 @@ struct ModelExtraArgsControl: View {
         TextField(loc.t("Argumentos", "Arguments"),
                   text: $text,
                   prompt: Text(verbatim: "-md /path/head.gguf --spec-type draft-mtp"))
-            .textFieldStyle(.roundedBorder)
+            .workspaceTextField()
             .font(.system(.body, design: .monospaced))
             .autocorrectionDisabled()
             .accessibilityLabel(loc.t("Argumentos extra para este modelo",
