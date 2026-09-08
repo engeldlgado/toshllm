@@ -1,0 +1,197 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 6bd4de46e..f17e81f5b 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3000,17 +3000,22 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+         }
+ 
+         // the wave64 q6_K variant keeps four rows per simdgroup, so the row split does not apply
+         // keep the gate in sync with the pipeline picker in ggml_metal_library_get_pipeline_mul_mv_ext
+         static const bool ext_w64_disable = getenv("TOSH_EXT_W64_DISABLE") != nullptr;
+         const bool ext_w64_q6k = !ext_w64_disable &&
+                                  props_dev->simd_width == 64 && op->src[0]->type == GGML_TYPE_Q6_K;
+ 
+-        const int16_t r0ptg = ext_w64_q6k ? 4*nsg : nypsg*nsg*nr0; // num src0 rows per threadgroup
++        // from six src1 rows the eight-column variant reads the weights once instead of twice
++        if (ext_w64_q6k && ne11 >= 6) {
++            r1ptg = 8;
++        }
++
++        const int16_t r0ptg = ext_w64_q6k ? (r1ptg == 8 ? 2 : 4)*nsg : nypsg*nsg*nr0; // num src0 rows per threadgroup
+ 
+         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_ext(lib, op, nsg, nxpsg, r1ptg, nr0);
+ 
+         ggml_metal_kargs_mul_mv_ext args = {
+             /*.ne00  =*/ ne00,
+             /*.ne01  =*/ ne01,
+             /*.ne02  =*/ ne02,
+             /*.nb00  =*/ nb00,
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index 68d4ae1f5..086eefbb6 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -4560,16 +4560,164 @@ kernel void kernel_mul_mv_ext_q6_K_f32_w64_disp(
+ }
+ 
+ typedef decltype(kernel_mul_mv_ext_q6_K_f32_w64_disp<2, 4, true>) mul_mv_ext_q6_K_w64_t;
+ 
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2_w64")]] kernel mul_mv_ext_q6_K_w64_t kernel_mul_mv_ext_q6_K_f32_w64_disp<2, 4, true>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_3_w64")]] kernel mul_mv_ext_q6_K_w64_t kernel_mul_mv_ext_q6_K_f32_w64_disp<3, 4, false>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_4_w64")]] kernel mul_mv_ext_q6_K_w64_t kernel_mul_mv_ext_q6_K_f32_w64_disp<4, 4, false>;
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5_w64")]] kernel mul_mv_ext_q6_K_w64_t kernel_mul_mv_ext_q6_K_f32_w64_disp<5, 4, true>;
++// eight src1 rows in one weight pass: dequantized block values live across both
++// four-column activation windows, so the register cost stays near the four-column
++// kernel while the second group no longer re-reads the weights. Two rows per lane.
++[[host_name("kernel_mul_mv_ext_q6_K_f32_r1_8_w64")]]
++kernel void kernel_mul_mv_ext_q6_K_f32_w64x8(
++        constant ggml_metal_kargs_mul_mv_ext & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        uint3   tgpig[[threadgroup_position_in_grid]],
++        ushort  tiisg[[thread_index_in_simdgroup]],
++        ushort  sgitg[[simdgroup_index_in_threadgroup]],
++        ushort  sgptg[[threads_per_simdgroup]]) {
++    constexpr short nr0  = 2;
++    constexpr short r1ptg = 8;
++    constexpr short cch  = 4;   // columns per activation window
++
++    const short NSG = FC_mul_mv_nsg;
++
++    constexpr uint8_t kmask1 = 0x03;
++    constexpr uint8_t kmask2 = 0x0C;
++    constexpr uint8_t kmask3 = 0x30;
++    constexpr uint8_t kmask4 = 0xC0;
++
++    const int nb = args.ne00/QK_K;
++
++    const int r0  = tgpig.x;
++    const int i11 = tgpig.y*r1ptg;
++    const int im  = tgpig.z;
++
++    const int first_row = (r0*NSG + sgitg)*nr0;
++
++    const uint i12 = im%FC_mul_mv_ne12;
++    const uint i13 = im/FC_mul_mv_ne12;
++
++    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
++    const uint64_t offset1 =        i11*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
++
++    device const block_q6_K * x  = (device const block_q6_K *) (src0 + offset0);
++    device const char       * yb = src1 + offset1;
++
++    float sumf[r1ptg][nr0];
++
++#pragma unroll
++    for (short ir1 = 0; ir1 < r1ptg; ++ir1) {
++#pragma unroll
++        for (short row = 0; row < nr0; ++row) {
++            sumf[ir1][row] = 0.0f;
++        }
++    }
++
++    const short NG  = sgptg/16;
++    const short tid = tiisg%16;
++    const short ix  = tiisg/16;
++    const short ip  = tid/8;
++    const short il  = tid%8;
++    const short l0  = 4*il;
++    const short is  = 8*ip + l0/16;
++
++    const short y_offset   = 128*ip + l0;
++    const short q_offset_l =  64*ip + l0;
++    const short q_offset_h =  32*ip + l0;
++
++    for (int i = ix; i < nb; i += NG) {
++        // dequant the block for both rows before the activation windows load
++        float4 v4r[nr0][4];
++        float4 dscr[nr0];
++
++#pragma unroll
++        for (short row = 0; row < nr0; ++row) {
++            // rows past ne01 fall back to row zero; their sums are dropped at the store
++            device const block_q6_K * xr = (first_row + row < args.ne01)
++                ? (device const block_q6_K *) ((device const char *) x + row*args.nb01)
++                : (device const block_q6_K *) src0;
++
++            device const uint8_t * q1 = xr[i].ql + q_offset_l;
++            device const uint8_t * q2 = q1 + 32;
++            device const uint8_t * qh = xr[i].qh + q_offset_h;
++            device const int8_t  * sc = xr[i].scales + is;
++            device const half    * dh = &xr[i].d;
++
++            device const ushort * s1 = (device const ushort *) q1;
++            device const ushort * s2 = (device const ushort *) q2;
++            device const ushort * sh = (device const ushort *) qh;
++
++            const uint w1 = (uint) s1[0] | ((uint) s1[1] << 16);
++            const uint w2 = (uint) s2[0] | ((uint) s2[1] << 16);
++            const uint wh = (uint) sh[0] | ((uint) sh[1] << 16);
++
++            // int-to-float via the exponent trick: full-rate ops, exact for v in [0, 63]
++            FOR_UNROLL (short l = 0; l < 4; ++l) {
++                const uint8_t b1 = (uint8_t)(w1 >> (8*l));
++                const uint8_t b2 = (uint8_t)(w2 >> (8*l));
++                const uint8_t bh = (uint8_t)(wh >> (8*l));
++
++                v4r[row][0][l] = as_type<float>(0x4B000000u | (uint)((b1 & 0xF) | ((bh & kmask1) << 4))) - 8388640.0f;
++                v4r[row][1][l] = as_type<float>(0x4B000000u | (uint)((b2 & 0xF) | ((bh & kmask2) << 2))) - 8388640.0f;
++                v4r[row][2][l] = as_type<float>(0x4B000000u | (uint)((b1  >> 4) | ((bh & kmask3) << 0))) - 8388640.0f;
++                v4r[row][3][l] = as_type<float>(0x4B000000u | (uint)((b2  >> 4) | ((bh & kmask4) >> 2))) - 8388640.0f;
++            }
++
++            dscr[row] = (float) dh[0] * (float4) { (float) sc[0], (float) sc[2], (float) sc[4], (float) sc[6] };
++        }
++
++#pragma unroll
++        for (short c0 = 0; c0 < r1ptg; c0 += cch) {
++            float4 y4[cch][4];
++
++#pragma unroll
++            for (short ir1 = 0; ir1 < cch; ++ir1) {
++                device const float4 * yc = (device const float4 *) (yb + (i11 + c0 + ir1 < args.ne11 ? (uint64_t)(c0 + ir1)*args.nb11 : 0));
++                device const float4 * y  = yc + i*(QK_K/4) + y_offset/4;
++
++                FOR_UNROLL (short j = 0; j < 4; ++j) {
++                    y4[ir1][j] = y[j*8];
++                }
++            }
++
++#pragma unroll
++            for (short row = 0; row < nr0; ++row) {
++#pragma unroll
++                for (short ir1 = 0; ir1 < cch; ++ir1) {
++                    float4 sums = {0.f, 0.f, 0.f, 0.f};
++
++                    FOR_UNROLL (short j = 0; j < 4; ++j) {
++                        sums[j] = dot(y4[ir1][j], v4r[row][j]);
++                    }
++
++                    sumf[c0 + ir1][row] += sums[0]*dscr[row][0] + sums[1]*dscr[row][1] + sums[2]*dscr[row][2] + sums[3]*dscr[row][3];
++                }
++            }
++        }
++    }
++
++    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)i11*args.ne0;
++
++#pragma unroll
++    for (short ir1 = 0; ir1 < r1ptg; ++ir1) {
++#pragma unroll
++        for (short row = 0; row < nr0; ++row) {
++            const float sum_all = simd_sum(sumf[ir1][row]);
++            if (tiisg == 0 && i11 + ir1 < args.ne11 && first_row + row < args.ne01) {
++                dst_f32[ir1*args.ne0 + first_row + row] = sum_all;
++            }
++        }
++    }
++}
++
+ 
+ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q6_K, 256, dequantize_q6_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 1, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 2, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_3")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 1, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 2, block_q2_K, 256, dequantize_q2_K>;
+ template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q2_K, 256, dequantize_q2_K>;
