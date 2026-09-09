@@ -1,0 +1,22 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index f17e81f5b..6385bf9cc 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -15,16 +15,17 @@ static inline int tosh_moe_off_slot_for_id(int, int, int)  { return 0; }
+ static inline int tosh_moe_off_cold_for_id(int, int, int)  { return 0; }
+ static inline int tosh_moe_off_id_of_slot(int, int, int)   { return 0; }
+ static inline int tosh_moe_off_usage(int, int, int)        { return 0; }
+ static inline int tosh_moe_off_step(int, int, int)         { return 0; }
+ static inline int tosh_moe_off_n_indices(int, int, int)    { return 0; }
+ static inline int tosh_moe_off_evict(int, int, int)        { return 0; }
+ static inline int tosh_moe_off_src(int, int, int)          { return 0; }
+ static inline int tosh_moe_off_ids(int, int, int)          { return 0; }
++static inline int tosh_moe_off_active(int, int, int)       { return 0; }
+ #endif
+ 
+ #include "ggml.h"
+ #include "ggml-impl.h"
+ #include "ggml-backend-impl.h"
+ 
+ #include "ggml-metal-impl.h"
+ #include "ggml-metal-common.h"
