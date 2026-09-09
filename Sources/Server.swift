@@ -375,8 +375,12 @@ struct ServerSettings {
         // A compatible downloaded DFlash draft takes precedence over embedded MTP.
         // Speculation decodes several tokens at once and the expert cache only has slots
         // for one token's experts, so the two cannot run together.
+        // A tensor split cuts the output head across cards, and DFlash picks its candidates
+        // inside the graph, where a top-k over a row that no card holds whole aborts the engine.
+        // MTP samples elsewhere and is unaffected, so it still applies below.
+        let dflashUsable = !isSplitting || effectiveSplitMode != "tensor"
         if !effectiveDynamicMoe {
-            if let selection = dflashSelection(modelPath: modelPath, ncmoe: ncmoe) {
+            if dflashUsable, let selection = dflashSelection(modelPath: modelPath, ncmoe: ncmoe) {
                 // Quantize the draft's KV cache: it doubles KV pressure at high ctx, and
                 // q8_0 halves that footprint at no measurable quality cost for a draft.
                 args += ["-md", selection.draft, "--spec-type", "draft-dflash",
@@ -503,7 +507,8 @@ struct ServerSettings {
             if reasoningInline { lines.append("reasoning-format = none") }
             if effectiveDynamicMoe {
                 // see the speculation note in arguments(): it does not mix with the cache
-            } else if let selection = dflashSelection(modelPath: path, ncmoe: ncmoeByPath[path] ?? 0) {
+            } else if !isSplitting || effectiveSplitMode != "tensor",
+                      let selection = dflashSelection(modelPath: path, ncmoe: ncmoeByPath[path] ?? 0) {
                 lines.append("model-draft = \(selection.draft)")
                 lines.append("spec-type = draft-dflash")
                 lines.append("gpu-layers-draft = \(selection.ngld)")

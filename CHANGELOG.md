@@ -15,6 +15,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **A DFlash draft no longer takes the engine down when the model is split across cards by tensors.** That split cuts the output head between them, and DFlash picks its candidates inside the graph, where no card holds a whole row of them. It is left aside in that configuration, and a model with its own prediction head still uses one; splitting by layers is unaffected.
+
 - **Attention no longer crashes on 384- and 640-wide heads.** The engine offered those two sizes for every cache type but only built kernels for them alongside TurboQuant, so any other combination reached for a kernel that was not there and took the process down. They now fall back to the processor like other unsupported sizes. Contributed by [malzzz](https://github.com/malzzz) in [#96](https://github.com/engeldlgado/toshllm/pull/96).
 
 - **The engine builds again with its expert cache compiled out.** A call added with the compact expert assembly had no counterpart in the disabled configuration, so building the vendored tree with default options failed. Contributed by [malzzz](https://github.com/malzzz) in [#95](https://github.com/engeldlgado/toshllm/pull/95).
