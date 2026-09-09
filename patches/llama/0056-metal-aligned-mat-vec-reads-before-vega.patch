@@ -1,0 +1,753 @@
+From: ToshLLM
+Subject: [PATCH] 0056-metal-aligned-mat-vec-reads-before-vega
+
+A dword read off a multiple of four is undefined in Metal, and the GCN cards before
+Vega return the bytes of the aligned address instead, so the 22-, 34-, 98-, 110- and
+210-byte blocks turned models to nonsense on them. The mat-vec kernels take a pair of
+shorts on the cards that need it, chosen once at startup from the ISA target so every
+other card keeps its single read and its code.
+
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -1,11 +1,33 @@
+ #include "common.h"
+ #include "dequantize.h"
+ 
++constant bool  FC_mul_mv_align [[function_constant(FC_MUL_MV + 8)]];
++
++// The 22-, 34-, 98-, 110- and 210-byte blocks leave every other one two bytes short of a word,
++// and a dword read there is undefined on a card that requires natural alignment. The constant
++// picks the pair of shorts for those cards, so every other one keeps the single read.
++inline uint mv_ld_u32(device const void * p) {
++    if (FC_mul_mv_align) {
++        device const ushort * s = (device const ushort *) p;
++        return (uint) s[0] | ((uint) s[1] << 16);
++    }
++    return *(device const uint *) p;
++}
++
++inline uint2 mv_ld_u32x2(device const void * p) {
++    if (FC_mul_mv_align) {
++        device const ushort * s = (device const ushort *) p;
++        return uint2((uint) s[0] | ((uint) s[1] << 16), (uint) s[2] | ((uint) s[3] << 16));
++    }
++    return *(device const uint2 *) p;
++}
++
++
+ constant short FC_mul_mv_nw [[function_constant(FC_MUL_MV + 5)]];
+ // Q1_0 dot product: dot = d * (2 * Σ(yl[i] where bit=1) - sumy)
+ inline float block_q_n_dot_y(device const block_q1_0 * qb_curr, float sumy, thread float * yl, int il) {
+     device const uint8_t * qs = qb_curr->qs + il / 8;
+     const uint8_t b0 = qs[0];
+     const uint8_t b1 = qs[1];
+ 
+     float acc = 0.0f;
+@@ -128,17 +150,18 @@
+ // we assume that the yl's have been multiplied with the appropriate scale factor
+ // that corresponds to the missing bit shifts (1, 1/16, 1/256, 1/4096)
+ inline float block_q_n_dot_y(device const block_q5_0 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 3 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < 8; i+=2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + 8] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + 9] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -151,17 +174,18 @@
+ // that corresponds to the missing bit shifts (1, 1/16, 1/256, 1/4096)
+ inline float block_q_n_dot_y(device const block_q5_1 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+     float m = qb_curr->m;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 4 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < 8; i+=2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + 8] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + 9] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -209,17 +233,18 @@
+ 
+ template<short HALF>
+ inline float block_q_n_dot_y_l(device const block_q5_0 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 3 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < HALF; i += 2) {
+         acc[0] += yl[i + 0]        * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1]        * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + HALF + 0] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + HALF + 1] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -229,17 +254,18 @@
+ template<short HALF>
+ inline float block_q_n_dot_y_l(device const block_q5_1 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+     float m = qb_curr->m;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 4 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < HALF; i += 2) {
+         acc[0] += yl[i + 0]        * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1]        * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + HALF + 0] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + HALF + 1] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -768,17 +794,17 @@
+         for (short row = 0; row < NR0; row++) {
+             device const int8_t * qs = ax[row][ib].qs + il*NQ;
+ 
+             float sumq = 0.f;
+             // the eight quants this lane wants are contiguous and the block is 34 bytes, so a
+             // stride that keeps them word-aligned lets two loads replace eight
+             if (FC_mul_mv_row8 && (NQ % 4) == 0) {
+                 FOR_UNROLL (short w = 0; w < NQ/4; ++w) {
+-                    const uint b = *(device const uint *)(qs + 4*w);
++                    const uint b = mv_ld_u32(qs + 4*w);
+                     FOR_UNROLL (short i = 0; i < 4; ++i) {
+                         sumq += (float)(int8_t)(b >> (8*i)) * yl[4*w + i];
+                     }
+                 }
+             } else {
+                 FOR_UNROLL (short i = 0; i < NQ; ++i) {
+                     sumq += qs[i] * yl[i];
+                 }
+@@ -1454,17 +1480,17 @@
+ 
+         for (short row = 0; row < nr0; row++) {
+             float4 acc1 = {0.f, 0.f, 0.f, 0.f};
+             float4 acc2 = {0.f, 0.f, 0.f, 0.f};
+             // the four shorts this lane reads are contiguous, so an aligned stride turns
+             // them into two words
+             ushort qw[4];
+             if (FC_mul_mv_row8) {
+-                const uint2 t = *(device const uint2 *)qs;
++                const uint2 t = mv_ld_u32x2(qs);
+                 qw[0] = (ushort)(t.x); qw[1] = (ushort)(t.x >> 16);
+                 qw[2] = (ushort)(t.y); qw[3] = (ushort)(t.y >> 16);
+             } else {
+                 qw[0] = qs[0]; qw[1] = qs[1]; qw[2] = qs[2]; qw[3] = qs[3];
+             }
+             for (int i = 0; i < 8; i += 2) {
+                 acc1[0] += yl[i+ 0] * (qw[i/2] & 0x0003);
+                 acc2[0] += yl[i+ 1] * (qw[i/2] & 0x0300);
+@@ -1609,20 +1635,20 @@
+             scales16[0] = a[il+0];
+             scales16[1] = a[il+1];
+             scales32 = ((scales32 >> s_shift1) & 0x0f0f0f0f) | aux32;
+ 
+             // q and h are read four contiguous shorts at a time in each half, so an aligned
+             // stride turns each group into two words
+             ushort qa[4], qb[4], ha[4], hb[4];
+             if (FC_mul_mv_row8) {
+-                const uint2 tq = *(device const uint2 *)(q);
+-                const uint2 tQ = *(device const uint2 *)(q + 8);
+-                const uint2 th = *(device const uint2 *)(h);
+-                const uint2 tH = *(device const uint2 *)(h + 8);
++                const uint2 tq = mv_ld_u32x2(q);
++                const uint2 tQ = mv_ld_u32x2(q + 8);
++                const uint2 th = mv_ld_u32x2(h);
++                const uint2 tH = mv_ld_u32x2(h + 8);
+                 qa[0]=(ushort)tq.x; qa[1]=(ushort)(tq.x>>16); qa[2]=(ushort)tq.y; qa[3]=(ushort)(tq.y>>16);
+                 qb[0]=(ushort)tQ.x; qb[1]=(ushort)(tQ.x>>16); qb[2]=(ushort)tQ.y; qb[3]=(ushort)(tQ.y>>16);
+                 ha[0]=(ushort)th.x; ha[1]=(ushort)(th.x>>16); ha[2]=(ushort)th.y; ha[3]=(ushort)(th.y>>16);
+                 hb[0]=(ushort)tH.x; hb[1]=(ushort)(tH.x>>16); hb[2]=(ushort)tH.y; hb[3]=(ushort)(tH.y>>16);
+             } else {
+                 FOR_UNROLL (short t = 0; t < 4; ++t) { qa[t]=q[t]; qb[t]=q[t+8]; ha[t]=h[t]; hb[t]=h[t+8]; }
+             }
+ 
+@@ -2047,19 +2073,19 @@
+         for (short row = 0; row < nr0; ++row) {
+             float4 sums = {0.f, 0.f, 0.f, 0.f};
+ 
+             // the three arrays are read four consecutive bytes at a time. The block is 210 bytes,
+             // so every other one sits two bytes off a word and a card that requires natural
+             // alignment reads the wrong bytes there; two shorts land right on every block
+             uint w1 = 0, w2 = 0, wh = 0;
+             if (FC_mul_mv_row8) {
+-                w1 = *(device const uint *) q1;
+-                w2 = *(device const uint *) q2;
+-                wh = *(device const uint *) qh;
++                w1 = mv_ld_u32(q1);
++                w2 = mv_ld_u32(q2);
++                wh = mv_ld_u32(qh);
+             } else if (FC_mul_mv_row4) {
+                 device const ushort * s1 = (device const ushort *) q1;
+                 device const ushort * s2 = (device const ushort *) q2;
+                 device const ushort * sh = (device const ushort *) qh;
+ 
+                 w1 = (uint) s1[0] | ((uint) s1[1] << 16);
+                 w2 = (uint) s2[0] | ((uint) s2[1] << 16);
+                 wh = (uint) sh[0] | ((uint) sh[1] << 16);
+@@ -6650,17 +6676,17 @@
+         for (short row = 0; row < NR0; row++) {
+             device const int8_t * qs = ax[row][ib].qs + il*NQ;
+ 
+             float sumq = 0.f;
+             // the eight quants this lane wants are contiguous and the block is 34 bytes, so a
+             // stride that keeps them word-aligned lets two loads replace eight
+             if (FC_mul_mv_row8 && (NQ % 4) == 0) {
+                 FOR_UNROLL (short w = 0; w < NQ/4; ++w) {
+-                    const uint b = *(device const uint *)(qs + 4*w);
++                    const uint b = mv_ld_u32(qs + 4*w);
+                     FOR_UNROLL (short i = 0; i < 4; ++i) {
+                         sumq += (float)(int8_t)(b >> (8*i)) * yl[4*w + i];
+                     }
+                 }
+             } else {
+                 FOR_UNROLL (short i = 0; i < NQ; ++i) {
+                     sumq += qs[i] * yl[i];
+                 }
+@@ -6954,17 +6980,17 @@
+             float4 acc1 = {0.f, 0.f, 0.f, 0.f};
+             float4 acc2 = {0.f, 0.f, 0.f, 0.f};
+             // the four shorts this lane reads are contiguous, so an aligned stride turns
+             // them into two words
+             // the two-word read only lines up when a lane covers exactly four shorts
+             ushort qw[Q/2];
+             if (FC_mul_mv_row8 && Q == 8) {
+                 FOR_UNROLL (short j = 0; j < Q/2; j += 4) {
+-                    const uint2 t = *(device const uint2 *)(qs + j);
++                    const uint2 t = mv_ld_u32x2(qs + j);
+                     qw[j+0] = (ushort)(t.x); qw[j+1] = (ushort)(t.x >> 16);
+                     qw[j+2] = (ushort)(t.y); qw[j+3] = (ushort)(t.y >> 16);
+                 }
+             } else {
+                 FOR_UNROLL (short j = 0; j < Q/2; ++j) { qw[j] = qs[j]; }
+             }
+             for (int i = 0; i < Q; i += 2) {
+                 acc1[0] += yl[i+    0] * (qw[i/2] & 0x0003);
+@@ -7538,19 +7564,19 @@
+             float4 sums = {0.f, 0.f, 0.f, 0.f};
+ 
+             // the three arrays are read four consecutive bytes at a time. The block is 210 bytes,
+             // so every other one sits two bytes off a word and a card that requires natural
+             // alignment reads the wrong bytes there; two shorts land right on every block
+             FOR_UNROLL (short c = 0; c < V/4; ++c) {
+                 uint w1 = 0, w2 = 0, wh = 0;
+                 if (FC_mul_mv_row8) {
+-                    w1 = *(device const uint *) (q1 + 4*c);
+-                    w2 = *(device const uint *) (q2 + 4*c);
+-                    wh = *(device const uint *) (qh + 4*c);
++                    w1 = mv_ld_u32(q1 + 4*c);
++                    w2 = mv_ld_u32(q2 + 4*c);
++                    wh = mv_ld_u32(qh + 4*c);
+                 } else if (FC_mul_mv_row4) {
+                     device const ushort * s1 = (device const ushort *) (q1 + 4*c);
+                     device const ushort * s2 = (device const ushort *) (q2 + 4*c);
+                     device const ushort * sh = (device const ushort *) (qh + 4*c);
+ 
+                     w1 = (uint) s1[0] | ((uint) s1[1] << 16);
+                     w2 = (uint) s2[0] | ((uint) s2[1] << 16);
+                     wh = (uint) sh[0] | ((uint) sh[1] << 16);
+--- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+@@ -1,15 +1,37 @@
+ // Kernels written for a 64-wide simdgroup. They do not share a lane mapping with the ones in
+ // mul_mv.metal, so they live apart: a change here cannot reach the 32-lane path. Kernels that
+ // only differ by a function constant stay there, where each width already compiles its own
+ // pipeline from the same source.
+ 
+ #include "common.h"
+ #include "dequantize.h"
++
++constant bool  FC_mul_mv_align [[function_constant(FC_MUL_MV + 8)]];
++
++// The 22-, 34-, 98-, 110- and 210-byte blocks leave every other one two bytes short of a word,
++// and a dword read there is undefined on a card that requires natural alignment. The constant
++// picks the pair of shorts for those cards, so every other one keeps the single read.
++inline uint mv_ld_u32(device const void * p) {
++    if (FC_mul_mv_align) {
++        device const ushort * s = (device const ushort *) p;
++        return (uint) s[0] | ((uint) s[1] << 16);
++    }
++    return *(device const uint *) p;
++}
++
++inline uint2 mv_ld_u32x2(device const void * p) {
++    if (FC_mul_mv_align) {
++        device const ushort * s = (device const ushort *) p;
++        return uint2((uint) s[0] | ((uint) s[1] << 16), (uint) s[2] | ((uint) s[3] << 16));
++    }
++    return *(device const uint2 *) p;
++}
++
+ constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
+ constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
+ constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
+ constant short FC_mul_mv_r3   [[function_constant(FC_MUL_MV + 4)]];
+ constant short FC_mul_mv_nw   [[function_constant(FC_MUL_MV + 5)]];
+ constant bool  FC_mul_mv_row4 [[function_constant(FC_MUL_MV + 6)]];
+ constant bool  FC_mul_mv_row8 [[function_constant(FC_MUL_MV + 7)]];
+ 
+@@ -122,17 +144,18 @@
+         acc[3] += yl[i + 3] * (qs[i / 2] & 0xF000);
+     }
+ 
+     return d * (acc[0] + acc[1] + acc[2] + acc[3]) + sumy * m;
+ }
+ 
+ inline float block_q_n_dot_y_o(device const block_q5_0 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs = ((device const uint16_t *) qb_curr + 3 + il/2);
+ 
+     for (int i = 0; i < 2; i += 2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+@@ -141,17 +164,18 @@
+     }
+ 
+     return d * (sumy * -16.f + acc[0] + acc[1] + acc[2] + acc[3]);
+ }
+ 
+ inline float block_q_n_dot_y_o(device const block_q5_1 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+     float m = qb_curr->m;
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs = ((device const uint16_t *) qb_curr + 4 + il/2);
+ 
+     for (int i = 0; i < 2; i += 2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+@@ -200,17 +224,18 @@
+ }
+ 
+ inline float block_q_n_dot_y_q(device const block_q5_0 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 3 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < 4; i += 2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + 4] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + 5] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -219,17 +244,18 @@
+ 
+ inline float block_q_n_dot_y_q(device const block_q5_1 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+     float m = qb_curr->m;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 4 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < 4; i += 2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + 4] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + 5] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -272,17 +298,18 @@
+ }
+ 
+ inline float block_q_n_dot_y(device const block_q5_0 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 3 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < 8; i+=2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + 8] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + 9] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -291,17 +318,18 @@
+ 
+ inline float block_q_n_dot_y(device const block_q5_1 * qb_curr, float sumy, thread float * yl, int il) {
+     float d = qb_curr->d;
+     float m = qb_curr->m;
+ 
+     float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+ 
+     device const uint16_t * qs =  ((device const uint16_t *)qb_curr + 4 + il/2);
+-           const uint32_t   qh = *((device const uint32_t *)qb_curr->qh);
++           const uint32_t   qh = (uint32_t) ((device const ushort *) qb_curr->qh)[0] |
++                              ((uint32_t) ((device const ushort *) qb_curr->qh)[1] << 16);
+ 
+     for (int i = 0; i < 8; i+=2) {
+         acc[0] += yl[i + 0] * ((qs[i / 2] & 0x000F) | ((qh >> (i+0+il        ) << 4 ) & 0x00010));
+         acc[1] += yl[i + 1] * ((qs[i / 2] & 0x0F00) | ((qh >> (i+1+il        ) << 12) & 0x01000));
+         acc[2] += yl[i + 8] * ((qs[i / 2] & 0x00F0) | ((qh >> (i+0+il+QK5_0/2) << 8 ) & 0x00100));
+         acc[3] += yl[i + 9] * ((qs[i / 2] & 0xF000) | ((qh >> (i+1+il+QK5_0/2) << 16) & 0x10000));
+     }
+ 
+@@ -425,19 +453,19 @@
+ 
+         for (short row = 0; row < nr0; ++row) {
+             float4 sums = {0.f, 0.f, 0.f, 0.f};
+ 
+             // eight bytes land aligned whenever the row stride is a multiple of eight; the
+             // two-word fallback keeps the odd strides correct
+             uint2 w1, w2, wh;
+             if (FC_mul_mv_row8) {
+-                w1 = *(device const uint2 *) q1;
+-                w2 = *(device const uint2 *) q2;
+-                wh = *(device const uint2 *) qh;
++                w1 = mv_ld_u32x2(q1);
++                w2 = mv_ld_u32x2(q2);
++                wh = mv_ld_u32x2(qh);
+             } else {
+                 device const ushort * s1 = (device const ushort *) q1;
+                 device const ushort * s2 = (device const ushort *) q2;
+                 device const ushort * sh = (device const ushort *) qh;
+                 w1 = uint2((uint) s1[0] | ((uint) s1[1] << 16), (uint) s1[2] | ((uint) s1[3] << 16));
+                 w2 = uint2((uint) s2[0] | ((uint) s2[1] << 16), (uint) s2[2] | ((uint) s2[3] << 16));
+                 wh = uint2((uint) sh[0] | ((uint) sh[1] << 16), (uint) sh[2] | ((uint) sh[3] << 16));
+             }
+@@ -1465,19 +1493,19 @@
+         for (short row = 0; row < nr0; ++row) {
+             float4 sums = {0.f, 0.f, 0.f, 0.f};
+ 
+             // the block is 210 bytes, so every other one sits two bytes off a word and a
+             // card that requires natural alignment reads the wrong bytes; two shorts land
+             // right on every block, and one word is fine where the row stride allows it
+             uint w1 = 0, w2 = 0, wh = 0;
+             if (FC_mul_mv_row8) {
+-                w1 = *(device const uint *) q1;
+-                w2 = *(device const uint *) q2;
+-                wh = *(device const uint *) qh;
++                w1 = mv_ld_u32(q1);
++                w2 = mv_ld_u32(q2);
++                wh = mv_ld_u32(qh);
+             } else if (FC_mul_mv_row4) {
+                 device const ushort * s1 = (device const ushort *) q1;
+                 device const ushort * s2 = (device const ushort *) q2;
+                 device const ushort * sh = (device const ushort *) qh;
+ 
+                 w1 = (uint) s1[0] | ((uint) s1[1] << 16);
+                 w2 = (uint) s2[0] | ((uint) s2[1] << 16);
+                 wh = (uint) sh[0] | ((uint) sh[1] << 16);
+@@ -1590,22 +1618,22 @@
+             float4 sums = {0.f, 0.f, 0.f, 0.f};
+ 
+             // the block is 210 bytes, so every other one sits two bytes off a word and a
+             // card that requires natural alignment reads the wrong bytes; two shorts land
+             // right on every block, and one word is fine where the row stride allows it
+             uint w1 = 0, w2 = 0, wh = 0;
+             uint v1 = 0, v2 = 0, vh = 0;
+             if (FC_mul_mv_row8) {
+-                w1 = *(device const uint *) q1;
+-                w2 = *(device const uint *) q2;
+-                wh = *(device const uint *) qh;
+-                v1 = *(device const uint *)(q1 + 4);
+-                v2 = *(device const uint *)(q2 + 4);
+-                vh = *(device const uint *)(qh + 4);
++                w1 = mv_ld_u32(q1);
++                w2 = mv_ld_u32(q2);
++                wh = mv_ld_u32(qh);
++                v1 = mv_ld_u32(q1 + 4);
++                v2 = mv_ld_u32(q2 + 4);
++                vh = mv_ld_u32(qh + 4);
+             } else if (FC_mul_mv_row4) {
+                 device const ushort * s1 = (device const ushort *) q1;
+                 device const ushort * s2 = (device const ushort *) q2;
+                 device const ushort * sh = (device const ushort *) qh;
+ 
+                 w1 = (uint) s1[0] | ((uint) s1[1] << 16);
+                 w2 = (uint) s2[0] | ((uint) s2[1] << 16);
+                 wh = (uint) sh[0] | ((uint) sh[1] << 16);
+@@ -1840,17 +1868,17 @@
+         }
+ 
+         for (short row = 0; row < NR0; row++) {
+             device const int8_t * qs = ax[row][ib].qs + il*NQ;
+ 
+             float sumq = 0.f;
+ 
+             FOR_UNROLL (short w = 0; w < NQ/4; ++w) {
+-                const char4 q = as_type<char4>(*(device const uint *)(qs + 4*w));
++                const char4 q = as_type<char4>(mv_ld_u32(qs + 4*w));
+ 
+                 sumq += dot(float4(q.x, q.y, q.z, q.w), yl[w]);
+             }
+ 
+             sumf[row] += sumq*ax[row][ib].d;
+         }
+ 
+         yb += NSG*NBI*QK8_0;
+@@ -1926,17 +1954,17 @@
+         }
+ 
+         for (short row = 0; row < NR0; row++) {
+             device const int8_t * qs = ax[row][ib].qs + il*NQ;
+ 
+             float sumq = 0.f;
+ 
+             FOR_UNROLL (short w = 0; w < NQ/4; ++w) {
+-                const char4 q = as_type<char4>(*(device const uint *)(qs + 4*w));
++                const char4 q = as_type<char4>(mv_ld_u32(qs + 4*w));
+ 
+                 sumq += dot(float4(q.x, q.y, q.z, q.w), yl[w]);
+             }
+ 
+             sumf[row] += sumq*ax[row][ib].d;
+         }
+ 
+         yb += NSG*NBI*QK8_0;
+@@ -2584,18 +2612,18 @@
+         device const uint16_t * gas = (device const uint16_t *)(xr->qs + QK_K/4) + 2 * ib;
+         device const half * dh = &xr->d;
+ 
+         for (short row = 0; row < nr0; row++) {
+             const float db = dh[0];
+ 
+             // the eight index bytes and the two halves of aux32 are contiguous, so the
+             // whole block header comes in as three words instead of ten narrow reads
+-            const uint2 q3w = *(device const uint2 *)(q3);
+-            const uint32_t aux32 = *(device const uint32_t *)(gas);
++            const uint2 q3w = mv_ld_u32x2(q3);
++            const uint32_t aux32 = mv_ld_u32(gas);
+ 
+             thread const uint8_t * q3b = (thread const uint8_t *)&q3w;
+ 
+             const float d = db * (0.5f + (aux32 >> 28));
+ 
+             float2 sum = {0};
+             for (short l = 0; l < 4; ++l) {
+                 // each grid entry is four bytes, so one word read replaces four byte reads
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1526,16 +1526,20 @@
+                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
+ 
+     // A stride that is a multiple of four lets the quant arrays be read a word at a time.
+     // The two widths are decided apart: 64 lanes have no last-level cache to hide the extra
+     // loads and every type gains, while 32 lanes only measured a gain on q8_0.
+     const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
+     const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
+     const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
++
++    // Cards that require natural alignment read the wrong bytes from the odd blocks of the
++    // 22-, 34-, 98-, 110- and 210-byte types, so the wide read splits in two there.
++    const bool align = props->needs_aligned_loads;
+ 
+     // Sweep hook: TOSH_SWEEP_TYPE names one ggml type and TOSH_SWEEP_NR0 / TOSH_SWEEP_NSG
+     // force its rows per lane and simdgroups, so the register front can be measured without
+     // rebuilding. The pipeline name carries both, so a run can be checked against what it asked.
+     {
+         const char * st = getenv("TOSH_SWEEP_TYPE");
+ 
+         if (st != nullptr && strcmp(st, ggml_type_name(tsrc0)) == 0) {
+@@ -1565,33 +1569,34 @@
+ 
+     char sfx[64];
+     if (w64) {
+         snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
+         suffix = sfx;
+     }
+ 
+     snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
+-    snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d", base, nsg, ne12, r2, r3, nw, row4, row8);
++    snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d_al=%d", base, nsg, ne12, r2, r3, nw, row4, row8, align);
+ 
+     if (getenv("TOSH_SWEEP_DEBUG") != nullptr) {
+         fprintf(stderr, "SWEEP pipeline = %s (nsg=%d nr0=%d)\n", name, nsg, nr0);
+     }
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, (int16_t) ne12, FC_MUL_MV + 2);
+         ggml_metal_cv_set_int16(cv, r2,             FC_MUL_MV + 3);
+         ggml_metal_cv_set_int16(cv, r3,             FC_MUL_MV + 4);
+         ggml_metal_cv_set_int16(cv, nw,             FC_MUL_MV + 5);
+         ggml_metal_cv_set_bool (cv, row4,           FC_MUL_MV + 6);
+         ggml_metal_cv_set_bool (cv, row8,           FC_MUL_MV + 7);
++        ggml_metal_cv_set_bool (cv, align,          FC_MUL_MV + 8);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+         ggml_metal_cv_free(cv);
+     }
+ 
+     res.nr0  = nr0;
+     res.nr1  = nr1;
+@@ -1945,31 +1950,34 @@
+     const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
+                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
+ 
+     // The expert kernels share the implementations of the dense path, so they can read the
+     // quant arrays a word at a time under the same conditions.
+     const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
+                       (nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0)) &&
+                       getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
++
++    const bool align = props_id->needs_aligned_loads;
+ 
+     snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, id_w64 ? "_w64" : "");
+-    snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d", base, nsg, nw, row4, row8);
++    snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d_al=%d", base, nsg, nw, row4, row8, align);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg, FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 2);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 3);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 4);
+         ggml_metal_cv_set_int16(cv, nw,  FC_MUL_MV + 5);
+         ggml_metal_cv_set_bool (cv, row4, FC_MUL_MV + 6);
+         ggml_metal_cv_set_bool (cv, row8, FC_MUL_MV + 7);
++        ggml_metal_cv_set_bool (cv, align, FC_MUL_MV + 8);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+         ggml_metal_cv_free(cv);
+     }
+ 
+     res.nr0  = nr0;
+     res.nr1  = nr1;
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1341,16 +1341,66 @@
+                     dev->props.simd_width != 32 &&
+                     ![dev->mtl_device supportsFamily:MTLGPUFamilyApple1] &&
+                     getenv("GGML_METAL_WAVE64_UNSAFE") == NULL;
+                 if (is_wave64) {
+                     fprintf(stderr, "ggml_metal: wave64 mode (SIMD width %d): GPU prefill matmul, "
+                                     "CPU decode/reductions for correct output\n",
+                             dev->props.simd_width);
+                     dev->props.has_simdgroup_reduction = false;
++                }
++
++                // A dword read off a multiple of four is undefined in Metal, and the GCN cards
++                // before Vega return the bytes of the aligned address instead. Assume a wave64
++                // card needs the aligned path unless it is one of the families measured to
++                // tolerate it, so an unknown card errs on the side of correct output.
++                {
++                    // amdgpu_gfx<N> names the ISA target: gfx6xx-8xx are GCN 1 to 4, gfx9xx is
++                    // Vega. Older than Vega reads a dword off a word boundary as the aligned
++                    // one. The name is the fallback for macOS 12 and 13, which have no
++                    // architecture property, and it grants the fast path rather than the safe
++                    // one so an unknown card stays correct.
++                    bool tolerant = false;
++                    bool known    = false;
++                    char how[64]  = "unknown";
++
++                    if (@available(macOS 14.0, *)) {
++                        const char * arch = dev->mtl_device.architecture.name.UTF8String;
++                        int gfx = 0;
++                        if (arch != NULL && sscanf(arch, "amdgpu_gfx%d", &gfx) == 1 && gfx > 0) {
++                            tolerant = gfx >= 900;
++                            known    = true;
++                            snprintf(how, sizeof(how), "%s", arch);
++                        }
++                    }
++                    if (!known) {
++                        const char * name = dev->mtl_device.name.UTF8String;
++                        tolerant = name != NULL &&
++                            (strstr(name, "Vega")          != NULL ||
++                             strstr(name, "Radeon VII")    != NULL ||
++                             strstr(name, "Radeon Pro VII")!= NULL ||
++                             strstr(name, "WX 8200")       != NULL ||
++                             strstr(name, "WX 9100")       != NULL ||
++                             strstr(name, "Instinct MI25") != NULL ||
++                             strstr(name, "Instinct MI50") != NULL ||
++                             strstr(name, "Instinct MI60") != NULL);
++                        snprintf(how, sizeof(how), "name (no architecture before macOS 14)");
++                    }
++                    dev->props.needs_aligned_loads = is_wave64 && !tolerant;
++
++                    const char * force = getenv("TOSH_MV_ALIGN");
++                    if (force != NULL) {
++                        dev->props.needs_aligned_loads = atoi(force) != 0;
++                        snprintf(how, sizeof(how), "TOSH_MV_ALIGN=%s", force);
++                    }
++                    if (is_wave64 || force != NULL) {
++                        fprintf(stderr, "ggml_metal: aligned mat-vec reads %s by %s "
++                                        "(override with TOSH_MV_ALIGN=1 or =0)\n",
++                                dev->props.needs_aligned_loads ? "ON" : "off", how);
++                    }
+                 }
+ 
+                 // Auto-on for wave64: run the quantized/f16 mat-vec decode on the GPU
+                 // (large tg win, validated on GCN); escape hatch forces it off.
+                 // GGML_METAL_WAVE64_SAFEMODE is the user-facing alias the app documents.
+                 dev->props.wave64_decode = is_wave64 && getenv("GGML_METAL_WAVE64_DECODE_DISABLE") == NULL
+                                                      && getenv("GGML_METAL_WAVE64_SAFEMODE") == NULL;
+                 if (dev->props.wave64_decode) {
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -293,16 +293,20 @@
+     // wave64 decode (experimental, opt-in): run the parameterized f16/q8_0 mat-vec
+     // kernels on the GPU for GCN/Vega instead of falling back to the CPU.
+     bool wave64_decode;
+ 
+     // Hardware SIMD-group width (threadExecutionWidth), probed at init.
+     // Apple Silicon and AMD RDNA report 32; AMD GCN/Vega report 64. The Metal
+     // kernels assume 32, so a non-32 width signals a wave64 device.
+     int simd_width;
++
++    // GCN before Vega reads a dword off a word boundary as the aligned one, so the mat-vec
++    // kernels take a pair of shorts there instead
++    bool needs_aligned_loads;
+ 
+     bool has_bfloat;
+     bool has_tensor;
+     bool use_residency_sets;
+     bool use_shared_buffers;
+ 
+     // host-resident weights on a discrete GPU: only the buffer type that asks for it, so the
+     // rest of the model stays in VRAM
