@@ -1,0 +1,163 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index ac20cd3cc..2ca50fc22 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -2262,17 +2262,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                 const bool turbo_dk_ok = (!k_turbo && !v_turbo) ||
+                     dk == 128 || dk == 256 || dk == 384 || dk == 512 || dk == 640;
+                 // A NULL mask is bidirectional attention (vision towers); the kernels
+                 // read args.has_mask and treat it as a zero bias.
+                 // dk 72 is vision-only and f16-only: it is not a whole number of
+                 // 32-element quant blocks, so K/V can never be quantized there.
+                 const bool f16_kv = kt == GGML_TYPE_F16 && vt == GGML_TYPE_F16;
+                 const bool dk_ok =
+-                    dk == 64 || dk == 128 || dk == 256 || dk == 384 || dk == 512 || dk == 640 ||
++                    dk == 64 || dk == 128 || dk == 256 || dk == 512 ||
++                    // dk 384/640 are instantiated for Turbo KV only
++                    ((dk == 384 || dk == 640) && (k_turbo || v_turbo)) ||
+                     (dk == 72 && f16_kv) ||
+                     // UNet diffusion heads (SD 1.5): not whole quant blocks, so f16 only
+                     ((dk == 40 || dk == 80 || dk == 160) && f16_kv);
+                 const bool simple =
+                     dk_ok &&
+                     op->src[2]->ne[0] == dk &&
+                     k_std && v_std && turbo_dk_ok &&
+                     max_bias == 0.0f && softcap == 0.0f;
+@@ -2285,16 +2287,20 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                 const bool mla_amd =
+                     ((dk == 576 && dv == 512) || (dk == 320 && dv == 256)) &&
+                     (kt == GGML_TYPE_F16 || kt == GGML_TYPE_Q8_0) && kt == vt &&
+                     max_bias == 0.0f && softcap == 0.0f;
+                 if (mla_amd) {
+                     return true;
+                 }
+             }
++            // dk 384/640 have no generic instantiation; Turbo KV there is AMD-only (above)
++            if (op->src[0]->ne[0] == 384 || op->src[0]->ne[0] == 640) {
++                return false;
++            }
+             if (op->src[1]->type != op->src[2]->type) {
+                 return false;
+             }
+             switch (op->src[1]->type) {
+                 case GGML_TYPE_F32:
+                 case GGML_TYPE_F16:
+                 case GGML_TYPE_Q8_0:
+                 case GGML_TYPE_Q4_0:
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 6385bf9cc..a7ddf1a64 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4036,18 +4036,24 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+     char fa_amd_pipeline[80] = {0};
+     // dk 72 is instantiated for f16 K/V only (vision towers); see the .metal side.
+     const bool fa_amd_f16_kv =
+         op->src[1]->type == GGML_TYPE_F16 && op->src[2]->type == GGML_TYPE_F16;
+     const bool fa_amd_dk72 = ne00 == 72 && fa_amd_f16_kv;
+     // UNet diffusion heads, f16 only like dk72: SD 1.5 runs 40 at full resolution,
+     // where the score matrix costs 2.7 GB at 768 and does not fit at all at 1024
+     const bool fa_amd_unet = (ne00 == 40 || ne00 == 80 || ne00 == 160) && fa_amd_f16_kv;
++    // dk 384/640 are instantiated for Turbo KV only; see the .metal side
++    const auto fa_amd_is_turbo = [](enum ggml_type t) {
++        return t == GGML_TYPE_TURBO2_0 || t == GGML_TYPE_TURBO3_0 || t == GGML_TYPE_TURBO4_0;
++    };
++    const bool fa_amd_turbo_kv = fa_amd_is_turbo(op->src[1]->type) || fa_amd_is_turbo(op->src[2]->type);
+     if (ne00 == ne20 &&
+-        (ne00 == 64 || ne00 == 128 || ne00 == 256 || ne00 == 384 || ne00 == 512 || ne00 == 640 ||
++        (ne00 == 64 || ne00 == 128 || ne00 == 256 || ne00 == 512 ||
++         ((ne00 == 384 || ne00 == 640) && fa_amd_turbo_kv) ||
+          fa_amd_dk72 || fa_amd_unet)) {
+         const char * ks = ggml_metal_fa_amd_type_suffix(op->src[1]->type);
+         const char * vs = ggml_metal_fa_amd_type_suffix(op->src[2]->type);
+         if (ks && vs) {
+             snprintf(fa_amd_pipeline, sizeof(fa_amd_pipeline), "kernel_flash_attn_ext_vec_amd_dk%d_k%s_v%s%s", (int) ne00, ks, vs,
+                      props_dev->simd_width == 64 ? "_w64" : "");
+         }
+     } else if (((ne00 == 576 && ne20 == 512) || (ne00 == 320 && ne20 == 256)) &&
+@@ -4259,46 +4265,45 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                          props_dev->simd_width == 64 ? "_w64" : "");
+             }
+ 
+             auto pipeline = ggml_metal_library_get_pipeline(lib, fa_tile_pipeline);
+             if (!pipeline.pipeline) {
+                 pipeline = ggml_metal_library_compile_pipeline(lib, fa_tile_pipeline, fa_tile_pipeline, nullptr);
+             }
+ 
+-            ggml_metal_encoder_set_pipeline(enc, pipeline);
+-            ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+-            ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
+-            ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
+-            ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);
+-            ggml_metal_encoder_set_buffer  (enc, bid_src3, 4);
+-            ggml_metal_encoder_set_buffer  (enc, bid_src4, 5);
+-            ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
+-            ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
++            // a missed instantiation leaves a null pipeline; fall through to the vec route
++            if (pipeline.pipeline) {
++                ggml_metal_encoder_set_pipeline(enc, pipeline);
++                ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++                ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
++                ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
++                ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);
++                ggml_metal_encoder_set_buffer  (enc, bid_src3, 4);
++                ggml_metal_encoder_set_buffer  (enc, bid_src4, 5);
++                ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);
++                ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
+ 
+-            // queries per threadgroup must match the instantiation: 16 on wave32, 8 on wave64
+-            const int fa_nq = props_dev->simd_width == 64 ? 8 : 16;
+-            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + fa_nq - 1)/fa_nq, ne02, ne03, props_dev->simd_width, fa_nq, 1);
++                // queries per threadgroup must match the instantiation: 16 on wave32, 8 on wave64
++                const int fa_nq = props_dev->simd_width == 64 ? 8 : 16;
++                ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + fa_nq - 1)/fa_nq, ne02, ne03, props_dev->simd_width, fa_nq, 1);
+ 
+-            return 1;
++                return 1;
++            }
+         }
+ 
+         // must match the .metal instantiations: q4_0 dequant caps the pipeline, so those
+         // pairs drop to 24 (dk128 q4_0 keys, dk64 subw=8 with q4_0 in either K or V).
+         int fa_amd_nsg = ne00 == 128 ? 16 : ne00 <= 128 ? 32 : 16;
+         if (props_dev->simd_width == 32) {
+             const bool k_q4 = op->src[1]->type == GGML_TYPE_Q4_0;
+             const bool v_q4 = op->src[2]->type == GGML_TYPE_Q4_0;
+             // the Turbo macro instantiates every head at 16, and pairing q4_0 with it
+             // leaves the pipeline at 512 threads, so 24 would overrun what it admits
+-            const auto is_turbo = [](enum ggml_type t) {
+-                return t == GGML_TYPE_TURBO2_0 || t == GGML_TYPE_TURBO3_0 || t == GGML_TYPE_TURBO4_0;
+-            };
+-            const bool turbo = is_turbo(op->src[1]->type) || is_turbo(op->src[2]->type);
+-            if (!turbo && ((ne00 == 128 && k_q4) || (ne00 == 64 && (k_q4 || v_q4)))) {
++            if (!fa_amd_turbo_kv && ((ne00 == 128 && k_q4) || (ne00 == 64 && (k_q4 || v_q4)))) {
+                 fa_amd_nsg = 24;
+             }
+         }
+         if (props_dev->simd_width == 64) {
+             fa_amd_nsg /= 2;
+         }
+         // the simdgroup count per head was never swept on either width; the pipeline caps it,
+         // so an override that overruns is dropped below rather than dispatched
+@@ -4392,17 +4397,21 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
+         if (!pipeline.pipeline) {
+             const char * nm = fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline;
+             pipeline = ggml_metal_library_compile_pipeline(lib, nm, nm, nullptr);
+         }
+ 
+         // dispatching more threads than the pipeline admits hangs the GPU, and how many
+         // it admits depends on the K type's dequant; fall through rather than risk it
+-        if (ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) < fa_amd_nsg*props_dev->simd_width) {
++        if (!pipeline.pipeline) {
++            // a missed instantiation leaves a null pipeline; fall through rather than crash
++            GGML_LOG_WARN("%s: %s is not instantiated; using the generic kernels\n",
++                          __func__, fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
++        } else if (ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) < fa_amd_nsg*props_dev->simd_width) {
+             GGML_LOG_WARN("%s: %s wants %d threads, pipeline allows %d; using the generic kernels\n",
+                           __func__, fa_amd_pipeline, fa_amd_nsg*props_dev->simd_width,
+                           ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+         } else {
+ 
+         ggml_metal_encoder_set_pipeline(enc, pipeline);
+         ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+         ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
