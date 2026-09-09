@@ -1,0 +1,32 @@
+From: ToshLLM
+Subject: [PATCH] 0057-llms-keep-the-output-head-on-every-card-for-dflash
+
+A DFlash draft has no output head of its own: its selector runs a top-k over the target's
+logits. A tensor split cuts that head by vocabulary, so no card holds a whole row and the
+graph aborts on the per-row assert. TOSH_MIRROR_OUTPUT_HEAD keeps the head on every card
+for that pairing, the way upstream already does for DeepSeek V4.
+
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -583,17 +583,20 @@
+             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
+         }
+         if (std::regex_match(tensor_name, pattern_ffn_down_exps_bias)) {
+             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_PARTIAL, "ffn_down_exps.weight");
+         }
+ 
+         // output
+         if (std::regex_match(tensor_name, pattern_output_weight)) {
+-            if (is_dsv4) {
++            // A DFlash draft has no head of its own: its selector runs a top-k over the target's
++            // logits, and a head split by vocabulary leaves no device holding a whole row of them.
++            // The caller sets this when it pairs such a draft with a tensor split.
++            if (is_dsv4 || getenv("TOSH_MIRROR_OUTPUT_HEAD") != nullptr) {
+                 return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
+             }
+             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1);
+         }
+         if (std::regex_match(tensor_name, pattern_output_bias)) {
+             const ggml_tensor * output_weight = ud->model->get_tensor("output.weight");
+             GGML_ASSERT(output_weight != nullptr);
+             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0);

@@ -7,25 +7,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
-- **The interface has been redesigned throughout without dropping the existing controls.** Home, Models, Servers, Benchmarks, Logs and Settings now share the same navigation, fields, menus, cards and responsive layout, while dense screens build and refresh less work. In reference idle measurements, memory use fell from roughly 600 MB in the previous interface to about 120 MB; the exact figure varies with the open screen, benchmark history and active servers.
+- **The interface has been redesigned across every screen, with the same controls as before.** Idle memory use drops from about 600 MB to about 120 MB.
 
-- **Text and number fields respond immediately and use one neutral surface throughout the app.** Large settings screens keep edits local until the field is confirmed, preventing every keystroke from rebuilding the full screen; numeric fields also reject non-numeric characters as they are typed.
+- **Text and number fields respond immediately.** A keystroke no longer rebuilds the whole screen, and numeric fields reject anything that is not a number.
 
-- **LLMs: GCN cards verify speculation about a third faster.** The multi-token path that speculative decoding, small batches and perplexity windows run through still used kernels laid out for another card. With a 27B model and its DFlash2 draft, generation goes from 15.5 to 20.9 tokens per second on a repetitive prompt and from 15.7 to 17.1 on a technical one, and the isolated path gains between 35% and 107% depending on the batch. Reading a long prompt and plain generation are unchanged, and the draft accepts exactly the same tokens. Contributed by [malzzz](https://github.com/malzzz) in [#94](https://github.com/engeldlgado/toshllm/pull/94).
+- **LLMs: GCN cards verify speculation up to a third faster.** With a 27B model and its DFlash2 draft, generation goes from 15.5 to 20.9 tokens per second; how much it gains depends on the prompt. Reading a prompt and plain generation are unchanged. Contributed by [malzzz](https://github.com/malzzz) in [#94](https://github.com/engeldlgado/toshllm/pull/94).
 
 ### Fixed
 
-- **A DFlash draft no longer takes the engine down when the model is split across cards by tensors.** That split cuts the output head between them, and DFlash picks its candidates inside the graph, where no card holds a whole row of them. It is left aside in that configuration, and a model with its own prediction head still uses one; splitting by layers is unaffected.
+- **A DFlash/DFlash2 draft works with a model split across cards by tensors instead of taking the engine down.** The output head is now kept whole on each card for that pairing, which costs its size per card and nothing in any other configuration. On four cards it turns out to be the fastest arrangement of the three: a 27B generates 20.5 tokens per second against 14.6 splitting by layers, accepting the same drafts on a Radeon Pro Vega II Duo.
 
-- **Attention no longer crashes on 384- and 640-wide heads.** The engine offered those two sizes for every cache type but only built kernels for them alongside TurboQuant, so any other combination reached for a kernel that was not there and took the process down. They now fall back to the processor like other unsupported sizes. Contributed by [malzzz](https://github.com/malzzz) in [#96](https://github.com/engeldlgado/toshllm/pull/96).
+- **Attention no longer crashes on 384- and 640-wide heads.** Outside TurboQuant they had no kernel, and the engine reached for it anyway. They now fall back to the processor. Contributed by [malzzz](https://github.com/malzzz) in [#96](https://github.com/engeldlgado/toshllm/pull/96).
 
-- **The engine builds again with its expert cache compiled out.** A call added with the compact expert assembly had no counterpart in the disabled configuration, so building the vendored tree with default options failed. Contributed by [malzzz](https://github.com/malzzz) in [#95](https://github.com/engeldlgado/toshllm/pull/95).
+- **The engine builds again with its expert cache compiled out.** Contributed by [malzzz](https://github.com/malzzz) in [#95](https://github.com/engeldlgado/toshllm/pull/95).
 
-- **LLMs: Radeon RX 400/500, Radeon Pro 400/500 and Radeon Pro WX write text again instead of nonsense.** Since 0.87.0 the engine read the weights of several formats four bytes at a time from addresses those cards need aligned, so half of them came back as neighbouring data. Q4_K_M models were affected through their Q6_K layers, and Q8_0 and IQ3_XXS through their own. The card is now asked which instruction set it runs and only the ones that need it take the paired read, so every other card keeps the code and the speed it had. Reported by [FreQRiDeR](https://github.com/engeldlgado/toshllm/issues/1).
+- **LLMs: Radeon RX 400/500, Radeon Pro 400/500 and Radeon Pro WX write text again instead of nonsense.** Since 0.87.0 the engine read the weights from addresses those cards need aligned, so half of them came back as neighbouring data. Every other card keeps the code and the speed it had. Reported by [FreQRiDeR](https://www.reddit.com/user/FreQRiDeR/).
 
-- **Chat: a model that writes its tool calls in the wrong shape no longer kills the turn.** The engine answered HTTP 500 and the message was lost, on every tool and on every attempt, so a small model made the chat unusable as soon as any tool was available. The model is now remembered, stops being offered tools and says so once; Settings lists them under Tools and gives each one back with a click.
-
-- **Settings keeps one consistent text size and its help cards remain usable with the pointer.** Compact switches no longer shrink the labels around them, and a help popover stays open while the pointer moves from its icon into the explanation.
+- **Chat: a model that writes its tool calls in the wrong shape no longer kills the turn.** The engine answered with an error and the message was lost, on every tool and every attempt. Such a model stops being offered tools and says so once; Settings lists them under Tools and gives each one back with a click.
 
 - **Images: LoRAs apply to f16 models instead of ending the render with an error.** Adding one to a checkpoint whose weights are f16, an SDXL safetensors file among them, stopped generation on cards without unified memory. Reported in #93.
 
