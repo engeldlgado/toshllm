@@ -116,7 +116,9 @@ cp Assets/model-icons/*.webp Assets/model-icons/sources.json "$APP/Contents/Reso
 # Binance Pay QR (cropped) for the donations popup
 [ -f Assets/binance-qr.png ] && cp Assets/binance-qr.png "$APP/Contents/Resources/binance-qr.png"
 [ -f Assets/model-hero.jpg ] && cp Assets/model-hero.jpg "$APP/Contents/Resources/model-hero.jpg"
+[ -f Assets/model-hero-light.jpg ] && cp Assets/model-hero-light.jpg "$APP/Contents/Resources/model-hero-light.jpg"
 [ -f Assets/settings-guide.jpg ] && cp Assets/settings-guide.jpg "$APP/Contents/Resources/settings-guide.jpg"
+[ -f Assets/settings-guide-light.jpg ] && cp Assets/settings-guide-light.jpg "$APP/Contents/Resources/settings-guide-light.jpg"
 
 
 # Image generation engine (stable-diffusion.cpp; optional)

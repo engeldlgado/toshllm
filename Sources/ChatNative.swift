@@ -2349,12 +2349,9 @@ struct NativeChatView: View {
     private var chatColumn: some View {
         VStack(spacing: 0) {
             conversationHeader
-            Divider()
             messagesScroll
-            Divider()
             inputArea
         }
-        .background(WorkspaceStyle.canvas)
     }
 
     /// Compact bar over the transcript: project chip + in-place editable title.
@@ -2522,8 +2519,7 @@ struct NativeChatView: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .padding(.vertical, 11)
     }
 
     /// Header shows the stored title; a brand-new empty chat starts blank
@@ -2644,7 +2640,10 @@ struct NativeChatView: View {
                 }
             }
         }
-        .padding()
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: 1120)
+        .frame(maxWidth: .infinity)
     }
 
     /// Pins the transcript back to the end and resumes following the answer.
@@ -2757,18 +2756,24 @@ struct NativeChatView: View {
     }
 
     private var emptyChatState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.system(size: 34))
-                .foregroundStyle(Color.appAccent.opacity(0.8))
-            Text(loc.t("¿En qué puedo ayudarte?", "What can I help with?"))
-                .font(.title2.weight(.semibold))
-            Text(loc.t("Todo se genera en tu GPU, sin salir de tu equipo. Adjunta código, texto o PDF con el clip para preguntar sobre ellos.",
-                       "Everything runs on your GPU, never leaving your machine. Attach code, text or PDF files with the paperclip to ask about them."))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
+        ChatEmptyState { action in
+            switch action {
+            case .ask:
+                draft = loc.t("Ayúdame a explorar una idea.", "Help me explore an idea.")
+                inputFocused = true
+            case .code:
+                draft = loc.t("Ayúdame a escribir y mejorar este código:", "Help me write and improve this code:")
+                inputFocused = true
+            case .files:
+                showAttachments = true
+            case .summarize:
+                draft = loc.t("Resume este contenido y destaca las ideas principales:",
+                              "Summarize this content and highlight the main ideas:")
+                inputFocused = true
+            case .explore:
+                control.openSettings(.chat)
+                openWindow(id: "control")
+            }
         }
     }
 
@@ -2776,7 +2781,6 @@ struct NativeChatView: View {
 
     private var inputArea: some View {
         VStack(spacing: 8) {
-            statusStrip
             if let queued = chat.queuedMessage, queued.conversationID == chat.currentID {
                 QueuedMessageBanner(message: queued, cancel: chat.cancelQueuedMessage)
                     .environmentObject(loc)
@@ -2806,11 +2810,11 @@ struct NativeChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            composerRow
+            composerShell
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.bar)
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
         // Files dropped anywhere on the composer become attachments.
         .dropDestination(for: URL.self) { urls, _ in
             addAttachments(urls: urls)
@@ -2831,6 +2835,75 @@ struct NativeChatView: View {
         } message: { Text(audioRecorder.error ?? dictation.error ?? appleDictation.error ?? "") }
     }
 
+    private var composerShell: some View {
+        VStack(spacing: 8) {
+            if server.state != .running {
+                serverAvailabilityBar
+                    .background(WorkspaceStyle.surface,
+                                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(WorkspaceStyle.border))
+            }
+            if server.state == .running || chat.generating || chat.compacting {
+                statusStrip
+                    .padding(.horizontal, 10)
+            }
+            composerRow
+                .background(WorkspaceStyle.surface,
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(WorkspaceStyle.border))
+        }
+    }
+
+    private var serverAvailabilityBar: some View {
+        HStack(spacing: 10) {
+            switch server.state {
+            case .starting:
+                ProgressView().controlSize(.small)
+                Text(loc.t("Iniciando el servidor… Puedes seguir consultando tus chats.",
+                           "Starting the server… You can keep browsing your chats."))
+                    .foregroundStyle(.secondary)
+            case .failed(let error):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(loc.half(error)).lineLimit(2)
+                Spacer(minLength: 8)
+                Button(loc.t("Reintentar", "Try again")) { server.start(.fromDefaults()) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(modelPath.isEmpty)
+            case .stopped:
+                Image(systemName: "circle")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(modelPath.isEmpty
+                     ? loc.t("Elige un modelo para poder enviar mensajes.",
+                             "Choose a model before sending messages.")
+                     : loc.t("El servidor está detenido. Puedes consultar y organizar tus chats.",
+                             "The server is stopped. You can browse and organize your chats."))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if modelPath.isEmpty {
+                    Button(loc.t("Elegir modelo", "Choose model")) {
+                        control.section = .models
+                        openWindow(id: "control")
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button(loc.t("Iniciar servidor", "Start server"), systemImage: "play.fill") {
+                        server.start(.fromDefaults())
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            case .running:
+                EmptyView()
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
     private var composerRow: some View {
         VStack(alignment: .leading, spacing: 10) {
             messageField
@@ -2843,20 +2916,31 @@ struct NativeChatView: View {
                 sendControls
             }
         }
-        .padding(12)
-        .glassSurface(in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+        .padding(14)
+        .frame(minHeight: 104)
     }
 
     private var messageField: some View {
-        TextField(loc.t("Escribe tu mensaje…", "Type your message…"),
-                  text: $draft, axis: .vertical)
-            .lineLimit(1...8)
-            .textFieldStyle(.plain)
-            .chatFont(.body)
-            .padding(.horizontal, 2).padding(.vertical, 4)
+        ZStack(alignment: .topLeading) {
+            if draft.isEmpty {
+                Text(loc.t("Escribe tu mensaje…", "Type your message…"))
+                    .chatFont(.body)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 7)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $draft)
+                .scrollContentBackground(.hidden)
+                .chatFont(.body)
+        }
+            .frame(height: 64)
             .focused($inputFocused)
-            .onSubmit(send)
+            .onKeyPress(.return, phases: .down) { press in
+                if press.modifiers.contains(.option) { return .ignored }
+                send()
+                return .handled
+            }
             .onChange(of: draft) { _, value in
                 absorbLargeDraft(value)
                 scheduleDraftSave()
@@ -2904,7 +2988,8 @@ struct NativeChatView: View {
     }
 
     private var canSend: Bool {
-        ocrPending == 0 && transcriptionPending == 0
+        server.state == .running
+            && ocrPending == 0 && transcriptionPending == 0
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty || !images.isEmpty)
     }
@@ -4102,12 +4187,8 @@ struct NativeChatView: View {
         return out
     }
 
-    /// One slim line above the composer; present only while there is
-    /// something to report, so the chat keeps a clean look at rest.
-    @ViewBuilder
     private var statusStrip: some View {
-        if chat.generating || chat.compacting || chat.contextUsed != nil {
-            HStack(spacing: 12) {
+        HStack(spacing: 12) {
                 if chat.compacting {
                     HStack(spacing: 5) {
                         ProgressView().controlSize(.mini)
@@ -4118,7 +4199,8 @@ struct NativeChatView: View {
                                 "Summarizing older messages with the model to free context."))
                 }
 
-                if let used = chat.contextUsed, contextLimit > 0 {
+                if server.state == .running && contextLimit > 0 {
+                    let used = chat.contextUsed ?? 0
                     let fraction = Double(used) / Double(contextLimit)
                     HStack(spacing: 5) {
                         Label(loc.t("Contexto", "Context"), systemImage: "memorychip")
@@ -4134,7 +4216,7 @@ struct NativeChatView: View {
                                 "Tokens used by history and the latest response. Past 70%, the app attempts to summarize older turns."))
                 }
 
-                if contextMaySlowGeneration && chat.canCompactCurrent {
+                if server.state == .running && contextMaySlowGeneration && chat.canCompactCurrent {
                     Button {
                         chat.compactCurrent(port: port)
                     } label: {
@@ -4149,9 +4231,9 @@ struct NativeChatView: View {
 
                 Spacer(minLength: 0)
                 LiveSpeedBadge(live: chat.live)
-            }
-            .font(.caption)
         }
+        .font(.caption)
+        .frame(minHeight: 24)
     }
 
     private func send() {
@@ -4209,6 +4291,9 @@ struct ConversationListView: View {
     @State private var promptConversation: Conversation?
     @State private var archiveMessage: String?
     @State private var confirmDeleteAll = false
+    @State private var hoveredConversationID: UUID?
+    @State private var dropTargetProjectID: UUID?
+    @State private var ungroupedDropIsTargeted = false
     @AppStorage(SettingsKeys.chatSortOrder) private var sortOrderRaw = ConversationSortOrder.lastUsed.rawValue
 
     private var sortOrder: ConversationSortOrder {
@@ -4263,8 +4348,15 @@ struct ConversationListView: View {
             Button {
                 chat.newConversation(in: chat.current?.projectID)
             } label: {
-                Label(loc.t("Nueva conversación", "New chat"), systemImage: "square.and.pencil")
-                    .frame(maxWidth: .infinity)
+                HStack(spacing: 8) {
+                    Label(loc.t("Nueva conversación", "New chat"), systemImage: "plus")
+                    Spacer(minLength: 8)
+                    Text("⌘ N")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                        .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+                }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(GlassPillButtonStyle(prominent: true))
             .keyboardShortcut("n", modifiers: .command)
@@ -4275,18 +4367,7 @@ struct ConversationListView: View {
                         "Start a new conversation in the current project (⌘N)."))
 
             HStack(spacing: 8) {
-                GlassSearchField(placeholder: loc.t("Buscar…", "Search…"), text: $searchText)
-
-                Button {
-                    newProjectName = ""
-                    creatingProject = true
-                } label: {
-                    Image(systemName: "folder.badge.plus")
-                }
-                .buttonStyle(GlassIconButtonStyle())
-                .accessibilityLabel(loc.t("Nuevo proyecto", "New project"))
-                .help(loc.t("Nuevo proyecto: una carpeta con su propio prompt de sistema.",
-                            "New project: a folder with its own system prompt."))
+                GlassSearchField(placeholder: loc.t("Buscar conversaciones…", "Search conversations…"), text: $searchText)
 
                 Menu {
                     ForEach(ConversationSortOrder.allCases, id: \.self) { order in
@@ -4311,7 +4392,7 @@ struct ConversationListView: View {
                     Button(loc.t("Borrar todas las conversaciones…", "Delete all conversations…"),
                            systemImage: "trash", role: .destructive) { confirmDeleteAll = true }
                 } label: {
-                    Image(systemName: "arrow.up.arrow.down")
+                    Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -4332,12 +4413,14 @@ struct ConversationListView: View {
                     ForEach(searchResults) { chatRow($0, showsProject: true) }
                 } else {
                     if !pinnedChats.isEmpty {
-                        Section(loc.t("Fijados", "Pinned")) {
+                        Section {
                             ForEach(pinnedChats) { chatRow($0, showsProject: true) }
+                        } header: {
+                            sidebarHeader(loc.t("Fijados", "Pinned"))
                         }
                     }
                     if !chat.projects.isEmpty {
-                        Section(loc.t("Proyectos", "Projects")) {
+                        Section {
                             ForEach(sortedProjects) { p in
                                 DisclosureGroup(isExpanded: expandBinding(p)) {
                                     let rows = projectChats(p)
@@ -4351,18 +4434,41 @@ struct ConversationListView: View {
                                     projectRow(p)
                                 }
                             }
+                        } header: {
+                            sidebarHeader(loc.t("Proyectos", "Projects"), actionIcon: "plus") {
+                                newProjectName = ""
+                                creatingProject = true
+                            }
+                        }
+                    } else {
+                        Section {
+                            EmptyView()
+                        } header: {
+                            sidebarHeader(loc.t("Proyectos", "Projects"), actionIcon: "plus") {
+                                newProjectName = ""
+                                creatingProject = true
+                            }
                         }
                     }
-                    if !ungroupedChats.isEmpty {
-                        Section(loc.t("Conversaciones", "Chats")) {
-                            ForEach(ungroupedChats) { chatRow($0, showsProject: false) }
-                        }
+                    Section {
+                        ForEach(ungroupedChats) { chatRow($0, showsProject: false) }
+                    } header: {
+                        chatsHeader
                     }
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+
+            Text("ToshLLM · macOS")
+                .font(.system(size: 10, weight: .medium))
+                .tracking(1.5)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
         }
-        .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 340)
+        .navigationSplitViewColumnWidth(min: 270, ideal: 330, max: 390)
         .alert(loc.t("Renombrar conversación", "Rename conversation"),
                isPresented: Binding(get: { renaming != nil },
                                     set: { if !$0 { renaming = nil } })) {
@@ -4436,6 +4542,65 @@ struct ConversationListView: View {
                 set: { chat.setProjectCollapsed(p, !$0) })
     }
 
+    @ViewBuilder
+    private func sidebarHeader(_ title: String, actionIcon: String? = nil,
+                               action: @escaping () -> Void = {}) -> some View {
+        HStack {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+                .textCase(nil)
+            Spacer()
+            if let actionIcon {
+                Button(action: action) {
+                    Image(systemName: actionIcon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(loc.t("Nuevo proyecto", "New project"))
+            }
+        }
+    }
+
+    private var chatsHeader: some View {
+        HStack {
+            Text(loc.t("Conversaciones", "Chats"))
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+                .textCase(nil)
+            Spacer()
+            Text(ungroupedDropIsTargeted
+                 ? loc.t("Soltar aquí", "Drop here")
+                 : sortOrder.label(loc))
+                .font(.caption)
+                .foregroundStyle(ungroupedDropIsTargeted
+                                 ? AnyShapeStyle(Color.appAccent)
+                                 : AnyShapeStyle(.tertiary))
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .dropDestination(for: String.self) { ids, _ in
+            let moved = conversations(for: ids)
+            guard !moved.isEmpty else { return false }
+            moved.forEach { chat.move($0, toProject: nil) }
+            return true
+        } isTargeted: { ungroupedDropIsTargeted = $0 }
+    }
+
+    private func conversations(for ids: [String]) -> [Conversation] {
+        ids.compactMap(UUID.init(uuidString:))
+            .compactMap { id in chat.conversations.first { $0.id == id } }
+    }
+
+    private func conversationTitle(_ conversation: Conversation) -> String {
+        if conversation.title.isEmpty && conversation.messages.isEmpty {
+            return loc.t("Nueva conversación", "New chat")
+        }
+        return chat.displayTitle(conversation)
+    }
+
     private func importArchive() {
         let panel = NSOpenPanel()
         var allowedTypes: [UTType] = [.json]
@@ -4482,11 +4647,13 @@ struct ConversationListView: View {
     // MARK: rows
 
     @ViewBuilder private func projectRow(_ p: ChatProject) -> some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 10) {
             Image(systemName: "folder.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(AppTheme.accent(accentRaw).opacity(0.85))
-                .padding(.leading, 4)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(AppTheme.accent(accentRaw))
+                .frame(width: 32, height: 32)
+                .background(AppTheme.accent(accentRaw).opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 9))
             Text(p.name)
                 .font(.callout.weight(.medium)).lineLimit(1)
             if p.pinned ?? false {
@@ -4505,17 +4672,22 @@ struct ConversationListView: View {
                 .padding(.horizontal, 6).padding(.vertical, 1)
                 .background(.quaternary.opacity(0.6), in: Capsule())
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(dropTargetProjectID == p.id ? Color.appAccent.opacity(0.14) : .clear,
+                    in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .strokeBorder(dropTargetProjectID == p.id ? Color.appAccent.opacity(0.7) : .clear))
         .contentShape(Rectangle())
         // The disclosure only toggles from its chevron; open from the whole row.
         .onTapGesture { withAnimation { expandBinding(p).wrappedValue.toggle() } }
         .dropDestination(for: String.self) { ids, _ in
-            let moved = ids.compactMap { UUID(uuidString: $0) }
-                .compactMap { id in chat.conversations.first { $0.id == id } }
+            let moved = conversations(for: ids)
             guard !moved.isEmpty else { return false }
             moved.forEach { chat.move($0, toProject: p.id) }
             return true
+        } isTargeted: { targeted in
+            dropTargetProjectID = targeted ? p.id : (dropTargetProjectID == p.id ? nil : dropTargetProjectID)
         }
         .contextMenu {
             Button(loc.t("Nueva conversación aquí", "New chat here")) {
@@ -4549,13 +4721,18 @@ struct ConversationListView: View {
     }
 
     @ViewBuilder private func chatRow(_ c: Conversation, showsProject: Bool) -> some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 10) {
+            Image(systemName: "bubble.left")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 32, height: 32)
+                .background(WorkspaceStyle.inset, in: Circle())
             if c.pinned ?? false {
                 Image(systemName: "pin.fill")
                     .font(.system(size: 9)).foregroundStyle(AppTheme.accent(accentRaw).opacity(0.7))
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(chat.displayTitle(c))
+                Text(conversationTitle(c))
                     .font(.callout).lineLimit(1)
                 HStack(spacing: 5) {
                     if showsProject, let p = chat.project(id: c.projectID) {
@@ -4574,35 +4751,77 @@ struct ConversationListView: View {
                     .help(loc.t("Esta conversación tiene prompt propio.",
                                 "This conversation has its own prompt."))
             }
-            // Separate hit target so the drag starts here, not under the row's tap.
             Image(systemName: "line.3.horizontal")
-                .font(.system(size: 11))
-                .foregroundStyle(.quaternary)
-                .draggable(c.id.uuidString) {
-                    Label(chat.displayTitle(c), systemImage: "bubble.left.fill")
-                        .font(.callout).lineLimit(1)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(Color.appAccent.opacity(0.9), in: Capsule())
-                        .foregroundStyle(.white)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(hoveredConversationID == c.id || chat.currentID == c.id
+                                 ? AnyShapeStyle(Color.appAccent)
+                                 : AnyShapeStyle(.quaternary))
+                .frame(width: 18, height: 26)
+                .help(loc.t("Puedes arrastrar toda la fila a un proyecto.",
+                            "You can drag the entire row into a project."))
+            Menu {
+                Button((c.pinned ?? false) ? loc.t("Desfijar", "Unpin") : loc.t("Fijar", "Pin")) {
+                    chat.togglePin(c)
                 }
-                .help(loc.t("Arrastra a un proyecto para moverla.",
-                            "Drag onto a project to move it."))
+                Button(loc.t("Renombrar…", "Rename…")) {
+                    renameText = conversationTitle(c)
+                    renaming = c
+                }
+                Button(loc.t("Prompt de esta conversación…", "This conversation's prompt…")) {
+                    promptConversation = c
+                }
+                Divider()
+                Button(loc.t("Eliminar", "Delete"), role: .destructive) { chat.delete(c) }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .opacity(hoveredConversationID == c.id || chat.currentID == c.id ? 1 : 0)
+            .accessibilityLabel(loc.t("Acciones de la conversación", "Conversation actions"))
         }
+        .padding(.leading, 0)
+        .padding(.trailing, 6)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
+        .contentShape(.interaction, RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture { chat.currentID = c.id }
+        .onHover { inside in
+            if inside {
+                hoveredConversationID = c.id
+            } else if hoveredConversationID == c.id {
+                hoveredConversationID = nil
+            }
+        }
+        .onDrag {
+            NSItemProvider(object: c.id.uuidString as NSString)
+        } preview: {
+            HStack(spacing: 8) {
+                Image(systemName: "bubble.left.fill")
+                Text(conversationTitle(c)).lineLimit(1)
+            }
+            .font(.callout.weight(.medium))
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(WorkspaceStyle.surface,
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.appAccent.opacity(0.6)))
+        }
         .listRowBackground(
             RoundedRectangle(cornerRadius: 8)
                 .fill(chat.currentID == c.id
                       ? AppTheme.accent(accentRaw).opacity(0.26) : Color.clear)
-                .padding(.horizontal, 4))
+                .padding(.horizontal, 13))
         .contextMenu {
             Button((c.pinned ?? false) ? loc.t("Desfijar", "Unpin") : loc.t("Fijar", "Pin")) {
                 chat.togglePin(c)
             }
             Button(loc.t("Renombrar…", "Rename…")) {
-                renameText = chat.displayTitle(c)
+                renameText = conversationTitle(c)
                 renaming = c
             }
             Button(loc.t("Prompt de esta conversación…", "This conversation's prompt…")) {

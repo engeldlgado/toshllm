@@ -63,7 +63,7 @@ struct ChatMainView: View {
     @StateObject private var upscaler = ImageUpscaler()
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
     @AppStorage(SettingsKeys.chatFontScale) private var chatFontScale = 1.0
-
+    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
         // A single NavigationSplitView for both modes: only the sidebar and detail
         // content swap, so the window chrome stays put and Chat/Images doesn't jump.
@@ -95,6 +95,18 @@ struct ChatMainView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: mode)
         .tint(AppTheme.accent(accentRaw))
+        .background {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                windowBackdropColor
+                    .opacity(0.93)
+            }
+            .ignoresSafeArea()
+        }
+        .background {
+            ChatWindowConfigurator()
+                .frame(width: 0, height: 0)
+        }
         .environmentObject(chat)
         .environment(\.chatFontScale, ChatFont.clamp(chatFontScale))
         .background {
@@ -104,13 +116,22 @@ struct ChatMainView: View {
                 .keyboardShortcut("=", modifiers: .command)
                 .opacity(0)
         }
-        .background(WorkspaceStyle.canvas)
-        .navigationTitle("ToshLLM")
-        .navigationSubtitle(modeSubtitle)
+        .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .principal) { modePicker }
-            toolbarActions
+            if #available(macOS 26.0, *) {
+                ToolbarItem(placement: .navigation) { toolbarIdentity }
+                    .sharedBackgroundVisibility(.hidden)
+                ToolbarItem(placement: .principal) { modePicker }
+                    .sharedBackgroundVisibility(.hidden)
+                toolbarActions
+                    .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .navigation) { toolbarIdentity }
+                ToolbarItem(placement: .principal) { modePicker }
+                toolbarActions
+            }
         }
+        .hiddenChatToolbarBackground()
         .onAppear {
             imageGenPool.modelStore = models
             models.refresh()
@@ -142,33 +163,75 @@ struct ChatMainView: View {
         }
     }
 
-    @ViewBuilder private var chatDetail: some View {
+    private var chatDetail: some View {
+        NativeChatView()
+    }
+
+    private var windowBackdropColor: Color {
+        colorScheme == .dark
+            ? Color(red: 19 / 255, green: 19 / 255, blue: 20 / 255)
+            : Color(red: 245 / 255, green: 245 / 255, blue: 248 / 255)
+    }
+
+    private var toolbarIdentity: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .foregroundStyle(Color.appAccent)
+            Text("ToshLLM")
+                .font(.system(size: 12, weight: .semibold))
+            Circle()
+                .fill(serverStateColor)
+                .frame(width: 7, height: 7)
+                .accessibilityLabel(modeSubtitle)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .glassSurface(in: Capsule())
+        .fixedSize(horizontal: true, vertical: false)
+        .help(modeSubtitle)
+    }
+
+    private var serverStateColor: Color {
         switch server.state {
-        case .running:  NativeChatView()
-        case .starting: loadingView
-        default:        setupHero
+        case .running: .green
+        case .starting: .orange
+        case .failed: .red
+        case .stopped: .secondary
         }
     }
 
     /// Chat / Images switch, front and center in the title bar.
     private var modePicker: some View {
-        Picker("", selection: $mode) {
-            Label(loc.t("Chat", "Chat"), systemImage: "bubble.left.and.bubble.right").tag(MainMode.chat)
-            Label(loc.t("Imágenes", "Images"), systemImage: "photo.on.rectangle.angled").tag(MainMode.images)
-            Label(loc.t("Vídeo", "Video"), systemImage: "film").tag(MainMode.video)
-            Label("Audio", systemImage: "waveform").tag(MainMode.audio)
+        HStack(spacing: 14) {
+            modeButton(.chat, title: loc.t("Chat", "Chat"), icon: "bubble.left.and.bubble.right")
+            modeButton(.images, title: loc.t("Imágenes", "Images"), icon: "photo.on.rectangle.angled")
+            modeButton(.video, title: loc.t("Vídeo", "Video"), icon: "play.circle")
+            modeButton(.audio, title: "Audio", icon: "waveform")
         }
-        .pickerStyle(.segmented).labelStyle(.titleAndIcon).fixedSize()
+        .fixedSize()
         .help(loc.t("Cambia entre chat, imágenes, vídeo y audio.",
                     "Switch between chat, images, video, and audio."))
     }
 
-    /// Web chat, config and the optional update badge. The web link only applies
-    /// to the chat, so it's disabled outside chat mode.
+    private func modeButton(_ value: MainMode, title: String, icon: String) -> some View {
+        Button {
+            mode = value
+        } label: {
+            Label(title, systemImage: icon)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 13, weight: .medium))
+        }
+        .buttonStyle(GlassIconButtonStyle(active: mode == value))
+        .help(title)
+        .accessibilityAddTraits(mode == value ? .isSelected : [])
+    }
+
     @ToolbarContentBuilder private var toolbarActions: some ToolbarContent {
         ToolbarItem(placement: .automatic) {
             GPUUsageBadge()
-                .padding(.leading, 12)
+                .padding(.horizontal, 9)
+                .frame(height: 28)
+                .glassSurface(in: Capsule())
         }
         ToolbarItemGroup(placement: .automatic) {
             if let version = updates.latestVersion {
@@ -183,12 +246,20 @@ struct ChatMainView: View {
             }
             Button {
                 NSWorkspace.shared.open(server.webChatURL)
-            } label: { Image(systemName: "safari") }
+            } label: {
+                Label(loc.t("Abrir chat web", "Open web chat"), systemImage: "safari")
+                    .labelStyle(.iconOnly)
+            }
+                .buttonStyle(GlassIconButtonStyle())
                 .disabled(server.state != .running || mode != .chat)
                 .iconHelp(loc.t("Abrir el chat web en el navegador", "Open the web chat in the browser"))
             Button {
                 openControl()
-            } label: { Image(systemName: "gearshape") }
+            } label: {
+                Label(loc.t("Configuración", "Configuration"), systemImage: "gearshape")
+                    .labelStyle(.iconOnly)
+            }
+                .buttonStyle(GlassIconButtonStyle())
                 .keyboardShortcut(",", modifiers: .command)
                 .accessibilityLabel(loc.t("Configuración", "Configuration"))
                 .help(loc.t("Configuración: modelos, motor, benchmarks y ajustes (⌘,)",

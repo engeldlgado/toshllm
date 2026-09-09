@@ -54,7 +54,7 @@ struct WorkspaceSidebar: View {
                 .font(.system(size: 14))
                 .padding(.horizontal, 16)
             }
-            Text("LOCAL AI · macOS")
+            Text("ToshLLM · macOS")
                 .font(.system(size: 10, weight: .medium)).tracking(1.6)
                 .foregroundStyle(.tertiary).padding(26)
         }

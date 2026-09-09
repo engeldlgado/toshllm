@@ -134,6 +134,8 @@ struct ToshLLMApp: App {
                 }
         }
         .defaultSize(width: 1240, height: 820)
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unifiedCompact)
         .commands { appCommands }
 
         Window(loc.t("Configuración", "Configuration"), id: "control") {

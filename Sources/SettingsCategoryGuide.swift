@@ -25,14 +25,13 @@ struct SettingsGuideContent {
 /// copy are not rebuilt every time an unrelated setting changes.
 struct SettingsCategoryGuide: View {
     let content: SettingsGuideContent
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
 
         ZStack {
             SettingsGuideArtwork()
-            LinearGradient(colors: [Color.black.opacity(0.18),
-                                    Color.black.opacity(0.58),
-                                    WorkspaceStyle.surface.opacity(0.94)],
+            LinearGradient(colors: guideGradientColors,
                            startPoint: .topTrailing, endPoint: .bottomLeading)
                 .allowsHitTesting(false)
             VStack(alignment: .leading, spacing: 14) {
@@ -72,7 +71,7 @@ struct SettingsCategoryGuide: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.black.opacity(0.16),
+                    .background(noteBackground,
                                 in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(WorkspaceStyle.border.opacity(0.8)))
@@ -82,5 +81,20 @@ struct SettingsCategoryGuide: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .clipped()
+    }
+
+    private var guideGradientColors: [Color] {
+        if colorScheme == .light {
+            return [Color.white.opacity(0.02),
+                    Color.white.opacity(0.32),
+                    WorkspaceStyle.surface.opacity(0.96)]
+        }
+        return [Color.black.opacity(0.18),
+                Color.black.opacity(0.58),
+                WorkspaceStyle.surface.opacity(0.94)]
+    }
+
+    private var noteBackground: Color {
+        colorScheme == .light ? Color.white.opacity(0.64) : Color.black.opacity(0.16)
     }
 }

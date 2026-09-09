@@ -64,7 +64,6 @@ struct MessageBubble: View, Equatable {
 
     private var isUser: Bool { message.role == "user" }
     private var isTool: Bool { message.role == "tool" }
-
     private func updateActionsHover(_ isInside: Bool) {
         hoverDismissTask?.cancel()
         hoverDismissTask = nil
@@ -144,8 +143,7 @@ struct MessageBubble: View, Equatable {
         .contentShape(Rectangle())
         .focusable()
         .focused($actionsFocused)
-        .onHover(perform: updateActionsHover)
-        .opacity(hovering || actionsFocused || confirmingDelete ? 1 : 0)
+        .opacity(hovering || actionsFocused || confirmingDelete ? 1 : 0.48)
         .animation(.easeOut(duration: 0.12), value: hovering || actionsFocused)
     }
 

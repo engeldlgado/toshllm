@@ -1116,16 +1116,24 @@ struct SettingsView: View {
     }
 }
 
-/// One small shared bitmap backs every guide. At 720 px and about 15 KB it
-/// decodes once and avoids five category-specific image allocations.
+/// Each appearance has one small shared bitmap. The selected 720 px image is
+/// loaded lazily and reused by every guide, avoiding category-specific images.
 struct SettingsGuideArtwork: View {
-    private static let image: NSImage? = Bundle.main
+    @Environment(\.colorScheme) private var colorScheme
+    private static let darkImage: NSImage? = Bundle.main
         .url(forResource: "settings-guide", withExtension: "jpg")
         .flatMap(NSImage.init(contentsOf:))
+    private static let lightImage: NSImage? = Bundle.main
+        .url(forResource: "settings-guide-light", withExtension: "jpg")
+        .flatMap(NSImage.init(contentsOf:))
+
+    private var image: NSImage? {
+        colorScheme == .light ? (Self.lightImage ?? Self.darkImage) : Self.darkImage
+    }
 
     var body: some View {
         GeometryReader { proxy in
-            if let image = Self.image {
+            if let image {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFill()

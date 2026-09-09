@@ -217,6 +217,7 @@ private struct FeaturedModelBanner: View {
     let next: () -> Void
     let select: () -> Void
     @EnvironmentObject private var loc: Localizer
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -256,18 +257,18 @@ private struct FeaturedModelBanner: View {
             HStack(spacing: 9) {
                 HStack(spacing: 5) {
                     ForEach(0..<total, id: \.self) { index in
-                        Capsule().fill(index == currentIndex ? Color.white : Color.white.opacity(0.25))
+                        Capsule().fill(index == currentIndex ? carouselControlColor : carouselControlColor.opacity(0.25))
                             .frame(width: index == currentIndex ? 14 : 5, height: 5)
                     }
                 }
                 Button(action: previous) { Image(systemName: "chevron.left") }
                     .buttonStyle(.plain).frame(width: 28, height: 28)
-                    .background(.black.opacity(0.20), in: Circle())
+                    .background(carouselButtonBackground, in: Circle())
                 Button(action: next) { Image(systemName: "chevron.right") }
                     .buttonStyle(.plain).frame(width: 28, height: 28)
-                    .background(.black.opacity(0.20), in: Circle())
+                    .background(carouselButtonBackground, in: Circle())
             }
-            .foregroundStyle(.white).padding(14)
+            .foregroundStyle(carouselControlColor).padding(14)
         }
         .contentTransition(.opacity)
     }
@@ -301,6 +302,14 @@ private struct FeaturedModelBanner: View {
     private var compatibilityColor: Color {
         recommendation.est.level == .ideal ? .green : recommendation.est.level == .no ? .red : .orange
     }
+
+    private var carouselControlColor: Color {
+        colorScheme == .light ? Color.black.opacity(0.72) : .white
+    }
+
+    private var carouselButtonBackground: Color {
+        colorScheme == .light ? Color.white.opacity(0.68) : Color.black.opacity(0.20)
+    }
 }
 
 private struct HeroMetric: View {
@@ -322,15 +331,23 @@ private struct HeroMetric: View {
     }
 }
 
-/// One shared 900 px JPEG (~20 KB on disk, ~1.4 MB decoded) replaces the
-/// previous geometry Canvas and stays crisp at the banner's rendered size.
+/// The appearance-specific 1000 px JPEG is loaded lazily. Only the active
+/// appearance is decoded during a normal session (~1.4 MB), and switching the
+/// system appearance updates the banner without rebuilding its parent screen.
 struct WorkspaceHeroArtwork: View {
-    private static let image: NSImage? = Bundle.main.url(forResource: "model-hero", withExtension: "jpg")
+    @Environment(\.colorScheme) private var colorScheme
+    private static let darkImage: NSImage? = Bundle.main.url(forResource: "model-hero", withExtension: "jpg")
         .flatMap(NSImage.init(contentsOf:))
+    private static let lightImage: NSImage? = Bundle.main.url(forResource: "model-hero-light", withExtension: "jpg")
+        .flatMap(NSImage.init(contentsOf:))
+
+    private var image: NSImage? {
+        colorScheme == .light ? (Self.lightImage ?? Self.darkImage) : Self.darkImage
+    }
 
     var body: some View {
         GeometryReader { proxy in
-            if let image = Self.image {
+            if let image {
                 Image(nsImage: image)
                     .resizable().scaledToFill()
                     .frame(width: proxy.size.width, height: proxy.size.height)
