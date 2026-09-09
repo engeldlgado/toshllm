@@ -375,6 +375,18 @@ The gains landed in three steps. `mul_mm_id` in 0.81.67 took a 35B MoE's prompt 
 
 Two contributed data points frame what to expect. On an **RX 580** a tester measured a K-quant model go from **1.3 t/s (CPU decode) to ~51 t/s (GPU decode)**, coherent. On a **Radeon Pro Vega II** (Mac Pro 2019), Qwen3.6-35B-A3B Q4_K_S with every expert in VRAM runs at **285 t/s prompt / 42 t/s generation**. Recommended on these cards: a K-quant model, Flash Attention left **ON** (not off), and the KV cache at f16 (q8_0 keys cost ~2% here, so it's a fair trade for long context). The GPU path is on by default; `GGML_METAL_WAVE64_DECODE_DISABLE=1` in **Extra arguments** falls back to the CPU, and `TOSH_W64_PREFILL_DISABLE=1` / `TOSH_W64_MMID_PREFILL_DISABLE=1` revert the two prompt-matmul routes if you want to compare.
 
+#### Aligned reads on GCN before Vega, and a flag for testers
+
+A weight block of 22, 34, 98, 110 or 210 bytes leaves every other one two bytes short of a word, so reading four of its bytes at once lands off a word boundary. Metal calls that undefined, and the GCN cards before Vega return the bytes of the aligned address instead, which turns a whole model to nonsense. Vega and RDNA happen to return the right bytes, which is why the wide read shipped without anyone noticing. Since 0.87.1 the mat-vec kernels take a pair of 16-bit reads on the cards that need it, chosen once at startup so the other cards keep the single read and the exact code they had.
+
+Which card needs it is read from `MTLDevice.architecture`, the ISA target: `amdgpu_gfx803` is Polaris, `amdgpu_gfx900` and `amdgpu_gfx906` are Vega, and anything below gfx900 gets the aligned path. On macOS 12 and 13 that property does not exist and the card name decides instead, granting the fast path only to the names known to tolerate the wide read, so an unrecognised card stays correct rather than fast. The startup log always says which way it went and why:
+
+```
+ggml_metal: aligned mat-vec reads off by amdgpu_gfx906 (override with TOSH_MV_ALIGN=1 or =0)
+```
+
+`TOSH_MV_ALIGN` in **Extra arguments** forces either path on any card, and this is where reports help. If you have a GCN 3 or 4 card and want to know whether it really needs the aligned reads, run the engine check in the **Logs** tab with `TOSH_MV_ALIGN=0`: a card that needs them fails `MUL_MAT` on `q5_0`, `q6_K` and the other odd-sized types, and a card that does not passes clean and can join the fast list. Expect corrupt output while that flag is set on a card that needs alignment... it is a measurement, not a mode. The same applies in reverse on an unusual Vega-class card with `TOSH_MV_ALIGN=1`. Either result is worth [an issue](https://github.com/engeldlgado/toshllm/issues): the fast list can only grow from cards the project does not own.
+
 > The wave64 path is validated on RDNA (wave32) as a byte-exact no-op, so it never affects Apple Silicon or AMD RDNA cards. On real GCN/Vega hardware it is still being validated with testers — if you have one of these cards, [your benchmark and coherence reports](https://github.com/engeldlgado/toshllm/issues) are exactly what moves it forward.
 
 ## Community benchmarks

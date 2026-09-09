@@ -14,6 +14,7 @@ struct ChatAdvancedSettingsSection: View {
     @AppStorage(SettingsKeys.toolsRuntime) private var toolsRuntime = ""
     @AppStorage(SettingsKeys.jsSandboxEnabled) private var jsSandboxEnabled = false
     @AppStorage(SettingsKeys.memoryToolsEnabled) private var memoryToolsEnabled = true
+    @State private var blockedToolModels: [String] = ToolSupport.blockedModels
     @AppStorage(SettingsKeys.memoryArchiveHookURL) private var archiveHookURL = ""
     @AppStorage(SettingsKeys.memoryArchiveHookSecret) private var archiveHookSecret = ""
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
@@ -252,7 +253,39 @@ struct ChatAdvancedSettingsSection: View {
                                    value: $agenticMaxTurns, range: 1...100,
                                    help: loc.t("Máximo de rondas herramienta→respuesta que el agente encadena en un turno antes de detenerse.",
                                                "Maximum tool→response rounds the agent chains in one turn before stopping."))
+                    if !blockedToolModels.isEmpty {
+                        SettingsRow(icon: "hammer.slash",
+                                    title: loc.t("Modelos sin herramientas", "Models without tools"),
+                                    help: loc.t("Modelos que escribieron mal una llamada y el motor cortó la respuesta, así que dejaron de recibir herramientas. Quita uno de la lista para volver a ofrecérselas.",
+                                                "Models that wrote a call in the wrong shape, so the engine stopped the answer and they stopped receiving tools. Remove one to offer them again.")) {
+                            EmptyView()
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(blockedToolModels, id: \.self) { model in
+                                HStack(spacing: 8) {
+                                    Text((model as NSString).lastPathComponent)
+                                        .font(.callout)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                        .help(model)
+                                    Spacer(minLength: 8)
+                                    Button {
+                                        ToolSupport.unblock(model)
+                                        blockedToolModels = ToolSupport.blockedModels
+                                    } label: {
+                                        Image(systemName: "arrow.uturn.backward")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help(loc.t("Volver a ofrecerle herramientas", "Offer tools to it again"))
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                .onAppear { blockedToolModels = ToolSupport.blockedModels }
             }
 
             if destination == .agents {

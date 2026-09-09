@@ -898,6 +898,7 @@ final class ChatStore: ObservableObject {
                     if javaScriptEnabled { availableTools.append(JavaScriptSandboxService.tool) }
                     if memoryToolsEnabled { availableTools.append(contentsOf: ChatMemoryService.tools) }
                     availableTools += await ToshMCPService.shared.discoverTools()
+                    if ToolSupport.isBlocked(ToolSupport.currentModelIdentity) { availableTools = [] }
                     if let enabledToolNames {
                         let selected = Set(enabledToolNames)
                         availableTools.removeAll { !selected.contains($0.name) }
@@ -1045,7 +1046,14 @@ final class ChatStore: ObservableObject {
                     reportedError = true
                     AppLog.chat.error("stream failed: \(error.localizedDescription)")
                     let store = self
-                    let message = error.localizedDescription
+                    let raw = error.localizedDescription
+                    // the engine kills the turn when the model writes the call in the wrong
+                    // shape, and it does it on every tool, so the model stops getting them
+                    let rejected = raw.contains("peg-native") && !availableTools.isEmpty
+                    if rejected { ToolSupport.block(ToolSupport.currentModelIdentity) }
+                    let message = rejected
+                        ? "Este modelo escribe mal las llamadas a herramientas y el motor cortó la respuesta; se le han desactivado, vuelve a enviar / this model writes tool calls in the wrong shape and the engine stopped the answer; they are now off for it, send again"
+                        : raw
                     await MainActor.run { store?.lastError = message }
                 }
             }
@@ -1062,7 +1070,7 @@ final class ChatStore: ObservableObject {
             // it instead of persisting an apparently duplicated empty bubble
             // and sending an empty assistant message in the next request.
             let hasVisibleAnswer = !accumulator.visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            let finalText = hasVisibleAnswer ? composed() : ""
+            let streamedText = hasVisibleAnswer ? composed() : ""
             let finalUsage = accumulator.usage
             let finalAccept = accumulator.mtpAccept
             let finalTimings: ChatTimings? = {
@@ -1075,6 +1083,7 @@ final class ChatStore: ObservableObject {
             let didReportError = reportedError
             let hadReasoning = !accumulator.reasoning.isEmpty
             let finalToolCalls = accumulator.toolCalls.filter { !$0.name.isEmpty }
+            let finalText = streamedText
             let nextAgentRun = AgentRunContext(
                 port: port, temperature: temperature, maxTokens: maxTokens,
                 system: system, thinking: thinking, sampling: sampling,

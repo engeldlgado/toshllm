@@ -92,6 +92,10 @@ enum SettingsKeys {
     /// memory_list / memory_archive / memory_recall. Off for setups where an
     /// external memory server already covers the job and the model mixes the two.
     static let memoryToolsEnabled = "memoryToolsEnabled"
+
+    /// Models whose template accepts tools but that write the call in the wrong shape: the
+    /// engine rejects it and the turn dies, so they stop being offered any tool.
+    static let toolsUnsupportedModels = "toolsUnsupportedModels"
     static let mcpServers = "mcpServers"
     static let uiMcpProxy = "uiMcpProxy"
     static let cacheTypeK = "cacheTypeK"
@@ -239,7 +243,7 @@ enum SettingsKeys {
         audioVADProfile, audioVADThreshold, audioVADMinSpeechMS,
         audioVADMinSilenceMS, audioVADMaxSpeechSeconds, audioVADSpeechPadMS,
         extraArgs, embeddings, agentToolsEnabled, toolsRuntime, jsSandboxEnabled,
-        memoryToolsEnabled, mcpServers, uiMcpProxy,
+        memoryToolsEnabled, toolsUnsupportedModels, mcpServers, uiMcpProxy,
         cacheTypeK, cacheTypeV, mlock, cacheRAM,
         parallelSlots, reasoningInline, specMTP, mtpDisabledModels, faAmd, prefetchExperts, ubatch,
         dynamicMoe, dynamicMoeSlots, dynamicMoePrefetch, dynamicMoePolicy, routerMode, routerModelsMax,
@@ -617,4 +621,38 @@ enum AppCodeSignature {
               let team = values[kSecCodeInfoTeamIdentifier as String] as? String else { return false }
         return !team.isEmpty
     }()
+}
+
+/// A model whose tool call the engine refuses kills the turn with an HTTP 500, and it does it
+/// on every tool, not only on one. Nothing in the template says which model gets it wrong, so
+/// the failure itself is the signal: the model is remembered and stops receiving tools.
+enum ToolSupport {
+    static var currentModelIdentity: String? {
+        if let alias = ServerSettings.activeRouterModel(), !alias.isEmpty { return alias }
+        let path = UserDefaults.standard.string(forKey: SettingsKeys.modelPath) ?? ""
+        return path.isEmpty ? nil : path
+    }
+
+    static func isBlocked(_ model: String?) -> Bool {
+        guard let model, !model.isEmpty else { return false }
+        return blockedModels.contains(model)
+    }
+
+    static var blockedModels: [String] {
+        UserDefaults.standard.stringArray(forKey: SettingsKeys.toolsUnsupportedModels) ?? []
+    }
+
+    static func unblock(_ model: String) {
+        var blocked = blockedModels
+        blocked.removeAll { $0 == model }
+        UserDefaults.standard.set(blocked, forKey: SettingsKeys.toolsUnsupportedModels)
+    }
+
+    static func block(_ model: String?) {
+        guard let model, !model.isEmpty else { return }
+        var blocked = blockedModels
+        guard !blocked.contains(model) else { return }
+        blocked.append(model)
+        UserDefaults.standard.set(blocked, forKey: SettingsKeys.toolsUnsupportedModels)
+    }
 }
