@@ -4,25 +4,12 @@
 
 import SwiftUI
 
-// MARK: - Liquid Glass with fallback
-
-/// macOS 26 (Tahoe) "Liquid Glass" surfaces, degrading to translucent
-/// materials on macOS 14–15 — and, importantly, when built with an SDK older
-/// than macOS 26 (e.g. CI runners). `#available` is only a *runtime* check; it
-/// does not help if the build SDK lacks `glassEffect`/`Glass` symbols at all,
-/// so the new API is additionally gated behind `#if compiler(>=6.2) && !TOSH_LEGACY_UI` — the
-/// toolchain that ships the macOS 26 SDK. Reserve `glassSurface` for floating,
-/// interactive controls (composer, jump-to-bottom button); applying it to
-/// every message bubble would stack many GPU-backed blurs and hurt scrolling.
 extension View {
     func glassSurface(in shape: some InsettableShape, tint: Color? = nil, interactive: Bool = false) -> some View {
         modifier(GlassSurface(shape: shape, tint: tint, interactive: interactive))
     }
 }
 
-/// Reading the accessibility environment needs a modifier, not a plain View
-/// extension: with "Reduce transparency" or "Increase contrast" on, a blurred
-/// surface over content is exactly what the user asked the system to remove.
 private struct GlassSurface<S: InsettableShape>: ViewModifier {
     let shape: S
     let tint: Color?
@@ -148,6 +135,7 @@ struct GlassPillButtonStyle: ButtonStyle {
     var prominent = false
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         let accent = AppTheme.accent(accentRaw)
@@ -163,7 +151,7 @@ struct GlassPillButtonStyle: ButtonStyle {
             .glassSurface(in: shape, tint: prominent ? accent : nil, interactive: true)
             .overlay(shape.strokeBorder(prominent ? Color.white.opacity(0.10) : WorkspaceStyle.border))
             .contentShape(shape)
-            .opacity(configuration.isPressed ? 0.65 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.65 : 1) : 0.42)
             .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.98 : 1))
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -174,6 +162,7 @@ struct GlassIconButtonStyle: ButtonStyle {
     var active = false
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         let accent = AppTheme.accent(accentRaw)
@@ -185,7 +174,7 @@ struct GlassIconButtonStyle: ButtonStyle {
             .glassSurface(in: Circle(), tint: active ? accent : nil, interactive: true)
             .overlay(Circle().strokeBorder(.primary.opacity(0.07)))
             .contentShape(Circle())
-            .opacity(configuration.isPressed ? 0.65 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.65 : 1) : 0.38)
             .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.94 : 1))
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }

@@ -6,12 +6,20 @@ import SwiftUI
 
 struct SubtitlePreview: View {
     @ObservedObject var studio: AudioStudioController
+    @ObservedObject private var playback: AudioPlaybackState
     @Binding var followPlayback: Bool
     let editing: Bool
     @EnvironmentObject private var loc: Localizer
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var searchText = ""
     @State private var replacement = ""
+
+    init(studio: AudioStudioController, followPlayback: Binding<Bool>, editing: Bool) {
+        self.studio = studio
+        _playback = ObservedObject(wrappedValue: studio.playback)
+        _followPlayback = followPlayback
+        self.editing = editing
+    }
 
     var body: some View {
         Group {
@@ -43,14 +51,14 @@ struct SubtitlePreview: View {
                         SubtitleCueEditorRow(
                             studio: studio, original: pair.original ?? cue,
                             translated: pair.translated, mode: studio.transcriptMode,
-                            editing: editing, isCurrent: cue.id == studio.currentCueID
+                            editing: editing, isCurrent: cue.id == playback.currentCueID
                         )
                         .id(cue.id)
                         Divider()
                     }
                 }
             }
-            .onChange(of: studio.currentCueID) { _, cueID in
+            .onChange(of: playback.currentCueID) { _, cueID in
                 guard studio.isPlaying, followPlayback, let cueID else { return }
                 if reduceMotion {
                     proxy.scrollTo(cueID, anchor: .center)

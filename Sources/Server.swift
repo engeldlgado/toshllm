@@ -1508,6 +1508,7 @@ final class ServerManager: ObservableObject {
     @Published var activeID: UUID
 
     private static let storeKey = "multiServerProfiles"
+    private var pendingPersist: Task<Void, Never>?
 
     private init() {
         // Server 1 is the default: nil profile → driven by the global settings.
@@ -1583,9 +1584,19 @@ final class ServerManager: ObservableObject {
 
     /// Persists only the added servers (those with their own profile).
     func persist() {
+        pendingPersist?.cancel()
         let profiles = servers.compactMap { $0.profile }
         if let data = try? JSONEncoder().encode(profiles) {
             UserDefaults.standard.set(data, forKey: Self.storeKey)
+        }
+    }
+
+    func schedulePersist() {
+        pendingPersist?.cancel()
+        pendingPersist = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            self?.persist()
         }
     }
 }

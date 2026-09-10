@@ -122,7 +122,11 @@ struct ServerLogView: View {
                 }
             }
             Spacer(minLength: 12)
-            serverAction
+            GlassActionGroup {
+                ServerWebUIButton(server: server)
+                    .glassButton()
+                serverAction
+            }
         }
         .padding(16)
         .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))

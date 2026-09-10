@@ -7,12 +7,23 @@ import Combine
 import Foundation
 
 @MainActor
+final class AudioPlaybackState: ObservableObject {
+    @Published private(set) var currentTime: TimeInterval = 0
+    @Published private(set) var currentCueID: Int?
+
+    fileprivate func update(time: TimeInterval, cueID: Int?) {
+        currentTime = time
+        if currentCueID != cueID { currentCueID = cueID }
+    }
+}
+
+@MainActor
 final class AudioStudioController: ObservableObject {
     static let shared = AudioStudioController()
 
     @Published private(set) var sourceURL: URL?
     @Published private(set) var duration: TimeInterval = 0
-    @Published private(set) var currentTime: TimeInterval = 0
+    private(set) var currentTime: TimeInterval = 0
     @Published private(set) var fileSize = 0
     @Published private(set) var player: AVPlayer?
     @Published private(set) var isPlaying = false
@@ -32,6 +43,8 @@ final class AudioStudioController: ObservableObject {
     @Published private(set) var vadPreviewCues: [SubtitleCue] = []
     @Published private(set) var detectedLanguage = ""
     @Published private(set) var error: String?
+
+    let playback = AudioPlaybackState()
 
     private var process: Process?
     private var stderrPipe: Pipe?
@@ -71,10 +84,6 @@ final class AudioStudioController: ObservableObject {
         return max(0, elapsed / progress - elapsed)
     }
 
-    var currentCueID: Int? {
-        Self.cueID(at: currentTime, in: originalCues.isEmpty ? cues : originalCues)
-    }
-
     var hasTranslation: Bool { !translatedCues.isEmpty }
 
     var canRetryTranslation: Bool { !originalCues.isEmpty && !isBusy }
@@ -91,16 +100,16 @@ final class AudioStudioController: ObservableObject {
         timeObserver = nil
         sourceURL = url
         duration = 0
-        currentTime = 0
+        updatePlaybackTime(0)
         vadPreviewState = .idle
         vadPreviewCues = []
         fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let player = AVPlayer(url: url)
         self.player = player
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main
         ) { [weak self] time in
-            Task { @MainActor in self?.currentTime = max(0, time.seconds) }
+            Task { @MainActor in self?.updatePlaybackTime(max(0, time.seconds)) }
         }
         Task { await loadDuration(url) }
     }
@@ -118,8 +127,16 @@ final class AudioStudioController: ObservableObject {
 
     func seek(to seconds: TimeInterval) {
         let target = max(0, seconds)
-        currentTime = target
+        updatePlaybackTime(target)
         player?.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+    }
+
+    private func updatePlaybackTime(_ time: TimeInterval) {
+        currentTime = time
+        playback.update(time: time, cueID: Self.cueID(
+            at: time,
+            in: originalCues.isEmpty ? cues : originalCues
+        ))
     }
 
     func start(modelURL: URL, vadModelURL: URL, vadConfiguration: AudioVADConfiguration,

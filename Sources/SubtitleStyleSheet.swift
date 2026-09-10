@@ -26,100 +26,171 @@ struct SubtitleStyleSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            preview
+        VStack(spacing: 0) {
+            header
             Divider()
-            controls
-            footer
+            ScrollView {
+                VStack(spacing: 16) {
+                    preview
+                    controls
+                }
+                .padding(18)
+            }
+            Divider()
+            footer.padding(14)
         }
-        .padding(16)
-        .frame(minWidth: 620, minHeight: 560)
+        .frame(minWidth: 660, idealWidth: 720, minHeight: 600, idealHeight: 720)
+        .background(WorkspaceStyle.canvas)
         .task { await loadFrame() }
         .onChange(of: style) { _, _ in render() }
     }
 
-    private var preview: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8).fill(.black)
-            if let rendered {
-                Image(nsImage: rendered)
-                    .resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-            } else {
-                ProgressView()
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "captions.bubble.fill")
+                .font(.title2)
+                .foregroundStyle(Color.appAccent)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(loc.t("Apariencia de los subtítulos", "Subtitle appearance"))
+                    .font(.headline)
+                Text(loc.t("Ajusta el resultado sobre un fotograma real del vídeo.",
+                           "Adjust the result over a real frame from the video."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            Spacer()
         }
-        .frame(minHeight: 260)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+    }
+
+    private var preview: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(loc.t("Vista previa", "Preview"), systemImage: "play.rectangle")
+                .font(.headline)
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(.black)
+                if let rendered {
+                    Image(nsImage: rendered)
+                        .resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(minHeight: 260)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(WorkspaceStyle.border))
+        }
+        .padding(14)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(WorkspaceStyle.border))
     }
 
     private var controls: some View {
-        Form {
-            Picker(loc.t("Tipografía", "Typeface"), selection: $style.fontName) {
-                ForEach(SubtitleStyle.fontChoices, id: \.name) { Text($0.label).tag($0.name) }
+        VStack(alignment: .leading, spacing: 10) {
+            Label(loc.t("Estilo", "Style"), systemImage: "slider.horizontal.3")
+                .font(.headline)
+
+            settingRow(loc.t("Tipografía", "Typeface")) {
+                Picker("", selection: $style.fontName) {
+                    ForEach(SubtitleStyle.fontChoices, id: \.name) { Text($0.label).tag($0.name) }
+                }
+                .labelsHidden()
+                .frame(width: 220)
             }
             .help(loc.t("Fuentes que trae macOS y se leen bien sobre imagen en movimiento.",
                         "Faces macOS ships that stay readable over moving pictures."))
 
-            LabeledContent(loc.t("Tamaño", "Size")) {
-                HStack {
+            settingRow(loc.t("Tamaño", "Size")) {
+                HStack(spacing: 10) {
                     Slider(value: $style.relativeSize, in: 0.02...0.08)
                     Text("\(Int(style.relativeSize * 1000))")
-                        .font(.system(size: 11, design: .monospaced)).frame(width: 30)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, alignment: .trailing)
                 }
+                .frame(width: 290)
             }
             .help(loc.t("Proporción del alto del fotograma, así se ve igual en 720p que en 4K.",
                         "A fraction of the frame height, so it reads the same at 720p and at 4K."))
 
-            ColorPicker(loc.t("Color del texto", "Text colour"),
-                        selection: Binding(get: { style.textColor.color },
-                                           set: { style.textColor = .init($0) }))
-
-            Picker(loc.t("Fondo", "Background"), selection: $style.background) {
-                Text(loc.t("Caja", "Box")).tag(SubtitleStyle.Background.box)
-                Text(loc.t("Contorno", "Outline")).tag(SubtitleStyle.Background.outline)
-                Text(loc.t("Ninguno", "None")).tag(SubtitleStyle.Background.none)
+            settingRow(loc.t("Color del texto", "Text colour")) {
+                ColorPicker("", selection: Binding(get: { style.textColor.color },
+                                                    set: { style.textColor = .init($0) }))
+                    .labelsHidden()
             }
-            .pickerStyle(.segmented)
+
+            settingRow(loc.t("Fondo", "Background")) {
+                GlassSegmentedControl(selection: $style.background, segments: [
+                    .init(value: .box, title: loc.t("Caja", "Box")),
+                    .init(value: .outline, title: loc.t("Contorno", "Outline")),
+                    .init(value: .none, title: loc.t("Ninguno", "None")),
+                ])
+            }
             .help(loc.t("La caja se lee siempre; el contorno tapa menos imagen.",
                         "The box always reads; the outline covers less of the picture."))
 
             if style.background != .none {
-                LabeledContent(loc.t("Opacidad", "Opacity")) {
+                settingRow(loc.t("Opacidad", "Opacity")) {
                     Slider(value: $style.backgroundOpacity, in: 0.2...1)
+                        .frame(width: 290)
                 }
             }
 
-            Picker(loc.t("Posición", "Position"), selection: $style.position) {
-                Text(loc.t("Abajo", "Bottom")).tag(SubtitleStyle.Position.bottom)
-                Text(loc.t("Arriba", "Top")).tag(SubtitleStyle.Position.top)
+            settingRow(loc.t("Posición", "Position")) {
+                GlassSegmentedControl(selection: $style.position, segments: [
+                    .init(value: .bottom, title: loc.t("Abajo", "Bottom")),
+                    .init(value: .top, title: loc.t("Arriba", "Top")),
+                ])
             }
-            .pickerStyle(.segmented)
 
-            LabeledContent(loc.t("Margen", "Margin")) {
+            settingRow(loc.t("Margen", "Margin")) {
                 Slider(value: $style.margin, in: 0.01...0.2)
+                    .frame(width: 290)
             }
 
-            LabeledContent(loc.t("Ancho máximo", "Maximum width")) {
+            settingRow(loc.t("Ancho máximo", "Maximum width")) {
                 Slider(value: $style.maxWidth, in: 0.5...0.98)
+                    .frame(width: 290)
             }
             .help(loc.t("Cuánto del ancho puede ocupar el texto antes de partir de línea.",
                         "How much of the width the text may take before it wraps."))
         }
-        .formStyle(.grouped)
+        .padding(14)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private func settingRow<Content: View>(_ title: String,
+                                           @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 14) {
+            Text(title)
+                .font(.callout)
+            Spacer(minLength: 20)
+            content()
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 42)
+        .background(WorkspaceStyle.field, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(WorkspaceStyle.border))
     }
 
     private var footer: some View {
         HStack {
             Button(loc.t("Restaurar", "Reset")) { style = .default }
+                .glassButton()
                 .help(loc.t("Vuelve a la apariencia de fábrica.", "Back to the built-in look."))
             Spacer()
             Button(loc.t("Cancelar", "Cancel")) { dismiss() }
+                .glassButton()
                 .keyboardShortcut(.cancelAction)
             Button(loc.t("Guardar", "Save")) {
                 style.save()
                 dismiss()
             }
-            .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .glassButton(prominent: true)
         }
     }
 

@@ -24,6 +24,8 @@ struct AudioControls: View {
     @AppStorage(SettingsKeys.chatSelectedModel) private var routerModel = ""
     @AppStorage(SettingsKeys.audioTranslationModel) private var translationModel = ""
     @AppStorage(SettingsKeys.audioGlossary) private var glossary = ""
+    @State private var usesCustomTargetLanguage = false
+    @FocusState private var customTargetLanguageFocused: Bool
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @AppStorage(SettingsKeys.audioVADMode) private var vadModeRaw = AudioVADMode.defaultMode.rawValue
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
@@ -37,20 +39,37 @@ struct AudioControls: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                sourceCard
-                taskCard
-                modelCard
-                actionCard
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    sourceCard
+                    Divider()
+                    taskCard
+                    Divider()
+                    modelCard
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
             }
-            .padding(14)
+            Divider()
+            actionCard
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
         }
-        .frame(minWidth: 270)
+        .frame(minWidth: 300)
+        .buttonStyle(GlassPillButtonStyle())
+        .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 420)
+        .onAppear {
+            seedTargetLanguageIfNeeded()
+            syncCustomTargetLanguage()
+        }
+        .onChange(of: operationRaw) { _, _ in
+            seedTargetLanguageIfNeeded()
+        }
     }
 
     private var sourceCard: some View {
-        Card(title: loc.t("Archivo", "File"), icon: "waveform") {
+        AudioSidebarSection(title: loc.t("Archivo", "File"), icon: "doc") {
             VStack(alignment: .leading, spacing: 8) {
                 Button(action: pickMedia) {
                     Label(loc.t("Elegir audio o vídeo…", "Choose audio or video…"),
@@ -79,7 +98,7 @@ struct AudioControls: View {
     }
 
     private var taskCard: some View {
-        Card(title: loc.t("Resultado", "Result"), icon: "captions.bubble") {
+        AudioSidebarSection(title: loc.t("Resultado", "Result"), icon: "captions.bubble") {
             VStack(alignment: .leading, spacing: 10) {
                 Picker(loc.t("Operación", "Operation"), selection: $operationRaw) {
                     Text(loc.t("Transcribir", "Transcribe")).tag(AudioStudioOperation.transcribe.rawValue)
@@ -98,10 +117,28 @@ struct AudioControls: View {
                             "Choosing the language improves accuracy; Automatic is useful when it is unknown."))
 
                 if operation == .translateLocal {
-                    DeferredSettingsTextField(loc.t("Idioma de destino", "Target language"),
-                                              text: $targetLanguage)
-                        .help(loc.t("Escribe el idioma final, por ejemplo Español, Coreano o Francés.",
-                                    "Enter the final language, such as Spanish, Korean, or French."))
+                    HStack(spacing: 10) {
+                        Text(loc.t("Idioma de destino", "Target language"))
+                        Spacer(minLength: 8)
+                        ToshDropdown(selection: targetLanguageSelection,
+                                     options: targetLanguageOptions,
+                                     placeholder: loc.t("Elegir idioma", "Choose language"),
+                                     width: 172,
+                                     maximumListHeight: 320,
+                                     listWidth: 260)
+                    }
+                    .help(loc.t("Elige el idioma final, por ejemplo Español, Coreano o Francés.",
+                                "Choose the final language, such as Spanish, Korean, or French."))
+
+                    if usesCustomTargetLanguage {
+                        TextField(loc.t("Escribe otro idioma…", "Enter another language…"),
+                                  text: $targetLanguage)
+                            .textFieldStyle(.plain)
+                            .padding(8)
+                            .workspaceFieldSurface()
+                            .focused($customTargetLanguageFocused)
+                            .onSubmit { commitCustomTargetLanguage() }
+                    }
                     chatRequirement
                     translationModelControl
                     TextField(loc.t("Glosario: término = traducción", "Glossary: term = translation"),
@@ -220,7 +257,7 @@ struct AudioControls: View {
     }
 
     private var modelCard: some View {
-        Card(title: "Whisper.cpp · GPU", icon: "memorychip") {
+        AudioSidebarSection(title: "Whisper.cpp · GPU", icon: "memorychip") {
             VStack(alignment: .leading, spacing: 8) {
                 Picker(loc.t("Modelo", "Model"), selection: $whisperModelID) {
                     ForEach(WhisperModel.catalog) { item in
@@ -370,7 +407,7 @@ struct AudioControls: View {
                    systemImage: "arrow.down.circle.fill") {
                 models.downloadWhisperModel(model)
             }
-            .buttonStyle(.borderedProminent)
+            .glassButton(prominent: true)
             .help(loc.t("Descarga el modelo en la carpeta local de modelos Whisper.",
                         "Downloads the model into the local Whisper model folder."))
         }
@@ -402,14 +439,15 @@ struct AudioControls: View {
                     Label(actionTitle, systemImage: operation == .transcribe ? "captions.bubble.fill" : "character.bubble.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .glassButton(prominent: true)
                 .controlSize(.large)
                 .disabled(!canStart)
                 .help(loc.t("Procesa el archivo localmente y conserva marcas de tiempo exportables.",
                             "Processes the file locally and preserves exportable timestamps."))
-                if studio.canRetryTranslation && operation == .translateLocal {
+                if !studio.originalCues.isEmpty && operation == .translateLocal {
                     Button(loc.t("Reintentar solo la traducción", "Retry translation only"),
                            systemImage: "arrow.triangle.2.circlepath", action: retryTranslation)
+                        .disabled(!canRetryTranslation)
                         .help(loc.t("Conserva la transcripción de Whisper y vuelve a ejecutar únicamente el Chat.",
                                     "Keeps the Whisper transcript and runs only Chat again."))
                 }
@@ -426,7 +464,16 @@ struct AudioControls: View {
     private var canStart: Bool {
         studio.sourceURL != nil && models.whisperModelInstalled(model)
             && (!vadMode.isEnabled || models.whisperVADInstalled)
-            && (operation != .translateLocal || (server.state == .running && !targetLanguage.trimmingCharacters(in: .whitespaces).isEmpty))
+            && (operation != .translateLocal || canUseTranslationServer)
+    }
+
+    private var canRetryTranslation: Bool {
+        studio.canRetryTranslation && canUseTranslationServer
+    }
+
+    private var canUseTranslationServer: Bool {
+        server.state == .running
+            && !targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var actionTitle: String {
@@ -494,6 +541,65 @@ struct AudioControls: View {
             : routerModel
     }
 
+    private func seedTargetLanguageIfNeeded() {
+        guard operation == .translateLocal else { return }
+        let current = targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        if current.isEmpty {
+            targetLanguage = TranslationLanguageOption.spanishValue
+        } else if let match = TranslationLanguageOption.matching(current), match.value != targetLanguage {
+            targetLanguage = match.value
+        }
+    }
+
+    private var targetLanguageSelection: Binding<String> {
+        Binding {
+            if usesCustomTargetLanguage {
+                return TranslationLanguageOption.customValue
+            }
+            return TranslationLanguageOption.matching(targetLanguage)?.value
+                ?? TranslationLanguageOption.customValue
+        } set: { selection in
+            if selection == TranslationLanguageOption.customValue {
+                usesCustomTargetLanguage = true
+                targetLanguage = ""
+                Task { @MainActor in
+                    await Task.yield()
+                    customTargetLanguageFocused = true
+                }
+            } else {
+                usesCustomTargetLanguage = false
+                customTargetLanguageFocused = false
+                targetLanguage = selection
+            }
+        }
+    }
+
+    private var targetLanguageOptions: [ToshDropdown<String>.Option] {
+        [
+            .init(value: TranslationLanguageOption.customValue,
+                  title: loc.t("Otro…", "Other…"),
+                  systemImage: "ellipsis")
+        ] + TranslationLanguageOption.all.map {
+            .init(value: $0.value, title: $0.label(isSpanish: loc.isSpanish))
+        }
+    }
+
+    private func syncCustomTargetLanguage() {
+        let current = targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return }
+        usesCustomTargetLanguage = TranslationLanguageOption.matching(current) == nil
+    }
+
+    private func commitCustomTargetLanguage() {
+        let current = targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        targetLanguage = current
+        if let match = TranslationLanguageOption.fuzzyMatch(current, minimumSimilarity: 0.80) {
+            targetLanguage = match.value
+            usesCustomTargetLanguage = false
+        }
+        customTargetLanguageFocused = false
+    }
+
     private func retryTranslation() {
         studio.retryTranslation(targetLanguage: targetLanguage, port: port,
                                 routerModel: selectedTranslationModel, glossary: glossary)
@@ -514,5 +620,119 @@ struct AudioControls: View {
         } else {
             studio.cancel()
         }
+    }
+}
+
+private struct TranslationLanguageOption: Identifiable {
+    let id: String
+    let value: String
+    let spanish: String
+    let english: String
+
+    func label(isSpanish: Bool) -> String { isSpanish ? spanish : english }
+
+    static let all: [TranslationLanguageOption] = {
+        let spanishLocale = Locale(identifier: "es")
+        let englishLocale = Locale(identifier: "en")
+        var seen = Set<String>()
+        return commonLanguageCodes.compactMap { code -> TranslationLanguageOption? in
+            guard let english = englishLocale.localizedString(forLanguageCode: code),
+                  let spanish = spanishLocale.localizedString(forLanguageCode: code),
+                  !english.isEmpty, !spanish.isEmpty,
+                  seen.insert(english.lowercased()).inserted else { return nil }
+            return TranslationLanguageOption(id: code, value: english,
+                                             spanish: spanish.capitalized(with: spanishLocale),
+                                             english: english.capitalized(with: englishLocale))
+        }
+        .sorted { $0.spanish.localizedStandardCompare($1.spanish) == .orderedAscending }
+    }()
+
+    /// Everyday translation targets. Less common and constructed languages stay
+    /// available through “Other” without overwhelming the dropdown.
+    private static let commonLanguageCodes = [
+        "af", "sq", "de", "am", "ar", "hy", "az", "bn", "be", "my", "bs", "bg",
+        "ca", "cs", "zh", "ko", "hr", "da", "sk", "sl", "es", "et", "eu", "fi",
+        "fil", "fr", "cy", "ka", "el", "gu", "he", "hi", "hu", "id", "en", "is",
+        "it", "ja", "kn", "kk", "km", "lo", "lv", "lt", "mk", "ms", "ml", "mr",
+        "mn", "ne", "nl", "no", "fa", "pl", "pt", "pa", "ro", "ru", "sr", "si",
+        "sv", "sw", "ta", "te", "th", "tr", "uk", "ur", "uz", "vi"
+    ]
+
+    static var spanishValue: String {
+        all.first(where: { $0.id == "es" })?.value ?? "Spanish"
+    }
+
+    static let customValue = "__toshllm_custom_language__"
+
+    static func matching(_ value: String) -> TranslationLanguageOption? {
+        all.first {
+            $0.id.caseInsensitiveCompare(value) == .orderedSame
+                || $0.value.caseInsensitiveCompare(value) == .orderedSame
+                || $0.spanish.caseInsensitiveCompare(value) == .orderedSame
+                || $0.english.caseInsensitiveCompare(value) == .orderedSame
+        }
+    }
+
+    static func fuzzyMatch(_ value: String, minimumSimilarity: Double) -> TranslationLanguageOption? {
+        let input = normalized(value)
+        // Very short names are too ambiguous while typing (for example Ga, Ewe,
+        // or Fon), so they must be chosen explicitly from the dropdown.
+        guard input.count >= 4 else { return nil }
+
+        return all.compactMap { option -> (TranslationLanguageOption, Double)? in
+            let score = [option.english, option.spanish]
+                .map { similarity(input, normalized($0)) }
+                .max() ?? 0
+            return score >= minimumSimilarity ? (option, score) : nil
+        }
+        .max { $0.1 < $1.1 }?
+        .0
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .filter { $0.isLetter }
+            .lowercased()
+    }
+
+    private static func similarity(_ lhs: String, _ rhs: String) -> Double {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
+        let left = Array(lhs)
+        let right = Array(rhs)
+        var previous = Array(0...right.count)
+
+        for (leftIndex, leftCharacter) in left.enumerated() {
+            var current = Array(repeating: 0, count: right.count + 1)
+            current[0] = leftIndex + 1
+            for (rightIndex, rightCharacter) in right.enumerated() {
+                let substitution = previous[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
+                current[rightIndex + 1] = min(
+                    current[rightIndex] + 1,
+                    previous[rightIndex + 1] + 1,
+                    substitution
+                )
+            }
+            previous = current
+        }
+
+        let distance = previous[right.count]
+        return 1 - Double(distance) / Double(max(left.count, right.count))
+    }
+}
+
+/// The same flat hierarchy used by the Images and Video sidebars. Sections keep
+/// their labels and spacing without adding a separate opaque card behind each one.
+private struct AudioSidebarSection<Content: View>: View {
+    let title: String
+    let icon: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

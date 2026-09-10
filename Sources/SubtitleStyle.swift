@@ -7,12 +7,12 @@ import SwiftUI
 /// How burned-in subtitles look. Sizes are fractions of the frame height so one
 /// setting reads the same on a 720p clip and a 4K one.
 struct SubtitleStyle: Codable, Equatable {
-    enum Background: String, Codable, CaseIterable, Identifiable {
+    enum Background: String, Codable, CaseIterable, Identifiable, Hashable {
         case box, outline, none
         var id: String { rawValue }
     }
 
-    enum Position: String, Codable, CaseIterable, Identifiable {
+    enum Position: String, Codable, CaseIterable, Identifiable, Hashable {
         case bottom, top
         var id: String { rawValue }
     }

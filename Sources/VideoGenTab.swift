@@ -5,11 +5,10 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// Video studio controls and animated PNG-sequence preview.
+private enum VideoSidebarMode: Hashable { case create, batch }
 
-/// Sidebar: model, prompt and the temporal settings.
 struct VideoControls: View {
-    @ObservedObject var gen: VideoGenerator
+    @ObservedObject var pool: VideoGenPool
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var models: ModelStore
 
@@ -25,58 +24,61 @@ struct VideoControls: View {
     @State private var prompt = ""
     @State private var seed = -1
     @State private var initImage = ""
+    @State private var sidebarMode = VideoSidebarMode.create
 
+    private var gen: VideoGenerator { pool.generator }
     private var vram: Double { ImageControls.vram(of: gpuIndex) }
-
     private var model: VideoGenModel {
-        VideoGenCatalog.all.first { $0.name == modelName } ?? VideoGenCatalog.recommended(vramGB: vram)
+        VideoGenCatalog.all.first { $0.name == modelName }
+            ?? VideoGenCatalog.recommended(vramGB: vram)
     }
     private var installed: Bool { VideoGenerator.installed(model, in: models) }
-
-    private var sizes: [VideoGenSize] { model.sizes }
-
     private var size: VideoGenSize {
         model.sizes.first { $0.label == sizeLabel } ?? model.sizes[0]
     }
-
+    private var canSubmit: Bool {
+        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && installed && VideoGenerator.engineInstalled
+    }
     private var vramFraction: Double {
         VideoGenLimits.vramFraction(width: size.width, height: size.height, frames: frames,
                                     vramGB: vram, model: model)
     }
 
-    private var nativeNote: String {
-        let list = model.sizes.map(\.label).joined(separator: ", ")
-        guard model.nativeFrames > 0 else {
-            return loc.t("Tamaños del modelo: %@. A %@ fps.", "The model's sizes: %@. At %@ fps.", "\(list)", "\(model.fps)")
-        }
-        let secs = String(format: "%.1f", VideoGenLimits.seconds(frames: model.nativeFrames, fps: model.fps))
-        if frames > model.nativeFrames {
-            return loc.t("Por encima de los %@ fotogramas que aprendió el modelo: el movimiento puede irse. Es límite del modelo, no de la app.", "Past the %@ frames the model learned: the motion may drift. That is the model's limit, not the app's.", "\(model.nativeFrames)")
-        }
-        return loc.t("Tamaños del modelo: %@, %@ fotogramas (%@ s) a %@ fps.", "The model's sizes: %@, %@ frames (%@ s) at %@ fps.", "\(list)", "\(model.nativeFrames)", "\(secs)", "\(model.fps)")
-    }
-
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                modelCard
-                promptCard
-                settingsCard
-                actionRow
+        VStack(spacing: 0) {
+            Picker("", selection: $sidebarMode) {
+                Text(loc.t("Crear", "Create")).tag(VideoSidebarMode.create)
+                Text(loc.t("Lotes", "Batch")).tag(VideoSidebarMode.batch)
             }
-            .padding(14)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.large)
+            .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 14)
+
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    modelCard
+                    promptCard
+                    settingsCard
+                }
+                .padding(.horizontal, 20).padding(.vertical, 18)
+            }
+            Divider()
+            footer.padding(.horizontal, 20).padding(.vertical, 14)
         }
+        .frame(minWidth: 300)
+        .buttonStyle(GlassPillButtonStyle())
+        .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 420)
         .onAppear {
+            pool.modelStore = models
             if modelName.isEmpty { modelName = VideoGenCatalog.recommended(vramGB: vram).name }
-            if !negativeSeeded {
-                negativePrompt = model.negativePrompt
-                negativeSeeded = true
-            }
-            // Preserve manual choices after the one-time recipe migration.
-            if recipeVersion < 1 {
-                steps = model.defaultSteps
-                recipeVersion = 1
-            }
+            if !negativeSeeded { negativePrompt = model.negativePrompt; negativeSeeded = true }
+            if recipeVersion < 1 { steps = model.defaultSteps; recipeVersion = 1 }
+        }
+        .onChange(of: sidebarMode) { _, value in
+            pool.section = value == .batch ? .queue : .videos
         }
         .onChange(of: modelName) { _, _ in
             steps = model.defaultSteps
@@ -86,377 +88,714 @@ struct VideoControls: View {
     }
 
     private var modelCard: some View {
-        Card(title: loc.t("Modelo", "Model"), icon: "film") {
-            VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Label(loc.t("Instancia", "Instance"), systemImage: "cube")
+                    .font(.headline)
+                Spacer()
+                Text(loc.t("Experimental", "Experimental"))
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(.orange.opacity(0.18), in: Capsule())
+                    .foregroundStyle(.orange)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(loc.t("Modelo", "Model")).font(.caption).foregroundStyle(.secondary)
                 Picker("", selection: $modelName) {
-                    ForEach(VideoGenCatalog.all) { m in
-                        Text(m.name).tag(m.name)
-                    }
+                    ForEach(VideoGenCatalog.all) { Text($0.name).tag($0.name) }
                 }
                 .labelsHidden()
-                .help(loc.t("Los Wan comparten codificador de texto, así que cambiar entre ellos no vuelve a descargarlo.",
-                            "The Wan models share a text encoder, so switching between them does not download it again."))
-
                 Text(model.detail(loc.isSpanish))
-                    .font(.caption).foregroundStyle(.secondary)
-
-                if !installed { installBox }
-                if !model.fitsVRAMClass(vram) {
-                    Label(loc.t("Pide %@ GB de VRAM y tienes %@", "Wants %@ GB of VRAM and you have %@", "\(Int(model.minVRAMGB))", "\(Int(vram))"),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
-                }
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        }
-    }
-
-    /// Same component list and downloader as the image studio: a Wan model is
-    /// several files and the encoder is shared, so partial state has to be visible.
-    private var installBox: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(model.components) { componentRow($0) }
-            Button {
-                for comp in model.components where !componentPresent(comp) {
-                    models.downloadImageComponent(urlString: comp.urlString, fileName: comp.fileName)
-                }
-            } label: {
-                Label(loc.t("Descargar todo (%@ GB)", "Download all (%@ GB)", "\(String(format: "%.1f", missingGB))"),
-                      systemImage: "arrow.down.circle.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .help(loc.t("Solo descarga lo que falte: el codificador es común a los Wan.",
-                        "Only downloads what is missing: the encoder is shared across the Wan models."))
-        }
-        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func componentPresent(_ comp: ImageGenComponent) -> Bool {
-        FileManager.default.fileExists(atPath: comp.path(in: models.imagenDirectory).path)
-    }
-
-    private var missingGB: Double {
-        model.components.filter { !componentPresent($0) }.reduce(0) { $0 + $1.sizeGB }
-    }
-
-    private func componentRow(_ comp: ImageGenComponent) -> some View {
-        let present = componentPresent(comp)
-        return HStack(spacing: 8) {
-            Image(systemName: present ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(present ? .green : .secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(comp.label(loc.isSpanish)).font(.caption)
-                Text(comp.fileName).font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-            }
-            Spacer()
-            if let item = models.imageDownload(fileName: comp.fileName) {
-                InlineDownloadProgress(item: item)
-            } else if !present {
-                Text(String(format: "%.1f GB", comp.sizeGB))
-                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+            if !installed { installBox }
+            if !model.fitsVRAMClass(vram) {
+                Label(loc.t("Requiere %@ GB de VRAM; hay %@ GB disponibles.",
+                            "Requires %@ GB of VRAM; %@ GB is available.",
+                            "\(Int(model.minVRAMGB))", "\(Int(vram))"),
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
             }
         }
     }
 
     private var promptCard: some View {
-        Card(title: loc.t("Descripción", "Prompt"), icon: "text.alignleft") {
-            VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(loc.t("Descripción", "Prompt")).font(.headline)
+            ZStack(alignment: .topLeading) {
                 TextEditor(text: $prompt)
-                    .font(.system(size: 12))
-                    .frame(height: 80)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-
-                negativePromptRow
-
-                if model.supportsI2V {
-                    HStack {
-                        Text(loc.t("Imagen inicial", "Init image")).font(.caption)
-                        Spacer()
-                        Button(initImage.isEmpty ? loc.t("Elegir…", "Choose…")
-                                                 : URL(fileURLWithPath: initImage).lastPathComponent) {
-                            pickInitImage()
-                        }
-                        .font(.caption)
-                        if !initImage.isEmpty {
-                            Button { initImage = "" } label: { Label(loc.t("Quitar", "Clear"), systemImage: "xmark.circle.fill") }
-                                .labelStyle(.iconOnly)
-                                .buttonStyle(.plain)
-                        }
-                    }
-                    .help(loc.t("Este modelo puede animar una imagen: será el primer fotograma.",
-                                "This model can animate an image: it becomes the first frame."))
+                    .font(.body).frame(minHeight: 96)
+                    .scrollContentBackground(.hidden).padding(8)
+                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+                if prompt.isEmpty {
+                    Text(loc.t("Describe el movimiento, la escena y la cámara…",
+                               "Describe the motion, scene, and camera…"))
+                        .font(.body).foregroundStyle(.tertiary)
+                        .padding(.horizontal, 13).padding(.vertical, 15)
+                        .allowsHitTesting(false)
                 }
             }
+            negativePromptRow
+            if model.supportsI2V { initImageRow }
         }
     }
 
     private var negativePromptRow: some View {
-        let tip = loc.t("Lo que NO debe aparecer. Viene relleno con el negativo recomendado del modelo; vaciarlo suele quemar la imagen.",
-                        "What must NOT appear. Prefilled with the model's recommended negative; emptying it usually burns the image out.")
-        return DisclosureGroup {
-            VStack(alignment: .leading, spacing: 6) {
-                TextEditor(text: $negativePrompt)
-                    .font(.system(size: 11))
-                    .frame(height: 60)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                Button(loc.t("Restaurar el del modelo", "Restore the model's")) {
-                    negativePrompt = model.negativePrompt
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(loc.t("Prompt negativo", "Negative prompt")).font(.subheadline)
+                Spacer()
+                Button { negativePrompt = model.negativePrompt } label: {
+                    Image(systemName: "arrow.counterclockwise")
                 }
-                .font(.caption).buttonStyle(.borderless)
+                .buttonStyle(GlassIconButtonStyle()).controlSize(.small)
                 .disabled(negativePrompt == model.negativePrompt)
-                .help(loc.t("Vuelve a poner el negativo recomendado de %@.",
-                            "Puts %@'s recommended negative back.", model.name))
+                .iconHelp(loc.t("Restaurar el prompt del modelo", "Restore the model prompt"))
             }
-            .padding(.top, 4)
-        } label: {
-            Text(loc.t("Prompt negativo", "Negative prompt")).font(.caption)
+            TextEditor(text: $negativePrompt)
+                .font(.callout).frame(minHeight: 44)
+                .scrollContentBackground(.hidden).padding(8)
+                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(alignment: .topLeading) {
+                    if negativePrompt.isEmpty {
+                        Text(loc.t("borroso, deforme, marca de agua, texto…",
+                                   "blurry, deformed, watermark, text…"))
+                            .font(.callout).foregroundStyle(.tertiary)
+                            .padding(.horizontal, 13).padding(.vertical, 15)
+                            .allowsHitTesting(false)
+                    }
+                }
         }
-        .help(tip)
     }
 
     private var settingsCard: some View {
-        Card(title: loc.t("Ajustes", "Settings"), icon: "slider.horizontal.3") {
-            VStack(alignment: .leading, spacing: 10) {
-                LabeledContent(loc.t("Tamaño", "Size")) {
-                    Picker("", selection: $sizeLabel) {
-                        ForEach(sizes) { s in
-                            Text(s.label).tag(s.label)
-                        }
-                    }.labelsHidden().frame(width: 130)
+        VStack(spacing: 12) {
+            settingRow(loc.t("Resolución", "Resolution")) {
+                Picker("", selection: $sizeLabel) {
+                    ForEach(model.sizes) { Text($0.label).tag($0.label) }
                 }
-                .help(loc.t("Solo los tamaños que el modelo declara. Fuera de ellos la imagen sale blanda o el modelo ni acepta la forma.",
-                            "Only the sizes the model states. Outside them the picture comes back soft, or the model does not accept the shape at all."))
-                LabeledContent(loc.t("Fotogramas", "Frames")) {
-                    Picker("", selection: $frames) {
-                        ForEach(VideoGenLimits.frameCounts, id: \.self) {
-                            Text("\($0)  ·  \(String(format: "%.1f", VideoGenLimits.seconds(frames: $0, fps: model.fps)))s").tag($0)
-                        }
-                    }.labelsHidden().frame(width: 130)
+                .labelsHidden().frame(width: 140)
+            }
+            settingRow(loc.t("Fotogramas", "Frames")) {
+                Picker("", selection: $frames) {
+                    ForEach(VideoGenLimits.frameCounts, id: \.self) { count in
+                        Text("\(count) · \(String(format: "%.1f", VideoGenLimits.seconds(frames: count, fps: model.fps)))s").tag(count)
+                    }
                 }
-                .help(loc.t("Los VAE temporales admitidos por el motor requieren cuentas 4n+1.",
-                            "The temporal VAEs supported by the engine require 4n+1 frame counts."))
-
-                if let recommended = VideoGenLimits.recommendedVRAMGB(model: model, frames: frames) {
-                    Label(loc.t("Este ajuste recomienda %@ GB de VRAM. En 12 GB queda menos de 2 GB libres para el escritorio y otras apps.", "This setting recommends %@ GB of VRAM. On 12 GB, less than 2 GB remains for the desktop and other apps.", "\(Int(recommended))"),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-
-                LabeledContent(loc.t("Pasos", "Steps")) {
-                    Stepper("\(steps)", value: $steps, in: 8...60, step: 2).frame(width: 130)
-                }
-                .help(loc.t("Recomendación para %@: %@ pasos.",
-                            "Recommended for %@: %@ steps.", model.name, String(model.defaultSteps)))
-
-                Toggle(loc.t("Decodificar por trozos", "Decode in tiles"), isOn: $vaeTiling)
-                    .help(loc.t("Recomendado. Sin esto el decodificado aclara un fotograma de cada cuatro y el clip parpadea, y además pide hasta 16 GB en vez de 3.4. Cuesta un 26% del decodificado.",
-                                "Recommended. Without it the decode brightens one frame in every four and the clip flickers, and it asks for up to 16 GB instead of 3.4. It costs 26% of the decode."))
-
-                Text(nativeNote).font(.caption2).foregroundStyle(.secondary)
-
-                if vramFraction > 0.9 && VideoGenLimits.recommendedVRAMGB(model: model, frames: frames) == nil {
-                    Label(loc.t("Estimo ~%@% de la VRAM. Si falla, baja los fotogramas antes que el tamaño.", "I estimate ~%@% of VRAM. If it fails, drop the frame count before the size.", "\(Int(vramFraction * 100))"),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-
-                if hardware.gpus.count > 1 {
-                    LabeledContent(loc.t("GPU", "GPU")) {
+                .labelsHidden().frame(width: 140)
+            }
+            settingRow(loc.t("Pasos", "Steps")) {
+                Stepper("\(steps)", value: $steps, in: 8...60, step: 2).frame(width: 140)
+            }
+            settingRow(loc.t("Semilla", "Seed")) {
+                TextField("", value: $seed, format: .number).workspaceTextField().frame(width: 140)
+            }
+            if !hardware.gpus.isEmpty {
+                settingRow("GPU") {
+                    if hardware.gpus.count > 1 {
                         Picker("", selection: $gpuIndex) {
                             Text(loc.t("Automática", "Automatic")).tag(-1)
-                            ForEach(Array(hardware.gpus.enumerated()), id: \.offset) { i, g in
-                                Text(g.name).tag(i)
-                            }
-                        }.labelsHidden().frame(width: 130)
+                            ForEach(Array(hardware.gpus.enumerated()), id: \.offset) { i, gpu in Text(gpu.name).tag(i) }
+                        }
+                        .labelsHidden().frame(width: 140)
+                    } else {
+                        Text(hardware.gpus[0].name).font(.callout).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.tail).frame(width: 140, alignment: .trailing)
                     }
                 }
+            }
+            settingRow(loc.t("Decodificar por bloques", "Decode in tiles")) {
+                Toggle("", isOn: $vaeTiling).labelsHidden().toggleStyle(.switch)
+            }
+            if let recommended = VideoGenLimits.recommendedVRAMGB(model: model, frames: frames) {
+                Label(loc.t("Esta configuración recomienda %@ GB de VRAM.",
+                            "This configuration recommends %@ GB of VRAM.", "\(Int(recommended))"),
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+            } else if vramFraction > 0.9 {
+                Label(loc.t("Uso estimado: %@% de la VRAM.", "Estimated use: %@% of VRAM.",
+                            "\(Int(vramFraction * 100))"), systemImage: "memorychip")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            Text(modelNote).font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var initImageRow: some View {
+        HStack(spacing: 6) {
+            Text(loc.t("Imagen inicial (img2video)", "Init image (img2video)")).font(.caption)
+            Spacer(minLength: 6)
+            Button(initImage.isEmpty ? loc.t("Elegir…", "Choose…")
+                                     : URL(fileURLWithPath: initImage).lastPathComponent) { pickInitImage() }
+                .font(.caption).lineLimit(1).truncationMode(.middle).frame(maxWidth: 150, alignment: .trailing)
+            if !initImage.isEmpty {
+                Button { initImage = "" } label: { Image(systemName: "xmark.circle") }
+                    .buttonStyle(GlassIconButtonStyle())
+                    .iconHelp(loc.t("Quitar imagen", "Remove image"))
             }
         }
     }
 
-    private var actionRow: some View {
-        VStack(spacing: 8) {
+    private func settingRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 6) {
+            Text(title).font(.callout)
+            Spacer(minLength: 8)
+            content()
+        }
+    }
+
+    @ViewBuilder private var footer: some View {
+        VStack(alignment: .leading, spacing: 9) {
             if gen.isBusy {
-                ProgressView(value: gen.progress)
-                HStack {
-                    Text(stageText).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    if let eta = gen.etaSeconds {
-                        Text(loc.t("~%@s restantes", "~%@s left", "\(eta)"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                Button(role: .cancel) { pool.cancelCurrent() } label: {
+                    Label(loc.t("Cancelar", "Cancel"), systemImage: "stop.circle").frame(maxWidth: .infinity)
                 }
-                Button(loc.t("Cancelar", "Cancel")) { gen.cancel() }
+                .controlSize(.large)
+            } else if sidebarMode == .create {
+                Button { pool.generate(request) } label: {
+                    Label(loc.t("Generar vídeo", "Generate video"), systemImage: "sparkles").frame(maxWidth: .infinity)
+                }
+                .glassButton(prominent: true).controlSize(.large).disabled(!canSubmit)
             } else {
-                Button {
-                    gen.generate(model: model, models: models, prompt: prompt,
-                                 negativePrompt: negativePrompt,
-                                 width: size.width, height: size.height, frames: frames,
-                                 steps: steps, seed: seed, fps: model.fps, gpuIndex: gpuIndex,
-                                 initImagePath: initImage)
-                } label: {
-                    Label(loc.t("Generar vídeo", "Generate video"), systemImage: "play.fill")
-                        .frame(maxWidth: .infinity)
+                Button { addToQueue() } label: {
+                    Label(loc.t("Añadir a la cola", "Add to queue"), systemImage: "text.badge.plus").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(prompt.isEmpty || !installed || !VideoGenerator.engineInstalled)
+                .glassButton(prominent: true).controlSize(.large).disabled(!canSubmit)
+                HStack(spacing: 8) {
+                    Text(loc.t("%@ pendientes", "%@ pending", "\(pool.queue.count)"))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        pool.queueActive ? pool.stopQueue() : pool.startQueue()
+                    } label: {
+                        Label(pool.queueActive ? loc.t("Pausar", "Pause") : loc.t("Procesar", "Process"),
+                              systemImage: pool.queueActive ? "pause.fill" : "play.fill")
+                    }
+                    .glassButton().disabled(pool.queue.isEmpty && !pool.queueActive)
+                }
             }
             if case .failed(let why) = gen.state, !why.isEmpty {
-                Text(failureText(why)).font(.caption).foregroundStyle(.red)
+                Label(failureText(why), systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.red)
             }
+            Text(loc.t("La generación se ejecuta localmente. El tiempo depende del hardware.",
+                       "Generation runs locally. Time depends on your hardware."))
+                .font(.caption2).foregroundStyle(.tertiary)
         }
     }
 
-    private var stageText: String {
-        switch gen.stage {
-        case .loading:  return loc.t("Cargando el modelo…", "Loading the model…")
-        case .sampling: return loc.t("Generando %@", "Sampling %@", "\(gen.stepText)")
-        case .decoding: return loc.t("Decodificando los fotogramas…", "Decoding the frames…")
-        }
+    private var request: VideoGenerationRequest {
+        VideoGenerationRequest(modelName: model.name,
+                               prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+                               negativePrompt: negativePrompt,
+                               width: size.width, height: size.height,
+                               frameCount: frames, steps: steps, seed: seed,
+                               fps: model.fps, gpuIndex: gpuIndex, initImagePath: initImage)
     }
 
+    private func addToQueue() { guard canSubmit else { return }; pool.enqueue(request); prompt = "" }
+
+    private var modelNote: String {
+        let sizes = model.sizes.map(\.label).joined(separator: ", ")
+        if model.nativeFrames > 0 {
+            let seconds = String(format: "%.1f", VideoGenLimits.seconds(frames: model.nativeFrames, fps: model.fps))
+            return loc.t("Resoluciones nativas: %@ · %@ fotogramas (%@ s) a %@ fps.",
+                         "Native resolutions: %@ · %@ frames (%@ s) at %@ fps.",
+                         sizes, "\(model.nativeFrames)", seconds, "\(model.fps)")
+        }
+        return loc.t("Resoluciones nativas: %@ · %@ fps.", "Native resolutions: %@ · %@ fps.", sizes, "\(model.fps)")
+    }
+
+    private var installBox: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(model.components) { component in
+                let present = componentPresent(component)
+                HStack(spacing: 8) {
+                    Image(systemName: present ? "checkmark.circle.fill" : "circle.dashed")
+                        .foregroundStyle(present ? .green : .secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(component.label(loc.isSpanish)).font(.caption)
+                        Text(component.fileName).font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                    if let item = models.imageDownload(fileName: component.fileName) {
+                        InlineDownloadProgress(item: item)
+                    } else if !present {
+                        Text(String(format: "%.1f GB", component.sizeGB))
+                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Button {
+                for component in model.components where !componentPresent(component) {
+                    models.downloadImageComponent(urlString: component.urlString, fileName: component.fileName)
+                }
+            } label: {
+                Label(loc.t("Descargar componentes", "Download components"), systemImage: "arrow.down.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .glassButton()
+        }
+        .padding(10)
+        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private func componentPresent(_ component: ImageGenComponent) -> Bool {
+        FileManager.default.fileExists(atPath: component.path(in: models.imagenDirectory).path)
+    }
     private func failureText(_ why: String) -> String {
         switch why {
-        case "OOM":     return loc.t("Sin VRAM. Baja el tamaño o los fotogramas.",
-                                     "Out of VRAM. Lower the size or the frame count.")
-        case "TIMEOUT": return loc.t("La GPU agotó el tiempo. Baja el tamaño o los fotogramas.",
-                                     "The GPU timed out. Lower the size or the frame count.")
-        default:        return why
+        case "OOM": return loc.t("Sin VRAM. Reduce la resolución o los fotogramas.", "Out of VRAM. Lower the resolution or frame count.")
+        case "TIMEOUT": return loc.t("La GPU agotó el tiempo. Reduce la resolución o los fotogramas.", "The GPU timed out. Lower the resolution or frame count.")
+        default: return why
         }
     }
-
     private func pickInitImage() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg]
-        panel.allowsMultipleSelection = false
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.png, .jpeg]; panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url { initImage = url.path }
     }
 }
 
-/// Detail: plays the frame sequence and exports it.
+// MARK: - Detail
+
 struct VideoCanvas: View {
-    @ObservedObject var gen: VideoGenerator
+    @ObservedObject var pool: VideoGenPool
     @EnvironmentObject var loc: Localizer
+    @State private var selectedID: GeneratedVideo.ID?
 
-    @State private var playing = true
-    @State private var frameIndex = 0
-    @State private var exporting = false
-    @State private var exportError = ""
-
-    var body: some View {
-        VStack(spacing: 12) {
-            if !gen.frames.isEmpty {
-                player
-                controls
-            } else if !gen.frameURLs.isEmpty {
-                // the frames decode off the main actor, so the run is done before
-                // they are ready; without this the canvas reads as "nothing here"
-                VStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(loc.t("Preparando los fotogramas…", "Preparing the frames…"))
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                emptyState
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(16)
+    private var selected: GeneratedVideo? {
+        pool.gallery.first(where: { $0.id == selectedID }) ?? pool.gallery.first
     }
 
-    private func exportMP4() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.mpeg4Movie]
-        panel.nameFieldStringValue = "toshllm-video.mp4"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let urls = gen.frameURLs
-        let fps = gen.lastFPS
-        exporting = true
-        Task.detached {
-            do {
-                let full = urls.compactMap { NSImage(contentsOf: $0) }
-                try VideoExporter.writeMP4(frames: full, fps: fps, to: url)
-                await MainActor.run {
-                    exporting = false
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack {
+                detailTabPicker
+                Spacer()
+            }
+            .frame(minHeight: 38)
+            if pool.section == .videos { videos } else {
+                VideoQueueView(pool: pool) { result in selectedID = result.id; pool.section = .videos }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .buttonStyle(GlassPillButtonStyle())
+        .onAppear { selectedID = pool.gallery.first?.id }
+        .onChange(of: pool.gallery.map(\.id)) { _, _ in selectedID = pool.gallery.first?.id }
+    }
+
+    private var detailTabPicker: some View {
+        HStack(spacing: 3) {
+            detailTabButton(.videos, title: loc.t("Vídeos", "Videos"),
+                            systemImage: "play.rectangle.on.rectangle")
+            detailTabButton(.queue,
+                            title: pool.queue.isEmpty
+                                ? loc.t("Cola", "Queue")
+                                : loc.t("Cola %@", "Queue %@", "\(pool.queue.count)"),
+                            systemImage: "list.bullet.rectangle")
+        }
+        .padding(3)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.08)))
+        .fixedSize()
+    }
+
+    private func detailTabButton(_ section: VideoStudioSection, title: String,
+                                 systemImage: String) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) { pool.section = section }
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.callout.weight(pool.section == section ? .semibold : .medium))
+                .foregroundStyle(pool.section == section ? Color.white : Color.secondary)
+                .frame(width: 118, height: 30)
+                .background(pool.section == section ? Color.appAccent : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(pool.section == section ? .isSelected : [])
+    }
+
+    @ViewBuilder private var videos: some View {
+        if !VideoGenerator.engineInstalled {
+            centeredState(icon: "exclamationmark.triangle", title: loc.t("Motor de vídeo no disponible", "Video engine unavailable"),
+                          detail: loc.t("Instala o compila el motor de generación para crear vídeos.", "Install or build the generation engine to create videos."), color: .orange)
+        } else if pool.gallery.isEmpty {
+            if pool.generator.isBusy { generationCanvas } else {
+                centeredState(icon: "play.rectangle.on.rectangle", title: loc.t("Crea tu primer vídeo", "Create your first video"),
+                              detail: loc.t("Elige un modelo, describe la escena y pulsa Generar.", "Choose a model, describe the scene, and press Generate."))
+            }
+        } else {
+            GeometryReader { geometry in
+                HStack(alignment: .top, spacing: 16) {
+                    hero
+                    if geometry.size.width >= 760 { gallery.frame(width: min(300, max(230, geometry.size.width * 0.26))) }
                 }
-            } catch {
-                await MainActor.run {
-                    exporting = false
-                    exportError = error.localizedDescription
+            }
+        }
+    }
+
+    private var generationCanvas: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "film.stack").font(.system(size: 42, weight: .light)).foregroundStyle(.tertiary)
+            VideoGenerationProgressCard(gen: pool.generator, compact: false)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WorkspaceStyle.canvas, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private var hero: some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .topLeading) {
+                if let selected { VideoPlaybackView(result: selected).id(selected.id).padding(12) }
+                if pool.generator.isBusy { VideoGenerationProgressCard(gen: pool.generator, compact: true).padding(16) }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity).background(WorkspaceStyle.canvas)
+            if let selected { resultFooter(selected) }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private var gallery: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.flexible())], spacing: 10) {
+                if pool.generator.isBusy { VideoGenerationThumbnail(gen: pool.generator) }
+                ForEach(pool.gallery) { result in
+                    VideoResultThumbnail(result: result, selected: result.id == selected?.id) { selectedID = result.id }
+                }
+            }
+            .padding(2)
+        }
+    }
+
+    private func resultFooter(_ result: GeneratedVideo) -> some View {
+        HStack(spacing: 12) {
+            Circle().fill(.green).frame(width: 9, height: 9)
+            Text(loc.t("Generado en %@s", "Generated in %@s", "\(result.duration)"))
+                .font(.caption.weight(.medium)).foregroundStyle(.green)
+            Text("\(result.width) × \(result.height) · \(result.frameCount)f · \(result.fps) fps")
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button { exportMP4(result) } label: { Label(loc.t("Guardar", "Save"), systemImage: "square.and.arrow.down") }
+            Button { reveal(result) } label: { Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder") }
+        }
+        .controlSize(.small).padding(.horizontal, 16).padding(.vertical, 12)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func centeredState(icon: String, title: String, detail: String, color: Color = .secondary) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: icon).font(.system(size: 42, weight: .light)).foregroundStyle(color)
+            Text(title).font(.title3.weight(.semibold))
+            Text(detail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(36).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WorkspaceStyle.canvas, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(WorkspaceStyle.border))
+    }
+}
+
+private struct VideoQueueView: View {
+    @ObservedObject var pool: VideoGenPool
+    @EnvironmentObject var loc: Localizer
+    let select: (GeneratedVideo) -> Void
+    @State private var grid = true
+
+    var body: some View {
+        VStack(spacing: 14) {
+            queueToolbar
+            if pool.queue.isEmpty && pool.gallery.isEmpty && !pool.generator.isBusy { emptyState } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if pool.generator.isBusy {
+                            sectionTitle(loc.t("En curso", "In progress"), count: 1, icon: "gearshape.2")
+                            VideoGenerationProgressCard(gen: pool.generator, compact: false)
+                        }
+                        if !pool.queue.isEmpty {
+                            sectionTitle(loc.t("Pendientes", "Pending"), count: pool.queue.count, icon: "clock")
+                            ForEach(Array(pool.queue.enumerated()), id: \.element.id) { index, request in pendingRow(request, number: index + 1) }
+                        }
+                        if !pool.gallery.isEmpty {
+                            sectionTitle(loc.t("Resultados", "Results"), count: pool.gallery.count, icon: "play.rectangle.on.rectangle")
+                            if grid {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 440), spacing: 12)], spacing: 12) {
+                                    ForEach(pool.gallery) { resultCard($0) }
+                                }
+                            } else {
+                                VStack(spacing: 10) { ForEach(pool.gallery) { resultRow($0) } }
+                            }
+                        }
+                    }
+                    .padding(2)
                 }
             }
         }
     }
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "film").font(.system(size: 40)).foregroundStyle(.tertiary)
-            Text(loc.t("Escribe una descripción y genera un vídeo.",
-                       "Write a prompt and generate a video."))
-                .foregroundStyle(.secondary)
-            if gen.isBusy {
-                Text(loc.t("Los fotogramas aparecen al terminar el decodificado.",
-                           "The frames appear once decoding finishes."))
-                    .font(.caption).foregroundStyle(.tertiary)
-            }
+        VStack(spacing: 12) {
+            Image(systemName: "rectangle.stack.badge.plus").font(.system(size: 40, weight: .light)).foregroundStyle(.tertiary)
+            Text(loc.t("Prepara un lote desde el sidebar", "Build a batch from the sidebar")).font(.title3.weight(.semibold))
+            Text(loc.t("Añade descripciones con su configuración y procésalas en orden.", "Add prompts with their settings and process them in order."))
+                .font(.callout).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WorkspaceStyle.canvas, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(WorkspaceStyle.border))
     }
 
-    /// Animates the PNG sequence at the model's frame rate. The closure re-reads
-    /// gen.frames on every tick, and the list can empty between the body's check and
-    /// that tick, so the bounds check belongs here: `% 0` is SIGILL, not a trap.
-    private var player: some View {
-        TimelineView(.periodic(from: .now, by: 1.0 / Double(max(1, gen.lastFPS)))) { ctx in
-            let count = gen.frames.count
-            if count > 0 {
-                let fps = max(1, gen.lastFPS)
-                let tick = Int(ctx.date.timeIntervalSinceReferenceDate * Double(fps))
-                let idx = playing ? ((tick % count) + count) % count
-                                  : min(max(0, frameIndex), count - 1)
-                Image(nsImage: gen.frames[idx])
-                    .resizable().scaledToFit()
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
-                Color.clear
+    private var queueToolbar: some View {
+        HStack(spacing: 10) {
+            Label(loc.t("%@ pendientes", "%@ pending", "\(pool.queue.count)"), systemImage: "list.number").font(.callout.weight(.medium))
+            if pool.generator.isBusy { Text(loc.t("Procesando", "Processing")).font(.caption).foregroundStyle(.green) }
+            Spacer()
+            FeedLayoutPicker(grid: $grid)
+            Button { pool.queueActive ? pool.stopQueue() : pool.startQueue() } label: {
+                Label(pool.queueActive ? loc.t("Pausar", "Pause") : loc.t("Procesar", "Process"),
+                      systemImage: pool.queueActive ? "pause.fill" : "play.fill")
+            }
+            .glassButton(prominent: true).disabled(pool.queue.isEmpty && !pool.queueActive)
+            if pool.generator.isBusy {
+                Button(role: .cancel) { pool.cancelCurrent() } label: { Label(loc.t("Cancelar actual", "Cancel current"), systemImage: "stop.circle") }
             }
         }
+        .padding(12)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
     }
 
-    private var controls: some View {
+    private func pendingRow(_ request: VideoGenerationRequest, number: Int) -> some View {
         HStack(spacing: 12) {
-            Button {
-                playing.toggle()
-            } label: {
-                Label(playing ? loc.t("Pausar", "Pause") : loc.t("Reproducir", "Play"),
-                      systemImage: playing ? "pause.fill" : "play.fill")
+            Text("\(number)").font(.caption.weight(.bold)).foregroundStyle(Color.appAccent)
+                .frame(width: 28, height: 28).background(Color.appAccent.opacity(0.13), in: Circle())
+            VStack(alignment: .leading, spacing: 4) {
+                Text(request.prompt).font(.callout.weight(.medium)).lineLimit(2)
+                Text("\(request.modelName) · \(request.width) × \(request.height) · \(request.frameCount)f · \(request.fps) fps")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
-                .labelStyle(.iconOnly)
-            if !playing {
-                Slider(value: Binding(get: { Double(frameIndex) },
-                                      set: { frameIndex = Int($0) }),
-                       in: 0...Double(max(1, gen.frames.count - 1)))
-                Text("\(frameIndex + 1)/\(gen.frames.count)")
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            } else {
-                Text(loc.t("%@ fotogramas · %@s en generarse", "%@ frames · %@s to generate", "\(gen.frames.count)", "\(gen.lastDuration)"))
-                    .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button { pool.remove(request.id) } label: { Image(systemName: "xmark") }
+                .buttonStyle(GlassIconButtonStyle()).iconHelp(loc.t("Quitar de la cola", "Remove from queue"))
+        }
+        .padding(12)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private func resultCard(_ result: GeneratedVideo) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { select(result) } label: { resultPreview(result).frame(maxWidth: .infinity).aspectRatio(16 / 9, contentMode: .fill).clipped() }
+                .buttonStyle(.plain).clipShape(RoundedRectangle(cornerRadius: 10))
+            Text(result.prompt).font(.callout.weight(.medium)).lineLimit(2)
+            Text("\(result.width) × \(result.height) · \(result.frameCount)f · \(result.modelName) · \(result.duration)s")
+                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            HStack {
+                Button { exportMP4(result) } label: { Label(loc.t("Guardar", "Save"), systemImage: "square.and.arrow.down") }
+                Button { reveal(result) } label: { Label("Finder", systemImage: "folder") }
+            }
+            .controlSize(.small)
+        }
+        .padding(10)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private func resultRow(_ result: GeneratedVideo) -> some View {
+        HStack(spacing: 12) {
+            Button { select(result) } label: { resultPreview(result).frame(width: 150, height: 84).clipped() }
+                .buttonStyle(.plain).clipShape(RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 5) {
+                Text(result.prompt).font(.callout.weight(.medium)).lineLimit(2)
+                Text("\(result.modelName) · \(result.width) × \(result.height) · \(result.frameCount)f · \(result.duration)s")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button { exportMP4(result) } label: { Image(systemName: "square.and.arrow.down") }
+                .buttonStyle(GlassIconButtonStyle())
+                .iconHelp(loc.t("Guardar vídeo", "Save video"))
+            Button { reveal(result) } label: { Image(systemName: "folder") }
+                .buttonStyle(GlassIconButtonStyle())
+                .iconHelp(loc.t("Mostrar en Finder", "Reveal in Finder"))
+        }
+        .padding(10)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+
+    @ViewBuilder private func resultPreview(_ result: GeneratedVideo) -> some View {
+        if let preview = result.preview { Image(nsImage: preview).resizable().scaledToFill() }
+        else { Image(systemName: "film").frame(maxWidth: .infinity, maxHeight: .infinity) }
+    }
+    private func sectionTitle(_ title: String, count: Int, icon: String) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon).foregroundStyle(Color.appAccent)
+            Text(title).font(.headline)
+            Text("\(count)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct VideoGenerationProgressCard: View {
+    @ObservedObject var gen: VideoGenerator
+    @EnvironmentObject var loc: Localizer
+    let compact: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(stageTitle).font(.callout.weight(.semibold)).lineLimit(1)
                 Spacer()
+                Text("\(Int(gen.progress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-            Button(loc.t("Exportar mp4…", "Export mp4…")) { exportMP4() }
-                .disabled(exporting)
-                .help(loc.t("Codifica los fotogramas en H.264, que macOS reproduce de serie.",
-                            "Encodes the frames as H.264, which macOS plays out of the box."))
-            Button(loc.t("Abrir carpeta", "Reveal")) {
-                if let first = gen.frameURLs.first {
-                    NSWorkspace.shared.activateFileViewerSelecting([first])
+            ProgressView(value: gen.progress).tint(Color.appAccent)
+            HStack {
+                Text(gen.lastModelName).lineLimit(1); Spacer(); Text(timeText).monospacedDigit()
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(compact ? 12 : 16).frame(width: compact ? 270 : nil)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+    private var stageTitle: String {
+        switch gen.stage {
+        case .loading: return loc.t("Cargando modelos…", "Loading models…")
+        case .sampling: return loc.t("Generando · paso %@", "Sampling · step %@", gen.stepText)
+        case .decoding: return loc.t("Decodificando fotogramas…", "Decoding frames…")
+        }
+    }
+    private var timeText: String {
+        if let eta = gen.etaSeconds { return loc.t("%@s · ~%@s restantes", "%@s · ~%@s left", "\(gen.elapsed)", "\(eta)") }
+        return loc.t("%@s transcurridos", "%@s elapsed", "\(gen.elapsed)")
+    }
+}
+
+private struct VideoGenerationThumbnail: View {
+    @ObservedObject var gen: VideoGenerator
+    @EnvironmentObject var loc: Localizer
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                ProgressView().controlSize(.small)
+                Text(loc.t("Generando vídeo", "Generating video")).font(.caption.weight(.semibold))
+                Spacer(); Text("\(Int(gen.progress * 100))%").font(.caption2.monospacedDigit())
+            }
+            ProgressView(value: gen.progress).tint(Color.appAccent)
+            Text(gen.lastModelName).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text("\(gen.lastWidth) × \(gen.lastHeight) · \(gen.lastFrameCount)f")
+                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(12).frame(maxWidth: .infinity, minHeight: 126, alignment: .bottomLeading)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.appAccent.opacity(0.8), lineWidth: 1.5))
+    }
+}
+
+private struct VideoResultThumbnail: View {
+    let result: GeneratedVideo
+    let selected: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            GeometryReader { geometry in
+                ZStack(alignment: .bottom) {
+                    if let preview = result.preview {
+                        Image(nsImage: preview).resizable().scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                    } else { Image(systemName: "film").frame(maxWidth: .infinity, maxHeight: .infinity) }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(result.modelName).font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text("\(result.width) × \(result.height) · \(result.frameCount)f").lineLimit(1).minimumScaleFactor(0.7)
+                            Spacer(minLength: 2); Text("\(result.duration)s")
+                        }
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                    }
+                    .foregroundStyle(.white).padding(.horizontal, 7).padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading).background(.black.opacity(0.64))
                 }
             }
-            .help(loc.t("Los fotogramas se guardan como PNG sueltos, listos para montarlos donde quieras.",
-                        "The frames are saved as individual PNGs, ready to assemble anywhere."))
+            .aspectRatio(16 / 10, contentMode: .fit).clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(selected ? Color.appAccent : Color.secondary.opacity(0.22), lineWidth: selected ? 2 : 1))
         }
-        .frame(maxWidth: 700)
+        .buttonStyle(.plain).help(result.prompt)
+    }
+}
+
+private struct VideoPlaybackView: View {
+    let result: GeneratedVideo
+    @EnvironmentObject var loc: Localizer
+    @State private var playing = true
+    @State private var frameIndex = 0
+    @State private var playbackFrames: [NSImage] = []
+    var body: some View {
+        VStack(spacing: 12) {
+            TimelineView(.periodic(from: .now, by: 1.0 / Double(max(1, result.fps)))) { context in
+                let count = playbackFrames.count
+                if count > 0 {
+                    let tick = Int(context.date.timeIntervalSinceReferenceDate * Double(max(1, result.fps)))
+                    let index = playing ? ((tick % count) + count) % count : min(max(0, frameIndex), count - 1)
+                    Image(nsImage: playbackFrames[index]).resizable().scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).clipShape(RoundedRectangle(cornerRadius: 12))
+                } else if let preview = result.preview { Image(nsImage: preview).resizable().scaledToFit() }
+            }
+            HStack(spacing: 10) {
+                Button { playing.toggle() } label: { Image(systemName: playing ? "pause.fill" : "play.fill") }
+                    .buttonStyle(GlassIconButtonStyle(active: playing))
+                    .iconHelp(playing ? loc.t("Pausar", "Pause") : loc.t("Reproducir", "Play"))
+                if !playing, playbackFrames.count > 1 {
+                    Slider(value: Binding(get: { Double(frameIndex) }, set: { frameIndex = Int($0) }),
+                           in: 0...Double(playbackFrames.count - 1))
+                    Text("\(frameIndex + 1)/\(playbackFrames.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                } else {
+                    Text(result.prompt).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Text(loc.t("%@ fotogramas", "%@ frames", "\(result.frameCount)"))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .task(id: result.id) {
+            let urls = result.frameURLs
+            let decoded = await Task.detached(priority: .userInitiated) {
+                urls.compactMap(VideoGenerator.displayFrame)
+            }.value
+            guard !Task.isCancelled else { return }
+            playbackFrames = decoded
+            frameIndex = 0
+        }
+    }
+}
+
+private func reveal(_ result: GeneratedVideo) {
+    if let first = result.frameURLs.first { NSWorkspace.shared.activateFileViewerSelecting([first]) }
+}
+
+private func exportMP4(_ result: GeneratedVideo) {
+    let panel = NSSavePanel(); panel.allowedContentTypes = [.mpeg4Movie]; panel.nameFieldStringValue = "toshllm-video.mp4"
+    guard panel.runModal() == .OK, let destination = panel.url else { return }
+    let urls = result.frameURLs; let fps = result.fps
+    Task.detached {
+        do {
+            let frames = urls.compactMap { NSImage(contentsOf: $0) }
+            try VideoExporter.writeMP4(frames: frames, fps: fps, to: destination)
+            await MainActor.run { NSWorkspace.shared.activateFileViewerSelecting([destination]) }
+        } catch {
+            await MainActor.run {
+                let alert = NSAlert(); alert.messageText = "ToshLLM"; alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning; alert.runModal()
+            }
+        }
     }
 }

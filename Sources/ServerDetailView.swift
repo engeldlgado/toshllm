@@ -4,9 +4,6 @@
 
 import SwiftUI
 
-/// The single-server workspace. It deliberately owns only presentation state;
-/// every control writes through the same defaults/profile objects used by Home,
-/// Settings and the compact server cards.
 struct ServerDetailView: View {
     enum Tab: String, CaseIterable, Hashable {
         case configuration, performance, logs, api, integrations
@@ -76,6 +73,7 @@ private struct ServerDetailHero: View {
     @EnvironmentObject private var control: ControlPanelState
     @AppStorage(SettingsKeys.modelPath) private var globalModelPath = ""
     @AppStorage(SettingsKeys.ncmoe) private var globalNcmoe = 0
+    @State private var inspectedModel: LocalModel?
 
     var body: some View {
         let settings = server.effectiveSettings()
@@ -94,6 +92,9 @@ private struct ServerDetailHero: View {
         }
         .padding(20)
         .cardSurface()
+        .sheet(item: $inspectedModel) { model in
+            LocalModelDetailsSheet(model: model)
+        }
     }
 
     private func identity(_ model: ModelName, settings: ServerSettings) -> some View {
@@ -115,11 +116,12 @@ private struct ServerDetailHero: View {
                 }
                 Text(description(for: model))
                     .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
-                Button(loc.t("Ver detalles del modelo", "View model details") + "  →") {
-                    control.section = .models
-                    control.serverAnchor = nil
+                if let local = localModel(at: settings.modelPath) {
+                    Button(loc.t("Ver detalles del modelo", "View model details") + "  →") {
+                        inspectedModel = local
+                    }
+                    .buttonStyle(.plain).foregroundStyle(Color.appAccent).font(.system(size: 13, weight: .medium))
                 }
-                .buttonStyle(.plain).foregroundStyle(Color.appAccent).font(.system(size: 13, weight: .medium))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -141,6 +143,18 @@ private struct ServerDetailHero: View {
             return loc.t("Modelo multimodal local para texto, imágenes y conversación.", "Local multimodal model for text, images and conversation.")
         }
         return loc.t("Modelo local para conversación, escritura y tareas cotidianas.", "Local model for chat, writing and everyday tasks.")
+    }
+
+    private func localModel(at path: String) -> LocalModel? {
+        guard !path.isEmpty else { return nil }
+        let target = URL(fileURLWithPath: path).standardizedFileURL.path
+        if let model = models.models.first(where: { $0.url.standardizedFileURL.path == target }) {
+            return model
+        }
+        guard FileManager.default.fileExists(atPath: target) else { return nil }
+        let url = URL(fileURLWithPath: target)
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        return LocalModel(url: url, name: url.lastPathComponent, sizeBytes: size)
     }
 
     private func statusAndActions(_ settings: ServerSettings) -> some View {
@@ -174,6 +188,8 @@ private struct ServerDetailHero: View {
 
     private func serverActions(_ settings: ServerSettings) -> some View {
         GlassActionGroup {
+            ServerWebUIButton(server: server)
+                .glassButton()
             Button { server.restart(server.effectiveSettings()) } label: {
                 Label(loc.t("Reiniciar", "Restart"), systemImage: "arrow.clockwise")
             }
@@ -195,13 +211,7 @@ private struct ServerDetailHero: View {
             }
             if server.state == .running || server.profile != nil {
                 Menu {
-                    if server.state == .running {
-                        Button(loc.t("Abrir interfaz web", "Open web interface"), systemImage: "safari") {
-                            NSWorkspace.shared.open(server.webChatURL)
-                        }
-                    }
                     if server.profile != nil {
-                        if server.state == .running { Divider() }
                         Button(loc.t("Eliminar servidor", "Delete server"), systemImage: "trash", role: .destructive) {
                             manager.removeServer(server.id)
                             control.serverAnchor = nil
@@ -300,12 +310,11 @@ private struct ServerConfigurationWorkspace: View {
     @State private var profileSelection = "current"
 
     private var busy: Bool { server.state == .running || server.state == .starting }
-    private var settings: ServerSettings { server.effectiveSettings() }
-
     var body: some View {
+        let settings = server.effectiveSettings()
         VStack(alignment: .leading, spacing: 14) {
-            AdaptiveTwoUp(threshold: 900) { serverSettingsCard } second: { engineCard }
-            modelConfigurationCard
+            AdaptiveTwoUp(threshold: 900) { serverSettingsCard(settings) } second: { engineCard(settings) }
+            modelConfigurationCard(settings)
             HStack {
                 if server.profile != nil {
                     ServerDeleteButton(presentation: .labeled) {
@@ -323,39 +332,41 @@ private struct ServerConfigurationWorkspace: View {
         }
     }
 
-    private var serverSettingsCard: some View {
+    private func serverSettingsCard(_ settings: ServerSettings) -> some View {
         DetailPanel(title: loc.t("Ajustes del servidor", "Server settings"),
                     subtitle: loc.t("Opciones principales de esta instancia.", "Core settings for this server instance."), icon: "server.rack", fill: true) {
             ServerSettingRow(icon: "shippingbox", title: loc.t("Modelo", "Model")) {
-                ToshDropdown(selection: modelSelection, options: modelOptions,
+                ToshDropdown(selection: modelSelection(settings), options: modelOptions,
                              placeholder: loc.t("Elige un modelo", "Choose a model"), listWidth: 390)
             }
             ServerSettingRow(icon: "number.square", title: loc.t("Puerto", "Port")) {
-                TextField("", value: port, format: .number.grouping(.never))
+                TextField("", value: port(settings), format: .number.grouping(.never))
                     .multilineTextAlignment(.trailing).workspaceTextField(width: 126)
+                    .accessibilityLabel(loc.t("Puerto", "Port"))
             }
             ServerSettingRow(icon: "doc.plaintext", title: loc.t("Longitud de contexto", "Context length")) {
-                ToshDropdown(selection: context, options: contextOptions, width: 126)
+                ToshDropdown(selection: context(settings), options: contextOptions, width: 126)
             }
             ServerSettingRow(icon: "wifi", title: loc.t("Descubrible en red local", "Discoverable on local network")) {
-                Toggle("", isOn: discovery).labelsHidden().toggleStyle(.switch)
+                Toggle(loc.t("Descubrible en red local", "Discoverable on local network"),
+                       isOn: discovery(settings)).labelsHidden().toggleStyle(.switch)
             }
             ServerSettingRow(icon: "number", title: loc.t("Límite de peticiones", "Request limit"),
                              detail: loc.t("Solicitudes procesadas en paralelo", "Requests processed in parallel")) {
-                requestLimitMenu
+                requestLimitMenu(settings)
             }
         }
         .disabled(busy)
     }
 
-    private var engineCard: some View {
+    private func engineCard(_ settings: ServerSettings) -> some View {
         DetailPanel(title: loc.t("Motor y hardware", "Engine and hardware"),
                     subtitle: loc.t("Perfil de ejecución y aceleración.", "Execution profile and acceleration."), icon: "gearshape", fill: true) {
             ServerSettingRow(icon: "slider.horizontal.3", title: loc.t("Perfil del motor", "Engine profile")) {
                 profileMenu
             }
             ServerSettingRow(icon: "cpu", title: "GPU") {
-                ToshDropdown(selection: gpuChoice, options: gpuOptions)
+                ToshDropdown(selection: gpuChoice(settings), options: gpuOptions(settings))
             }
             HStack(spacing: 10) {
                 hardwareTile("display", hardware.gpus.first?.name ?? loc.t("GPU predeterminada", "Default GPU"),
@@ -367,23 +378,26 @@ private struct ServerConfigurationWorkspace: View {
                 .font(.system(size: 14, weight: .semibold))
             ServerSettingRow(icon: "point.3.connected.trianglepath.dotted", title: loc.t("Servidor de embeddings", "Embeddings server"),
                              detail: loc.t("Expone un endpoint compatible con OpenAI", "Exposes an OpenAI-compatible endpoint")) {
-                Toggle("", isOn: embeddings).labelsHidden().toggleStyle(.switch)
+                Toggle(loc.t("Servidor de embeddings", "Embeddings server"),
+                       isOn: embeddings(settings)).labelsHidden().toggleStyle(.switch)
             }
             ServerSettingRow(icon: "network", title: loc.t("Proxy MCP para la interfaz web", "MCP proxy for the web interface"),
                              detail: loc.t("Permite usar MCP mediante la interfaz web", "Allows MCP through the web interface")) {
-                Toggle("", isOn: mcpProxy).labelsHidden().toggleStyle(.switch)
+                Toggle(loc.t("Proxy MCP para la interfaz web", "MCP proxy for the web interface"),
+                       isOn: mcpProxy(settings)).labelsHidden().toggleStyle(.switch)
             }
             ServerSettingRow(icon: "arrow.triangle.2.circlepath", title: loc.t("Router (multi-modelo)", "Router (multi-model)"),
                              detail: loc.t("Enruta peticiones entre modelos locales", "Routes requests across local models")) {
-                Toggle("", isOn: router).labelsHidden().toggleStyle(.switch)
+                Toggle(loc.t("Router multi-modelo", "Multi-model router"),
+                       isOn: router(settings)).labelsHidden().toggleStyle(.switch)
             }
-            if router.wrappedValue {
+            if router(settings).wrappedValue {
                 ServerSettingRow(icon: "square.stack.3d.up", title: loc.t("Modelos simultáneos", "Models loaded at once")) {
-                    Stepper("\(routerMax.wrappedValue)", value: routerMax, in: 1...4).fixedSize()
+                    Stepper("\(routerMax(settings).wrappedValue)", value: routerMax(settings), in: 1...4).fixedSize()
                 }
             }
             ServerSettingRow(icon: "terminal", title: loc.t("Argumentos extra", "Extra arguments")) {
-                TextField("--no-warmup -np 2", text: extraArgs)
+                TextField("--no-warmup -np 2", text: extraArgs(settings))
                     .font(.system(.callout, design: .monospaced))
                     .workspaceTextField(width: 330)
             }
@@ -391,10 +405,10 @@ private struct ServerConfigurationWorkspace: View {
         .disabled(busy)
     }
 
-    private var modelConfigurationCard: some View {
+    private func modelConfigurationCard(_ settings: ServerSettings) -> some View {
         DetailPanel(title: loc.t("Configuración del modelo", "Model configuration"),
                     subtitle: loc.t("Parámetros específicos del modelo seleccionado.", "Model-specific parameters for the selected model."), icon: "cube") {
-            AdaptiveTwoUp(threshold: 820, spacing: 12) { modelRuntimeGroup } second: { modelAccelerationGroup }
+            AdaptiveTwoUp(threshold: 820, spacing: 12) { modelRuntimeGroup(settings) } second: { modelAccelerationGroup(settings) }
             if !settings.modelPath.isEmpty {
                 HStack(spacing: 10) {
                     Label(loc.t("Detectado", "Detected"), systemImage: "checkmark.seal")
@@ -424,28 +438,29 @@ private struct ServerConfigurationWorkspace: View {
         .disabled(busy)
     }
 
-    private var modelRuntimeGroup: some View {
+    private func modelRuntimeGroup(_ settings: ServerSettings) -> some View {
         ModelConfigurationGroup(title: loc.t("Ejecución", "Runtime"), icon: "memorychip") {
             ServerSettingRow(icon: "square.stack.3d.down.right", title: loc.t("Micro-lote", "Micro-batch"),
                              detail: loc.t("Equilibra velocidad y memoria", "Balances throughput and memory")) {
-                ToshDropdown(selection: ubatch, options: ubatchOptions, width: 184, listWidth: 250)
+                ToshDropdown(selection: ubatch(settings), options: ubatchOptions, width: 184, listWidth: 250)
             }
             if ServerSettings.modelIsMoE(at: settings.modelPath) {
                 Divider()
                 ServerSettingRow(icon: "cpu", title: loc.t("Expertos MoE en CPU", "MoE experts on CPU"),
                                  detail: loc.t("Reduce VRAM usando memoria del sistema", "Trades system memory for lower VRAM use")) {
-                    CompactIntegerStepper(value: ncmoe, range: 0...99)
+                    CompactIntegerStepper(value: ncmoe(settings), range: 0...99)
                 }
             }
         }
     }
 
-    private var modelAccelerationGroup: some View {
+    private func modelAccelerationGroup(_ settings: ServerSettings) -> some View {
         ModelConfigurationGroup(title: loc.t("Capacidades y aceleración", "Capabilities and acceleration"), icon: "bolt.horizontal") {
             if ServerSettings.mightSupportVision(modelPath: settings.modelPath) {
                 ServerSettingRow(icon: "photo", title: loc.t("Modelo de visión", "Vision model"),
                                  detail: loc.t("Proyector visual para imágenes", "Visual projector used for images")) {
-                    VisionProjectorControl(modelPath: settings.modelPath, layout: .detail, loadEnabled: vision)
+                    VisionProjectorControl(modelPath: settings.modelPath, layout: .detail,
+                                           loadEnabled: vision(settings))
                 }
             }
             if ServerSettings.modelUsesMTP(at: settings.modelPath) {
@@ -482,8 +497,8 @@ private struct ServerConfigurationWorkspace: View {
         }
     }
 
-    private var requestLimitMenu: some View {
-        ToshDropdown(selection: parallel, options: requestLimitOptions)
+    private func requestLimitMenu(_ settings: ServerSettings) -> some View {
+        ToshDropdown(selection: parallel(settings), options: requestLimitOptions)
     }
 
     private var modelOptions: [ToshDropdown<String>.Option] {
@@ -517,15 +532,15 @@ private struct ServerConfigurationWorkspace: View {
         ServerSettings.ubatchOptions.map { .init(value: $0, title: ServerSettings.ubatchLabel($0, loc: loc)) }
     }
 
-    private var gpuOptions: [ToshDropdown<Int>.Option] {
+    private func gpuOptions(_ settings: ServerSettings) -> [ToshDropdown<Int>.Option] {
         var result: [ToshDropdown<Int>.Option] = [
             .init(value: -1, title: loc.t("GPU predeterminada", "Default GPU"),
                   subtitle: hardware.gpus.first.map { "\($0.name) · \($0.vramGB) GB" }, systemImage: "cpu")
         ]
-        if gpuList.wrappedValue.count >= 2 {
+        if gpuList(settings).wrappedValue.count >= 2 {
             result.append(.init(value: -2,
-                                title: loc.t("Reparto · %@ GPUs", "Split · %@ GPUs", "\(gpuList.wrappedValue.count)"),
-                                subtitle: gpuList.wrappedValue.compactMap { index in hardware.gpus.first { $0.index == index }?.name }.joined(separator: " + "),
+                                title: loc.t("Reparto · %@ GPUs", "Split · %@ GPUs", "\(gpuList(settings).wrappedValue.count)"),
+                                subtitle: gpuList(settings).wrappedValue.compactMap { index in hardware.gpus.first { $0.index == index }?.name }.joined(separator: " + "),
                                 systemImage: "square.split.2x1"))
         }
         result += hardware.gpus.map { .init(value: $0.index, title: $0.name, subtitle: "\($0.vramGB) GB VRAM · Metal", systemImage: "display") }
@@ -551,7 +566,7 @@ private struct ServerConfigurationWorkspace: View {
             copy.name = server.name
             copy.port = server.profile?.port ?? profile.port
             server.profile = copy
-            manager.persist()
+            manager.schedulePersist()
         }
     }
 
@@ -572,7 +587,7 @@ private struct ServerConfigurationWorkspace: View {
         Binding(get: { server.profile?[keyPath: keyPath] ?? fallback }, set: { value in
             server.profile?[keyPath: keyPath] = value
             if let key { pin(key) }
-            manager.persist()
+            manager.schedulePersist()
         })
     }
 
@@ -581,33 +596,35 @@ private struct ServerConfigurationWorkspace: View {
         if !pins.contains(key) { pins.append(key); server.profile?.pinned = pins }
     }
 
-    private var port: Binding<Int> { server.profile == nil ? $globalPort : addedBinding(\.port, fallback: settings.port) }
-    private var modelSelection: Binding<String> {
+    private func port(_ settings: ServerSettings) -> Binding<Int> {
+        server.profile == nil ? $globalPort : addedBinding(\.port, fallback: settings.port)
+    }
+    private func modelSelection(_ settings: ServerSettings) -> Binding<String> {
         Binding(get: { settings.modelPath }, set: { path in
             server.selectModel(path: path, ncmoe: Estimator.ncmoeForSelection(path: path, models: models.models))
-            manager.persist()
+            manager.schedulePersist()
         })
     }
-    private var context: Binding<Int> { server.profile == nil ? $globalContext : addedBinding(\.ctx, fallback: settings.ctx, pin: Profile.Pin.ctx) }
-    private var discovery: Binding<Bool> { server.profile == nil ? $globalDiscovery : addedBinding(\.localNetworkDiscovery, fallback: settings.localNetworkDiscovery, pin: Profile.Pin.discovery).optionalValue(default: false) }
-    private var parallel: Binding<Int> { server.profile == nil ? $globalParallel : addedBinding(\.parallelSlots, fallback: settings.parallelSlots, pin: Profile.Pin.parallelSlots).optionalValue(default: 1) }
-    private var embeddings: Binding<Bool> { server.profile == nil ? $globalEmbeddings : addedBinding(\.embeddings, fallback: settings.embeddings, pin: Profile.Pin.embeddings).optionalValue(default: false) }
-    private var mcpProxy: Binding<Bool> { server.profile == nil ? $globalMCP : addedBinding(\.uiMcpProxy, fallback: settings.uiMcpProxy, pin: Profile.Pin.uiMcpProxy).optionalValue(default: false) }
-    private var router: Binding<Bool> { server.profile == nil ? $globalRouter : addedBinding(\.routerMode, fallback: settings.routerMode, pin: Profile.Pin.router).optionalValue(default: false) }
-    private var routerMax: Binding<Int> { server.profile == nil ? $globalRouterMax : addedBinding(\.routerModelsMax, fallback: settings.routerModelsMax, pin: Profile.Pin.router).optionalValue(default: 1) }
-    private var extraArgs: Binding<String> { server.profile == nil ? $globalExtraArgs : addedBinding(\.extraArgs, fallback: settings.extraArgs, pin: Profile.Pin.extraArgs) }
-    private var ubatch: Binding<Int> { server.profile == nil ? $globalUbatch : addedBinding(\.ubatch, fallback: settings.ubatch, pin: Profile.Pin.ubatch).optionalValue(default: 0) }
-    private var ncmoe: Binding<Int> { server.profile == nil ? $globalNcmoe : addedBinding(\.ncmoe, fallback: settings.ncmoe, pin: Profile.Pin.moe) }
-    private var vision: Binding<Bool> { server.profile == nil ? $globalVision : addedBinding(\.loadVision, fallback: settings.loadVision, pin: Profile.Pin.vision).optionalValue(default: true) }
-    private var gpu: Binding<Int> { server.profile == nil ? $globalGPU : addedBinding(\.gpuIndex, fallback: settings.gpuIndex, pin: Profile.Pin.gpu) }
-    private var gpuChoice: Binding<Int> {
-        Binding(get: { gpuList.wrappedValue.count >= 2 ? -2 : gpu.wrappedValue }, set: { value in
+    private func context(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalContext : addedBinding(\.ctx, fallback: settings.ctx, pin: Profile.Pin.ctx) }
+    private func discovery(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalDiscovery : addedBinding(\.localNetworkDiscovery, fallback: settings.localNetworkDiscovery, pin: Profile.Pin.discovery).optionalValue(default: false) }
+    private func parallel(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalParallel : addedBinding(\.parallelSlots, fallback: settings.parallelSlots, pin: Profile.Pin.parallelSlots).optionalValue(default: 1) }
+    private func embeddings(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalEmbeddings : addedBinding(\.embeddings, fallback: settings.embeddings, pin: Profile.Pin.embeddings).optionalValue(default: false) }
+    private func mcpProxy(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalMCP : addedBinding(\.uiMcpProxy, fallback: settings.uiMcpProxy, pin: Profile.Pin.uiMcpProxy).optionalValue(default: false) }
+    private func router(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalRouter : addedBinding(\.routerMode, fallback: settings.routerMode, pin: Profile.Pin.router).optionalValue(default: false) }
+    private func routerMax(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalRouterMax : addedBinding(\.routerModelsMax, fallback: settings.routerModelsMax, pin: Profile.Pin.router).optionalValue(default: 1) }
+    private func extraArgs(_ settings: ServerSettings) -> Binding<String> { server.profile == nil ? $globalExtraArgs : addedBinding(\.extraArgs, fallback: settings.extraArgs, pin: Profile.Pin.extraArgs) }
+    private func ubatch(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalUbatch : addedBinding(\.ubatch, fallback: settings.ubatch, pin: Profile.Pin.ubatch).optionalValue(default: 0) }
+    private func ncmoe(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalNcmoe : addedBinding(\.ncmoe, fallback: settings.ncmoe, pin: Profile.Pin.moe) }
+    private func vision(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalVision : addedBinding(\.loadVision, fallback: settings.loadVision, pin: Profile.Pin.vision).optionalValue(default: true) }
+    private func gpu(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalGPU : addedBinding(\.gpuIndex, fallback: settings.gpuIndex, pin: Profile.Pin.gpu) }
+    private func gpuChoice(_ settings: ServerSettings) -> Binding<Int> {
+        Binding(get: { gpuList(settings).wrappedValue.count >= 2 ? -2 : gpu(settings).wrappedValue }, set: { value in
             guard value != -2 else { return }
-            gpuList.wrappedValue = []
-            gpu.wrappedValue = value
+            gpuList(settings).wrappedValue = []
+            gpu(settings).wrappedValue = value
         })
     }
-    private var gpuList: Binding<[Int]> {
+    private func gpuList(_ settings: ServerSettings) -> Binding<[Int]> {
         if server.profile == nil {
             return Binding(get: { ServerSettings.gpuList(fromCSV: globalGPUList) },
                            set: { globalGPUList = $0.map(String.init).joined(separator: ",") })
@@ -770,7 +787,8 @@ private struct ServerAPIWorkspace: View {
         DetailPanel(title: loc.t("Conexión API", "API connection"),
                     subtitle: loc.t("Compatible con clientes OpenAI.", "Compatible with OpenAI clients."), icon: "network") {
             ServerSettingRow(icon: "link", title: loc.t("URL base", "Base URL")) {
-                Text("http://127.0.0.1:\(settings.port)/v1").font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                Text(verbatim: "http://127.0.0.1:\(settings.port)/v1")
+                    .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
             }
             ServerSettingRow(icon: "wifi", title: loc.t("Acceso", "Access")) {
                 Text(settings.localNetworkDiscovery ? loc.t("Red local", "Local network") : loc.t("Solo este Mac", "This Mac only"))
@@ -780,11 +798,8 @@ private struct ServerAPIWorkspace: View {
                 Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("http://127.0.0.1:\(settings.port)/v1", forType: .string) } label: {
                     Label(loc.t("Copiar URL", "Copy URL"), systemImage: "doc.on.doc")
                 }.glassButton()
-                if server.state == .running {
-                    Button { NSWorkspace.shared.open(server.webChatURL) } label: {
-                        Label(loc.t("Abrir interfaz web", "Open web interface"), systemImage: "safari")
-                    }.glassButton(prominent: true)
-                }
+                ServerWebUIButton(server: server)
+                    .glassButton(prominent: true)
             }
         }
     }
@@ -860,10 +875,10 @@ private struct ServerIntegrationsWorkspace: View {
                     Text(row.1).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                 }.font(.system(size: 12))
             }
-            if openWeb, server.state == .running {
-                Button { NSWorkspace.shared.open(server.webChatURL) } label: {
-                    Label(loc.t("Abrir interfaz web", "Open web interface"), systemImage: "arrow.up.right.square")
-                }.glassButton(prominent: true).frame(maxWidth: .infinity, alignment: .trailing)
+            if openWeb {
+                ServerWebUIButton(server: server)
+                    .glassButton(prominent: true)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }.padding(16).frame(maxWidth: .infinity, minHeight: 230, alignment: .topLeading).cardSurface()
     }

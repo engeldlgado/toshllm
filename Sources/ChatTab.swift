@@ -54,11 +54,8 @@ struct ChatMainView: View {
     @AppStorage(SettingsKeys.onboardingDone) private var onboardingDone = false
     @State private var showOnboarding = false
     @State private var mode: MainMode = .chat
-    // One pool shared across the studio's sidebar (controls) and detail
-    // (canvas): it owns every generation instance and its generator, so both
-    // halves of the split view drive the same runs.
     @StateObject private var imageGenPool = ImageGenPool()
-    @StateObject private var videoGen = VideoGenerator()
+    @StateObject private var videoGenPool = VideoGenPool()
     @StateObject private var audioStudio = AudioStudioController.shared
     @StateObject private var upscaler = ImageUpscaler()
     @AppStorage(SettingsKeys.appAccent) private var accentRaw = AppTheme.defaultKey
@@ -72,7 +69,7 @@ struct ChatMainView: View {
                 if mode == .images {
                     ImageControls(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
                 } else if mode == .video {
-                    VideoControls(gen: videoGen).transition(.opacity)
+                    VideoControls(pool: videoGenPool).transition(.opacity)
                 } else if mode == .audio {
                     AudioControls(studio: audioStudio).transition(.opacity)
                 } else {
@@ -84,7 +81,7 @@ struct ChatMainView: View {
                 if mode == .images {
                     ImageCanvas(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
                 } else if mode == .video {
-                    VideoCanvas(gen: videoGen).transition(.opacity)
+                    VideoCanvas(pool: videoGenPool).transition(.opacity)
                 } else if mode == .audio {
                     AudioCanvas(studio: audioStudio).transition(.opacity)
                 } else {
@@ -134,6 +131,7 @@ struct ChatMainView: View {
         .hiddenChatToolbarBackground()
         .onAppear {
             imageGenPool.modelStore = models
+            videoGenPool.modelStore = models
             models.refresh()
             if !onboardingDone && models.models.isEmpty {
                 showOnboarding = true
@@ -244,15 +242,9 @@ struct ChatMainView: View {
                 .help(loc.t("ToshLLM %@ disponible... instálala desde Configuración → Inicio.",
                             "ToshLLM %@ available... install it from Configuration → Home.", version))
             }
-            Button {
-                NSWorkspace.shared.open(server.webChatURL)
-            } label: {
-                Label(loc.t("Abrir chat web", "Open web chat"), systemImage: "safari")
-                    .labelStyle(.iconOnly)
-            }
+            ServerWebUIButton(server: server, presentation: .icon)
                 .buttonStyle(GlassIconButtonStyle())
-                .disabled(server.state != .running || mode != .chat)
-                .iconHelp(loc.t("Abrir el chat web en el navegador", "Open the web chat in the browser"))
+                .disabled(mode != .chat)
             Button {
                 openControl()
             } label: {

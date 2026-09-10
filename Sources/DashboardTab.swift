@@ -71,8 +71,6 @@ struct DashboardView: View {
                             .id(instance.id)
                         }
                     }
-                    if control.serverAnchor == nil { recommendationCard }
-
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity)
@@ -262,12 +260,7 @@ struct DashboardView: View {
             }
             row("number", loc.t("Peticiones: %@", "Requests: %@", "\(server.requestCount)"))
 
-            // Quick access to the two settings most often changed when sharing the
-            // server. Locked while running — they apply on the next start. Same row
-            // layout as above (18-pt icon column) so everything lines up.
             let serverBusy = server.state == .running || server.state == .starting
-            // Shown on hover only while running, so the section never grows/shrinks
-            // (no layout jump) when the server starts or stops.
             let restartNote = serverBusy
                 ? loc.t(" Se aplica al reiniciar el servidor.", " Applies when the server restarts.")
                 : ""
@@ -299,19 +292,17 @@ struct DashboardView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "wifi").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Descubrible en red local", "Discoverable on local network")).font(.callout)
-                    // Inline ⓘ (no extra row → no vertical jump). Styled, reliable popover.
                     if localNetworkDiscovery && !apiKeyEnabled {
                         InfoTip(text: loc.t("Recomendado: protege la API con clave antes de exponerla en la red local.",
                                             "Recommended: protect the API with a key before exposing it on the local network."))
                     }
                     Spacer(minLength: 8)
-                    Toggle("", isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
+                    Toggle(loc.t("Descubrible en red local", "Discoverable on local network"),
+                           isOn: Binding(get: { localNetworkDiscovery }, set: setDiscoverable))
                         .labelsHidden().toggleStyle(.switch).controlSize(.small)
                 }
                 .help(loc.t("Hace que el servidor escuche en la red local y lo anuncia con Bonjour. Reinicia el servidor si está activo.",
                             "Makes the server listen on the local network and advertises it via Bonjour. Restarts the server if it's running."))
-                // Vision-capable models: the mmproj menu is the single control —
-                // pick a projector, auto-pair, or "No vision" to run text-only.
                 if ServerSettings.mightSupportVision(modelPath: modelPath) {
                     HStack(spacing: 8) {
                         Image(systemName: "photo").frame(width: 18).foregroundStyle(.secondary)
@@ -342,7 +333,7 @@ struct DashboardView: View {
                         .frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Servidor de embeddings", "Embeddings server")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: $embeddings)
+                    Toggle(loc.t("Servidor de embeddings", "Embeddings server"), isOn: $embeddings)
                         .labelsHidden().toggleStyle(.switch).controlSize(.small)
                         .disabled(serverBusy)
                 }
@@ -354,7 +345,8 @@ struct DashboardView: View {
                         .frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Proxy MCP de la interfaz web", "MCP proxy for the web interface")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: $uiMcpProxy)
+                    Toggle(loc.t("Proxy MCP de la interfaz web", "MCP proxy for the web interface"),
+                           isOn: $uiMcpProxy)
                         .labelsHidden().toggleStyle(.switch).controlSize(.small)
                         .disabled(serverBusy)
                 }
@@ -365,7 +357,7 @@ struct DashboardView: View {
                     Image(systemName: "arrow.triangle.2.circlepath").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Router (multi-modelo)", "Router (multi-model)")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: $routerMode)
+                    Toggle(loc.t("Router multi-modelo", "Multi-model router"), isOn: $routerMode)
                         .labelsHidden().toggleStyle(.switch).controlSize(.small)
                         .disabled(serverBusy)
                 }
@@ -408,12 +400,7 @@ struct DashboardView: View {
             HStack {
                 ServerStateBadge(state: server.state)
                 Spacer()
-                if server.state == .running {
-                    Button { NSWorkspace.shared.open(server.webChatURL) } label: {
-                        Image(systemName: "safari")
-                    }
-                    .iconHelp(loc.t("Abrir en el navegador", "Open in browser"))
-                }
+                ServerWebUIButton(server: server, presentation: .icon)
                 if server.state == .running || server.state == .starting {
                     Button(role: .destructive) { server.stop() } label: {
                         Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
@@ -429,29 +416,6 @@ struct DashboardView: View {
         }
     }
 
-    @ViewBuilder
-    private var recommendationCard: some View {
-        let recs = Catalog.recommendations(for: hardware)
-        if !recs.isEmpty {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(loc.t("Recomendado para tu equipo", "Recommended for your machine"), systemImage: "star.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                    Text(loc.t("Modelos adecuados para tu hardware. Las velocidades son estimaciones.",
-                               "Models suited to your hardware. Speeds are estimates."))
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                }
-                VStack(spacing: 8) {
-                    ForEach(recs, id: \.id) { rec in
-                        DashboardRecommendationRow(rec: rec)
-                    }
-                }
-            }
-            .padding(20)
-            .cardSurface()
-        }
-    }
-
     private func row(_ icon: String, _ text: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon).frame(width: 18).foregroundStyle(.secondary)
@@ -461,9 +425,6 @@ struct DashboardView: View {
     }
 }
 
-/// Restores the former per-device view on the main dashboard when more than one
-/// Metal device is present. The wrapper keeps the extra UI absent on single-GPU
-/// machines and reacts when an eGPU is connected after launch.
 private struct DashboardMultiGPUOverview: View {
     @EnvironmentObject private var vram: VRAMMonitor
 
@@ -811,18 +772,16 @@ struct AddedServerCard: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: "cpu").frame(width: 18).foregroundStyle(.secondary)
-                // Pinning one GPU field seeds the sibling from the shown (global)
-                // value, so the pin captures exactly what the user was looking at.
                 GPUSelectionMenu(gpuIndex: Binding(
                     get: { isPinned(Profile.Pin.gpu) ? (c.profile?.gpuIndex ?? -1) : gGpuIndex },
                     set: {
                         if !isPinned(Profile.Pin.gpu) { c.profile?.gpuList = ServerSettings.gpuList(fromCSV: gGpuListCSV) }
-                        c.profile?.gpuIndex = $0; pin(Profile.Pin.gpu); manager.persist()
+                        c.profile?.gpuIndex = $0; pin(Profile.Pin.gpu); manager.schedulePersist()
                     }), gpuList: Binding(
                     get: { isPinned(Profile.Pin.gpu) ? (c.profile?.gpuList ?? []) : ServerSettings.gpuList(fromCSV: gGpuListCSV) },
                     set: {
                         if !isPinned(Profile.Pin.gpu) { c.profile?.gpuIndex = gGpuIndex }
-                        c.profile?.gpuList = $0; pin(Profile.Pin.gpu); manager.persist()
+                        c.profile?.gpuList = $0; pin(Profile.Pin.gpu); manager.schedulePersist()
                     }))
                     .disabled(busy)
             }
@@ -835,7 +794,7 @@ struct AddedServerCard: View {
                     Spacer(minLength: 8)
                     Stepper("", value: Binding(
                         get: { moeValue },
-                        set: { c.profile?.ncmoe = $0; pin(Profile.Pin.moe); manager.persist() }),
+                        set: { c.profile?.ncmoe = $0; pin(Profile.Pin.moe); manager.schedulePersist() }),
                         in: 0...99)
                         .labelsHidden().disabled(busy)
                 }
@@ -847,7 +806,7 @@ struct AddedServerCard: View {
                     Spacer(minLength: 8)
                     Picker("", selection: Binding(
                         get: { isPinned(Profile.Pin.ubatch) ? (c.profile?.ubatch ?? gUbatch) : gUbatch },
-                        set: { c.profile?.ubatch = $0; pin(Profile.Pin.ubatch); manager.persist() })) {
+                        set: { c.profile?.ubatch = $0; pin(Profile.Pin.ubatch); manager.schedulePersist() })) {
                         ForEach(ServerSettings.ubatchOptions, id: \.self) { n in
                             Text(ServerSettings.ubatchLabel(n, loc: loc)).tag(n)
                         }
@@ -871,7 +830,7 @@ struct AddedServerCard: View {
                 Spacer(minLength: 8)
                 Picker("", selection: Binding(
                     get: { isPinned(Profile.Pin.ctx) ? (c.profile?.ctx ?? gCtx) : gCtx },
-                    set: { c.profile?.ctx = $0; pin(Profile.Pin.ctx); manager.persist() })) {
+                    set: { c.profile?.ctx = $0; pin(Profile.Pin.ctx); manager.schedulePersist() })) {
                     ForEach([4096, 8192, 16384, 32768, 65536, 131072, 262144], id: \.self) { n in
                         Text("\(n / 1024)k").tag(n)
                     }
@@ -884,9 +843,9 @@ struct AddedServerCard: View {
                 Image(systemName: "wifi").frame(width: 18).foregroundStyle(.secondary)
                 Text(loc.t("Descubrible en red local", "Discoverable on local network")).font(.callout)
                 Spacer(minLength: 8)
-                Toggle("", isOn: Binding(
+                Toggle(loc.t("Descubrible en red local", "Discoverable on local network"), isOn: Binding(
                     get: { isPinned(Profile.Pin.discovery) ? (c.profile?.localNetworkDiscovery ?? false) : gDiscovery },
-                    set: { c.profile?.localNetworkDiscovery = $0; pin(Profile.Pin.discovery); manager.persist() }))
+                    set: { c.profile?.localNetworkDiscovery = $0; pin(Profile.Pin.discovery); manager.schedulePersist() }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
             }
             if ServerSettings.mmprojPath(forModel: modelPath) != nil {
@@ -898,7 +857,7 @@ struct AddedServerCard: View {
                     Button {
                         c.profile?.loadVision = !on
                         pin(Profile.Pin.vision)
-                        manager.persist()
+                        manager.schedulePersist()
                     } label: {
                         Image(systemName: on ? "eye.fill" : "eye.slash")
                             .imageScale(.large).foregroundStyle(on ? Color.accentColor : .secondary)
@@ -918,9 +877,9 @@ struct AddedServerCard: View {
                         .frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Servidor de embeddings", "Embeddings server")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: Binding(
+                    Toggle(loc.t("Servidor de embeddings", "Embeddings server"), isOn: Binding(
                         get: { isPinned(Profile.Pin.embeddings) ? (c.profile?.embeddings ?? false) : gEmbeddings },
-                        set: { c.profile?.embeddings = $0; pin(Profile.Pin.embeddings); manager.persist() }))
+                        set: { c.profile?.embeddings = $0; pin(Profile.Pin.embeddings); manager.schedulePersist() }))
                         .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
                 }
                 .help(loc.t("Sirve /v1/embeddings con --embeddings para clientes RAG (p. ej. Obsidian Copilot). El servidor queda dedicado a embeddings: úsalo con un modelo de embeddings, no para chatear.",
@@ -931,9 +890,9 @@ struct AddedServerCard: View {
                         .frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Proxy MCP de la interfaz web", "MCP proxy for the web interface")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: Binding(
+                    Toggle(loc.t("Proxy MCP de la interfaz web", "MCP proxy for the web interface"), isOn: Binding(
                         get: { isPinned(Profile.Pin.uiMcpProxy) ? (c.profile?.uiMcpProxy ?? false) : gUiMcpProxy },
-                        set: { c.profile?.uiMcpProxy = $0; pin(Profile.Pin.uiMcpProxy); manager.persist() }))
+                        set: { c.profile?.uiMcpProxy = $0; pin(Profile.Pin.uiMcpProxy); manager.schedulePersist() }))
                         .labelsHidden().toggleStyle(.switch).controlSize(.small)
                         .disabled(busy)
                 }
@@ -944,11 +903,11 @@ struct AddedServerCard: View {
                     Image(systemName: "arrow.triangle.2.circlepath").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Router (multi-modelo)", "Router (multi-model)")).font(.callout)
                     Spacer(minLength: 8)
-                    Toggle("", isOn: Binding(
+                    Toggle(loc.t("Router multi-modelo", "Multi-model router"), isOn: Binding(
                         get: { routerMode },
                         set: {
                             if !isPinned(Profile.Pin.router) { c.profile?.routerModelsMax = gRouterModelsMax }
-                            c.profile?.routerMode = $0; pin(Profile.Pin.router); manager.persist()
+                            c.profile?.routerMode = $0; pin(Profile.Pin.router); manager.schedulePersist()
                         }))
                         .labelsHidden().toggleStyle(.switch).controlSize(.small).disabled(busy)
                 }
@@ -965,7 +924,7 @@ struct AddedServerCard: View {
                             get: { routerMax },
                             set: {
                                 if !isPinned(Profile.Pin.router) { c.profile?.routerMode = gRouterMode }
-                                c.profile?.routerModelsMax = $0; pin(Profile.Pin.router); manager.persist()
+                                c.profile?.routerModelsMax = $0; pin(Profile.Pin.router); manager.schedulePersist()
                             }), in: 1...4)
                             .fixedSize().disabled(busy)
                     }
@@ -977,7 +936,7 @@ struct AddedServerCard: View {
                     Spacer(minLength: 8)
                     TextField("", text: Binding(
                         get: { isPinned(Profile.Pin.extraArgs) ? (c.profile?.extraArgs ?? gExtraArgs) : gExtraArgs },
-                        set: { c.profile?.extraArgs = $0; pin(Profile.Pin.extraArgs); manager.persist() }),
+                        set: { c.profile?.extraArgs = $0; pin(Profile.Pin.extraArgs); manager.schedulePersist() }),
                         prompt: Text(verbatim: "--no-warmup -np 2"))
                         .workspaceTextField()
                         .font(.system(.callout, design: .monospaced))
@@ -997,6 +956,7 @@ struct AddedServerCard: View {
             HStack {
                 ServerStateBadge(state: c.state)
                 Spacer()
+                ServerWebUIButton(server: c)
                 if busy {
                     Button(role: .destructive) { c.stop() } label: {
                         Label(loc.t("Detener", "Stop"), systemImage: "stop.fill")
@@ -1026,7 +986,7 @@ struct AddedServerCard: View {
                             "Loads a saved profile into this server."))
             }
             if c.profile?.pinned != [Profile.Pin.model] {
-                Button { c.profile?.pinned = [Profile.Pin.model]; manager.persist() } label: {
+                Button { c.profile?.pinned = [Profile.Pin.model]; manager.schedulePersist() } label: {
                     Image(systemName: "pin.slash").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -1036,22 +996,20 @@ struct AddedServerCard: View {
         }
     }
 
-    /// Loads a saved profile into this server, keeping its own name and port.
     private func applyProfile(_ p: Profile) {
         var np = p
         np.name = c.name
         np.port = c.profile?.port ?? p.port
         np.selectInstanceModel(path: np.modelPath, ncmoe: np.ncmoe)
         c.profile = np
-        manager.persist()
+        manager.schedulePersist()
     }
 
     private func bind<T>(_ kp: WritableKeyPath<Profile, T>, _ fallback: T) -> Binding<T> {
         Binding(get: { c.profile?[keyPath: kp] ?? fallback },
-                set: { c.profile?[keyPath: kp] = $0; manager.persist() })
+                set: { c.profile?[keyPath: kp] = $0; manager.schedulePersist() })
     }
 
-    /// nil pinned = pre-0.83 server: full snapshot, every field its own.
     private func isPinned(_ key: String) -> Bool {
         guard let pinned = c.profile?.pinned else { return true }
         return pinned.contains(key)
@@ -1067,12 +1025,7 @@ struct AddedServerCard: View {
 struct Card<Content: View, Trailing: View>: View {
     let title: String
     let icon: String
-    /// When true the card stretches to fill the tallest sibling in its row, so
-    /// side-by-side cards line up even with different amounts of content.
     var fill: Bool = false
-    /// Accessory pinned to the top-right of the title row (e.g. a profile picker
-    /// or a "clear" action). Generic rather than AnyView so the accessory keeps
-    /// its identity across updates.
     @ViewBuilder let trailing: Trailing
     @ViewBuilder let content: Content
 

@@ -166,9 +166,6 @@ enum VideoGenCatalog {
         // 2.37 is the engine's own default for LTX; 3.0 is the generic one for a
         // different prediction branch. Steps and CFG follow the model card.
         defaultSteps: 8, cfgScale: 1.0, flowShift: 2.37, minVRAMGB: 24,
-        // Past about 9.7 million pixel-frames the clip comes back with its opening
-        // frames corrupted, so these stay under that at 33 frames. Measured 09-02;
-        // it happens on the CPU backend too, so it is not the Metal path.
         sizes: [VideoGenSize(width: 704, height: 384), VideoGenSize(width: 640, height: 352),
                 VideoGenSize(width: 512, height: 288), VideoGenSize(width: 384, height: 704)],
         fps: 24,
@@ -268,28 +265,13 @@ enum VideoGenLimits {
     /// at a time, so this is how many times the decode graph repeats itself.
     static func latentFrames(_ frames: Int) -> Int { (frames - 1) / 4 + 1 }
 
-    /// Command buffers to split each graph into. A video decode is the image one
-    /// repeated per latent frame, so a single buffer runs long enough for the GPU
-    /// watchdog to kill it mid-clip and the frames come back as noise. Measured on
-    /// Wan 2.1 at 704x400 with 33 frames: two timeouts without it, none with, and
-    /// no cost on a clip that already worked (480x272, 33 frames: 130 vs 131 s).
     static let nCB = 32
 
-    /// Decode the frames in tiles. On by default, and not only to save memory: the
-    /// decode in one piece brightens the first frame of every group of four (the
-    /// VAE's temporal stride), which reads as a flicker through the whole clip.
-    /// Measured on Wan 2.1 at 704x400: mean luma 118.6/136.3/125.6/120.4 repeating
-    /// whole against 118.6/118.3/118.2/118.3 tiled. It also pins the decode graph
-    /// at about 3.4 GB whatever the frame size, against 16 GB at 704x400 in one
-    /// piece, and costs about 26% of the decode.
     static var vaeTilingEnabled: Bool {
         UserDefaults.standard.object(forKey: SettingsKeys.videoVAETiling) as? Bool ?? true
     }
 }
 
-/// Drives one text/image-to-video run. Mirrors ImageGenerator, with the temporal
-/// settings sd-cli needs and a PNG sequence as the output: macOS has no VP8
-/// decoder, so the app animates the frames itself instead of playing a container.
 @MainActor
 final class VideoGenerator: ObservableObject {
     enum State: Equatable { case idle, generating, done, failed(String) }
@@ -307,6 +289,11 @@ final class VideoGenerator: ObservableObject {
     private(set) var lastPrompt = ""
     private(set) var lastSeed = -1
     private(set) var lastFPS = 16
+    private(set) var lastWidth = 0
+    private(set) var lastHeight = 0
+    private(set) var lastFrameCount = 0
+    private(set) var lastModelName = ""
+    var onFinish: (() -> Void)?
 
     private var process: Process?
     private var startedAt: Date?
@@ -353,6 +340,8 @@ final class VideoGenerator: ObservableObject {
                   initImagePath: String = "") {
         guard !isBusy else { return }
         lastPrompt = prompt; lastSeed = seed; lastFPS = fps
+        lastWidth = width; lastHeight = height; lastFrameCount = frameCount
+        lastModelName = model.name
         let dir = models.imagenDirectory
 
         let fmt = DateFormatter()
@@ -401,11 +390,6 @@ final class VideoGenerator: ObservableObject {
         // Split each graph into enough command buffers to clear the GPU watchdog.
         env["GGML_METAL_NCB"] = String(VideoGenLimits.nCB)
         env["TOSH_VAE_TILE_YIELD_MS"] = "100"
-        // Our flash-attention kernels for AMD are opt-in. Without them the backend
-        // refuses --diffusion-fa and the attention matrix is built whole, which is
-        // quadratic in the latent length: past 3.5 GB (this card's largest buffer)
-        // it stops fitting and the clip comes back as a flat colour. On the cards
-        // the kernels do not cover, the engine ignores this and nothing changes.
         env["TOSH_FA_AMD"] = "1"
         let devices = MTLCopyAllDevices()
         if gpuIndex >= 0 && devices.count > 1 {
@@ -448,6 +432,7 @@ final class VideoGenerator: ObservableObject {
             process = p
         } catch {
             state = .failed(error.localizedDescription)
+            onFinish?()
         }
     }
 
@@ -491,23 +476,162 @@ final class VideoGenerator: ObservableObject {
             .filter { $0.pathExtension.lowercased() == "png" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard status == 0, !urls.isEmpty else {
-            if status == 15 || status == 2 { state = .failed(""); return }
-            if logTail.contains("failed to allocate") { state = .failed("OOM"); return }
+            if status == 15 || status == 2 { state = .failed(""); onFinish?(); return }
+            if logTail.contains("failed to allocate") { state = .failed("OOM"); onFinish?(); return }
             let timedOut = logTail.contains("Timeout") || logTail.contains("status 5")
             state = .failed(timedOut ? "TIMEOUT" : "exit \(status)")
+            onFinish?()
             return
         }
         frameURLs = urls
         progress = 1
         lastDuration = elapsed
-        state = .done
-        // Off the main actor, and downsampled for playback: 81 frames at 720p held
-        // at full size are ~300 MB of NSImage for a view a few hundred points wide.
-        // The PNGs stay on disk as the source of truth, so export is unaffected.
         Task.detached(priority: .userInitiated) {
             let decoded = urls.compactMap { Self.displayFrame($0) }
-            await MainActor.run { self.frames = decoded }
+            await MainActor.run {
+                self.frames = decoded
+                self.state = .done
+                self.onFinish?()
+            }
         }
+    }
+}
+
+// MARK: - Video studio session and batch queue
+
+struct VideoGenerationRequest: Identifiable {
+    let id: UUID
+    var modelName: String
+    var prompt: String
+    var negativePrompt: String
+    var width: Int
+    var height: Int
+    var frameCount: Int
+    var steps: Int
+    var seed: Int
+    var fps: Int
+    var gpuIndex: Int
+    var initImagePath: String
+
+    init(id: UUID = UUID(), modelName: String, prompt: String, negativePrompt: String,
+         width: Int, height: Int, frameCount: Int, steps: Int, seed: Int,
+         fps: Int, gpuIndex: Int, initImagePath: String) {
+        self.id = id
+        self.modelName = modelName
+        self.prompt = prompt
+        self.negativePrompt = negativePrompt
+        self.width = width
+        self.height = height
+        self.frameCount = frameCount
+        self.steps = steps
+        self.seed = seed
+        self.fps = fps
+        self.gpuIndex = gpuIndex
+        self.initImagePath = initImagePath
+    }
+
+    var model: VideoGenModel {
+        VideoGenCatalog.all.first { $0.name == modelName } ?? VideoGenCatalog.all[0]
+    }
+}
+
+struct GeneratedVideo: Identifiable {
+    let id = UUID()
+    let frameURLs: [URL]
+    let preview: NSImage?
+    let prompt: String
+    let modelName: String
+    let width: Int
+    let height: Int
+    let frameCount: Int
+    let fps: Int
+    let seed: Int
+    let duration: Int
+
+    var folderURL: URL? { frameURLs.first?.deletingLastPathComponent() }
+}
+
+enum VideoStudioSection { case videos, queue }
+
+@MainActor
+final class VideoGenPool: ObservableObject {
+    let generator = VideoGenerator()
+    @Published var queue: [VideoGenerationRequest] = []
+    @Published var gallery: [GeneratedVideo] = []
+    @Published var queueActive = false
+    @Published var section: VideoStudioSection = .videos
+
+    weak var modelStore: ModelStore?
+    private var currentRequest: VideoGenerationRequest?
+    private var forward: AnyCancellable?
+
+    init() {
+        forward = generator.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        generator.onFinish = { [weak self] in self?.finishedCurrentRun() }
+    }
+
+    var isBusy: Bool { generator.isBusy }
+
+    func generate(_ request: VideoGenerationRequest) {
+        guard !generator.isBusy, let models = modelStore else { return }
+        currentRequest = request
+        generator.generate(model: request.model, models: models, prompt: request.prompt,
+                           negativePrompt: request.negativePrompt,
+                           width: request.width, height: request.height,
+                           frames: request.frameCount, steps: request.steps,
+                           seed: request.seed, fps: request.fps,
+                           gpuIndex: request.gpuIndex,
+                           initImagePath: request.initImagePath)
+    }
+
+    func enqueue(_ request: VideoGenerationRequest) {
+        queue.append(request)
+        section = .queue
+        if queueActive { pump() }
+    }
+
+    func remove(_ id: UUID) { queue.removeAll { $0.id == id } }
+
+    func startQueue() {
+        queueActive = true
+        section = .queue
+        pump()
+    }
+
+    func stopQueue() { queueActive = false }
+
+    func cancelCurrent() { generator.cancel() }
+
+    private func pump() {
+        guard queueActive, modelStore != nil, !generator.isBusy, !queue.isEmpty else {
+            if queue.isEmpty && !generator.isBusy { queueActive = false }
+            return
+        }
+        generate(queue.removeFirst())
+    }
+
+    private func finishedCurrentRun() {
+        defer {
+            currentRequest = nil
+            pump()
+        }
+        guard case .done = generator.state,
+              !generator.frameURLs.isEmpty,
+              let request = currentRequest else { return }
+        gallery.insert(GeneratedVideo(frameURLs: generator.frameURLs,
+                                      preview: generator.frames.first
+                                          ?? generator.frameURLs.first.flatMap(VideoGenerator.displayFrame),
+                                      prompt: request.prompt,
+                                      modelName: request.modelName,
+                                      width: request.width,
+                                      height: request.height,
+                                      frameCount: request.frameCount,
+                                      fps: request.fps,
+                                      seed: request.seed,
+                                      duration: generator.lastDuration), at: 0)
+        if gallery.count > 30 { gallery.removeLast() }
     }
 }
 

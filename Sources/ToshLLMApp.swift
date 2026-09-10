@@ -45,9 +45,6 @@ private func defaultsMigrationExtraArgs() -> String? {
 @main
 struct ToshLLMApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    // Plain references: a property wrapper here would subscribe the scene body to
-    // every publish and rebuild both windows. Only the menus need to follow a
-    // change, and that is the language.
     private let obj = AppObjects.shared
     @ObservedObject private var loc = AppObjects.shared.loc
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
@@ -226,9 +223,6 @@ struct MenuBarView: View {
     }
 }
 
-/// One server in the menu bar panel (primary or added): live status, start/stop,
-/// chat link and a per-server networking toggle. Observes the controller so it
-/// refreshes while the panel is open.
 struct MenuServerRow: View {
     @ObservedObject var c: ServerController
     let isPrimary: Bool
@@ -254,8 +248,6 @@ struct MenuServerRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle().fill(dotColor).frame(width: 7, height: 7)
-                // The primary's stored name isn't localized; show the same label the
-                // dashboard uses for it. Added servers keep their user-facing name.
                 Text(isPrimary ? loc.t("Servidor", "Server") : c.name)
                     .font(.subheadline.weight(.medium)).lineLimit(1)
                 if c.state == .running, let tg = c.genSpeed {
@@ -269,7 +261,7 @@ struct MenuServerRow: View {
                 Image(systemName: "wifi").font(.caption2).foregroundStyle(.secondary)
                 Text(loc.t("Descubrible en red", "Discoverable")).font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Toggle("", isOn: discoverBinding)
+                Toggle(loc.t("Descubrible en red", "Discoverable"), isOn: discoverBinding)
                     .labelsHidden().toggleStyle(.switch).controlSize(.mini)
             }
         }
@@ -277,11 +269,10 @@ struct MenuServerRow: View {
 
     @ViewBuilder private var actions: some View {
         if running {
-            if c.state == .running {
-                Button(loc.t("Chat", "Chat")) { NSWorkspace.shared.open(c.webChatURL) }.controlSize(.small)
-            }
+            ServerWebUIButton(server: c).controlSize(.small)
             Button(loc.t("Detener", "Stop")) { c.stop() }.controlSize(.small)
         } else {
+            ServerWebUIButton(server: c).controlSize(.small)
             Button(loc.t("Iniciar", "Start")) {
                 c.start(isPrimary ? .fromDefaults() : c.effectiveSettings())
             }

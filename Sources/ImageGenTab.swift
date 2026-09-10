@@ -6,15 +6,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import ImageIO
 
-// Image studio, laid out to share the main window's NavigationSplitView: the
-// controls live in the sidebar (ImageControls) and the canvas in the detail
-// (ImageCanvas). Every generation slot is an accordion with its own full
-// configuration (model, prompt, size, GPU, seed…); one shared ImageGenPool
-// drives all of them so both halves see the same runs.
 
-/// Sidebar column: one accordion per instance plus the add/generate actions.
-/// Create makes images, Upscale enlarges an existing one. Two jobs that share the
-/// engine but not the controls, so they get a tab each instead of one crowded list.
 enum ImageStudioMode: String, CaseIterable { case create, upscale }
 
 struct ImageControls: View {
@@ -109,6 +101,7 @@ struct ImageControls: View {
             }
         }
         .frame(minWidth: 300)
+        .buttonStyle(GlassPillButtonStyle())
         .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 420)
     }
 
@@ -140,7 +133,7 @@ struct ImageControls: View {
                             if !upscalerCustom.isEmpty {
                                 Button { upscalerCustom = "" } label: { Label(loc.t("Quitar", "Clear"), systemImage: "xmark.circle") }
                                     .labelStyle(.iconOnly)
-                                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                                    .buttonStyle(GlassIconButtonStyle())
                             }
                         }
                         Text(loc.t("Debe ser ESRGAN ×4. Los DAT y SwinIR que encabezan las listas no los carga este motor.",
@@ -187,7 +180,7 @@ struct ImageControls: View {
                                   systemImage: "arrow.up.left.and.arrow.down.right")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .glassButton(prominent: true)
                         // Custom with no file picked resolves to no model, so the
                         // button would run nothing and say nothing
                         .disabled(upscaler.isBusy || flavor.component(customPath: upscalerCustom) == nil)
@@ -230,7 +223,7 @@ struct ImageControls: View {
                 Button { pool.add() } label: {
                     Image(systemName: "plus")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(GlassIconButtonStyle())
                 .disabled(pool.anyBusy)
                 .iconHelp(loc.t("Añadir instancia", "Add instance"))
             }
@@ -279,9 +272,6 @@ struct ImageControls: View {
             .foregroundStyle(.orange)
     }
 
-    /// Two Metal contexts at once can hang an AMD GPU, so warn while the chat
-    /// engine holds a GPU that an image instance could also land on, and offer
-    /// to free it before generating.
     private var serverBusyWarning: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(loc.t("El chat comparte GPU con una instancia", "Chat shares a GPU with an instance"),
@@ -301,9 +291,6 @@ struct ImageControls: View {
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// True when the chat server's GPU could be the same card as an instance's:
-    /// multi-GPU split, "system default" (unknown card), a matching index, or a
-    /// single-GPU Mac. Chat pinned to a card no instance uses is the safe combo.
     private var serverGPUOverlap: Bool {
         guard !ServerSettings.isAppleSilicon else { return false }
         guard hardware.gpus.count > 1 else { return true }
@@ -314,9 +301,6 @@ struct ImageControls: View {
         }
     }
 
-    /// Two runs on one GPU is the risky case on AMD Macs (same reason as the
-    /// chat-server warning); flag it instead of blocking it. A split instance
-    /// claims its encoder/VAE GPU too.
     private var duplicatedGPU: Bool {
         guard pool.configs.count > 1, !ServerSettings.isAppleSilicon else { return false }
         let all = pool.configs.flatMap { c -> [Int] in
@@ -404,7 +388,7 @@ struct ImageControls: View {
             } label: {
                 Label(loc.t("Generar", "Generate"), systemImage: "sparkles").frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent).controlSize(.large)
+            .glassButton(prominent: true).controlSize(.large)
             .disabled(!pool.configs.contains { runnable($0) })
             .help(loc.t("Genera una imagen por instancia lista (modelo instalado y descripción escrita).",
                         "Generates one image per ready instance (model installed and prompt written)."))
@@ -491,12 +475,6 @@ struct QueueFeedView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
-            // TextField(axis:) clips past its line cap and doesn't reflow on
-            // window resize on macOS, so this is a TextEditor sized by a hidden
-            // mirror of the text: grows with the content up to maxHeight, then
-            // scrolls inside. Cmd+Return queues the prompt.
-            // lineLimit caps the mirror's ideal height; a maxHeight frame would
-            // pin the field at the cap regardless of content.
             Text(draft.isEmpty ? " " : draft + " ")
                 .font(.body).lineLimit(8).hidden()
                 .padding(.horizontal, 5).padding(.vertical, 8)
@@ -768,7 +746,7 @@ struct QueueFeedView: View {
                     Label(loc.t("Quitar imagen", "Clear image"), systemImage: "xmark.circle")
                         .labelStyle(.iconOnly)
                 }
-                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                .buttonStyle(GlassIconButtonStyle())
                 .help(loc.t("Quita la imagen; los siguientes prompts vuelven a usar la de cada instancia.",
                             "Clears the image; following prompts use each instance's own again."))
             }
@@ -938,7 +916,8 @@ struct ImageInstanceForm: View {
                 Button(role: .destructive, action: onRemove) {
                     Label(loc.t("Quitar instancia", "Remove instance"), systemImage: "trash")
                 }
-                .buttonStyle(.borderless).controlSize(.small)
+                .glassButton().controlSize(.small)
+                .foregroundStyle(.red)
                 .disabled(busy)
                 .help(loc.t("Elimina esta instancia.", "Removes this instance."))
             }
@@ -1005,7 +984,7 @@ struct ImageInstanceForm: View {
                       systemImage: "arrow.down.circle.fill")
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
+            .glassButton(prominent: true)
             .help(loc.t("Descarga los componentes del modelo.", "Download the model's components."))
         }
         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -1033,9 +1012,6 @@ struct ImageInstanceForm: View {
         }
     }
 
-    /// Custom model setup: point the app at a checkpoint or a bare diffusion model
-    /// (with its VAE and text encoder) the user downloaded themselves, plus the
-    /// CFG their model expects.
     private var customSetup: some View {
         VStack(alignment: .leading, spacing: 8) {
             Picker(loc.t("Tipo", "Kind"), selection: $cfg.customIsDiffusion) {
@@ -1354,7 +1330,7 @@ struct ImageInstanceForm: View {
             if !path.wrappedValue.isEmpty {
                 Button { path.wrappedValue = "" } label: { Label(loc.t("Quitar", "Clear"), systemImage: "xmark.circle") }
                     .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .buttonStyle(GlassIconButtonStyle())
                     .iconHelp(loc.t("Quitar el archivo", "Clear the file"))
             }
         }
@@ -1497,6 +1473,7 @@ struct ImageCanvas: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
+        .buttonStyle(GlassPillButtonStyle())
         .animation(.easeOut(duration: 0.16), value: presentsFullscreenImage)
         .onChange(of: pool.gallery.map(\.id)) {
             selectedResultID = orderedGallery.first?.id
@@ -1523,7 +1500,7 @@ struct ImageCanvas: View {
                     .font(.callout.weight(.semibold))
                     .frame(width: 28, height: 28)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(GlassIconButtonStyle())
             .keyboardShortcut(.cancelAction)
             .iconHelp(loc.t("Cerrar", "Close"))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -1660,7 +1637,7 @@ struct ImageCanvas: View {
                         .menuIndicator(.hidden)
                         .iconHelp(loc.t("Más acciones", "More actions"))
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(GlassIconButtonStyle())
                     .controlSize(.large)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(16)
@@ -1815,9 +1792,11 @@ struct ImageCanvas: View {
                 .font(.title3.weight(.semibold))
                 .frame(width: 30, height: 30)
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(GlassIconButtonStyle())
         .controlSize(.large)
         .disabled(orderedGallery.count < 2)
+        .iconHelp(delta < 0 ? loc.t("Imagen anterior", "Previous image")
+                            : loc.t("Imagen siguiente", "Next image"))
     }
 
     private func moveSelection(_ delta: Int) {
@@ -2288,9 +2267,6 @@ struct ImageInstanceRow: View {
     }
 }
 
-/// Before/after wipe. Both images are laid out in the same frame and the top one
-/// is masked to the drag position, so the comparison is at identical on-screen
-/// scale: that is the only way the added detail is visible rather than implied.
 private struct UpscaleCompare: View {
     let pair: UpscaleResult
     @State private var fraction: CGFloat = 0.5

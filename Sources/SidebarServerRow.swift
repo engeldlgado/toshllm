@@ -30,6 +30,10 @@ struct SidebarServerRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            ServerWebUIButton(server: server, presentation: .icon)
+                .buttonStyle(.plain)
+                .frame(width: 26, height: 26)
+                .padding(.trailing, server.profile == nil ? 8 : 0)
             if server.profile != nil {
                 ServerDeleteButton(presentation: .icon) { manager.removeServer(server.id) }
                     .padding(.trailing, 8)

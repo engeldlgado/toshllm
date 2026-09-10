@@ -77,6 +77,8 @@ struct ServerOverviewView: View {
                 .frame(maxWidth: 480)
                 Spacer(minLength: 0)
                 GlassActionGroup {
+                    ServerWebUIButton(server: server)
+                        .glassButton().controlSize(.large)
                     if let onDelete {
                         ServerDeleteButton(presentation: .labeled, action: onDelete)
                     }

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import SwiftUI
+import AppKit
 import PDFKit
 import Vision
 import UniformTypeIdentifiers
@@ -87,11 +88,6 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     // Attached images as data URIs (data:image/jpeg;base64,…) for vision models.
     var imageURIs: [String]? = nil
 
-    /// Content as sent over the wire: attached files as fenced blocks first,
-    /// then the typed text.
-    /// Rough token cost of this turn, for deciding how much history to keep
-    /// verbatim. Same chars/4 rule the attachment badge uses, plus what the
-    /// attachments themselves carry.
     var estimatedTokens: Int {
         let text = role == "assistant" ? parts.body : wireContent
         let attached = (attachments ?? []).reduce(0) { $0 + $1.estimatedTokens }
@@ -125,10 +121,6 @@ struct Conversation: Identifiable, Codable {
     var messages: [ChatMessage] = []
     var created = Date()
     var updated = Date()
-    // Auto-compaction: rolling summary of the oldest turns and how many
-    // leading messages it covers. Those messages stay visible and persisted;
-    // they are just no longer sent verbatim with each request. Optionals keep
-    // pre-compaction JSON decodable.
     var summary: String?
     var summarizedCount: Int?
     /// Pinned conversations sort first. Optional for backward compatibility
@@ -221,9 +213,6 @@ struct StreamSnapshot: Equatable {
     let reasoningTail: String
 }
 
-/// High-frequency streaming state, isolated from ChatStore so per-flush
-/// updates re-render only the views that observe it (the streaming bubble
-/// and the speed badge), never the sidebar or the rest of the transcript.
 @MainActor
 final class LiveStream: ObservableObject {
     @Published var visibleText = ""
@@ -265,9 +254,6 @@ final class LiveStream: ObservableObject {
     func update(reasoning: String, visible: String, speed: Double?, now: Date = Date()) {
         latestReasoning = reasoning
         if hasReasoning != !reasoning.isEmpty { hasReasoning = !reasoning.isEmpty }
-        // Rendering a growing reasoning transcript is expensive. Keep the
-        // answer stream responsive at ~12 Hz, but refresh expanded reasoning
-        // in larger chunks at 2 Hz.
         if reasoningExpanded,
            now.timeIntervalSince(lastReasoningPublish) >= reasoningPublishInterval,
            displayedReasoning != reasoning {
@@ -305,13 +291,6 @@ final class LiveStream: ObservableObject {
     }
 }
 
-/// Thread-safe hand-off of the latest streaming snapshot from the off-main SSE
-/// reader (writer) to the main-actor display pump (reader). The reader writes
-/// without ever awaiting the main actor, so a slow render cannot stop it from
-/// draining the socket. Previously the reader awaited `MainActor.run` on every
-/// flush; when a frame was expensive (a long transcript), the reader stopped
-/// reading, the TCP buffer filled, and llama-server blocked on send — stalling
-/// its decode in multi-second bursts. Decoupling removes that backpressure.
 final class StreamBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var reasoning = ""
@@ -388,13 +367,6 @@ final class ChatStore: ObservableObject {
     @Published var pendingAgentContinuation: PendingAgentContinuation?
     @Published var queuedMessage: QueuedChatMessage?
     let live = LiveStream()
-    /// Streaming uses a dedicated session, not URLSession.shared, so the long
-    /// idle timeout actually applies. A per-request `timeoutInterval` is
-    /// unreliable on the shared session (its 60s `timeoutIntervalForRequest`
-    /// effectively wins), which dropped the connection mid-prefill whenever the
-    /// first token took longer than ~60s (a long prompt re-processing). The
-    /// server's own read/write timeout is an hour, so the client was the one
-    /// giving up — hence llama-server's "cancelled after 30s" warning.
     static let streamingSession: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest  = 600   // idle between bytes (covers a slow first token)
@@ -411,15 +383,9 @@ final class ChatStore: ObservableObject {
     }
 
     private var task: Task<Void, Never>?
-    // Watchdog: large MoE models with CPU offload can deadlock the AMD Metal
-    // driver mid-generation (process stuck in uninterruptible wait, 0% CPU).
-    // We detect the stall, stop the engine to free memory, and report it.
     private var watchdog: Task<Void, Never>?
     private var lastStreamActivity = Date()
     private var sawFirstToken = false
-    /// Which conversation's KV is currently loaded in the engine's slot 0, when
-    /// disk cache persistence is on. Reset to nil whenever a fresh engine starts
-    /// (empty slots), so the next turn restores the active conversation.
     private var slotConvID: UUID?
     private var agentContext: AgentRunContext?
 
@@ -789,12 +755,6 @@ final class ChatStore: ObservableObject {
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
 
         let buffer = StreamBuffer()
-        // Main-actor display pump: the ONLY thing that touches the UI during
-        // streaming. It pulls the latest snapshot at a length-scaled rate and
-        // drops intermediate frames, so render cost stays off the reader's
-        // path. The reader (below) just writes to `buffer` and never awaits the
-        // main actor — that is what keeps a slow frame from backpressuring the
-        // socket and stalling the engine's decode.
         let pump = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let snap = buffer.take() else {
@@ -812,9 +772,6 @@ final class ChatStore: ObservableObject {
             }
         }
 
-        // Detached: SSE parsing must stay off the main actor, otherwise UI
-        // rendering throttles token consumption on long responses and the
-        // measured t/s drops even though the server keeps generating.
         task = Task.detached(priority: .userInitiated) { [weak self, buffer, pump] in
             var nTokens = 0
             let tSent = Date()
@@ -835,12 +792,6 @@ final class ChatStore: ObservableObject {
                     + (accumulator.visible.isEmpty ? "" : "</think>" + accumulator.visible)
             }
 
-            // Hands the latest snapshot to the display pump at most ~12 Hz.
-            // Non-blocking: it only writes to the lock-protected buffer, never
-            // awaits the main actor — so the reader keeps draining the socket
-            // even while a frame renders. Throttling here (rather than writing
-            // every token) also keeps `visible`'s COW append amortized O(1):
-            // the buffer shares the string only once per interval.
             func flush() {
                 let now = Date()
                 let interval: TimeInterval = {
@@ -908,10 +859,6 @@ final class ChatStore: ObservableObject {
                 var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                // Idle timeout between SSE packets. A long prompt re-processing
-                // can take minutes with no token arriving; the effective idle
-                // timeout comes from streamingSession's config (600s) — this
-                // per-request value is a belt-and-suspenders match.
                 req.timeoutInterval = 600
                 if let key = ServerSettings.activeAPIKey() {
                     req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
@@ -1066,9 +1013,6 @@ final class ChatStore: ObservableObject {
                 return dt > 0.4 && nTokens > 1 ? Double(nTokens) / dt : nil
             }
             let ttft: Double? = tFirst.map { $0.timeIntervalSince(tSent) * 1000 }
-            // A reasoning-only turn is not a usable assistant response. Drop
-            // it instead of persisting an apparently duplicated empty bubble
-            // and sending an empty assistant message in the next request.
             let hasVisibleAnswer = !accumulator.visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let streamedText = hasVisibleAnswer ? composed() : ""
             let finalUsage = accumulator.usage
@@ -1125,9 +1069,6 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// Writes the completed response into its conversation and clears the
-    /// live-streaming state. The conversation may no longer be the current
-    /// one, or may have been deleted, hence the lookup by id.
     private func finish(conversation id: UUID, text: String, speed: Double?,
                         mtpAccept: Double? = nil, timings: ChatTimings? = nil,
                         toolCalls: [ChatToolCall] = []) {
@@ -1458,9 +1399,6 @@ final class ChatStore: ObservableObject {
                 try? await Task.sleep(for: .seconds(5))
                 guard let self, !Task.isCancelled, self.generating else { return }
                 let idle = Date().timeIntervalSince(self.lastStreamActivity)
-                // Before the first token the engine may be doing a long
-                // prefill, so allow a generous grace period; once tokens flow,
-                // a 30 s gap means it deadlocked rather than merely slowed.
                 let limit: TimeInterval = self.sawFirstToken ? 30 : 180
                 if idle > limit {
                     self.handleStreamStall()
@@ -1491,9 +1429,6 @@ final class ChatStore: ObservableObject {
 
     // MARK: auto-compaction
 
-    /// Builds the wire history: system prompt with the rolling summary of
-    /// compacted turns folded in, then the messages that remain uncompacted,
-    /// stripped of reasoning blocks (saves context).
     nonisolated static func requestHistory(system: String, summary: String?,
                                            messages: [ChatMessage], from start: Int,
                                            archived: [ArchivedBlock]? = nil,
@@ -1562,17 +1497,8 @@ final class ChatStore: ObservableObject {
         return ""
     }
 
-    /// Index up to which messages can be folded into the summary: keeps the
-    /// most recent exchanges verbatim and lands on a user message so the
-    /// remaining history starts a full turn. Nil when too little would be
-    /// gained over what is already compacted.
     nonisolated static func compactionCutoff(messages: [ChatMessage], alreadyCompacted: Int,
                                              keepTokens: Int = 0) -> Int? {
-        // Keeping a fixed number of messages verbatim says nothing about how much
-        // context they hold: four turns of tool output can be most of the window,
-        // and compacting then frees almost nothing. Walk back from the end until
-        // the kept tail is worth about a quarter of the context, with the old
-        // four-message floor underneath it.
         var cutoff = messages.count - 4
         if keepTokens > 0 {
             var kept = 0
@@ -1588,15 +1514,7 @@ final class ChatStore: ObservableObject {
         return cutoff
     }
 
-    /// Once the last exchange used over 70% of the configured context,
-    /// summarize the older turns with the model itself; future requests send
-    /// the summary plus the recent messages. The full transcript stays
-    /// visible and persisted.
-    // MARK: model-managed memory (memory_list / memory_archive / memory_recall)
 
-    /// Runs one of the memory tools against the open conversation. Everything the
-    /// model needs is already in the transcript, so archiving only records a range
-    /// and recall reads it back: nothing is deleted and nothing leaves the app.
     func runMemoryTool(_ name: String, arguments: [String: Any]) -> ToolExecutionResult {
         guard ChatMemoryService.isEnabled else {
             return ToolExecutionResult(content: "Conversation memory tools are turned off.", isError: true)
@@ -1717,9 +1635,6 @@ final class ChatStore: ObservableObject {
         compact(conversation: id, index: i, from: start, through: cutoff, port: port)
     }
 
-    /// Manually summarizes every completed exchange. This is useful on
-    /// backends without Flash Attention, where generation can slow down well
-    /// before the context is close to full.
     func compactCurrent(port: Int) {
         guard !generating, !compacting, let i = currentIndex,
               conversations[i].messages.last?.role == "assistant" else { return }
@@ -1828,9 +1743,6 @@ final class ChatStore: ObservableObject {
         return "HTTP \(status): \(message.prefix(300))"
     }
 
-    /// Streaming APIs can report a compute failure inside an HTTP 200 SSE
-    /// response. Surface it instead of silently treating the partial text as
-    /// a completed assistant message.
     nonisolated static func streamedError(from object: [String: Any]) -> String? {
         guard let error = object["error"] else { return nil }
         if let details = error as? [String: Any],
@@ -1868,9 +1780,6 @@ final class ChatStore: ObservableObject {
         return message
     }
 
-    /// A summary that claims more messages than are left would silence every
-    /// message after it: the request history starts at that index and finds
-    /// nothing. Any edit that shortens the transcript has to bring it back.
     nonisolated static func clampSummary(_ c: inout Conversation) {
         c.archived = ChatMemoryService.clamped(c.archived, toCount: c.messages.count)
         guard let covered = c.summarizedCount else { return }
@@ -2069,11 +1978,109 @@ final class ScrollGestureClock {
     var isRecent: Bool { Date().timeIntervalSince(last) < 0.4 }
 }
 
-/// The chat detail: transcript and composer. The conversation list lives in
-/// `ConversationListView` (the split-view sidebar); both share the ChatStore
-/// from the environment, injected by ChatMainView.
+private struct ChatComposerTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    var isFocused: FocusState<Bool>.Binding
+    let fontSize: CGFloat
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+
+        let textView = ComposerTextView()
+        textView.delegate = context.coordinator
+        textView.onSubmit = onSubmit
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .controlAccentColor
+        textView.font = .systemFont(ofSize: fontSize)
+        textView.textContainerInset = NSSize(width: 5, height: 7)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.string = text
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? ComposerTextView else { return }
+        context.coordinator.parent = self
+        textView.onSubmit = onSubmit
+        textView.font = .systemFont(ofSize: fontSize)
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .controlAccentColor
+        if textView.string != text {
+            textView.string = text
+            textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        }
+        if isFocused.wrappedValue,
+           textView.window?.firstResponder !== textView {
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView, textView.window?.firstResponder !== textView else { return }
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ChatComposerTextEditor
+
+        init(parent: ChatComposerTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.isFocused.wrappedValue = true
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.isFocused.wrappedValue = false
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
+    }
+
+    final class ComposerTextView: NSTextView {
+        var onSubmit: (() -> Void)?
+
+        override func keyDown(with event: NSEvent) {
+            let isReturn = event.keyCode == 36 || event.keyCode == 76
+            guard isReturn, !hasMarkedText() else {
+                super.keyDown(with: event)
+                return
+            }
+
+            if event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.option) {
+                insertNewline(nil)
+            } else {
+                onSubmit?()
+            }
+        }
+    }
+}
+
 struct NativeChatView: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.chatFontScale) private var chatFontScale
     @EnvironmentObject var server: ServerController
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var chat: ChatStore
@@ -2235,9 +2242,6 @@ struct NativeChatView: View {
         guard !ServerSettings.isAppleSilicon, let used = chat.contextUsed, contextLimit > 0 else {
             return false
         }
-        // Without Flash Attention, generation slows with absolute depth
-        // (~ -8 t/s per 1k tokens measured on RDNA2), so an absolute token
-        // threshold matters more than the fraction of configured context.
         return used >= 2560 || Double(used) / Double(contextLimit) >= 0.15
     }
 
@@ -2246,9 +2250,6 @@ struct NativeChatView: View {
             .onAppear {
                 inputFocused = true
                 loadDraft(for: chat.currentID)
-                // The field editor swallows Cmd+V before SwiftUI's paste command
-                // sees it, so intercept the key itself when the clipboard carries
-                // an image or files; plain text falls through to the normal paste.
                 pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                     guard inputFocused,
                           event.modifierFlags.contains(.command),
@@ -2331,9 +2332,6 @@ struct NativeChatView: View {
                 }
                 .environmentObject(loc)
             }
-            // Markdown links: open valid web/mail URLs in the default browser
-            // and silently drop malformed ones (e.g. placeholder "#" links),
-            // instead of the system's "can't open the application (-50)" dialog.
             .environment(\.openURL, OpenURLAction { url in
                 let raw = url.scheme == nil ? "https://\(url.absoluteString)" : url.absoluteString
                 guard let target = URL(string: raw), let scheme = target.scheme?.lowercased(),
@@ -2354,9 +2352,6 @@ struct NativeChatView: View {
         }
     }
 
-    /// Compact bar over the transcript: project chip + in-place editable title.
-    /// A pinned folder can be moved or deleted behind our back; the tools would only
-    /// fail at call time, so flag it where the folder is shown.
     private func directoryIsMissing(_ path: String?) -> Bool {
         guard let path, !path.isEmpty else { return false }
         var isDir: ObjCBool = false
@@ -2539,11 +2534,6 @@ struct NativeChatView: View {
         return c.messages[n].id
     }
 
-    // Inverted scroll: the whole stack and every row are flipped, and messages
-    // are listed newest-first, so the conversation's end sits at the scroll's
-    // natural origin. Opening, following the stream and scrolling up to read all
-    // work without any scrollTo or anchor management — the pattern messaging apps
-    // use. Avoids the LazyVStack + scrollPosition blank bug (FB/Apple thread).
     private var messagesScroll: some View {
         // Tool results are shown inside the assistant's tool-call card, so the
         // separate tool-role message is display-only noise and is hidden here.
@@ -2592,9 +2582,6 @@ struct NativeChatView: View {
         }
     }
 
-    /// Sits at the conversation's end, outside the lazy stack on purpose:
-    /// scrolling away unloads lazy children, and a probe that disappears when
-    /// the reader steps back is a probe that never reports what matters.
     private var endProbe: some View {
         Color.clear.frame(height: 1).id(Self.bottomID)
             .background {
@@ -2930,17 +2917,13 @@ struct NativeChatView: View {
                     .padding(.vertical, 7)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $draft)
-                .scrollContentBackground(.hidden)
-                .chatFont(.body)
+            ChatComposerTextEditor(
+                text: $draft,
+                isFocused: $inputFocused,
+                fontSize: ChatFont.Base.body.points * chatFontScale,
+                onSubmit: send)
         }
             .frame(height: 64)
-            .focused($inputFocused)
-            .onKeyPress(.return, phases: .down) { press in
-                if press.modifiers.contains(.option) { return .ignored }
-                send()
-                return .handled
-            }
             .onChange(of: draft) { _, value in
                 absorbLargeDraft(value)
                 scheduleDraftSave()
@@ -2948,8 +2931,8 @@ struct NativeChatView: View {
             .onPasteCommand(of: [.image, .png, .tiff, .fileURL]) { _ in
                 pasteFromClipboard()
             }
-            .help(loc.t("Intro envía; Opción+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto; pegar una imagen (captura) la adjunta si el modelo tiene visión.",
-                        "Return sends; Option+Return inserts a line break. Large pasted text becomes an attachment; pasting an image (screenshot) attaches it if the model has vision."))
+            .help(loc.t("Intro envía; Mayús+Intro inserta un salto de línea. Los textos pegados grandes se convierten en un adjunto; pegar una imagen (captura) la adjunta si el modelo tiene visión.",
+                        "Return sends; Shift+Return inserts a line break. Large pasted text becomes an attachment; pasting an image (screenshot) attaches it if the model has vision."))
     }
 
     @ViewBuilder
@@ -3848,9 +3831,6 @@ struct NativeChatView: View {
         contextLimit > 0 && attachmentTokens >= contextLimit
     }
 
-    /// A multiline TextField re-measures its whole contents on every
-    /// keystroke, so a large pasted blob makes typing crawl. Fold it into an
-    /// attachment chip instead; it still reaches the model verbatim.
     private func absorbLargeDraft(_ value: String) {
         guard pasteLongTextLength > 0, value.count > pasteLongTextLength else { return }
         let base = loc.t("Texto pegado", "Pasted text")
@@ -4068,9 +4048,6 @@ struct NativeChatView: View {
         startNextFileTranscription()
     }
 
-    /// Decode a file as text, trying UTF-8/UTF-16, then a single-byte encoding
-    /// (Latin-1/Windows-1252) only when the bytes look like text. Returns nil
-    /// for binary data (handled separately via string extraction).
     private static func decodeText(_ data: Data) -> String? {
         if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
             return String(data: data, encoding: .utf16)
@@ -4093,9 +4070,6 @@ struct NativeChatView: View {
     private var audioAvailable: Bool { modelModalities?.audio ?? false }
     private var videoAvailable: Bool { modelModalities?.video ?? false }
 
-    /// Downscale an image (preserving aspect, max dimension) and re-encode as a
-    /// JPEG data URI for the OpenAI multimodal `image_url` field — keeps the
-    /// request and the persisted conversation from ballooning.
     private static func imageDataURI(from data: Data, maxMegapixels: Double) -> String? {
         guard let img = NSImage(data: data),
               let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
@@ -4133,9 +4107,6 @@ struct NativeChatView: View {
         return output
     }
 
-    /// OCR a scanned (text-less) PDF on-device with the Vision framework. Renders
-    /// each page to a bitmap via Core Graphics (thread-safe, off the main actor)
-    /// and recognizes text. Bounded by page and character caps.
     private static func ocrPDF(data: Data, maxPages: Int, maxChars: Int) async -> String {
         await Task.detached(priority: .userInitiated) { () -> String in
             guard let doc = PDFDocument(data: data) else { return "" }
@@ -4260,10 +4231,6 @@ struct NativeChatView: View {
 
 // MARK: - Conversation list (split-view sidebar)
 
-/// The chat sidebar: new-conversation button, search and the conversation
-/// list. A native `List`/`.sidebar` inside the NavigationSplitView so it
-/// adopts the system's translucent sidebar — including macOS 26 Liquid Glass —
-/// on every supported release.
 enum ConversationSortOrder: String, CaseIterable {
     case lastUsed, created, title
 
