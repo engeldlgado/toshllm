@@ -75,6 +75,7 @@ struct ServerSettings {
     var ngl: Int
     var ncmoe: Int
     var ctx: Int
+    var contextAutomatic: Bool = false
     var threads: Int
     var flashAttn: String      // auto | on | off
     var noMmap: Bool
@@ -767,6 +768,7 @@ struct ServerSettings {
             ngl: int(SettingsKeys.ngl, 99),
             ncmoe: int(SettingsKeys.ncmoe, 0),
             ctx: int(SettingsKeys.ctx, 16384),
+            contextAutomatic: bool(SettingsKeys.contextAutomatic, false),
             threads: int(SettingsKeys.threads, 6),
             flashAttn: d.string(forKey: SettingsKeys.flashAttn) ?? "auto",
             noMmap: bool(SettingsKeys.noMmap, true),

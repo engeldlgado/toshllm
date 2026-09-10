@@ -66,6 +66,7 @@ enum SettingsKeys {
     /// stalls at/above it); the sweep measures it and prefetch is gated below it.
     static let prefetchCliffByModel = "prefetchCliffByModel"
     static let ctx = "ctx"
+    static let contextAutomatic = "contextAutomatic"
     static let threads = "threads"
     static let flashAttn = "flashAttn"
     static let noMmap = "noMmap"
@@ -115,6 +116,7 @@ enum SettingsKeys {
     static let dynamicMoePolicy = "dynamicMoePolicy"
     static let routerMode = "routerMode"
     static let routerModelsMax = "routerModelsMax"
+    static let serverConfigurationAdvanced = "serverConfigurationAdvanced"
     /// Alias of the model the native chat targets in router mode. A runtime
     /// pick, not a "setting", so it's excluded from resettableOptionKeys.
     static let chatSelectedModel = "chatSelectedModel"
@@ -235,7 +237,7 @@ enum SettingsKeys {
     /// never hides or deletes downloaded models. Profiles and the Keychain API key
     /// live outside UserDefaults and are untouched.
     static let resettableOptionKeys = [
-        serverBinary, port, ngl, ncmoe, ctx, threads, flashAttn, noMmap, jinja,
+        serverBinary, port, ngl, ncmoe, ctx, contextAutomatic, threads, flashAttn, noMmap, jinja,
         vramReserve, gpuIndex, gpuList, whisperModel, speechInputMethod, whisperLoadPolicy,
         audioOperation, audioLanguage, audioTargetLanguage, audioExportFormat,
         audioFollowTranscript, audioTranscriptMode, audioExportTrack,

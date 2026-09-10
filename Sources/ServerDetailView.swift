@@ -16,19 +16,56 @@ struct ServerDetailView: View {
     @EnvironmentObject private var vram: VRAMMonitor
     @EnvironmentObject private var control: ControlPanelState
     @State private var tab: Tab = .configuration
+    @AppStorage(SettingsKeys.serverConfigurationAdvanced) private var showAdvanced = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             ServerDetailHero(server: server)
             metricStrip
-            ServerDetailTabs(selection: $tab)
+            navigationBar
             tabContent
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    private var navigationBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                ServerDetailTabs(selection: $tab)
+            }
+            if tab == .configuration {
+                configurationModeBar
+            }
+        }
+    }
+
+    private var configurationModeBar: some View {
+        HStack(spacing: 12) {
+            Label(loc.t("Nivel de configuración", "Configuration level"),
+                  systemImage: showAdvanced ? "slider.horizontal.3" : "person.fill")
+                .font(.system(size: 13, weight: .semibold))
+            Text(showAdvanced ? loc.t("Avanzado", "Advanced") : loc.t("Básico", "Basic"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(showAdvanced ? Color.appAccent : .secondary)
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background((showAdvanced ? Color.appAccent : Color.secondary).opacity(0.10), in: Capsule())
+            Spacer()
+            Toggle(loc.t("Mostrar opciones avanzadas", "Show advanced options"), isOn: $showAdvanced)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: 12, weight: .medium))
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(WorkspaceStyle.border))
+        .help(loc.t("Activa la configuración técnica del servidor.",
+                    "Enables the server's technical configuration."))
+    }
+
     private var metricStrip: some View {
         let settings = server.effectiveSettings()
+        let estimate = estimatedMemory(for: settings)
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
             DashboardMetric(title: loc.t("Última generación", "Last generation"), icon: "bolt.fill",
                             value: server.genSpeed.map { String(format: "%.1f t/s", $0) } ?? "—",
@@ -40,17 +77,34 @@ struct ServerDetailView: View {
             DashboardMetric(title: loc.t("Uso de VRAM", "VRAM usage"), icon: "memorychip",
                             value: vram.gpus.isEmpty ? "—" : String(format: "%.1f / %.0f GB", vram.usedMB / 1024, vram.totalMB / 1024),
                             detail: String(format: "%.0f%%", vram.fraction * 100), progress: vram.fraction)
+            DashboardMetric(title: loc.t("Memoria estimada", "Estimated memory"), icon: "gauge.with.needle",
+                            value: estimate.map { String(format: "%.1f GB VRAM", $0.vramGB) } ?? "—",
+                            detail: estimate.map { String(format: "%.1f GB RAM", $0.ramGB) }
+                                ?? loc.t("Selecciona un modelo", "Choose a model"), tint: .chartSecondary)
             DashboardMetric(title: loc.t("Longitud de contexto", "Context length"), icon: "doc.plaintext",
-                            value: "\(settings.ctx / 1024)k",
-                            detail: loc.t("Máximo configurado", "Configured maximum"),
+                            value: settings.contextAutomatic ? loc.t("Auto · 16k", "Auto · 16k") : "\(settings.ctx / 1024)k",
+                            detail: settings.contextAutomatic
+                                ? loc.t("Seleccionado por la app", "Selected by the app")
+                                : loc.t("Máximo configurado", "Configured maximum"),
                             progress: min(Double(settings.ctx) / 262_144, 1), tint: .chartSecondary)
         }
+    }
+
+    private func estimatedMemory(for settings: ServerSettings) -> MemoryEstimate? {
+        guard let model = models.models.first(where: {
+            $0.url.standardizedFileURL.path == URL(fileURLWithPath: settings.modelPath).standardizedFileURL.path
+        }) else { return nil }
+        return Estimator.estimate(
+            spec: Catalog.spec(forLocal: model), hw: hardware, ctx: settings.ctx,
+            kvScale: (Estimator.kvTypeScale(settings.cacheTypeK) + Estimator.kvTypeScale(settings.cacheTypeV)) / 2,
+            multiGPU: settings.multiGPU || settings.gpuList.count >= 2,
+            tensorSplit: settings.splitMode == "tensor", ncmoeOverride: settings.ncmoe)
     }
 
     @ViewBuilder private var tabContent: some View {
         switch tab {
         case .configuration:
-            ServerConfigurationWorkspace(server: server)
+            ServerConfigurationWorkspace(server: server, showAdvanced: $showAdvanced)
         case .performance:
             ServerPerformanceWorkspace(server: server)
         case .logs:
@@ -287,6 +341,7 @@ private struct ServerDetailTabs: View {
 
 private struct ServerConfigurationWorkspace: View {
     @ObservedObject var server: ServerController
+    @Binding var showAdvanced: Bool
     @EnvironmentObject private var manager: ServerManager
     @EnvironmentObject private var models: ModelStore
     @EnvironmentObject private var loc: Localizer
@@ -295,6 +350,7 @@ private struct ServerConfigurationWorkspace: View {
     @AppStorage(SettingsKeys.modelPath) private var globalModelPath = ""
     @AppStorage(SettingsKeys.port) private var globalPort = 8080
     @AppStorage(SettingsKeys.ctx) private var globalContext = 16384
+    @AppStorage(SettingsKeys.contextAutomatic) private var globalContextAutomatic = false
     @AppStorage(SettingsKeys.gpuIndex) private var globalGPU = -1
     @AppStorage(SettingsKeys.gpuList) private var globalGPUList = ""
     @AppStorage(SettingsKeys.localNetworkDiscovery) private var globalDiscovery = false
@@ -307,27 +363,35 @@ private struct ServerConfigurationWorkspace: View {
     @AppStorage(SettingsKeys.ubatch) private var globalUbatch = 0
     @AppStorage(SettingsKeys.ncmoe) private var globalNcmoe = 0
     @AppStorage(SettingsKeys.loadVision) private var globalVision = true
+    @AppStorage(SettingsKeys.flashAttn) private var globalFlashAttention = "auto"
+    @AppStorage(SettingsKeys.faAmd) private var globalAMDFlashAttention = ServerSettings.defaultFaAmd
     @State private var profileSelection = "current"
 
     private var busy: Bool { server.state == .running || server.state == .starting }
     var body: some View {
         let settings = server.effectiveSettings()
         VStack(alignment: .leading, spacing: 14) {
-            AdaptiveTwoUp(threshold: 900) { serverSettingsCard(settings) } second: { engineCard(settings) }
+            AdaptiveTwoUp(threshold: 900) {
+                serverSettingsCard(settings)
+            } second: {
+                engineCard(settings)
+            }
             modelConfigurationCard(settings)
-            HStack {
-                if server.profile != nil {
-                    ServerDeleteButton(presentation: .labeled) {
-                        manager.removeServer(server.id)
+            if showAdvanced {
+                HStack {
+                    if server.profile != nil {
+                        ServerDeleteButton(presentation: .labeled) {
+                            manager.removeServer(server.id)
+                        }
                     }
+                    Spacer()
+                    Button { resetOverrides() } label: {
+                        Label(loc.t("Restablecer valores", "Reset to defaults"), systemImage: "arrow.counterclockwise")
+                    }.glassButton()
+                    Button { manager.persist() } label: {
+                        Label(loc.t("Guardar cambios", "Save changes"), systemImage: "checkmark")
+                    }.glassButton(prominent: true)
                 }
-                Spacer()
-                Button { resetOverrides() } label: {
-                    Label(loc.t("Restablecer valores", "Reset to defaults"), systemImage: "arrow.counterclockwise")
-                }.glassButton()
-                Button { manager.persist() } label: {
-                    Label(loc.t("Guardar cambios", "Save changes"), systemImage: "checkmark")
-                }.glassButton(prominent: true)
             }
         }
     }
@@ -339,21 +403,25 @@ private struct ServerConfigurationWorkspace: View {
                 ToshDropdown(selection: modelSelection(settings), options: modelOptions,
                              placeholder: loc.t("Elige un modelo", "Choose a model"), listWidth: 390)
             }
-            ServerSettingRow(icon: "number.square", title: loc.t("Puerto", "Port")) {
-                TextField("", value: port(settings), format: .number.grouping(.never))
-                    .multilineTextAlignment(.trailing).workspaceTextField(width: 126)
-                    .accessibilityLabel(loc.t("Puerto", "Port"))
+            if showAdvanced {
+                ServerSettingRow(icon: "number.square", title: loc.t("Puerto", "Port")) {
+                    TextField("", value: port(settings), format: .number.grouping(.never))
+                        .multilineTextAlignment(.trailing).workspaceTextField(width: 126)
+                        .accessibilityLabel(loc.t("Puerto", "Port"))
+                }
             }
             ServerSettingRow(icon: "doc.plaintext", title: loc.t("Longitud de contexto", "Context length")) {
-                ToshDropdown(selection: context(settings), options: contextOptions, width: 126)
+                ToshDropdown(selection: contextChoice(settings), options: contextOptions, width: 180)
             }
             ServerSettingRow(icon: "wifi", title: loc.t("Descubrible en red local", "Discoverable on local network")) {
                 Toggle(loc.t("Descubrible en red local", "Discoverable on local network"),
                        isOn: discovery(settings)).labelsHidden().toggleStyle(.switch)
             }
-            ServerSettingRow(icon: "number", title: loc.t("Límite de peticiones", "Request limit"),
-                             detail: loc.t("Solicitudes procesadas en paralelo", "Requests processed in parallel")) {
-                requestLimitMenu(settings)
+            if showAdvanced {
+                ServerSettingRow(icon: "number", title: loc.t("Límite de peticiones", "Request limit"),
+                                 detail: loc.t("Solicitudes procesadas en paralelo", "Requests processed in parallel")) {
+                    requestLimitMenu(settings)
+                }
             }
         }
         .disabled(busy)
@@ -362,29 +430,13 @@ private struct ServerConfigurationWorkspace: View {
     private func engineCard(_ settings: ServerSettings) -> some View {
         DetailPanel(title: loc.t("Motor y hardware", "Engine and hardware"),
                     subtitle: loc.t("Perfil de ejecución y aceleración.", "Execution profile and acceleration."), icon: "gearshape", fill: true) {
-            ServerSettingRow(icon: "slider.horizontal.3", title: loc.t("Perfil del motor", "Engine profile")) {
-                profileMenu
+            if showAdvanced {
+                ServerSettingRow(icon: "slider.horizontal.3", title: loc.t("Perfil del motor", "Engine profile")) {
+                    profileMenu
+                }
             }
             ServerSettingRow(icon: "cpu", title: "GPU") {
                 ToshDropdown(selection: gpuChoice(settings), options: gpuOptions(settings))
-            }
-            HStack(spacing: 10) {
-                hardwareTile("display", hardware.gpus.first?.name ?? loc.t("GPU predeterminada", "Default GPU"),
-                             hardware.gpus.first.map { "\($0.vramGB) GB VRAM · Metal" } ?? "Metal")
-                hardwareTile("apple.logo", hardware.osVersion, ServerSettings.isAppleSilicon ? "Apple Silicon" : "AMD Metal")
-            }
-            Divider().padding(.vertical, 3)
-            Label(loc.t("Servicios y opciones avanzadas", "Services and advanced options"), systemImage: "slider.horizontal.3")
-                .font(.system(size: 14, weight: .semibold))
-            ServerSettingRow(icon: "point.3.connected.trianglepath.dotted", title: loc.t("Servidor de embeddings", "Embeddings server"),
-                             detail: loc.t("Expone un endpoint compatible con OpenAI", "Exposes an OpenAI-compatible endpoint")) {
-                Toggle(loc.t("Servidor de embeddings", "Embeddings server"),
-                       isOn: embeddings(settings)).labelsHidden().toggleStyle(.switch)
-            }
-            ServerSettingRow(icon: "network", title: loc.t("Proxy MCP para la interfaz web", "MCP proxy for the web interface"),
-                             detail: loc.t("Permite usar MCP mediante la interfaz web", "Allows MCP through the web interface")) {
-                Toggle(loc.t("Proxy MCP para la interfaz web", "MCP proxy for the web interface"),
-                       isOn: mcpProxy(settings)).labelsHidden().toggleStyle(.switch)
             }
             ServerSettingRow(icon: "arrow.triangle.2.circlepath", title: loc.t("Router (multi-modelo)", "Router (multi-model)"),
                              detail: loc.t("Enruta peticiones entre modelos locales", "Routes requests across local models")) {
@@ -396,10 +448,25 @@ private struct ServerConfigurationWorkspace: View {
                     Stepper("\(routerMax(settings).wrappedValue)", value: routerMax(settings), in: 1...4).fixedSize()
                 }
             }
-            ServerSettingRow(icon: "terminal", title: loc.t("Argumentos extra", "Extra arguments")) {
-                TextField("--no-warmup -np 2", text: extraArgs(settings))
-                    .font(.system(.callout, design: .monospaced))
-                    .workspaceTextField(width: 330)
+            if showAdvanced {
+                Divider().padding(.vertical, 3)
+                Label(loc.t("Servicios y opciones avanzadas", "Services and advanced options"), systemImage: "slider.horizontal.3")
+                    .font(.system(size: 14, weight: .semibold))
+                ServerSettingRow(icon: "point.3.connected.trianglepath.dotted", title: loc.t("Servidor de embeddings", "Embeddings server"),
+                                 detail: loc.t("Expone un endpoint compatible con OpenAI", "Exposes an OpenAI-compatible endpoint")) {
+                    Toggle(loc.t("Servidor de embeddings", "Embeddings server"),
+                           isOn: embeddings(settings)).labelsHidden().toggleStyle(.switch)
+                }
+                ServerSettingRow(icon: "network", title: loc.t("Proxy MCP para la interfaz web", "MCP proxy for the web interface"),
+                                 detail: loc.t("Permite usar MCP mediante la interfaz web", "Allows MCP through the web interface")) {
+                    Toggle(loc.t("Proxy MCP para la interfaz web", "MCP proxy for the web interface"),
+                           isOn: mcpProxy(settings)).labelsHidden().toggleStyle(.switch)
+                }
+                ServerSettingRow(icon: "terminal", title: loc.t("Argumentos extra", "Extra arguments")) {
+                    TextField("--no-warmup -np 2", text: extraArgs(settings))
+                        .font(.system(.callout, design: .monospaced))
+                        .workspaceTextField(width: 330)
+                }
             }
         }
         .disabled(busy)
@@ -408,7 +475,15 @@ private struct ServerConfigurationWorkspace: View {
     private func modelConfigurationCard(_ settings: ServerSettings) -> some View {
         DetailPanel(title: loc.t("Configuración del modelo", "Model configuration"),
                     subtitle: loc.t("Parámetros específicos del modelo seleccionado.", "Model-specific parameters for the selected model."), icon: "cube") {
-            AdaptiveTwoUp(threshold: 820, spacing: 12) { modelRuntimeGroup(settings) } second: { modelAccelerationGroup(settings) }
+            if showAdvanced || ServerSettings.modelIsMoE(at: settings.modelPath) {
+                AdaptiveTwoUp(threshold: 820, spacing: 12) {
+                    modelRuntimeGroup(settings)
+                } second: {
+                    modelAccelerationGroup(settings)
+                }
+            } else {
+                modelAccelerationGroup(settings)
+            }
             if !settings.modelPath.isEmpty {
                 HStack(spacing: 10) {
                     Label(loc.t("Detectado", "Detected"), systemImage: "checkmark.seal")
@@ -419,8 +494,8 @@ private struct ServerConfigurationWorkspace: View {
                                      icon: "shippingbox", color: .secondary)
                             if ServerSettings.modelIsMoE(at: settings.modelPath) { TagBadge(text: "MoE", icon: "square.stack.3d.up", color: .purple) }
                             if ServerSettings.mightSupportVision(modelPath: settings.modelPath) { TagBadge(text: "Vision", icon: "eye", color: .purple) }
-                            if ServerSettings.modelUsesMTP(at: settings.modelPath) { TagBadge(text: "MTP", icon: "hare.fill", color: .green) }
-                            if ServerSettings.dflashDraftPath(forModel: settings.modelPath) != nil { TagBadge(text: "DFlash", icon: "bolt.fill", color: .orange) }
+                            if showAdvanced && ServerSettings.modelUsesMTP(at: settings.modelPath) { TagBadge(text: "MTP", icon: "hare.fill", color: .green) }
+                            if showAdvanced && ServerSettings.dflashDraftPath(forModel: settings.modelPath) != nil { TagBadge(text: "DFlash", icon: "bolt.fill", color: .orange) }
                         }
                     }
                     Spacer(minLength: 8)
@@ -440,12 +515,14 @@ private struct ServerConfigurationWorkspace: View {
 
     private func modelRuntimeGroup(_ settings: ServerSettings) -> some View {
         ModelConfigurationGroup(title: loc.t("Ejecución", "Runtime"), icon: "memorychip") {
-            ServerSettingRow(icon: "square.stack.3d.down.right", title: loc.t("Micro-lote", "Micro-batch"),
-                             detail: loc.t("Equilibra velocidad y memoria", "Balances throughput and memory")) {
-                ToshDropdown(selection: ubatch(settings), options: ubatchOptions, width: 184, listWidth: 250)
+            if showAdvanced {
+                ServerSettingRow(icon: "square.stack.3d.down.right", title: loc.t("Micro-lote", "Micro-batch"),
+                                 detail: loc.t("Equilibra velocidad y memoria", "Balances throughput and memory")) {
+                    ToshDropdown(selection: ubatch(settings), options: ubatchOptions, width: 184, listWidth: 250)
+                }
             }
             if ServerSettings.modelIsMoE(at: settings.modelPath) {
-                Divider()
+                if showAdvanced { Divider() }
                 ServerSettingRow(icon: "cpu", title: loc.t("Expertos MoE en CPU", "MoE experts on CPU"),
                                  detail: loc.t("Reduce VRAM usando memoria del sistema", "Trades system memory for lower VRAM use")) {
                     CompactIntegerStepper(value: ncmoe(settings), range: 0...99)
@@ -463,22 +540,36 @@ private struct ServerConfigurationWorkspace: View {
                                            loadEnabled: vision(settings))
                 }
             }
-            if ServerSettings.modelUsesMTP(at: settings.modelPath) {
+            if settings.serverBinary == ServerSettings.defaultBinary {
                 if ServerSettings.mightSupportVision(modelPath: settings.modelPath) { Divider() }
+                ServerSettingRow(icon: "bolt.horizontal.fill", title: "Flash Attention",
+                                 detail: loc.t("Aceleración AMD mediante Metal", "AMD acceleration through Metal")) {
+                    Toggle("Flash Attention", isOn: amdFlashAttention(settings))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+            } else {
+                if ServerSettings.mightSupportVision(modelPath: settings.modelPath) { Divider() }
+                ServerSettingRow(icon: "bolt.horizontal.fill", title: "Flash Attention",
+                                 detail: loc.t("Configuración del motor externo", "External engine configuration")) {
+                    ToshDropdown(selection: flashAttention(settings), options: flashAttentionOptions, width: 150)
+                }
+            }
+            if showAdvanced && ServerSettings.modelUsesMTP(at: settings.modelPath) {
+                Divider()
                 ServerSettingRow(icon: "hare.fill", title: "MTP",
                                  detail: loc.t("Predicción de múltiples tokens", "Multi-token prediction")) {
                     MTPControl(modelPath: settings.modelPath)
                 }
             }
-            if ServerSettings.dflashDraftPath(forModel: settings.modelPath) != nil {
-                if ServerSettings.mightSupportVision(modelPath: settings.modelPath) || ServerSettings.modelUsesMTP(at: settings.modelPath) { Divider() }
+            if showAdvanced && ServerSettings.dflashDraftPath(forModel: settings.modelPath) != nil {
+                Divider()
                 ServerSettingRow(icon: "bolt.fill", title: "DFlash",
                                  detail: loc.t("Decodificación con borrador especulativo", "Speculative draft decoding")) {
                     DflashControl(modelPath: settings.modelPath, layout: .detail)
                         .environmentObject(server)
                 }
             }
-            if !ServerSettings.mightSupportVision(modelPath: settings.modelPath) &&
+            if showAdvanced && !ServerSettings.mightSupportVision(modelPath: settings.modelPath) &&
                 !ServerSettings.modelUsesMTP(at: settings.modelPath) &&
                 ServerSettings.dflashDraftPath(forModel: settings.modelPath) == nil {
                 Label(loc.t("Este modelo no declara aceleradores opcionales.", "This model does not declare optional accelerators."),
@@ -516,10 +607,20 @@ private struct ServerConfigurationWorkspace: View {
         profileStore.profiles.map { .init(value: $0.id.uuidString, title: $0.name, systemImage: "person.crop.circle") }
     }
 
-    private var contextOptions: [ToshDropdown<Int>.Option] {
-        [4096, 8192, 16384, 32768, 65536, 131072, 262144].map {
-            .init(value: $0, title: "\($0 / 1024)k")
+    private var contextOptions: [ToshDropdown<String>.Option] {
+        [.init(value: "automatic", title: loc.t("Automático", "Automatic"),
+               subtitle: loc.t("Recomendado · 16k", "Recommended · 16k"), systemImage: "wand.and.stars")] +
+        [8192, 16384, 32768, 65536].map {
+            .init(value: String($0), title: "\($0 / 1024)k", systemImage: "doc.plaintext")
         }
+    }
+
+    private var flashAttentionOptions: [ToshDropdown<String>.Option] {
+        [
+            .init(value: "auto", title: loc.t("Automático", "Automatic")),
+            .init(value: "on", title: loc.t("Activado", "On")),
+            .init(value: "off", title: loc.t("Desactivado", "Off"))
+        ]
     }
 
     private var requestLimitOptions: [ToshDropdown<Int>.Option] {
@@ -573,6 +674,7 @@ private struct ServerConfigurationWorkspace: View {
     private func resetOverrides() {
         guard var profile = server.profile else {
             globalContext = 16384; globalGPU = -1; globalGPUList = ""; globalDiscovery = false
+            globalContextAutomatic = false; globalFlashAttention = "auto"; globalAMDFlashAttention = ServerSettings.defaultFaAmd
             globalParallel = 1; globalEmbeddings = false; globalMCP = false; globalRouter = false
             globalRouterMax = 1; globalExtraArgs = ""; globalUbatch = 0
             return
@@ -605,7 +707,33 @@ private struct ServerConfigurationWorkspace: View {
             manager.schedulePersist()
         })
     }
-    private func context(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalContext : addedBinding(\.ctx, fallback: settings.ctx, pin: Profile.Pin.ctx) }
+    private func contextChoice(_ settings: ServerSettings) -> Binding<String> {
+        Binding(get: {
+            settings.contextAutomatic ? "automatic" : String(settings.ctx)
+        }, set: { value in
+            let automatic = value == "automatic"
+            let amount = automatic ? 16384 : (Int(value) ?? 16384)
+            if server.profile == nil {
+                globalContextAutomatic = automatic
+                globalContext = amount
+            } else {
+                server.profile?.contextAutomatic = automatic
+                server.profile?.ctx = amount
+                pin(Profile.Pin.ctx)
+                manager.schedulePersist()
+            }
+        })
+    }
+    private func flashAttention(_ settings: ServerSettings) -> Binding<String> {
+        server.profile == nil
+            ? $globalFlashAttention
+            : addedBinding(\.flashAttn, fallback: settings.flashAttn, pin: Profile.Pin.flashAttention)
+    }
+    private func amdFlashAttention(_ settings: ServerSettings) -> Binding<Bool> {
+        server.profile == nil
+            ? $globalAMDFlashAttention
+            : addedBinding(\.faAmd, fallback: settings.faAmd, pin: Profile.Pin.flashAttention).optionalValue(default: ServerSettings.defaultFaAmd)
+    }
     private func discovery(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalDiscovery : addedBinding(\.localNetworkDiscovery, fallback: settings.localNetworkDiscovery, pin: Profile.Pin.discovery).optionalValue(default: false) }
     private func parallel(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalParallel : addedBinding(\.parallelSlots, fallback: settings.parallelSlots, pin: Profile.Pin.parallelSlots).optionalValue(default: 1) }
     private func embeddings(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalEmbeddings : addedBinding(\.embeddings, fallback: settings.embeddings, pin: Profile.Pin.embeddings).optionalValue(default: false) }

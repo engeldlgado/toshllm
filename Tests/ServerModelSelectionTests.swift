@@ -60,4 +60,26 @@ final class ServerModelSelectionTests: XCTestCase {
         XCTAssertEqual(profile.ctx, originalContext)
         XCTAssertEqual(profile.modelPath, "/models/new.gguf")
     }
+
+    func testPinnedBasicSettingsPreserveAutomaticContextAndFlashAttention() throws {
+        var profile = ServerSettings.fromDefaults().makeProfile(name: "Basic")
+        profile.ctx = 16_384
+        profile.contextAutomatic = true
+        profile.flashAttn = "on"
+        profile.faAmd = false
+        profile.pinned = [Profile.Pin.ctx, Profile.Pin.flashAttention]
+
+        let restored = try JSONDecoder().decode(Profile.self, from: JSONEncoder().encode(profile))
+        var settings = ServerSettings.fromDefaults()
+        settings.ctx = 65_536
+        settings.contextAutomatic = false
+        settings.flashAttn = "off"
+        settings.faAmd = true
+        settings.applyPinned(restored, Set(try XCTUnwrap(restored.pinned)))
+
+        XCTAssertEqual(settings.ctx, 16_384)
+        XCTAssertTrue(settings.contextAutomatic)
+        XCTAssertEqual(settings.flashAttn, "on")
+        XCTAssertFalse(settings.faAmd)
+    }
 }

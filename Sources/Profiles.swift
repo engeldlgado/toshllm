@@ -12,6 +12,7 @@ struct Profile: Codable, Identifiable {
     var ngl: Int
     var ncmoe: Int
     var ctx: Int
+    var contextAutomatic: Bool? = nil
     var threads: Int
     var flashAttn: String
     var noMmap: Bool
@@ -55,6 +56,7 @@ struct Profile: Codable, Identifiable {
         static let model      = "model"
         static let moe        = "moe"
         static let ctx        = "ctx"
+        static let flashAttention = "flashAttention"
         static let gpu        = "gpu"
         static let discovery  = "discovery"
         static let vision     = "vision"
@@ -141,6 +143,7 @@ final class ProfileStore: ObservableObject {
         d.set(p.ngl, forKey: SettingsKeys.ngl)
         d.set(p.ncmoe, forKey: SettingsKeys.ncmoe)
         d.set(p.ctx, forKey: SettingsKeys.ctx)
+        if let value = p.contextAutomatic { d.set(value, forKey: SettingsKeys.contextAutomatic) }
         d.set(p.threads, forKey: SettingsKeys.threads)
         d.set(p.flashAttn, forKey: SettingsKeys.flashAttn)
         d.set(p.noMmap, forKey: SettingsKeys.noMmap)
@@ -214,6 +217,7 @@ extension ServerSettings {
     /// Snapshot the full runtime config into a named profile.
     func makeProfile(name: String) -> Profile {
         Profile(name: name, modelPath: modelPath, ngl: ngl, ncmoe: ncmoe, ctx: ctx,
+                contextAutomatic: contextAutomatic,
                 threads: threads, flashAttn: flashAttn, noMmap: noMmap, jinja: jinja,
                 vramReserve: vramReserveMB,
                 gpuIndex: gpuIndex, extraArgs: extraArgs, cacheTypeK: cacheTypeK,
@@ -235,6 +239,7 @@ extension ServerSettings {
     /// so the benchmark can seed a local run-config from a profile.
     mutating func apply(_ p: Profile) {
         modelPath = p.modelPath; ngl = p.ngl; ncmoe = p.ncmoe; ctx = p.ctx
+        if let value = p.contextAutomatic { contextAutomatic = value }
         threads = p.threads; flashAttn = p.flashAttn; noMmap = p.noMmap; jinja = p.jinja
         vramReserveMB = p.vramReserve
         gpuIndex = p.gpuIndex; extraArgs = p.extraArgs; cacheTypeK = p.cacheTypeK
@@ -274,6 +279,11 @@ extension ServerSettings {
         if pinned.contains(Profile.Pin.model) { modelPath = p.modelPath; ncmoe = p.ncmoe }
         if pinned.contains(Profile.Pin.moe) { ncmoe = p.ncmoe }
         if pinned.contains(Profile.Pin.ctx) { ctx = p.ctx }
+        if pinned.contains(Profile.Pin.ctx), let value = p.contextAutomatic { contextAutomatic = value }
+        if pinned.contains(Profile.Pin.flashAttention) {
+            flashAttn = p.flashAttn
+            if let value = p.faAmd { faAmd = value }
+        }
         if pinned.contains(Profile.Pin.ubatch), let v = p.ubatch { ubatch = v }
         if pinned.contains(Profile.Pin.parallelSlots), let v = p.parallelSlots { parallelSlots = v }
         if pinned.contains(Profile.Pin.gpu) { gpuIndex = p.gpuIndex; gpuList = p.gpuList ?? [] }
