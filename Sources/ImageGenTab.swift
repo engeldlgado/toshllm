@@ -72,19 +72,44 @@ struct ImageControls: View {
     @AppStorage(SettingsKeys.imagenCleanupOnClose) private var cleanupOnClose = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                experimentalBadge
-                Picker("", selection: $studioModeRaw) {
-                    Text(loc.t("Crear", "Create")).tag(ImageStudioMode.create.rawValue)
-                    Text(loc.t("Escalar", "Upscale")).tag(ImageStudioMode.upscale.rawValue)
-                }
-                .pickerStyle(.segmented).labelsHidden()
-                if studioMode == .upscale { upscalePanel } else { createPanel }
+        VStack(spacing: 0) {
+            Picker("", selection: $studioModeRaw) {
+                Text(loc.t("Crear", "Create")).tag(ImageStudioMode.create.rawValue)
+                Text(loc.t("Escalar", "Upscale")).tag(ImageStudioMode.upscale.rawValue)
             }
-            .padding(16)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.large)
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 14)
+
+            Divider()
+
+            ScrollView {
+                Group {
+                    if studioMode == .upscale { upscalePanel } else { createPanel }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+            }
+
+            if studioMode == .create {
+                Divider()
+                VStack(alignment: .leading, spacing: 9) {
+                    generateButton
+                    Text(loc.t("La generación se ejecuta localmente. El tiempo depende del hardware.",
+                               "Generation runs locally. Time depends on your hardware."))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+            }
         }
-        .frame(minWidth: 260)
+        .frame(minWidth: 300)
+        .navigationSplitViewColumnWidth(min: 300, ideal: 360, max: 420)
     }
 
     private var studioMode: ImageStudioMode {
@@ -196,33 +221,53 @@ struct ImageControls: View {
     }
 
     private var createPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-                if server.state == .running && serverGPUOverlap { serverBusyWarning }
-                ForEach($pool.configs) { $cfg in
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 10) {
+                Label(loc.t("Instancia", "Instance"), systemImage: "cube")
+                    .font(.headline)
+                Spacer()
+                experimentalBadge
+                Button { pool.add() } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .disabled(pool.anyBusy)
+                .iconHelp(loc.t("Añadir instancia", "Add instance"))
+            }
+
+            if server.state == .running && serverGPUOverlap { serverBusyWarning }
+
+            ForEach($pool.configs) { $cfg in
+                if pool.configs.count == 1 {
+                    ImageInstanceForm(cfg: $cfg,
+                                      isPrimary: true,
+                                      canRemove: false,
+                                      busy: pool.anyBusy,
+                                      onRemove: {})
+                } else {
                     instanceAccordion($cfg)
                 }
-                Button { pool.add() } label: {
-                    Label(loc.t("Añadir instancia", "Add instance"), systemImage: "plus.circle")
-                }
-                .buttonStyle(.borderless).controlSize(.small)
-                .disabled(pool.anyBusy)
-                .help(loc.t("Añade otra generación en paralelo con su propia configuración (modelo, GPU, semilla…). Generar lanza todas a la vez.",
-                            "Adds another parallel run with its own configuration (model, GPU, seed…). Generate launches them all at once."))
-                if duplicatedGPU {
-                    Label(loc.t("Dos instancias comparten GPU: en Macs AMD puede colgar la tarjeta.",
-                                "Two instances share a GPU: on AMD Macs this can hang the card."),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption2).foregroundStyle(.orange)
-                }
-                generateButton
-                Divider().padding(.vertical, 2)
+            }
+
+            if duplicatedGPU {
+                Label(loc.t("Dos instancias comparten GPU: en Macs AMD puede colgar la tarjeta.",
+                            "Two instances share a GPU: on AMD Macs this can hang the card."),
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
+
+            DisclosureGroup(loc.t("Avanzado", "Advanced")) {
                 Toggle(isOn: $cleanupOnClose) {
                     Text(loc.t("Borrar imágenes al cerrar la app", "Delete images on app close"))
                         .font(.caption)
                 }
-                .toggleStyle(.switch).controlSize(.mini)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .padding(.top, 8)
                 .help(loc.t("Al salir de la app borra las imágenes generadas (toshllm_*) de la carpeta de salida, para no acumular cientos con los nombres por fecha.",
                             "On quitting the app, deletes the generated images (toshllm_*) from the output folder, so the date-named files don't pile up."))
+            }
+            .font(.callout)
         }
     }
 
@@ -369,6 +414,11 @@ struct ImageControls: View {
 
 enum ImageDetailTab { case instances, queue }
 
+private enum ImageGalleryOrder: String, CaseIterable, Identifiable {
+    case recent, oldest
+    var id: String { rawValue }
+}
+
 /// Queue tab: a composer (prompt + seed) over a live feed that accumulates pending,
 /// in-progress and finished renders so nothing is lost when instances move on.
 struct QueueFeedView: View {
@@ -383,42 +433,47 @@ struct QueueFeedView: View {
     @AppStorage(SettingsKeys.imagenQueueGrid) private var grid = false
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             composer
-            Divider()
             if pool.queue.isEmpty && pool.gallery.isEmpty && !pool.anyBusy {
                 emptyState
             } else {
-                if !pool.gallery.isEmpty {
-                    HStack(spacing: 12) {
-                        Spacer()
-                        FeedLayoutPicker(grid: $grid)
-                        if pool.gallery.count > 1 {
-                            Button { saveImagesToFolder(pool.gallery.map(\.url), loc: loc) } label: {
-                                Label(loc.t("Guardar todas…", "Save all…"), systemImage: "square.and.arrow.down.on.square")
-                            }
-                            .help(loc.t("Copia todas las imágenes generadas a una carpeta que elijas.",
-                                        "Copies every generated image into a folder you choose."))
-                        }
-                    }
-                }
+                queueToolbar
                 ScrollView {
-                    VStack(spacing: 10) {
-                        ForEach(pool.queue) { pendingRow($0) }
-                        ForEach(pool.configs) { c in
-                            let gen = pool.generator(for: c.id)
-                            if gen.isBusy { progressRow(gen, instanceLabel: pool.instanceLabel(for: c.id)) }
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !pool.queue.isEmpty {
+                            queueSectionTitle(loc.t("Pendientes", "Pending"),
+                                              count: pool.queue.count,
+                                              icon: "clock")
+                            ForEach(pool.queue) { pendingRow($0) }
                         }
-                        if grid {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 460), spacing: 10)],
-                                      alignment: .leading, spacing: 10) {
-                                ForEach(pool.gallery) { resultCard($0) }
+
+                        let running = pool.configs.filter { pool.generator(for: $0.id).isBusy }
+                        if !running.isEmpty {
+                            queueSectionTitle(loc.t("En curso", "In progress"),
+                                              count: running.count,
+                                              icon: "gearshape.2")
+                            ForEach(running) { c in
+                                progressRow(pool.generator(for: c.id),
+                                            instanceLabel: pool.instanceLabel(for: c.id))
                             }
-                        } else {
-                            ForEach(pool.gallery) { resultRow($0) }
+                        }
+
+                        if !pool.gallery.isEmpty {
+                            queueSectionTitle(loc.t("Resultados", "Results"),
+                                              count: pool.gallery.count,
+                                              icon: "photo.stack")
+                            if grid {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 460), spacing: 12)],
+                                          alignment: .leading, spacing: 12) {
+                                    ForEach(pool.gallery) { resultCard($0) }
+                                }
+                            } else {
+                                ForEach(pool.gallery) { resultRow($0) }
+                            }
                         }
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, 4)
                 }
             }
         }
@@ -427,7 +482,15 @@ struct QueueFeedView: View {
     /// Prompt on top, send options (target, seed, image) and Add in one row,
     /// queue controls below.
     private var composer: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label(loc.t("Añadir a la cola", "Add to queue"), systemImage: "text.badge.plus")
+                    .font(.headline)
+                Spacer()
+                Text(loc.t("⌘↩ para añadir", "⌘↩ to add"))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
             // TextField(axis:) clips past its line cap and doesn't reflow on
             // window resize on macOS, so this is a TextEditor sized by a hidden
             // mirror of the text: grows with the content up to maxHeight, then
@@ -441,7 +504,8 @@ struct QueueFeedView: View {
                 .frame(minHeight: 44)
                 .overlay {
                     TextEditor(text: $draft)
-                        .font(.body).scrollContentBackground(.hidden)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
                         .padding(.vertical, 4)
                         .onKeyPress(.return, phases: .down) { press in
                             guard press.modifiers.contains(.command) else { return .ignored }
@@ -457,8 +521,8 @@ struct QueueFeedView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-            HStack(spacing: 14) {
+                .workspaceFieldSurface(cornerRadius: 10)
+            HStack(spacing: 12) {
                 ImageLoraMenu(prompt: $draft)
                     .fixedSize()
                 HStack(spacing: 4) {
@@ -484,37 +548,89 @@ struct QueueFeedView: View {
                 initImageChip
                 Spacer()
                 Button(action: add) { Label(loc.t("Añadir", "Add"), systemImage: "plus") }
-                    .glassButton()
+                    .glassButton(prominent: true)
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            if !pool.queue.isEmpty || pool.queueActive {
-                HStack {
-                    if !pool.queue.isEmpty {
-                        Text(loc.t("%@ en cola", "%@ queued", "\(pool.queue.count)"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button(action: toggle) {
-                        Label(pool.queueActive ? loc.t("Detener", "Stop") : loc.t("Procesar cola", "Process queue"),
-                              systemImage: pool.queueActive ? "stop.fill" : "play.fill")
-                    }
-                    .buttonStyle(.borderedProminent).controlSize(.small)
-                    .disabled(!pool.queueActive && pool.queue.isEmpty)
-                }
-            }
         }
+        .padding(14)
+        .cardSurface()
         .help(loc.t("Cada prompt (con su semilla) lo genera la siguiente instancia libre, una generación por GPU. Los resultados se acumulan abajo con nombre único.",
                     "Each prompt (with its seed) is rendered by the next free instance, one run per GPU. Results accumulate below, each with a unique name."))
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "list.bullet.rectangle").font(.system(size: 40)).foregroundStyle(.tertiary)
-            Text(loc.t("Añade prompts a la cola y pulsa Procesar. Cada resultado aparece aquí.",
-                       "Add prompts to the queue and press Process. Each result shows up here."))
-                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+    private var queueToolbar: some View {
+        HStack(spacing: 10) {
+            if !pool.queue.isEmpty {
+                Label(loc.t("%@ pendientes", "%@ pending", "\(pool.queue.count)"), systemImage: "clock")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            } else if pool.anyBusy {
+                Label(loc.t("Procesando", "Processing"), systemImage: "gearshape.2")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.appAccent)
+            } else {
+                Label(loc.t("%@ resultados", "%@ results", "\(pool.gallery.count)"), systemImage: "photo.stack")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            FeedLayoutPicker(grid: $grid)
+            if pool.gallery.count > 1 {
+                Button { saveImagesToFolder(pool.gallery.map(\.url), loc: loc) } label: {
+                    Label(loc.t("Guardar todas", "Save all"), systemImage: "square.and.arrow.down.on.square")
+                }
+                .glassButton()
+                .help(loc.t("Copia todas las imágenes generadas a una carpeta que elijas.",
+                            "Copies every generated image into a folder you choose."))
+            }
+            if !pool.queue.isEmpty || pool.queueActive {
+                Button(action: toggle) {
+                    Label(pool.queueActive ? loc.t("Detener", "Stop") : loc.t("Procesar", "Process"),
+                          systemImage: pool.queueActive ? "stop.fill" : "play.fill")
+                }
+                .glassButton(prominent: true)
+                .disabled(!pool.queueActive && pool.queue.isEmpty)
+            }
         }
+        .frame(minHeight: 32)
+    }
+
+    private func queueSectionTitle(_ title: String, count: Int, icon: String) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .foregroundStyle(Color.appAccent)
+            Text(title).font(.callout.weight(.semibold))
+            Text("\(count)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(WorkspaceStyle.inset, in: Capsule())
+            Spacer()
+        }
+        .padding(.top, 2)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "tray")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(.tertiary)
+            VStack(spacing: 5) {
+                Text(loc.t("La cola está vacía", "The queue is empty"))
+                    .font(.headline)
+                Text(loc.t("Escribe una descripción arriba para preparar varias imágenes.",
+                           "Type a prompt above to prepare several images."))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: 420)
+        .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.quaternary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.quaternary))
     }
 
     private func pendingRow(_ q: QueuedPrompt) -> some View {
@@ -537,10 +653,11 @@ struct QueueFeedView: View {
             Text(loc.t("En cola", "Queued")).font(.caption).foregroundStyle(.secondary)
             Button { pool.removeFromQueue(q.id) } label: { Label(loc.t("Quitar", "Clear"), systemImage: "xmark.circle") }
                 .labelStyle(.iconOnly)
-                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                .buttonStyle(GlassIconButtonStyle())
                 .iconHelp(loc.t("Quitar de la cola", "Remove from the queue"))
         }
-        .padding(12).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
+        .padding(12)
+        .cardSurface()
     }
 
     private func progressRow(_ gen: ImageGenerator, instanceLabel: String?) -> some View {
@@ -566,7 +683,8 @@ struct QueueFeedView: View {
             }
             Spacer()
         }
-        .padding(12).background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+        .padding(12)
+        .cardSurface(tint: .appAccent)
     }
 
     private func resultRow(_ g: GeneratedImage) -> some View {
@@ -585,17 +703,20 @@ struct QueueFeedView: View {
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                 HStack(spacing: 10) {
                     Button { save(g) } label: { Label(loc.t("Guardar…", "Save…"), systemImage: "square.and.arrow.down") }
+                        .glassButton()
                         .help(loc.t("Guarda una copia donde elijas.", "Save a copy wherever you choose."))
                     Button { NSWorkspace.shared.activateFileViewerSelecting([g.url]) } label: {
                         Label(loc.t("Finder", "Finder"), systemImage: "folder")
                     }
+                    .glassButton()
                     .help(loc.t("Abre el archivo en el Finder.", "Reveal the file in Finder."))
                 }
                 .controlSize(.small)
             }
             Spacer()
         }
-        .padding(12).background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+        .padding(12)
+        .cardSurface()
     }
 
     /// Grid tile: image on top, prompt excerpt (hover = full text) and metadata below.
@@ -615,15 +736,18 @@ struct QueueFeedView: View {
             }
             HStack(spacing: 10) {
                 Button { save(g) } label: { Label(loc.t("Guardar…", "Save…"), systemImage: "square.and.arrow.down") }
+                    .glassButton()
                     .help(loc.t("Guarda una copia donde elijas.", "Save a copy wherever you choose."))
                 Button { NSWorkspace.shared.activateFileViewerSelecting([g.url]) } label: {
                     Label(loc.t("Finder", "Finder"), systemImage: "folder")
                 }
+                .glassButton()
                 .help(loc.t("Abre el archivo en el Finder.", "Reveal the file in Finder."))
             }
             .controlSize(.small)
         }
-        .padding(10).background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+        .padding(12)
+        .cardSurface()
     }
 
     /// Optional img2img source for queued prompts; sticks across adds, like the
@@ -637,6 +761,7 @@ struct QueueFeedView: View {
                           : (draftInitImage as NSString).lastPathComponent,
                       systemImage: "photo")
             }
+            .glassButton()
             .font(.caption).lineLimit(1).truncationMode(.middle).frame(maxWidth: 160)
             if !draftInitImage.isEmpty {
                 Button { draftInitImage = "" } label: {
@@ -708,11 +833,19 @@ struct FeedLayoutPicker: View {
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        Picker("", selection: $grid) {
-            Label(loc.t("Lista", "List"), systemImage: "list.bullet").tag(false)
-            Label(loc.t("Cuadrícula", "Grid"), systemImage: "square.grid.2x2").tag(true)
+        HStack(spacing: 5) {
+            Button { grid = false } label: {
+                Image(systemName: "list.bullet")
+            }
+            .buttonStyle(GlassIconButtonStyle(active: !grid))
+            .iconHelp(loc.t("Lista", "List"))
+
+            Button { grid = true } label: {
+                Image(systemName: "square.grid.2x2")
+            }
+            .buttonStyle(GlassIconButtonStyle(active: grid))
+            .iconHelp(loc.t("Cuadrícula", "Grid"))
         }
-        .pickerStyle(.segmented).labelsHidden().labelStyle(.iconOnly).fixedSize()
         .help(loc.t("Resultados en lista o en cuadrícula.", "Results as a list or a grid."))
     }
 }
@@ -1263,50 +1396,471 @@ private func imageFailureText(_ raw: String, _ loc: Localizer) -> String {
     }
 }
 
+/// Observes one generator directly so each latent preview repaints immediately.
+private struct ImageGenerationThumbnail: View {
+    @ObservedObject var generator: ImageGenerator
+    let label: String
+    @EnvironmentObject private var loc: Localizer
+
+    var body: some View {
+        VStack(spacing: 0) {
+            GeometryReader { geometry in
+                ZStack {
+                    if let preview = generator.previewImage {
+                        Image(nsImage: preview)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                            .transition(.opacity)
+                    } else {
+                        WorkspaceStyle.surface
+                        Image(systemName: "photo.badge.clock")
+                            .font(.system(size: 30, weight: .light))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .aspectRatio(4.0 / 3.0, contentMode: .fit)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text(stageTitle)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("\(Int(generator.progress * 100))%")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: generator.progress)
+                    .progressViewStyle(.linear)
+                    .tint(.appAccent)
+                HStack(spacing: 5) {
+                    Text(label).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("\(generator.elapsed)s")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            .padding(9)
+        }
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(Color.appAccent.opacity(0.8), lineWidth: 1.5))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(loc.t("Generación en curso", "Generation in progress"))
+    }
+
+    private var stageTitle: String {
+        switch generator.stage {
+        case .loading:  return loc.t("Cargando modelos…", "Loading models…")
+        case .sampling: return loc.t("Generando · paso %@", "Sampling · step %@", generator.stepText)
+        case .decoding: return loc.t("Decodificando…", "Decoding…")
+        }
+    }
+}
+
 /// Detail column: single canvas for one instance, a tile grid for several.
 struct ImageCanvas: View {
     @ObservedObject var pool: ImageGenPool
     @ObservedObject var upscaler: ImageUpscaler
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var models: ModelStore
+    @Environment(\.colorScheme) private var interfaceColorScheme
     @State private var detailTab: ImageDetailTab = .instances
+    @State private var selectedResultID: GeneratedImage.ID?
+    @State private var galleryOrder = ImageGalleryOrder.recent
+    @State private var presentsFullscreenImage = false
     @AppStorage(SettingsKeys.imageStudioMode) private var studioModeRaw = ImageStudioMode.create.rawValue
     @AppStorage(SettingsKeys.imagenCanvasGrid) private var canvasGrid = false
 
     var body: some View {
-        Group {
-            if !ImageGenerator.engineInstalled {
-                centered { engineMissingCard }
-            } else if studioMode == .upscale {
-                upscaleCanvas
-            } else {
-                VStack(spacing: 14) {
-                    Picker("", selection: $detailTab) {
-                        Text(loc.t("Instancias", "Instances")).tag(ImageDetailTab.instances)
-                        Text(pool.queue.isEmpty ? loc.t("Cola", "Queue")
-                                                : loc.t("Cola (%@)", "Queue (%@)", "\(pool.queue.count)"))
-                            .tag(ImageDetailTab.queue)
-                    }
-                    .pickerStyle(.segmented).fixedSize()
+        ZStack {
+            Group {
+                if !ImageGenerator.engineInstalled {
+                    centered { engineMissingCard }
+                } else if studioMode == .upscale {
+                    upscaleCanvas
+                } else {
+                    studio
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(16)
 
-                    if detailTab == .instances {
-                        instancesCanvas
-                    } else {
-                        QueueFeedView(pool: pool)
+            if presentsFullscreenImage, let result = selectedResult {
+                expandedImage(result)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: presentsFullscreenImage)
+        .onChange(of: pool.gallery.map(\.id)) {
+            selectedResultID = orderedGallery.first?.id
+        }
+        .onExitCommand { presentsFullscreenImage = false }
+    }
+
+    private func expandedImage(_ result: GeneratedImage) -> some View {
+        ZStack {
+            Color.black.opacity(0.72)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { presentsFullscreenImage = false }
+
+            Image(nsImage: result.image)
+                .resizable()
+                .scaledToFit()
+                .padding(36)
+                .contentShape(Rectangle())
+                .onTapGesture { }
+
+            Button { presentsFullscreenImage = false } label: {
+                Image(systemName: "xmark")
+                    .font(.callout.weight(.semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.bordered)
+            .keyboardShortcut(.cancelAction)
+            .iconHelp(loc.t("Cerrar", "Close"))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .padding(18)
+        }
+        .zIndex(10)
+    }
+
+    private var studio: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                detailTabPicker
+                Spacer()
+                if detailTab == .instances, !pool.gallery.isEmpty {
+                    Picker("", selection: $galleryOrder) {
+                        Text(loc.t("Recientes", "Recent")).tag(ImageGalleryOrder.recent)
+                        Text(loc.t("Más antiguas", "Oldest")).tag(ImageGalleryOrder.oldest)
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
+                    FeedLayoutPicker(grid: $canvasGrid)
+                }
+            }
+            .frame(minHeight: 38)
+
+            if detailTab == .instances {
+                instancesCanvas
+            } else {
+                QueueFeedView(pool: pool)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var detailTabPicker: some View {
+        HStack(spacing: 3) {
+            detailTabButton(.instances,
+                            title: loc.t("Instancias", "Instances"),
+                            systemImage: "square.stack.3d.up")
+            detailTabButton(.queue,
+                            title: pool.queue.isEmpty
+                                ? loc.t("Cola", "Queue")
+                                : loc.t("Cola %@", "Queue %@", "\(pool.queue.count)"),
+                            systemImage: "list.bullet.rectangle")
+        }
+        .padding(3)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.08)))
+        .fixedSize()
+    }
+
+    private func detailTabButton(_ tab: ImageDetailTab, title: String,
+                                 systemImage: String) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) { detailTab = tab }
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.callout.weight(detailTab == tab ? .semibold : .medium))
+                .foregroundStyle(detailTab == tab ? Color.white : Color.secondary)
+                .frame(width: 118, height: 30)
+                .background(detailTab == tab ? Color.appAccent : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(detailTab == tab ? .isSelected : [])
+    }
+
+    @ViewBuilder private var instancesCanvas: some View {
+        if pool.gallery.isEmpty {
+            activeInstanceCanvas
+        } else {
+            GeometryReader { geometry in
+                HStack(alignment: .top, spacing: 16) {
+                    heroPanel(showGenerationOverlay: geometry.size.width < 760)
+                    if geometry.size.width >= 760 {
+                        galleryPanel
+                            .frame(width: min(300, max(230, geometry.size.width * 0.26)))
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(24)
     }
 
-    @ViewBuilder private var instancesCanvas: some View {
+    @ViewBuilder private var activeInstanceCanvas: some View {
         if pool.configs.count == 1, let cfg = pool.configs.first {
             singleCanvas(cfg)
         } else {
             multiCanvas
         }
+    }
+
+    private var orderedGallery: [GeneratedImage] {
+        galleryOrder == .recent ? pool.gallery : pool.gallery.reversed()
+    }
+
+    private var selectedResult: GeneratedImage? {
+        orderedGallery.first(where: { $0.id == selectedResultID }) ?? orderedGallery.first
+    }
+
+    private func heroPanel(showGenerationOverlay: Bool) -> some View {
+        VStack(spacing: 0) {
+            ZStack {
+                if let result = selectedResult {
+                    Image(nsImage: result.image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(12)
+
+                    HStack {
+                        navigationButton(systemImage: "chevron.left", delta: -1)
+                        Spacer()
+                        navigationButton(systemImage: "chevron.right", delta: 1)
+                    }
+                    .padding(.horizontal, 14)
+
+                    HStack(spacing: 8) {
+                        Button { presentsFullscreenImage = true } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        }
+                        .iconHelp(loc.t("Ver a pantalla completa", "View fullscreen"))
+                        Menu {
+                            Button { save(result) } label: {
+                                Label(loc.t("Guardar como…", "Save as…"), systemImage: "square.and.arrow.down")
+                            }
+                            Button { NSWorkspace.shared.activateFileViewerSelecting([result.url]) } label: {
+                                Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .iconHelp(loc.t("Más acciones", "More actions"))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(16)
+
+                    if showGenerationOverlay, !busyGenerators.isEmpty {
+                        generationOverlay
+                            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                                   alignment: .topLeading)
+                            .padding(16)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+
+            if let result = selectedResult {
+                resultFooter(result)
+            }
+        }
+        .background(.quaternary.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.quaternary))
+    }
+
+    private var busyGenerators: [(id: UUID, label: String, generator: ImageGenerator)] {
+        pool.configs.compactMap { config in
+            let generator = pool.generator(for: config.id)
+            guard generator.isBusy else { return nil }
+            return (config.id,
+                    pool.instanceLabel(for: config.id) ?? loc.t("Instancia", "Instance"),
+                    generator)
+        }
+    }
+
+    @ViewBuilder private var generationOverlay: some View {
+        if let active = busyGenerators.first {
+            generationStatus(active.generator,
+                             label: active.label,
+                             title: busyGenerators.count > 1
+                                ? loc.t("Generando %@ imágenes", "Generating %@ images", "\(busyGenerators.count)")
+                                : loc.t("Generando otra imagen", "Generating another image"),
+                             width: 230)
+        }
+    }
+
+    private func generationStatus(_ generator: ImageGenerator, label: String,
+                                  title: String, width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if generator.progress > 0 {
+                    Text("\(Int(generator.progress * 100))%")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ProgressView(value: generator.progress)
+                .progressViewStyle(.linear)
+                .tint(.appAccent)
+            HStack(spacing: 6) {
+                Text(label).lineLimit(1)
+                Spacer(minLength: 8)
+                Text("\(generator.elapsed)s")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(width: width)
+        .background(generationCardColor, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.22)))
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(loc.t("Generación en curso", "Generation in progress"))
+    }
+
+    private var generationCardColor: Color {
+        interfaceColorScheme == .dark
+            ? Color(red: 0.105, green: 0.105, blue: 0.115).opacity(0.98)
+            : Color(red: 0.955, green: 0.955, blue: 0.965).opacity(0.98)
+    }
+
+    private var galleryPanel: some View {
+        ScrollView {
+            LazyVGrid(columns: canvasGrid
+                      ? [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+                      : [GridItem(.flexible())], spacing: 10) {
+                ForEach(busyGenerators, id: \.id) { active in
+                    generationThumbnail(active.generator, label: active.label)
+                }
+                ForEach(orderedGallery) { result in
+                    galleryThumbnail(result)
+                }
+            }
+            .padding(2)
+        }
+    }
+
+    private func generationThumbnail(_ generator: ImageGenerator, label: String) -> some View {
+        ImageGenerationThumbnail(generator: generator, label: label)
+    }
+
+    private func galleryThumbnail(_ result: GeneratedImage) -> some View {
+        Button { selectedResultID = result.id } label: {
+            GeometryReader { geometry in
+                ZStack(alignment: .bottom) {
+                    Image(nsImage: result.image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(result.instanceLabel ?? loc.t("Imagen generada", "Generated image"))
+                            .font(.system(size: 10, weight: .semibold))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        HStack(spacing: 5) {
+                            Text("\(result.width) × \(result.height)")
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                            Spacer(minLength: 2)
+                            Text("\(result.duration)s")
+                                .fixedSize()
+                        }
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.black.opacity(0.62))
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(result.id == selectedResult?.id ? Color.appAccent : Color.secondary.opacity(0.22),
+                            lineWidth: result.id == selectedResult?.id ? 2 : 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(result.prompt)
+    }
+
+    private func navigationButton(systemImage: String, delta: Int) -> some View {
+        Button { moveSelection(delta) } label: {
+            Image(systemName: systemImage)
+                .font(.title3.weight(.semibold))
+                .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .disabled(orderedGallery.count < 2)
+    }
+
+    private func moveSelection(_ delta: Int) {
+        guard !orderedGallery.isEmpty else { return }
+        let current = orderedGallery.firstIndex(where: { $0.id == selectedResult?.id }) ?? 0
+        let next = (current + delta + orderedGallery.count) % orderedGallery.count
+        selectedResultID = orderedGallery[next].id
+    }
+
+    private func resultFooter(_ result: GeneratedImage) -> some View {
+        HStack(spacing: 12) {
+            Circle().fill(.green).frame(width: 9, height: 9)
+            Text(loc.t("Generada en %@s", "Generated in %@s", "\(result.duration)"))
+                .font(.caption.weight(.medium)).foregroundStyle(.green)
+            Text("\(result.width) × \(result.height) · \(result.url.pathExtension.uppercased())"
+                 + (result.seed >= 0 ? " · #\(result.seed)" : ""))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button { reusePrompt(result) } label: {
+                Label(loc.t("Reutilizar prompt", "Reuse prompt"), systemImage: "arrow.triangle.2.circlepath")
+            }
+            Button { save(result) } label: {
+                Label(loc.t("Guardar", "Save"), systemImage: "square.and.arrow.down")
+            }
+            Button { NSWorkspace.shared.activateFileViewerSelecting([result.url]) } label: {
+                Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
+            }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func reusePrompt(_ result: GeneratedImage) {
+        guard !pool.configs.isEmpty else { return }
+        pool.configs[0].prompt = result.prompt
+    }
+
+    private func save(_ result: GeneratedImage) {
+        let format = ImageFormat(rawValue: result.url.pathExtension.lowercased()) ?? .png
+        saveAs(result.url, format: format)
     }
 
     // MARK: single instance
@@ -1323,39 +1877,67 @@ struct ImageCanvas: View {
     }
 
     private func idleCanvas(_ gen: ImageGenerator) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: "photo.on.rectangle.angled")
-                .font(.system(size: 46)).foregroundStyle(.tertiary)
-            Text(loc.t("Elige un modelo, escribe una descripción y pulsa Generar",
-                       "Pick a model, type a prompt and press Generate")).foregroundStyle(.secondary)
+                .font(.system(size: 42, weight: .light)).foregroundStyle(.tertiary)
+            VStack(spacing: 5) {
+                Text(loc.t("Crea tu primera imagen", "Create your first image"))
+                    .font(.title3.weight(.semibold))
+                Text(loc.t("Elige un modelo, escribe una descripción y pulsa Generar.",
+                           "Choose a model, write a prompt, and press Generate."))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             if case .failed(let msg) = gen.state, !msg.isEmpty {
                 Label(imageFailureText(msg, loc), systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.red).frame(maxWidth: 380)
             }
         }
+        .padding(36)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.quaternary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.quaternary))
     }
 
     private func progressCanvas(_ gen: ImageGenerator) -> some View {
-        VStack(spacing: 18) {
+        ZStack {
             if let preview = gen.previewImage {
                 Image(nsImage: preview)
-                    .resizable().scaledToFit()
-                    .frame(maxWidth: 520, maxHeight: 520)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(12)
                     .transition(.opacity)
-            }
-            ProgressView(value: gen.progress > 0 ? gen.progress : nil)
-                .progressViewStyle(.linear).frame(width: 260)
-            Text(stageLabel(gen)).font(.headline)
-            HStack(spacing: 14) {
-                Label("\(gen.elapsed)s", systemImage: "clock")
-                if let eta = gen.etaSeconds {
-                    Label(loc.t("~%@s restantes", "~%@s left", "\(eta)"), systemImage: "hourglass")
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "photo.badge.clock")
+                        .font(.system(size: 42, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text(loc.t("Preparando el lienzo…", "Preparing the canvas…"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+
+            generationStatus(gen,
+                             label: progressDetail(gen),
+                             title: stageLabel(gen),
+                             width: 260)
+                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                       alignment: gen.previewImage == nil ? .center : .topLeading)
+                .padding(16)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.quaternary))
+    }
+
+    private func progressDetail(_ gen: ImageGenerator) -> String {
+        if let eta = gen.etaSeconds {
+            return loc.t("%@s · ~%@s restantes", "%@s · ~%@s left", "\(gen.elapsed)", "\(eta)")
+        }
+        return loc.t("%@s transcurridos", "%@s elapsed", "\(gen.elapsed)")
     }
 
     private func stageLabel(_ gen: ImageGenerator) -> String {

@@ -33,77 +33,123 @@ struct MaskEditorView: View {
     @State private var pixelSize = CGSize(width: 512, height: 512)
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             header
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+            Divider()
             canvas
+                .padding(16)
             if !error.isEmpty {
-                Text(error).font(.caption).foregroundStyle(.red)
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 10)
             }
+            Divider()
             controls
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
         }
-        .padding(16)
-        .frame(minWidth: 560, minHeight: 560)
+        .background(WorkspaceStyle.canvas.ignoresSafeArea())
+        .frame(minWidth: 640, minHeight: 600)
         .task(id: initImagePath) { load() }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(loc.t("Pinta la zona a retocar", "Paint the area to repaint"))
-                .font(.headline)
-            Text(loc.t("Lo pintado se vuelve a generar; el resto de la foto se conserva.",
-                       "What you paint is regenerated; the rest of the photo is kept."))
-                .font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            Image(systemName: "paintbrush.pointed.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.appAccent)
+                .frame(width: 34, height: 34)
+                .background(Color.appAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(loc.t("Pinta la zona a retocar", "Paint the area to repaint"))
+                    .font(.headline)
+                Text(loc.t("Lo pintado se vuelve a generar; el resto de la foto se conserva.",
+                           "What you paint is regenerated; the rest of the photo is kept."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var canvas: some View {
         MaskPaintSurface(image: image, pixelSize: pixelSize, strokes: $strokes,
                          radius: radius, erasing: erasing, maskOnly: showMaskOnly)
             .frame(minHeight: 380)
+            .padding(12)
+            .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(WorkspaceStyle.border))
     }
 
     private var controls: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Picker("", selection: $erasing) {
-                    Label(loc.t("Pincel", "Brush"), systemImage: "paintbrush.pointed").tag(false)
-                    Label(loc.t("Borrador", "Eraser"), systemImage: "eraser").tag(true)
+        VStack(spacing: 14) {
+            HStack(spacing: 8) {
+                Button { erasing = false } label: {
+                    Label(loc.t("Pincel", "Brush"), systemImage: "paintbrush.pointed")
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 200)
+                .glassButton(prominent: !erasing)
+                Button { erasing = true } label: {
+                    Label(loc.t("Borrador", "Eraser"), systemImage: "eraser")
+                }
+                .glassButton(prominent: erasing)
                 .help(loc.t("El pincel marca lo que se repinta; el borrador devuelve la zona a conservada.",
                             "The brush marks what gets repainted; the eraser puts an area back to kept."))
 
-                Text(loc.t("Grosor", "Size")).font(.caption)
-                Slider(value: $radius, in: 0.01...0.25).frame(width: 130)
+                Divider().frame(height: 22)
+
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 7))
+                    .foregroundStyle(.secondary)
+                Slider(value: $radius, in: 0.01...0.25)
+                    .frame(minWidth: 100, maxWidth: 150)
                     .help(loc.t("Diámetro del pincel, relativo al ancho de la imagen.",
                                 "Brush diameter, relative to the image width."))
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
 
-                Toggle(loc.t("Ver máscara", "View mask"), isOn: $showMaskOnly)
-                    .toggleStyle(.switch).font(.caption)
+                Spacer(minLength: 8)
+
+                Button { showMaskOnly.toggle() } label: {
+                    Label(loc.t("Ver máscara", "View mask"),
+                          systemImage: showMaskOnly ? "eye.fill" : "eye")
+                }
+                .glassButton(prominent: showMaskOnly)
                     .help(loc.t("Muestra la máscara en blanco y negro, como la recibe el motor.",
                                 "Shows the mask in black and white, the way the engine gets it."))
             }
 
             HStack(spacing: 10) {
-                Button(loc.t("Deshacer", "Undo"), systemImage: "arrow.uturn.backward") {
+                Button {
                     if !strokes.isEmpty { strokes.removeLast() }
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
                 }
+                .buttonStyle(GlassIconButtonStyle())
                 .disabled(strokes.isEmpty)
-                .help(loc.t("Quita el último trazo.", "Removes the last stroke."))
+                .iconHelp(loc.t("Deshacer", "Undo"))
 
-                Button(loc.t("Limpiar", "Clear"), systemImage: "trash") { strokes.removeAll() }
+                Button { strokes.removeAll() } label: {
+                    Image(systemName: "trash")
+                }
+                    .buttonStyle(GlassIconButtonStyle())
+                    .foregroundStyle(.red)
                     .disabled(strokes.isEmpty)
-                    .help(loc.t("Borra todos los trazos.", "Removes every stroke."))
+                    .iconHelp(loc.t("Limpiar", "Clear"))
 
                 Spacer()
 
                 Button(loc.t("Cancelar", "Cancel")) { dismiss() }
+                    .glassButton()
                     .keyboardShortcut(.cancelAction)
 
                 Button(loc.t("Usar máscara", "Use mask")) { save() }
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
+                    .glassButton(prominent: true)
                     .disabled(strokes.isEmpty)
                     .help(loc.t("Guarda la máscara y la aplica a esta instancia.",
                                 "Saves the mask and applies it to this instance."))

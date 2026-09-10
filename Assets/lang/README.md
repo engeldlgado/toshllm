@@ -36,12 +36,12 @@ hand.
 |---|---|---|
 | Spanish (Español) | `es` | Built-in (100%) |
 | English (English) | `en` | Built-in (100%) |
-| Italian (Italiano) | `it` | 76% (1326/1748) |
+| Italian (Italiano) | `it` | 75% (1318/1765) |
 | German (Deutsch) | `de` | not started |
 | French (Français) | `fr` | not started |
 | Portuguese (Português) | `pt` | not started |
-| Chinese (Simplified) (简体中文) | `zh` | 76% (1326/1748) |
-| Japanese (日本語) | `ja` | 76% (1326/1748) |
+| Chinese (Simplified) (简体中文) | `zh` | 75% (1318/1765) |
+| Japanese (日本語) | `ja` | 75% (1318/1765) |
 | Korean (한국어) | `ko` | not started |
 | Russian (Русский) | `ru` | not started |
 | Hindi (हिन्दी) | `hi` | not started |
