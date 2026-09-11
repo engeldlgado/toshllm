@@ -4252,7 +4252,6 @@ struct ConversationListView: View {
     @State private var renaming: Conversation?
     @State private var renameText = ""
     @State private var renamingProject: ChatProject?
-    @State private var projectRenameText = ""
     @State private var creatingProject = false
     @State private var newProjectName = ""
     @State private var promptProject: ChatProject?
@@ -4470,15 +4469,11 @@ struct ConversationListView: View {
             Text(loc.t("Una carpeta para tus conversaciones. Si le defines un prompt de sistema al proyecto, todas las conversaciones dentro lo heredan.",
                        "A folder for your conversations. If you set a system prompt on the project, every conversation inside inherits it."))
         }
-        .alert(loc.t("Renombrar proyecto", "Rename project"),
-               isPresented: Binding(get: { renamingProject != nil },
-                                    set: { if !$0 { renamingProject = nil } })) {
-            TextField(loc.t("Nombre", "Name"), text: $projectRenameText)
-            Button(loc.t("Guardar", "Save")) {
-                if let p = renamingProject { chat.renameProject(p, to: projectRenameText) }
-                renamingProject = nil
+        .sheet(item: $renamingProject) { project in
+            ProjectRenameSheet(initial: project.name) { name in
+                chat.renameProject(project, to: name)
             }
-            Button(loc.t("Cancelar", "Cancel"), role: .cancel) { renamingProject = nil }
+            .environmentObject(loc)
         }
         .sheet(item: $promptProject) { p in
             PromptEditorSheet(
@@ -4684,7 +4679,6 @@ struct ConversationListView: View {
                 }
             }
             Button(loc.t("Renombrar…", "Rename…")) {
-                projectRenameText = p.name
                 renamingProject = p
             }
             Button((p.pinned ?? false) ? loc.t("Desfijar proyecto", "Unpin project")
@@ -4840,32 +4834,140 @@ struct PromptEditorSheet: View {
     let initial: String
     let onSave: (String) -> Void
     @State private var text = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: "text.bubble")
-                .font(.headline)
-            TextEditor(text: $text)
-                .font(.system(size: 12))
-                .frame(minHeight: 140)
-                .scrollContentBackground(.hidden)
-                .padding(6)
-                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
-            Text(hint)
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
+        VStack(spacing: 0) {
+            HStack(spacing: 13) {
+                SectionGlyph(systemName: "text.bubble")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(2)
+                    Text(loc.t("Instrucciones para esta parte del chat.",
+                               "Instructions for this part of Chat."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
-                Button(loc.t("Cancelar", "Cancel"), role: .cancel) { dismiss() }
-                Button(loc.t("Guardar", "Save")) {
+            }
+            .padding(.horizontal, 20).padding(.vertical, 16)
+            .background(WorkspaceStyle.surface)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                TextEditor(text: $text)
+                    .font(.system(size: 13))
+                    .focused($focused)
+                    .frame(height: 190)
+                    .workspaceFieldSurface(cornerRadius: 10)
+                Label(hint, systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(WorkspaceStyle.inset,
+                                in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(WorkspaceStyle.border))
+            }
+            .padding(18)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button(loc.t("Cancelar", "Cancel")) { dismiss() }
+                    .glassButton()
+                    .keyboardShortcut(.cancelAction)
+                Button(loc.t("Guardar", "Save"), systemImage: "checkmark") {
                     onSave(text)
                     dismiss()
                 }
+                .glassButton(prominent: true)
                 .keyboardShortcut(.defaultAction)
             }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+            .background(WorkspaceStyle.surface)
         }
-        .padding(16)
-        .frame(width: 440)
-        .onAppear { text = initial }
+        .frame(width: 540)
+        .background(WorkspaceStyle.canvas)
+        .onAppear {
+            text = initial
+            Task { await Task.yield(); focused = true }
+        }
+    }
+}
+
+/// Compact project-name editor using the same surfaces as the rest of Chat.
+private struct ProjectRenameSheet: View {
+    @EnvironmentObject private var loc: Localizer
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @FocusState private var focused: Bool
+    let onSave: (String) -> Void
+
+    init(initial: String, onSave: @escaping (String) -> Void) {
+        _name = State(initialValue: initial)
+        self.onSave = onSave
+    }
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 13) {
+                SectionGlyph(systemName: "folder")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(loc.t("Renombrar proyecto", "Rename project"))
+                        .font(.title3.weight(.semibold))
+                    Text(loc.t("El nuevo nombre aparecerá en la barra lateral.",
+                               "The new name will appear in the sidebar."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.vertical, 16)
+            .background(WorkspaceStyle.surface)
+
+            Divider()
+
+            SettingsRowGroup {
+                SettingsRow(icon: "tag", title: loc.t("Nombre", "Name")) {
+                    TextField(loc.t("Nombre del proyecto", "Project name"), text: $name)
+                        .focused($focused)
+                        .workspaceTextField(width: 280)
+                }
+            }
+            .padding(18)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button(loc.t("Cancelar", "Cancel")) { dismiss() }
+                    .glassButton()
+                    .keyboardShortcut(.cancelAction)
+                Button(loc.t("Guardar", "Save"), systemImage: "checkmark", action: saveName)
+                    .glassButton(prominent: true)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedName.isEmpty)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+            .background(WorkspaceStyle.surface)
+        }
+        .frame(width: 520)
+        .background(WorkspaceStyle.canvas)
+        .onAppear {
+            Task { await Task.yield(); focused = true }
+        }
+    }
+
+    private func saveName() {
+        guard !trimmedName.isEmpty else { return }
+        onSave(trimmedName)
+        dismiss()
     }
 }

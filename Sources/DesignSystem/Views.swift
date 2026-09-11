@@ -127,49 +127,91 @@ struct OnboardingSheet: View {
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
-            ToshLLMLogo(size: 72)
-            Text(loc.t("Bienvenido a ToshLLM", "Welcome to ToshLLM"))
-                .font(.title.bold())
-            Text(loc.t("Modelos de lenguaje corriendo en tu GPU, sin nube y sin cuentas.",
-                       "Language models running on your GPU — no cloud, no accounts."))
-                .foregroundStyle(.secondary)
-
-            VStack(alignment: .leading, spacing: 12) {
-                step("1", loc.t("Descarga un modelo del catálogo — la app te marca cuáles caben en tu equipo.",
-                                "Download a model from the catalog — the app marks which ones fit your machine."))
-                step("2", loc.t("Pulsa 'Usar' y los parámetros se configuran solos.",
-                                "Press 'Use' and the parameters configure themselves."))
-                step("3", loc.t("Vuelve al Chat, pulsa 'Iniciar servidor' y escribe.",
-                                "Go back to Chat, press 'Start server' and type."))
+        VStack(spacing: 0) {
+            HStack(spacing: 16) {
+                ToshLLMLogo(size: 58)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(loc.t("Bienvenido a ToshLLM", "Welcome to ToshLLM"))
+                        .font(.system(size: 22, weight: .bold))
+                    Text(loc.t("Modelos de lenguaje en tu GPU, sin nube ni cuentas.",
+                               "Language models on your GPU, with no cloud or accounts."))
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: 380)
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(WorkspaceStyle.surface)
 
-            HStack {
-                Button(loc.t("Explorar por mi cuenta", "Explore on my own"), action: onDismiss)
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                step("1", icon: "arrow.down.circle",
+                     loc.t("Descarga un modelo del catálogo. ToshLLM indica cuáles caben en tu equipo.",
+                           "Download a model from the catalog. ToshLLM shows which ones fit your machine."))
+                step("2", icon: "slider.horizontal.3",
+                     loc.t("Pulsa «Usar» para configurar automáticamente sus parámetros.",
+                           "Press “Use” to configure its parameters automatically."))
+                step("3", icon: "bubble.left.and.bubble.right",
+                     loc.t("Vuelve al Chat, inicia el servidor y comienza a escribir.",
+                           "Return to Chat, start the server, and begin typing."))
+            }
+            .padding(20)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Button(action: onDismiss) {
+                    Label(loc.t("Explorar por mi cuenta", "Explore on my own"),
+                          systemImage: "arrow.right")
+                }
+                .glassButton()
+                .controlSize(.large)
+                .help(loc.t("Cierra esta guía y continúa en el chat.",
+                            "Closes this guide and continues to Chat."))
+                Spacer()
                 Button {
                     onGoToModels()
                 } label: {
                     Label(loc.t("Elegir mi primer modelo", "Pick my first model"),
                           systemImage: "shippingbox")
                 }
-                .buttonStyle(.borderedProminent)
+                .glassButton(prominent: true)
                 .controlSize(.large)
+                .help(loc.t("Abre el catálogo para elegir un modelo compatible.",
+                            "Opens the catalog to choose a compatible model."))
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .background(WorkspaceStyle.surface)
         }
-        .padding(30)
-        .frame(width: 480)
+        .frame(width: 540)
+        .background(WorkspaceStyle.canvas)
     }
 
-    private func step(_ number: String, _ text: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+    private func step(_ number: String, icon: String, _ text: String) -> some View {
+        HStack(spacing: 12) {
             Text(number)
                 .font(.system(.callout, design: .rounded).bold())
-                .frame(width: 24, height: 24)
-                .background(Color.appAccent.opacity(0.18), in: Circle())
+                .frame(width: 28, height: 28)
+                .foregroundStyle(.white)
+                .background(Color.appAccent, in: Circle())
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Color.appAccent)
+                .frame(width: 20)
+                .accessibilityHidden(true)
             Text(text)
+                .font(.system(size: 13))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
+        .padding(12)
+        .background(WorkspaceStyle.inset,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(WorkspaceStyle.border))
     }
 }
 

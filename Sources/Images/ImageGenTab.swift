@@ -86,19 +86,12 @@ struct ImageControls: View {
                 .padding(.vertical, 18)
             }
 
-            if studioMode == .create {
-                Divider()
-                VStack(alignment: .leading, spacing: 9) {
-                    generateButton
-                    Text(loc.t("La generación se ejecuta localmente. El tiempo depende del hardware.",
-                               "Generation runs locally. Time depends on your hardware."))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+            Divider()
+            Group {
+                if studioMode == .create { createFooter } else { upscaleFooter }
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
         .frame(minWidth: 300)
         .buttonStyle(GlassPillButtonStyle())
@@ -112,45 +105,50 @@ struct ImageControls: View {
 
     /// Upscaling is a one-shot job on a file: model choice, the file, and the result.
     private var upscalePanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Card(title: loc.t("Modelo", "Model"), icon: "wand.and.stars") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("", selection: $upscalerFlavor) {
-                        ForEach(ImageUpscaler.Flavor.allCases) { f in
-                            Text(f.label(loc.isSpanish)).tag(f.rawValue)
-                        }
+        VStack(alignment: .leading, spacing: 18) {
+            upscaleSection(title: loc.t("Modelo", "Model"), icon: "wand.and.stars") {
+                Picker("", selection: $upscalerFlavor) {
+                    ForEach(ImageUpscaler.Flavor.allCases) { f in
+                        Text(f.label(loc.isSpanish)).tag(f.rawValue)
                     }
-                    .pickerStyle(.segmented).labelsHidden()
-                    Text(flavor.detail(loc.isSpanish))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                Text(flavor.detail(loc.isSpanish))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                    if flavor == .custom {
-                        HStack(spacing: 6) {
-                            Button(upscalerCustom.isEmpty
-                                   ? loc.t("Elegir modelo…", "Choose model…")
-                                   : (upscalerCustom as NSString).lastPathComponent) { pickCustomModel() }
-                                .font(.caption).lineLimit(1).truncationMode(.middle)
-                            if !upscalerCustom.isEmpty {
-                                Button { upscalerCustom = "" } label: { Label(loc.t("Quitar", "Clear"), systemImage: "xmark.circle") }
-                                    .labelStyle(.iconOnly)
-                                    .buttonStyle(GlassIconButtonStyle())
+                if flavor == .custom {
+                    HStack(spacing: 6) {
+                        Button(upscalerCustom.isEmpty
+                               ? loc.t("Elegir modelo…", "Choose model…")
+                               : (upscalerCustom as NSString).lastPathComponent) { pickCustomModel() }
+                            .font(.caption).lineLimit(1).truncationMode(.middle)
+                        if !upscalerCustom.isEmpty {
+                            Button { upscalerCustom = "" } label: {
+                                Label(loc.t("Quitar", "Clear"), systemImage: "xmark.circle")
                             }
+                            .labelStyle(.iconOnly)
+                            .buttonStyle(GlassIconButtonStyle())
+                            .iconHelp(loc.t("Quitar modelo personalizado", "Remove custom model"))
                         }
-                        Text(loc.t("Debe ser ESRGAN ×4. Los DAT y SwinIR que encabezan las listas no los carga este motor.",
-                                   "Must be a 4x ESRGAN. The DAT and SwinIR models topping the charts do not load in this engine."))
-                            .font(.caption2).foregroundStyle(.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else if let c = flavor.component(customPath: upscalerCustom),
-                              !ImageUpscaler.installed(flavor, customPath: upscalerCustom, in: models) {
-                        Label(loc.t("Se descargan %@ MB la primera vez", "Downloads %@ MB on first use", "\(Int(c.sizeGB * 1000))"),
-                              systemImage: "arrow.down.circle")
-                            .font(.caption).foregroundStyle(.secondary)
                     }
+                    Text(loc.t("Debe ser ESRGAN ×4. Los modelos DAT y SwinIR no son compatibles con este motor.",
+                               "Must be a 4x ESRGAN. DAT and SwinIR models are not compatible with this engine."))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let component = flavor.component(customPath: upscalerCustom),
+                          !ImageUpscaler.installed(flavor, customPath: upscalerCustom, in: models) {
+                    Label(loc.t("Se descargan %@ MB la primera vez", "Downloads %@ MB on first use",
+                                "\(Int(component.sizeGB * 1000))"),
+                          systemImage: "arrow.down.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
 
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(loc.t("Escala", "Scale")).font(.caption).foregroundStyle(.secondary)
                     Picker("", selection: $upscalerScale) {
-                        ForEach(ImageUpscaler.Scale.allCases) { s in
-                            Text(s.label).tag(s.rawValue)
+                        ForEach(ImageUpscaler.Scale.allCases) { scale in
+                            Text(scale.label).tag(scale.rawValue)
                         }
                     }
                     .pickerStyle(.segmented).labelsHidden()
@@ -158,57 +156,89 @@ struct ImageControls: View {
                                 "The engine only loads 4x models, so x2 upscales and resamples to half."))
                 }
             }
-            Card(title: loc.t("Imagen", "Image"), icon: "photo") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Button {
-                        pickImages()
-                    } label: {
-                        Label(loc.t("Elegir imágenes…", "Choose images…"), systemImage: "folder")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .disabled(upscaler.isBusy)
 
-                    if !upscaler.queued.isEmpty {
-                        Text(upscaler.queued.count == 1
-                             ? upscaler.queued[0].lastPathComponent
-                             : loc.t("%@ imágenes en cola", "%@ images queued", "\(upscaler.queued.count)"))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        Button {
-                            startUpscale(upscaler.queued)
-                        } label: {
-                            Label(loc.t("Escalar %@", "Upscale %@", "\(scale.label)"),
-                                  systemImage: "arrow.up.left.and.arrow.down.right")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .glassButton(prominent: true)
-                        // Custom with no file picked resolves to no model, so the
-                        // button would run nothing and say nothing
-                        .disabled(upscaler.isBusy || flavor.component(customPath: upscalerCustom) == nil)
-                    }
-                    if upscaler.isBusy {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ProgressView(value: upscaler.progress)
-                            HStack {
-                                Text(upscaler.total > 1
-                                     ? loc.t("Imagen %@ de %@", "Image %@ of %@", "\(upscaler.index)", "\(upscaler.total)")
-                                     : loc.t("Escalando ×4…", "Upscaling x4…"))
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Spacer()
-                                Text("\(upscaler.elapsed)s")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                Button(loc.t("Cancelar", "Cancel")) { upscaler.cancel() }.font(.caption)
-                            }
-                        }
-                    }
-                    if case .failed(let why) = upscaler.state, !why.isEmpty {
-                        Text(why).font(.caption).foregroundStyle(.red)
-                    }
+            Divider()
+
+            upscaleSection(title: loc.t("Imágenes", "Images"), icon: "photo.on.rectangle.angled") {
+                Button {
+                    pickImages()
+                } label: {
+                    Label(loc.t("Elegir imágenes…", "Choose images…"), systemImage: "folder")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(upscaler.isBusy)
+
+                if !upscaler.queued.isEmpty {
+                    Label(upscaler.queued.count == 1
+                          ? upscaler.queued[0].lastPathComponent
+                          : loc.t("%@ imágenes seleccionadas", "%@ images selected",
+                                  "\(upscaler.queued.count)"),
+                          systemImage: upscaler.queued.count == 1 ? "photo" : "photo.stack")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2).truncationMode(.middle)
                 }
             }
-            Text(loc.t("Multiplica el ancho y el alto por 4. Una foto de 12 MP pasa de 200 MP: en tarjetas pequeñas conviene recortar antes.",
-                       "Multiplies width and height by 4. A 12 MP photo becomes 200 MP: on small cards, crop first."))
+        }
+    }
+
+    private func upscaleSection<Content: View>(title: String, icon: String,
+                                                @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: icon).font(.headline)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var createFooter: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            generateButton
+            Text(loc.t("La generación se ejecuta localmente. El tiempo depende del hardware.",
+                       "Generation runs locally. Time depends on your hardware."))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var upscaleFooter: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            if upscaler.isBusy {
+                ProgressView(value: upscaler.progress)
+                HStack {
+                    Text(upscaler.total > 1
+                         ? loc.t("Imagen %@ de %@", "Image %@ of %@",
+                                 "\(upscaler.index)", "\(upscaler.total)")
+                         : loc.t("Escalando…", "Upscaling…"))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(upscaler.elapsed)s")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Button(role: .cancel) { upscaler.cancel() } label: {
+                    Label(loc.t("Cancelar", "Cancel"), systemImage: "stop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+            } else {
+                Button { startUpscale(upscaler.queued) } label: {
+                    Label(loc.t("Escalar %@", "Upscale %@", "\(scale.label)"),
+                          systemImage: "arrow.up.left.and.arrow.down.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .glassButton(prominent: true)
+                .controlSize(.large)
+                .disabled(upscaler.queued.isEmpty || flavor.component(customPath: upscalerCustom) == nil)
+                .help(loc.t("Escala todas las imágenes seleccionadas en orden.",
+                            "Upscales every selected image in order."))
+            }
+            if case .failed(let reason) = upscaler.state, !reason.isEmpty {
+                Label(reason, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.red)
+            }
+            Text(loc.t("El proceso se ejecuta localmente. Para imágenes grandes puede convenir recortar primero.",
+                       "Processing runs locally. Cropping first can help with very large images."))
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }

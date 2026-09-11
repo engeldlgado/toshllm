@@ -171,60 +171,184 @@ private struct MCPServerEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(loc.t("Servidor MCP", "MCP server")).font(.title2.weight(.semibold))
-            Form {
-                TextField(loc.t("Nombre", "Name"), text: $server.name).workspaceTextField()
-                Picker(loc.t("Transporte", "Transport"), selection: $server.transport) {
-                    Text(loc.t("Automático", "Automatic")).tag(MCPTransport.automatic)
-                    Text(loc.t("Local (stdio)", "Local (stdio)")).tag(MCPTransport.stdio)
-                    Text("Streamable HTTP").tag(MCPTransport.streamableHTTP)
-                    Text("SSE").tag(MCPTransport.serverSentEvents)
-                    Text("WebSocket").tag(MCPTransport.webSocket)
-                }
-                .help(loc.t("'Local (stdio)' lanza un programa de tu equipo y habla con él por sus tuberías, que es como corre la mayoría de servidores MCP locales. Los demás se conectan a una URL.",
-                            "'Local (stdio)' launches a program on your machine and talks to it over its pipes, which is how most local MCP servers run. The rest connect to a URL."))
-                if server.transport.isLocal {
-                    TextField(loc.t("Comando", "Command"), text: $server.command).workspaceTextField()
-                        .help(loc.t("Ruta del ejecutable, o su nombre si está en el PATH.",
-                                    "Path to the executable, or its name when it is on the PATH."))
-                    TextField(loc.t("Argumentos (uno por línea)", "Arguments (one per line)"), text: argumentsText, axis: .vertical)
-                        .workspaceTextField().lineLimit(2...5)
-                        .help(loc.t("Cada argumento en su propia línea, para que los que llevan espacios no se partan.",
-                                    "One argument per line, so the ones containing spaces stay whole."))
-                    TextField(loc.t("Carpeta de trabajo (opcional)", "Working directory (optional)"),
-                              text: $server.workingDirectory).workspaceTextField()
-                } else {
-                    TextField("URL", text: $server.url).workspaceTextField()
-                }
-                Stepper(loc.t("Timeout: %@ s", "Timeout: %@ s", "\(server.timeoutSeconds)"),
-                        value: $server.timeoutSeconds, in: 5...600, step: 5)
-                if !server.transport.isLocal {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(loc.t("Cabeceras HTTP (JSON, opcional)", "HTTP headers (optional JSON)"))
-                        TextEditor(text: $headers)
-                            .font(.system(.caption, design: .monospaced)).frame(height: 90)
-                            .workspaceFieldSurface()
-                        Text(#"{"Authorization":"Bearer …"}"#)
-                            .font(.caption2).foregroundStyle(.tertiary)
+        VStack(spacing: 0) {
+            sheetHeader
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    SettingsRowGroup {
+                        SettingsRow(icon: "tag", title: loc.t("Nombre", "Name")) {
+                            TextField(loc.t("Nombre del servidor", "Server name"), text: $server.name)
+                                .workspaceTextField(width: 310)
+                        }
+                        SettingsRow(icon: "point.3.connected.trianglepath.dotted",
+                                    title: loc.t("Transporte", "Transport"),
+                                    help: transportHelp) {
+                            ToshDropdown(selection: $server.transport,
+                                         options: transportOptions,
+                                         width: 310,
+                                         maximumListHeight: 250)
+                        }
+                        if server.transport.isLocal {
+                            SettingsRow(icon: "terminal", title: loc.t("Comando", "Command"),
+                                        help: loc.t("Ruta del ejecutable, o su nombre si está en el PATH.",
+                                                    "Path to the executable, or its name when it is on the PATH.")) {
+                                TextField("/usr/local/bin/server", text: $server.command)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .workspaceTextField(width: 310)
+                            }
+                            SettingsRow(icon: "folder", title: loc.t("Carpeta de trabajo", "Working directory"),
+                                        subtitle: loc.t("Opcional", "Optional")) {
+                                TextField("/path/to/project", text: $server.workingDirectory)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .workspaceTextField(width: 310)
+                            }
+                        } else {
+                            SettingsRow(icon: "link", title: "URL") {
+                                TextField("http://127.0.0.1:3000/mcp", text: $server.url)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .workspaceTextField(width: 310)
+                            }
+                        }
+                        SettingsRow(icon: "clock", title: loc.t("Tiempo de espera", "Timeout"),
+                                    subtitle: loc.t("Entre 5 y 600 segundos", "Between 5 and 600 seconds")) {
+                            timeoutControl
+                        }
+                    }
+
+                    if server.transport.isLocal { localArgumentsCard } else { headersCard }
+
+                    if server.transport.isLocal {
+                        notice(loc.t("Este servidor se ejecuta en tu equipo con tus permisos. Añade solo programas en los que confíes.",
+                                     "This server runs on your machine with your permissions. Only add programs you trust."),
+                               icon: "exclamationmark.triangle", color: .orange)
+                    }
+                    if let validationError {
+                        notice(validationError, icon: "exclamationmark.circle", color: .red)
                     }
                 }
+                .padding(18)
             }
-            if server.transport.isLocal {
-                Label(loc.t("Este servidor se ejecuta en tu equipo con tus permisos. Añade solo programas en los que confíes.",
-                            "This server runs on your machine with your permissions. Only add programs you trust."),
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            if let validationError { Text(validationError).font(.caption).foregroundStyle(.red) }
-            HStack {
-                Spacer()
-                Button(loc.t("Cancelar", "Cancel")) { dismiss() }
-                Button(loc.t("Guardar", "Save")) { validateAndSave() }
-                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-            }
+            .frame(height: server.transport.isLocal ? 440 : 360)
+
+            Divider()
+            footer
         }
-        .padding(22).frame(width: 520)
+        .frame(width: 610)
+        .background(WorkspaceStyle.canvas)
+    }
+
+    private var sheetHeader: some View {
+        HStack(spacing: 13) {
+            SectionGlyph(systemName: "point.3.connected.trianglepath.dotted")
+            VStack(alignment: .leading, spacing: 3) {
+                Text(loc.t("Servidor MCP", "MCP server"))
+                    .font(.title3.weight(.semibold))
+                Text(loc.t("Conecta herramientas locales o remotas con el chat.",
+                           "Connect local or remote tools to Chat."))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 20).padding(.vertical, 16)
+        .background(WorkspaceStyle.surface)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Spacer()
+            Button(loc.t("Cancelar", "Cancel")) { dismiss() }
+                .glassButton()
+                .keyboardShortcut(.cancelAction)
+            Button(loc.t("Guardar", "Save"), systemImage: "checkmark") { validateAndSave() }
+                .glassButton(prominent: true)
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 14)
+        .background(WorkspaceStyle.surface)
+    }
+
+    private var transportOptions: [ToshDropdown<MCPTransport>.Option] {
+        [
+            .init(value: .automatic, title: loc.t("Automático", "Automatic"),
+                  subtitle: loc.t("Detecta el protocolo", "Detects the protocol"), systemImage: "wand.and.stars"),
+            .init(value: .stdio, title: loc.t("Local (stdio)", "Local (stdio)"),
+                  subtitle: loc.t("Ejecuta un programa local", "Runs a local program"), systemImage: "terminal"),
+            .init(value: .streamableHTTP, title: "Streamable HTTP", systemImage: "network"),
+            .init(value: .serverSentEvents, title: "SSE", systemImage: "dot.radiowaves.left.and.right"),
+            .init(value: .webSocket, title: "WebSocket", systemImage: "arrow.left.arrow.right"),
+        ]
+    }
+
+    private var transportHelp: String {
+        loc.t("«Local (stdio)» ejecuta un programa del equipo y se comunica por sus tuberías. Los demás transportes se conectan a una URL.",
+              "“Local (stdio)” runs a program on this Mac and communicates over its pipes. The other transports connect to a URL.")
+    }
+
+    private var timeoutControl: some View {
+        HStack(spacing: 8) {
+            Button { server.timeoutSeconds = max(5, server.timeoutSeconds - 5) } label: {
+                Image(systemName: "minus")
+            }
+            .buttonStyle(GlassIconButtonStyle())
+            .disabled(server.timeoutSeconds <= 5)
+            .iconHelp(loc.t("Reducir tiempo de espera", "Decrease timeout"))
+            Text("\(server.timeoutSeconds) s")
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .frame(width: 58)
+            Button { server.timeoutSeconds = min(600, server.timeoutSeconds + 5) } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(GlassIconButtonStyle())
+            .disabled(server.timeoutSeconds >= 600)
+            .iconHelp(loc.t("Aumentar tiempo de espera", "Increase timeout"))
+        }
+    }
+
+    private var localArgumentsCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(loc.t("Argumentos", "Arguments"), systemImage: "list.bullet.rectangle")
+                .font(.callout.weight(.semibold))
+            Text(loc.t("Uno por línea; los argumentos con espacios permanecen completos.",
+                       "One per line; arguments containing spaces stay intact."))
+                .font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: argumentsText)
+                .font(.system(.caption, design: .monospaced))
+                .frame(height: 92)
+                .workspaceFieldSurface()
+        }
+        .padding(14)
+        .cardSurface()
+    }
+
+    private var headersCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(loc.t("Cabeceras HTTP", "HTTP headers"), systemImage: "lock.shield")
+                .font(.callout.weight(.semibold))
+            Text(loc.t("Objeto JSON opcional. Las credenciales se guardan en el Llavero de macOS.",
+                       "Optional JSON object. Credentials are stored in the macOS Keychain."))
+                .font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $headers)
+                .font(.system(.caption, design: .monospaced))
+                .frame(height: 96)
+                .workspaceFieldSurface()
+            Text(#"{"Authorization":"Bearer …"}"#)
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .padding(14)
+        .cardSurface()
+    }
+
+    private func notice(_ text: String, icon: String, color: Color) -> some View {
+        Label(text, systemImage: icon)
+            .font(.caption)
+            .foregroundStyle(color)
+            .padding(11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(color.opacity(0.22)))
     }
 
     private var argumentsText: Binding<String> {
@@ -273,26 +397,53 @@ private struct MCPConfigImportSheet: View {
     let add: ([MCPServer]) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(loc.t("Importar servidores MCP", "Import MCP servers")).font(.title2.weight(.semibold))
-            Text(loc.t("Pega la configuración que usan otros clientes MCP. Se admiten servidores locales (comando) y remotos (URL).",
-                       "Paste the configuration other MCP clients use. Local servers (a command) and remote ones (a url) are both accepted."))
-                .font(.callout).foregroundStyle(.secondary)
-            TextEditor(text: $text)
-                .font(.system(.caption, design: .monospaced))
-                .frame(height: 210).workspaceFieldSurface()
-            Text(#"{"mcpServers":{"memory":{"command":"/usr/local/bin/server","args":["--project-path","/ruta"]}}}"#)
-                .font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
-            if let error { Text(error).font(.caption).foregroundStyle(.red) }
-            HStack {
+        VStack(spacing: 0) {
+            HStack(spacing: 13) {
+                SectionGlyph(systemName: "doc.on.clipboard")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(loc.t("Importar servidores MCP", "Import MCP servers"))
+                        .font(.title3.weight(.semibold))
+                    Text(loc.t("Admite servidores locales y remotos.", "Supports local and remote servers."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.vertical, 16)
+            .background(WorkspaceStyle.surface)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(loc.t("Pega el bloque de configuración «mcpServers» de otro cliente MCP.",
+                           "Paste the “mcpServers” configuration block from another MCP client."))
+                    .font(.callout).foregroundStyle(.secondary)
+                TextEditor(text: $text)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(height: 220).workspaceFieldSurface()
+                Text(#"{"mcpServers":{"memory":{"command":"/usr/local/bin/server","args":["--project-path","/ruta"]}}}"#)
+                    .font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
+                if let error {
+                    Label(error, systemImage: "exclamationmark.circle")
+                        .font(.caption).foregroundStyle(.red)
+                }
+            }
+            .padding(18)
+
+            Divider()
+
+            HStack(spacing: 10) {
                 Spacer()
                 Button(loc.t("Cancelar", "Cancel")) { dismiss() }
-                Button(loc.t("Importar", "Import")) { load() }
-                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .glassButton().keyboardShortcut(.cancelAction)
+                Button(loc.t("Importar", "Import"), systemImage: "square.and.arrow.down") { load() }
+                    .glassButton(prominent: true).keyboardShortcut(.defaultAction)
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+            .background(WorkspaceStyle.surface)
         }
-        .padding(22).frame(width: 560)
+        .frame(width: 590)
+        .background(WorkspaceStyle.canvas)
     }
 
     private func load() {
