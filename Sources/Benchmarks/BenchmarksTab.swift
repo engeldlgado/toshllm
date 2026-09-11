@@ -38,6 +38,7 @@ struct BenchmarksView: View {
     @State private var comparisonAID: UUID?
     @State private var comparisonBID: UUID?
     @State private var outputDismissed = false
+    @State private var configFieldsWide = true
 
     private var gpus: [GPUDevice] { hardware.gpus }
     private var busy: Bool { bench.running || bench.sweeping || bench.optimizingDynamicMoe }
@@ -244,22 +245,20 @@ struct BenchmarksView: View {
                 }
              }) {
             VStack(alignment: .leading, spacing: 12) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 0) {
-                        compactModelField.frame(minWidth: 260, maxWidth: .infinity)
-                        compactDivider
-                        compactProfileField.frame(width: 220)
-                        compactDivider
-                        compactGPUField.frame(width: 220)
-                    }
-                    VStack(alignment: .leading, spacing: 12) {
-                        compactModelField
-                        HStack(alignment: .top, spacing: 14) {
-                            compactProfileField
-                            compactGPUField
-                        }
+                // Not ViewThatFits: measuring the model pop-up rebuilds its menu and asks for
+                // another layout, endlessly. AnyLayout keeps the fields' identity across the switch.
+                let outer = configFieldsWide ? AnyLayout(HStackLayout(alignment: .top, spacing: 0))
+                                             : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+                outer {
+                    compactModelField.frame(minWidth: configFieldsWide ? 260 : nil, maxWidth: .infinity)
+                    HStack(alignment: .top, spacing: configFieldsWide ? 0 : 14) {
+                        if configFieldsWide { compactDivider }
+                        compactProfileField.frame(width: configFieldsWide ? 220 : nil)
+                        if configFieldsWide { compactDivider }
+                        compactGPUField.frame(width: configFieldsWide ? 220 : nil)
                     }
                 }
+                .onGeometryChange(for: Bool.self) { $0.size.width >= 760 } action: { configFieldsWide = $0 }
                 .disabled(busy)
 
                 BenchmarkWrappingLayout(spacing: 6) {

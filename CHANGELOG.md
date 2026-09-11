@@ -11,6 +11,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **Benchmarks no longer closes the app in a narrow window.** The results table scrolls sideways when it does not fit. Reported in [#97](https://github.com/engeldlgado/toshllm/issues/97).
 
+- **Benchmarks no longer keeps a processor core busy at some window widths.**
+
 ## [0.87.1] - 2026-09-11
 
 ### Added
