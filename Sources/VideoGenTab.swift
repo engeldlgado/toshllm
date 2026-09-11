@@ -171,13 +171,17 @@ struct VideoControls: View {
 
     private var settingsCard: some View {
         VStack(spacing: 12) {
-            settingRow(loc.t("Resolución", "Resolution")) {
+            settingRow(loc.t("Resolución", "Resolution"),
+                       help: loc.t("Solo los tamaños que el modelo declara. Fuera de ellos la imagen sale blanda o el modelo ni acepta la forma.",
+                                   "Only the sizes the model states. Outside them the picture comes back soft, or the model does not accept the shape at all.")) {
                 Picker("", selection: $sizeLabel) {
                     ForEach(model.sizes) { Text($0.label).tag($0.label) }
                 }
                 .labelsHidden().frame(width: 140)
             }
-            settingRow(loc.t("Fotogramas", "Frames")) {
+            settingRow(loc.t("Fotogramas", "Frames"),
+                       help: loc.t("Los VAE temporales admitidos por el motor requieren cuentas 4n+1.",
+                                   "The temporal VAEs supported by the engine require 4n+1 frame counts.")) {
                 Picker("", selection: $frames) {
                     ForEach(VideoGenLimits.frameCounts, id: \.self) { count in
                         Text("\(count) · \(String(format: "%.1f", VideoGenLimits.seconds(frames: count, fps: model.fps)))s").tag(count)
@@ -185,14 +189,20 @@ struct VideoControls: View {
                 }
                 .labelsHidden().frame(width: 140)
             }
-            settingRow(loc.t("Pasos", "Steps")) {
+            settingRow(loc.t("Pasos", "Steps"),
+                       help: loc.t("Más pasos afinan el detalle y tardan proporcionalmente más. El modelo trae su propia recomendación.",
+                                   "More steps refine the detail and take proportionally longer. The model ships its own recommendation.")) {
                 Stepper("\(steps)", value: $steps, in: 8...60, step: 2).frame(width: 140)
             }
-            settingRow(loc.t("Semilla", "Seed")) {
+            settingRow(loc.t("Semilla", "Seed"),
+                       help: loc.t("Repite la misma semilla con el mismo prompt para reproducir un vídeo. Cámbiala para explorar variantes.",
+                                   "Repeat the same seed with the same prompt to reproduce a video. Change it to explore variations.")) {
                 TextField("", value: $seed, format: .number).workspaceTextField().frame(width: 140)
             }
             if !hardware.gpus.isEmpty {
-                settingRow("GPU") {
+                settingRow("GPU",
+                           help: loc.t("Qué GPU genera el vídeo. Con varias tarjetas conviene dejar libre la que pinta la pantalla.",
+                                       "Which GPU generates the video. With several cards, leave the one driving the display free.")) {
                     if hardware.gpus.count > 1 {
                         Picker("", selection: $gpuIndex) {
                             Text(loc.t("Automática", "Automatic")).tag(-1)
@@ -205,7 +215,9 @@ struct VideoControls: View {
                     }
                 }
             }
-            settingRow(loc.t("Decodificar por bloques", "Decode in tiles")) {
+            settingRow(loc.t("Decodificar por bloques", "Decode in tiles"),
+                       help: loc.t("Recomendado. Sin esto el decodificado aclara un fotograma de cada cuatro y el clip parpadea, y además pide hasta 16 GB en vez de 3.4. Cuesta un 26% del decodificado.",
+                                   "Recommended. Without it the decode brightens every fourth frame and the clip flickers, and it asks for up to 16 GB instead of 3.4. It costs 26% of the decode.")) {
                 Toggle("", isOn: $vaeTiling).labelsHidden().toggleStyle(.switch)
             }
             if let recommended = VideoGenLimits.recommendedVRAMGB(model: model, frames: frames) {
@@ -226,6 +238,8 @@ struct VideoControls: View {
     private var initImageRow: some View {
         HStack(spacing: 6) {
             Text(loc.t("Imagen inicial (img2video)", "Init image (img2video)")).font(.caption)
+                .help(loc.t("Este modelo puede animar una imagen: será el primer fotograma.",
+                            "This model can animate a still: it becomes the first frame."))
             Spacer(minLength: 6)
             Button(initImage.isEmpty ? loc.t("Elegir…", "Choose…")
                                      : URL(fileURLWithPath: initImage).lastPathComponent) { pickInitImage() }
@@ -238,12 +252,14 @@ struct VideoControls: View {
         }
     }
 
-    private func settingRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+    private func settingRow<Content: View>(_ title: String, help: String = "",
+                                           @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 6) {
             Text(title).font(.callout)
             Spacer(minLength: 8)
             content()
         }
+        .help(help)
     }
 
     @ViewBuilder private var footer: some View {
@@ -338,6 +354,8 @@ struct VideoControls: View {
                     .frame(maxWidth: .infinity)
             }
             .glassButton()
+            .help(loc.t("Solo descarga lo que falte: el codificador de texto es común a los Wan, así que cambiar entre ellos no vuelve a bajarlo.",
+                        "Downloads only what is missing: the Wan models share a text encoder, so switching between them does not fetch it again."))
         }
         .padding(10)
         .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 10))
