@@ -108,16 +108,18 @@ CMAKE_FLAGS=(
     -DLLAMA_OPENSSL=OFF
 )
 
-# pin every ISA flag: with GGML_NATIVE=OFF ggml's defaults follow the build host, and an
-# arm64 runner cross-building x86_64 does not count as cross-compiling. TOSH_NO_AVX2=1 is
-# the SSE4.2 baseline for pre-AVX Xeons.
+# pin every ISA flag in both variants: with GGML_NATIVE=OFF ggml's defaults follow the build
+# host, an arm64 runner cross-building x86_64 does not count as cross-compiling, and a flag left
+# out keeps whatever the previous variant cached in build-static. TOSH_NO_AVX2=1 is the SSE4.2
+# baseline for pre-AVX Xeons.
 ISA_FLAGS=()
 if [ "$ARCH" = "x86_64" ]; then
     if [ -z "${TOSH_NO_AVX2:-}" ]; then
-        ISA_FLAGS=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON)
+        ISA_FLAGS=(-DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON
+                   -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX_VNNI=OFF -DGGML_AVX512=OFF)
     else
         ISA_FLAGS=(-DGGML_SSE42=ON -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF
-                   -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_AVX_VNNI=OFF)
+                   -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_AVX_VNNI=OFF -DGGML_AVX512=OFF)
     fi
     CMAKE_FLAGS+=("${ISA_FLAGS[@]}")
 fi
