@@ -20,7 +20,7 @@ if ! grep -q "^## \[$V\]" CHANGELOG.md; then
     exit 1
 fi
 
-git add CHANGELOG.md VERSION Sources/AboutTab.swift
+git add CHANGELOG.md VERSION Sources/App/AboutTab.swift
 git diff --cached --quiet || git commit -m "release: $V"
 
 # annotated so the tag is a real object and tag.gpgsign can sign it; a lightweight tag cannot be

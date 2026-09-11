@@ -24,7 +24,7 @@ elif [ -z "$CI" ] && [ "$TOSH_NO_BUMP" != "1" ]; then
 else
     VERSION=$(<VERSION)
 fi
-sed -i '' -E "s/static let version = \"[^\"]*\"/static let version = \"$VERSION\"/" Sources/AboutTab.swift
+sed -i '' -E "s/static let version = \"[^\"]*\"/static let version = \"$VERSION\"/" Sources/App/AboutTab.swift
 echo "version: $VERSION"
 
 # Stamp the no-AVX2 variant so the updater keeps it on its own channel (an AVX2 DMG
