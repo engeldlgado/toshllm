@@ -5,9 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Chat: MCP servers that run on your own machine.** Until now a server had to be reachable at a URL, which left out nearly every local one, since they are started by a command and talked to over their pipes. Settings also takes the `mcpServers` block other MCP clients use, so a configuration can be pasted in rather than retyped.
+
 ### Improved
 
 - **The interface has been redesigned across every screen, with the same controls as before.** Idle memory use drops from about 600 MB to about 120 MB.
+
+- **Models in subfolders are found.** One recursive inventory now serves language, image and video models alike, so a library sorted into folders no longer looks half empty.
+
+- **The estimated speed matches your card.** It was calculated from a single card's bandwidth, and how much of that decode reaches turns out to differ by a factor of nearly three between families: measured 58.8 tokens per second on a Radeon Pro Vega II Duo against 61 on an RX 6700 XT with the same 8B model, despite 2.7 times the bandwidth. On a Radeon RX 570 the figure was out by four times.
 
 - **Text and number fields respond immediately.** A keystroke no longer rebuilds the whole screen, and numeric fields reject anything that is not a number.
 
