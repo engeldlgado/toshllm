@@ -21,7 +21,7 @@ final class FamilyGroupTests: XCTestCase {
             ("DeepSeek-V4-Flash-Q4_K.gguf", "DeepSeek", nil),
             ("Phi-4-14B-Q4_K_M.gguf", "Phi", 14),
             ("gpt-oss-20b-MXFP4.gguf", "GPT-OSS", 20),
-            ("OLMoE-1B-7B-Q4_0.gguf", "OLMo", 1),
+            ("OLMoE-1B-7B-Q4_0.gguf", "OLMo", 7),
             ("Mistral-Small-4-24B-Instruct-Q4_K_M.gguf", "Mistral", 24),
             ("Ministral-8B-Instruct-Q4_K_M.gguf", "Mistral", 8),
             ("granite-4.0-h-small-32B-Q4_K_M.gguf", "Granite", 32),

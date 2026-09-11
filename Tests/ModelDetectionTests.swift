@@ -61,7 +61,7 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertEqual(ServerSettings.ggufUInt32("expert_count", at: int32URL.path), 256)
     }
 
-    func testTraitWarmPublishesEachDetectedModel() throws {
+    func testTraitWarmPublishesAfterDetectingAllModels() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let olmoe = dir.appendingPathComponent("olmoe.gguf")
@@ -70,8 +70,7 @@ final class ModelDetectionTests: XCTestCase {
         try writeGGUF(to: deepseek, uint32: ["deepseek2.expert_count": 256])
 
         ModelTraitsCache.invalidate()
-        let published = expectation(description: "traits published progressively")
-        published.expectedFulfillmentCount = 2
+        let published = expectation(description: "traits published as one batch")
         ModelTraitsCache.warm(paths: [olmoe.path, deepseek.path]) { published.fulfill() }
         wait(for: [published], timeout: 2)
         XCTAssertTrue(ModelTraitsCache.cached(for: olmoe.path)?.isMoE == true)
@@ -222,6 +221,79 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertEqual(GGUFFile.totalSize(at: models[0].url.path), 24)
     }
 
+    func testLocalScanFindsNestedModelsAndSkipsManagedMediaFolders() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let nested = dir.appendingPathComponent("Qwen/four-bit", isDirectory: true)
+        let image = dir.appendingPathComponent("imagen", isDirectory: true)
+        let videos = dir.appendingPathComponent("videos", isDirectory: true)
+        let whisper = dir.appendingPathComponent("whisper", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: image, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: videos, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: whisper, withIntermediateDirectories: true)
+        try Data([1]).write(to: nested.appendingPathComponent("nested-model.gguf"))
+        try Data([1]).write(to: nested.appendingPathComponent("split-00001-of-00002.gguf"))
+        try Data([2]).write(to: nested.appendingPathComponent("split-00002-of-00002.gguf"))
+        try Data([3]).write(to: image.appendingPathComponent("diffusion.gguf"))
+        try Data([3]).write(to: videos.appendingPathComponent("video-encoder.gguf"))
+        try Data([4]).write(to: whisper.appendingPathComponent("speech.gguf"))
+
+        let models = LocalModel.scan(in: dir)
+        XCTAssertEqual(Set(models.map(\.name)), ["nested-model.gguf", "split-00001-of-00002.gguf"])
+        XCTAssertEqual(models.first { $0.name.hasPrefix("split-") }?.partURLs.count, 2)
+    }
+
+    func testRecursiveFileIndexReusesMediaComponentsOutsideManagedFolder() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let external = dir.appendingPathComponent("existing/video/encoders", isDirectory: true)
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        let encoder = external.appendingPathComponent("UMT5-XXL-Encoder-Q4_K_M.GGUF")
+        try Data([1]).write(to: encoder)
+
+        let index = ModelFileIndex.scan(in: dir)
+        XCTAssertEqual(index.file(named: "umt5-xxl-encoder-Q4_K_M.gguf")?.path, encoder.path)
+    }
+
+    func testRecursiveFileIndexReusesSafePunctuationVariant() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let existing = dir.appendingPathComponent("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf")
+        try Data([1]).write(to: existing)
+
+        let index = ModelFileIndex.scan(in: dir)
+        XCTAssertEqual(index.file(named: "Qwen2.5-VL-7B-Instruct.Q4_K_M.gguf")?.path,
+                       existing.path)
+    }
+
+    func testRecursiveFileIndexFallsBackToOriginalDownloadName() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let original = dir.appendingPathComponent("stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf")
+        try Data([1]).write(to: original)
+
+        let index = ModelFileIndex.scan(in: dir)
+        XCTAssertEqual(index.file(namedAny: ["sd-v1-5-Q8_0.gguf", original.lastPathComponent])?.path,
+                       original.path)
+    }
+
+    func testRecursiveFileIndexPrefersManagedMediaCopyWhenNamesCollide() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let other = dir.appendingPathComponent("archive", isDirectory: true)
+        let managed = dir.appendingPathComponent("imagen", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        try Data([1]).write(to: other.appendingPathComponent("shared.safetensors"))
+        let preferred = managed.appendingPathComponent("shared.safetensors")
+        try Data([2]).write(to: preferred)
+
+        let index = ModelFileIndex.scan(in: dir)
+        XCTAssertEqual(index.file(named: "shared.safetensors", preferredDirectory: managed)?.path,
+                       preferred.path)
+    }
+
     func testEmbeddedNameKeepsFilenameSizeAndDropsRepositoryOwner() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -244,6 +316,81 @@ final class ModelDetectionTests: XCTestCase {
         let parsed = ModelName.forPath(url.path)
         XCTAssertEqual(parsed.title, "Qwen3.8 27B")
         XCTAssertEqual(parsed.quant, "IQ2_M")
+    }
+
+    func testMetadataAfterTokenizerIsStillRead() throws {
+        var data = Data("GGUF".utf8)
+        func appendUInt32(_ value: UInt32) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        func appendUInt64(_ value: UInt64) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        func appendString(_ value: String) {
+            appendUInt64(UInt64(value.utf8.count))
+            data.append(contentsOf: value.utf8)
+        }
+
+        appendUInt32(3)
+        appendUInt64(0)
+        appendUInt64(4)
+        appendString("general.architecture")
+        appendUInt32(8)
+        appendString("qwen3")
+        appendString("tokenizer.ggml.tokens")
+        appendUInt32(9)
+        appendUInt32(8)
+        appendUInt64(2)
+        appendString("one")
+        appendString("two")
+        appendString("general.file_type")
+        appendUInt32(4)
+        appendUInt32(25)
+        appendString("qwen3.context_length")
+        appendUInt32(4)
+        appendUInt32(32_768)
+
+        let metadata = try XCTUnwrap(GGUFMetadataCache.parse(from: data))
+        XCTAssertEqual(metadata.fileTypeLabel, "IQ4_NL")
+    }
+
+    func testIQ4NLFilenameFallbackKeepsFullQuantizationName() {
+        XCTAssertEqual(ModelName("Qwen3-4B-IQ4_NL.gguf").quant, "IQ4_NL")
+    }
+
+    func testDetailedUDQuantizationFromFilenameWinsOverGenericHeaderType() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("gemma-4-12B-UD-Q4_K_XL.gguf")
+        try writeGGUF(to: url, strings: ["general.name": "Gemma 4 12B"],
+                      uint32: ["general.file_type": 15])
+        XCTAssertEqual(ModelName.forPath(url.path).quant, "UD-Q4_K_XL")
+    }
+
+    func testGenericEmbeddedNameFallsBackToFilename() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("gemma-2-9B-it-IQ1_M.gguf")
+        try writeGGUF(to: url, strings: ["general.name": "Original Model"],
+                      uint32: ["general.file_type": 31])
+        XCTAssertEqual(ModelName.forPath(url.path).title, "Gemma 2 9B")
+        XCTAssertEqual(ModelName.forPath(url.path).quant, "IQ1_M")
+    }
+
+    func testFilenameKeepsMoEActiveParameterSizeMissingFromMetadata() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("Qwen3.6-35B-A3B-Q5_K_M.gguf")
+        try writeGGUF(to: url, strings: ["general.name": "Qwen3.6 35B"],
+                      uint32: ["general.file_type": 17])
+        XCTAssertEqual(ModelName.forPath(url.path).title, "Qwen3.6 35B-A3B")
+    }
+
+    func testActiveTotalMoESizeUsesTotalParametersAndActivePrefix() {
+        let parsed = ModelName("OLMoE-1B-7B-0924-Instruct-Q5_K_M.gguf")
+        XCTAssertEqual(parsed.title, "OLMoE 1B-7B")
+        XCTAssertEqual(parsed.paramsB, 7)
+        XCTAssertEqual(ModelName.activeParamsB("OLMoE-1B-7B-0924-Instruct-Q5_K_M.gguf"), 1)
     }
 
     func testLegacyProjectorFallbackRequiresUniqueFamilyAndDimension() throws {
