@@ -19,7 +19,8 @@ struct ToshDropdown<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [Option]
     var placeholder = "Select"
-    var width: CGFloat = 270
+    /// nil fills the width offered by the parent.
+    var width: CGFloat? = 270
     var maximumListHeight: CGFloat = 330
     var listWidth: CGFloat? = nil
 
@@ -89,7 +90,7 @@ struct ToshDropdown<Value: Hashable>: View {
             // control size from rows that shrink their controls.
             .controlSize(.regular)
             .font(.body)
-            .frame(width: listWidth ?? max(width, 250),
+            .frame(width: listWidth ?? max(width ?? 250, 250),
                    height: min(max(CGFloat(options.count) * 39 + 12, 56), maximumListHeight))
             .background(WorkspaceStyle.surface)
             .presentationCornerRadius(6)

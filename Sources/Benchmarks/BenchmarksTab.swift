@@ -913,6 +913,9 @@ struct BenchmarksView: View {
         }
     }
 
+    /// The table's column minimums plus their spacing and padding.
+    private static let resultsTableMinWidth: CGFloat = 966
+
     private var resultsCard: some View {
         let visible = Array(filteredResults.prefix(resultsLimit))
         let maxPrompt = visible.map(\.pp).max() ?? 1
@@ -922,32 +925,38 @@ struct BenchmarksView: View {
                         Text("\(visible.count) / \(filteredResults.count)")
                             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     }) {
-            VStack(spacing: 0) {
-                BenchmarkResultTableHeader(loc: loc)
-                Divider()
-                ForEach(visible) { result in
-                    BenchmarkResultTableRow(result: result,
-                                            isBest: result.id == bench.history.max(by: { $0.tg < $1.tg })?.id,
-                                            maxPrompt: maxPrompt,
-                                            maxGeneration: maxGeneration,
-                                            loc: loc,
-                                            onSaveProfile: { promptSave(result) },
-                                            onApplyGlobal: { applyGlobal(result) },
-                                            onDelete: { bench.delete(result) })
-                    if result.id != visible.last?.id { Divider().opacity(0.45) }
-                }
-                if visible.isEmpty {
-                    ContentUnavailableView.search(text: resultSearch)
-                        .frame(height: 120)
-                }
-                if visible.count < filteredResults.count {
-                    Divider().opacity(0.45)
-                    BenchmarkLoadMoreButton(remaining: filteredResults.count - visible.count,
-                                            loc: loc) {
-                        resultsLimit = min(resultsLimit + 20, filteredResults.count)
+            // Narrower than its columns it scrolls sideways, so the table never asks the
+            // window for more width than it has.
+            ScrollView(.horizontal) {
+                VStack(spacing: 0) {
+                    BenchmarkResultTableHeader(loc: loc)
+                    Divider()
+                    ForEach(visible) { result in
+                        BenchmarkResultTableRow(result: result,
+                                                isBest: result.id == bench.history.max(by: { $0.tg < $1.tg })?.id,
+                                                maxPrompt: maxPrompt,
+                                                maxGeneration: maxGeneration,
+                                                loc: loc,
+                                                onSaveProfile: { promptSave(result) },
+                                                onApplyGlobal: { applyGlobal(result) },
+                                                onDelete: { bench.delete(result) })
+                        if result.id != visible.last?.id { Divider().opacity(0.45) }
+                    }
+                    if visible.isEmpty {
+                        ContentUnavailableView.search(text: resultSearch)
+                            .frame(height: 120)
+                    }
+                    if visible.count < filteredResults.count {
+                        Divider().opacity(0.45)
+                        BenchmarkLoadMoreButton(remaining: filteredResults.count - visible.count,
+                                                loc: loc) {
+                            resultsLimit = min(resultsLimit + 20, filteredResults.count)
+                        }
                     }
                 }
+                .containerRelativeFrame(.horizontal) { width, _ in max(width, Self.resultsTableMinWidth) }
             }
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
         }
     }
 
@@ -1122,13 +1131,14 @@ struct BenchmarksView: View {
     private func comparisonPicker(_ title: String, selection: Binding<UUID>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title.uppercased()).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-            Picker("", selection: selection) {
-                ForEach(bench.history) { result in
-                    Text("\(result.shortModel) · \(result.quantization) · \(result.date.formatted(date: .abbreviated, time: .shortened))")
-                        .tag(result.id)
-                }
-            }
-            .labelsHidden().frame(maxWidth: .infinity)
+            // Not a Picker: a native pop-up is as wide as its longest item, and this one lists the whole history.
+            ToshDropdown(selection: selection,
+                         options: bench.history.map { result in
+                             .init(value: result.id, title: "\(result.shortModel) · \(result.quantization)",
+                                   subtitle: result.date.formatted(date: .abbreviated, time: .shortened))
+                         },
+                         width: nil, listWidth: 420)
+                .help(loc.t("Elige la ejecución a comparar", "Choose the run to compare"))
         }
         .frame(maxWidth: .infinity)
     }
@@ -1164,7 +1174,7 @@ struct BenchmarksView: View {
             Text(label).font(.headline).foregroundStyle(Color.appAccent)
             ModelBrandIcon(name: result.shortModel, size: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(result.shortModel).font(.callout.weight(.semibold))
+                Text(result.shortModel).font(.callout.weight(.semibold)).lineLimit(1)
                 Text("\(result.quantization) · \(result.configLabel)")
                     .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }

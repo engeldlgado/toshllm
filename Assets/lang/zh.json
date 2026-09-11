@@ -300,6 +300,7 @@
   "Choose the balance between speed, memory, and accuracy.": "在速度、内存占用和准确度之间取得平衡。",
   "Choose the final language, such as Spanish, Korean, or French.": "选择最终语言，例如西班牙语、韩语或法语。",
   "Choose the router model that will translate the subtitles.": "选择用于翻译字幕的路由模型。",
+  "Choose the run to compare": "选择要比较的运行",
   "Choose where your models live.": "选择模型的存放位置。",
   "Choose…": "选择…",
   "Choosing the language improves accuracy; Automatic is useful when it is unknown.": "指定语言可以提高准确度；语言未知时用“自动”更合适。",

@@ -71,7 +71,7 @@ actor MCPStdioTransport {
         let handle = stderr.fileHandleForReading
         let label = name
         Task.detached(priority: .utility) {
-            while let line = try? handle.read(upToCount: 4096), !line.isEmpty {
+            while case let line = Self.readAvailable(handle, max: 4096), !line.isEmpty {
                 let text = String(decoding: line, as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { AppLog.chat.debug("MCP \(label, privacy: .public): \(text, privacy: .public)") }
@@ -80,13 +80,24 @@ actor MCPStdioTransport {
         readerTask = Task { await readLoop() }
     }
 
+    /// Whatever the pipe holds, empty at end of file. `read(upToCount:)` waits until the
+    /// count is filled or the pipe closes, and a server keeps its pipe open.
+    private static func readAvailable(_ handle: FileHandle, max: Int) -> Data {
+        var bytes = [UInt8](repeating: 0, count: max)
+        while true {
+            let count = Darwin.read(handle.fileDescriptor, &bytes, max)
+            if count >= 0 { return Data(bytes[0..<count]) }
+            if errno != EINTR { return Data() }
+        }
+    }
+
     /// One JSON object per line: read what arrives and split on the newline, since
     /// a pipe hands over bytes with no message boundaries of its own.
     private func readLoop() async {
         let handle = stdout.fileHandleForReading
         while !finished {
             let chunk = await Task.detached(priority: .utility) {
-                (try? handle.read(upToCount: 65_536)) ?? Data()
+                Self.readAvailable(handle, max: 65_536)
             }.value
             if chunk.isEmpty { break }
             buffer.append(chunk)

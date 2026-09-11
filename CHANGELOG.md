@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Chat: local MCP servers connect straight away instead of staying on Connecting.** Reported in [#98](https://github.com/engeldlgado/toshllm/issues/98).
+
+- **Benchmarks no longer closes the app in a narrow window.** The results table scrolls sideways when it does not fit. Reported in [#97](https://github.com/engeldlgado/toshllm/issues/97).
+
 ## [0.87.1] - 2026-09-11
 
 ### Added

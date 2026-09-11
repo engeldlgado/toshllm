@@ -1831,6 +1831,20 @@ final class ChatMessageTests: XCTestCase {
             "repo://open%20ai/llama/file?ref=main&path=a%2Fb.swift")
     }
 
+    func testMCPStdioDeliversShortReplyWhileOutputStaysOpen() async throws {
+        let reply = #"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#
+        let server = MCPServer(name: "probe", url: "", transport: .stdio, command: "/bin/sh",
+                               arguments: ["-c", "read line; printf '%s\\n' '\(reply)'; exec sleep 30"])
+        let transport = try MCPStdioTransport(server: server)
+        try await transport.start()
+        let start = Date()
+        let result = try await transport.send(["jsonrpc": "2.0", "id": 1, "method": "initialize"], id: 1, timeout: 5)
+        let elapsed = Date().timeIntervalSince(start)
+        await transport.stop()
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertLessThan(elapsed, 2)
+    }
+
     func testConversationBranchesPreserveAndSwitchCompletePaths() throws {
         let user = ChatMessage(role: "user", content: "Pregunta")
         let first = ChatMessage(role: "assistant", content: "Respuesta A")

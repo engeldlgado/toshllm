@@ -300,6 +300,7 @@
   "Choose the balance between speed, memory, and accuracy.": "速度、メモリ、精度のバランスを選びます。",
   "Choose the final language, such as Spanish, Korean, or French.": "スペイン語、韓国語、フランス語など、最終的な言語を選択します。",
   "Choose the router model that will translate the subtitles.": "字幕を翻訳するルーターのモデルを選びます。",
+  "Choose the run to compare": "比較する実行を選択",
   "Choose where your models live.": "モデルの保存場所を選択します。",
   "Choose…": "選択…",
   "Choosing the language improves accuracy; Automatic is useful when it is unknown.": "言語を指定すると精度が上がります。不明な場合は「自動」が便利です。",
