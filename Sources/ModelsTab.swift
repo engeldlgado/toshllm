@@ -263,9 +263,11 @@ private struct FeaturedModelBanner: View {
                 }
                 Button(action: previous) { Image(systemName: "chevron.left") }
                     .buttonStyle(.plain).frame(width: 28, height: 28)
+                    .contentShape(Circle())
                     .background(carouselButtonBackground, in: Circle())
                 Button(action: next) { Image(systemName: "chevron.right") }
                     .buttonStyle(.plain).frame(width: 28, height: 28)
+                    .contentShape(Circle())
                     .background(carouselButtonBackground, in: Circle())
             }
             .foregroundStyle(carouselControlColor).padding(14)

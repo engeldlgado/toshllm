@@ -415,14 +415,16 @@ struct ServerLogView: View {
         revealInFinder(file: file, folder: server.logsDirectory)
     }
 
+    private var engineBinary: String { ServerSettings.resolvedBinary() }
+    private var engineCheckAvailable: Bool { EngineCheck.isAvailable(serverBinary: engineBinary) }
     private var engineCheckReady: Bool {
-        server.state != .running && server.state != .starting && EngineCheck.isAvailable(serverBinary: ServerSettings.fromDefaults().serverBinary)
+        server.state != .running && server.state != .starting && engineCheckAvailable
     }
     private var engineCheckHelp: String {
         if server.state == .running || server.state == .starting {
             return loc.t("Detén el servidor antes de comprobar: la prueba ocupa la GPU entera.", "Stop the server before checking: the test uses the whole GPU.")
         }
-        if !EngineCheck.isAvailable(serverBinary: ServerSettings.fromDefaults().serverBinary) {
+        if !engineCheckAvailable {
             return loc.t("Este motor no incluye la herramienta de comprobación.", "This engine does not ship the check tool.")
         }
         return loc.t("Ejecuta las pruebas del motor y añade el resultado al diagnóstico.", "Runs the engine tests and adds the result to diagnostics.")

@@ -86,6 +86,229 @@ struct UseModelButton: View {
     }
 }
 
+private struct GPUPickerSection: Identifiable {
+    let id: UInt64
+    let title: String?
+    let color: Color?
+    let gpus: [GPUDevice]
+}
+
+private enum GPUPickerLayout {
+    static let palette: [Color] = [.accentColor, .teal, .orange, .purple, .pink]
+
+    static func colors(_ gpus: [GPUDevice]) -> [UInt64: Color] {
+        let items = gpus.map { (index: $0.index, groupID: $0.peerGroupID) }
+        return GPUPeerTopology.groupIDs(items).enumerated().reduce(into: [:]) { out, pair in
+            out[pair.element] = palette[pair.offset % palette.count]
+        }
+    }
+
+    /// Linked cards first, each bridge as its own block, then the loose ones.
+    static func sections(_ gpus: [GPUDevice], loc: Localizer) -> [GPUPickerSection] {
+        let colors = colors(gpus)
+        let linked = GPUPeerTopology.groups(of: gpus).map { group -> GPUPickerSection in
+            let members = gpus.filter { group.indices.contains($0.index) }
+            let gb = members.reduce(0) { $0 + $1.vramGB }
+            let id = members.first?.peerGroupID ?? 0
+            return GPUPickerSection(id: id,
+                                    title: loc.t("Fabric %@ · %@ GB", "Fabric %@ · %@ GB", group.label, "\(gb)"),
+                                    color: colors[id], gpus: members)
+        }
+        let loose = gpus.filter { colors[$0.peerGroupID] == nil }
+        guard !loose.isEmpty else { return linked }
+        return linked + [GPUPickerSection(id: 0,
+                                          title: linked.isEmpty ? nil : loc.t("Sin enlace", "No link"),
+                                          color: nil, gpus: loose)]
+    }
+}
+
+private struct GPUPickerRow: View {
+    let gpu: GPUDevice
+    let color: Color?
+    let selected: Bool
+    let onToggle: (Int) -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button { onToggle(gpu.index) } label: {
+            HStack(spacing: 9) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(selected ? (color ?? Color.accentColor) : Color.secondary.opacity(0.5))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(gpu.name).font(.system(size: 12)).lineLimit(1)
+                    Text("#\(gpu.index) · \(gpu.vramGB) GB")
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 6)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(hovered ? 0.06 : 0),
+                        in: RoundedRectangle(cornerRadius: 7))
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1.5).fill(color ?? .clear).frame(width: 2.5)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .onHover { hovered = $0 }
+    }
+}
+
+private struct GPUPickerChip: View {
+    let title: String
+    let color: Color?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 11, weight: .medium))
+                .foregroundStyle(color ?? .primary)
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background((color ?? .primary).opacity(color == nil ? 0.08 : 0.14), in: Capsule())
+                .overlay(Capsule().strokeBorder((color ?? .clear).opacity(0.35)))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct GPUPickerPanel: View {
+    let gpus: [GPUDevice]
+    let sections: [GPUPickerSection]
+    let selection: Set<Int>
+    let defaultTitle: String
+    let onDefault: () -> Void
+    let onSelect: ([Int]) -> Void
+    let onToggle: (Int) -> Void
+
+    @EnvironmentObject var loc: Localizer
+
+    private var splitEligible: [GPUDevice] { gpus.filter { !$0.isIntegrated } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            shortcuts
+            Divider().opacity(0.6)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(sections) { section in
+                        VStack(alignment: .leading, spacing: 1) {
+                            header(section)
+                            ForEach(section.gpus) { g in
+                                GPUPickerRow(gpu: g, color: section.color,
+                                             selected: selection.contains(g.index), onToggle: onToggle)
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 10)
+            }
+            .frame(maxHeight: 340)
+            Divider().opacity(0.6)
+            summary
+        }
+        .frame(width: 340)
+    }
+
+    @ViewBuilder private func header(_ section: GPUPickerSection) -> some View {
+        if let title = section.title {
+            HStack(spacing: 5) {
+                Circle().fill(section.color ?? .clear).frame(width: 6, height: 6)
+                Text(title).font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary).textCase(.uppercase)
+            }
+            .padding(.horizontal, 12).padding(.bottom, 3)
+        }
+    }
+
+    private var shortcuts: some View {
+        HStack(spacing: 6) {
+            GPUPickerChip(title: defaultTitle, color: nil, action: onDefault)
+            if splitEligible.count > 1 {
+                if defaultTitle != loc.t("Todas", "All") {
+                    GPUPickerChip(title: loc.t("Todas", "All"), color: nil) {
+                        onSelect(splitEligible.map(\.index))
+                    }
+                }
+                ForEach(sections.filter { $0.color != nil }) { section in
+                    GPUPickerChip(title: loc.t("Fabric %@", "Fabric %@", letter(section)),
+                                  color: section.color) { onSelect(section.gpus.map(\.index)) }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+    }
+
+    private func letter(_ section: GPUPickerSection) -> String {
+        section.title.flatMap { $0.split(separator: " ").dropFirst().first.map(String.init) } ?? ""
+    }
+
+    private var summary: some View {
+        let chosen = gpus.filter { selection.contains($0.index) }
+        let gb = chosen.reduce(0) { $0 + $1.vramGB }
+        return HStack(spacing: 6) {
+            Image(systemName: chosen.count >= 2 ? "square.split.2x1" : "cpu")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(chosen.count >= 2
+                    ? loc.t("%@ GPUs · %@ GB de reparto", "%@ GPUs · %@ GB split", "\(chosen.count)", "\(gb)")
+                    : (chosen.first.map { "\($0.name) · \($0.vramGB) GB" } ?? defaultTitle))
+                .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(WorkspaceStyle.inset)
+    }
+}
+
+/// Checkbox list of GPUs in a popover: a menu closes on every click, which makes
+/// picking several cards one reopen per card.
+struct GPUMultiPicker: View {
+    let label: String
+    let selection: Set<Int>
+    let defaultTitle: String
+    var width: CGFloat = 230
+    var help: String = ""
+    let onDefault: () -> Void
+    let onSelect: ([Int]) -> Void
+    let onToggle: (Int) -> Void
+
+    @EnvironmentObject var loc: Localizer
+    @State private var open = false
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            HStack(spacing: 9) {
+                Image(systemName: selection.count >= 2 ? "square.split.2x1" : "cpu")
+                    .foregroundStyle(.secondary).frame(width: 16)
+                Text(label)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 11)
+            .frame(width: width, height: 34)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(WorkspaceStyle.border))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            let gpus = hardware.gpus
+            GPUPickerPanel(gpus: gpus, sections: GPUPickerLayout.sections(gpus, loc: loc),
+                           selection: selection,
+                           defaultTitle: defaultTitle, onDefault: onDefault,
+                           onSelect: onSelect, onToggle: onToggle)
+        }
+    }
+}
+
 /// GPU picker that also supports sets: none selected = system default, one =
 /// pin that GPU, two or more = split the layers across exactly those GPUs.
 struct GPUSelectionMenu: View {
@@ -98,19 +321,12 @@ struct GPUSelectionMenu: View {
     }
 
     var body: some View {
-        Menu {
-            Button(loc.t("Predeterminada", "Default")) { gpuIndex = -1; gpuList = [] }
-            Divider()
-            ForEach(hardware.gpus) { g in
-                Toggle("\(g.name) · \(g.vramGB) GB", isOn: Binding(
-                    get: { selection.contains(g.index) },
-                    set: { _ in toggle(g.index) }))
-            }
-        } label: {
-            Text(label).lineLimit(1)
-        }
-        .help(loc.t("GPU(s) que usa este servidor: una fija esa GPU; varias reparten las capas del modelo entre ellas (experimental); ninguna deja elegir a macOS.",
-                    "GPU(s) this server uses: one pins that GPU; several split the model's layers across them (experimental); none lets macOS choose."))
+        GPUMultiPicker(label: label, selection: selection,
+                       defaultTitle: loc.t("Predeterminada", "Default"),
+                       help: loc.t("GPU(s) que usa este servidor: una fija esa GPU; varias reparten las capas del modelo entre ellas (experimental); ninguna deja elegir a macOS. Los atajos eligen todas de golpe o un enlace Infinity Fabric entero.",
+                                   "GPU(s) this server uses: one pins that GPU; several split the model's layers across them (experimental); none lets macOS choose. The shortcuts pick every card at once, or one whole Infinity Fabric link."),
+                       onDefault: { gpuIndex = -1; gpuList = [] },
+                       onSelect: select, onToggle: toggle)
     }
 
     private var label: String {
@@ -120,12 +336,15 @@ struct GPUSelectionMenu: View {
         return loc.t("GPU predeterminada", "Default GPU")
     }
 
+    private func select(_ indices: [Int]) {
+        if indices.count >= 2 { gpuIndex = -1; gpuList = indices.sorted() }
+        else { gpuIndex = indices.first ?? -1; gpuList = [] }
+    }
+
     private func toggle(_ i: Int) {
         var sel = selection
         if sel.contains(i) { sel.remove(i) } else { sel.insert(i) }
-        let sorted = sel.sorted()
-        if sorted.count >= 2 { gpuIndex = -1; gpuList = sorted }
-        else { gpuIndex = sorted.first ?? -1; gpuList = [] }
+        select(sel.sorted())
     }
 }
 

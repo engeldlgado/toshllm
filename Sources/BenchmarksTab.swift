@@ -39,7 +39,7 @@ struct BenchmarksView: View {
     @State private var comparisonBID: UUID?
     @State private var outputDismissed = false
 
-    private var gpus: [GPUDevice] { ServerController.availableGPUs() }
+    private var gpus: [GPUDevice] { hardware.gpus }
     private var busy: Bool { bench.running || bench.sweeping || bench.optimizingDynamicMoe }
 
     var body: some View {

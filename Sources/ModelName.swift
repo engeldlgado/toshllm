@@ -223,12 +223,26 @@ struct ModelName {
     /// Titles from the embedded `general.name` when local. Quantization comes from
     /// `general.file_type`; filenames are only the fallback for incomplete metadata.
     static func forPath(_ path: String) -> ModelName {
+        if let cached = cacheLock.withLock({ cache[path] }) { return cached }
+        let name = resolve(path)
+        cacheLock.withLock { cache[path] = name }
+        return name
+    }
+
+    nonisolated(unsafe) private static var cache: [String: ModelName] = [:]
+    private static let cacheLock = NSLock()
+
+    /// Called from list rows, so it is cached: each pass otherwise costs three stat
+    /// calls per model and the name never changes while the file does not.
+    static func forgetCachedNames() { cacheLock.withLock { cache.removeAll() } }
+
+    private static func resolve(_ path: String) -> ModelName {
         let byFile = ModelName(URL(fileURLWithPath: path).lastPathComponent)
         guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return byFile }
         let metadata = GGUFMetadataCache.metadata(at: path)
         let headerQuant = metadata?.fileTypeLabel
         guard
-              let meta = ServerSettings.ggufString("general.name", at: path)?
+              let meta = metadata?.string(for: "general.name")?
                   .trimmingCharacters(in: .whitespaces),
               !meta.isEmpty else {
             guard let headerQuant else { return byFile }

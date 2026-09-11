@@ -49,7 +49,13 @@ struct DashboardView: View {
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                         .popover(isPresented: $showHardware) {
                             ScrollView {
-                                VStack(spacing: 14) { MachineCard(); GPUsCard() }.padding(20)
+                                VStack(spacing: 14) {
+                                    MachineCard()
+                                    // The dashboard already shows the GPU card on a
+                                    // multi-GPU machine; repeating it here reads as a bug.
+                                    if hardware.splitEligibleGPUs.count <= 1 { GPUsCard() }
+                                }
+                                .padding(20)
                             }
                             .frame(width: 600, height: 480)
                         }
@@ -457,9 +463,16 @@ struct MachineCard: View {
                         .frame(width: 18).foregroundStyle(.secondary)
                     Text(gpuCountSummary).font(.callout).lineLimit(1)
                     Spacer(minLength: 8)
-                    Button(loc.t("Detalle", "Details")) { showGPUDetail.toggle() }
-                        .buttonStyle(.plain).font(.caption.weight(.medium))
+                    Button { showGPUDetail.toggle() } label: {
+                        HStack(spacing: 3) {
+                            Text(loc.t("Detalle", "Details"))
+                            Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
+                        }
+                    }
+                        .buttonStyle(.plain).font(.caption.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
                         .popover(isPresented: $showGPUDetail, arrowEdge: .bottom) { gpuDetailPopover }
                 }
                 .help(gpuListTooltip)
@@ -476,7 +489,7 @@ struct MachineCard: View {
                 : loc.t("Backend: Metal (build AMD parcheado)", "Backend: Metal (patched AMD build)"))
         }
         .onChange(of: vram.gpus.count) { _, _ in
-            machine.gpus = ServerController.availableGPUs()
+            machine.gpus = ServerController.availableGPUs(rescan: true)
         }
     }
 
@@ -573,6 +586,8 @@ struct MachineCard: View {
 
 /// Per-GPU VRAM bars. Owns the 3s-polling monitor so its ticks re-render only this card.
 struct GPUsCard: View {
+    // -1 until the user decides, so a machine with many cards starts folded.
+    @AppStorage(SettingsKeys.gpusCardCollapsed) private var collapsedRaw = -1
     @AppStorage(SettingsKeys.mgpuPeer) private var mgpuPeer = true
     @AppStorage(SettingsKeys.multiGPU) private var multiGPU = false
     @AppStorage(SettingsKeys.gpuList) private var gpuListCSV = ""
@@ -581,7 +596,9 @@ struct GPUsCard: View {
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        Card(title: loc.t("GPUs", "GPUs"), icon: "rectangle.on.rectangle", fill: true) {
+        Card(title: cardTitle, icon: "rectangle.on.rectangle", fill: true,
+             collapsed: vram.gpus.count > 1 ? collapsedBinding : nil,
+             trailing: { rescanButton }) {
             if vram.gpus.isEmpty {
                 Label(loc.t("Sin datos de uso de GPU", "No GPU usage data"),
                       systemImage: "rectangle.on.rectangle")
@@ -590,6 +607,31 @@ struct GPUsCard: View {
                 ForEach(vram.gpus) { gpuRow($0) }
             }
         }
+    }
+
+    private var rescanButton: some View {
+        Button(loc.t("Volver a buscar", "Rescan"), systemImage: "arrow.clockwise") {
+            vram.refreshDevices()
+        }
+        .buttonStyle(.plain).labelStyle(.iconOnly)
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .padding(5)
+        .background(WorkspaceStyle.inset, in: Circle())
+        .overlay(Circle().strokeBorder(WorkspaceStyle.border))
+        .help(loc.t("Vuelve a preguntar a Metal por las tarjetas, por si has conectado o quitado una eGPU. La app ya no lo hace sola porque en algunos Mac Pro con varias tarjetas esa consulta llega a colgar el equipo.",
+                    "Asks Metal for the cards again, in case you plugged or unplugged an eGPU. The app no longer does it on its own because on some multi-card Mac Pros that query can hang the machine."))
+    }
+
+    private var cardTitle: String {
+        vram.gpus.count > 1
+            ? loc.t("GPUs · %@", "GPUs · %@", "\(vram.gpus.count)")
+            : loc.t("GPUs", "GPUs")
+    }
+
+    private var collapsedBinding: Binding<Bool> {
+        Binding(get: { collapsedRaw < 0 ? vram.gpus.count > 4 : collapsedRaw == 1 },
+                set: { collapsedRaw = $0 ? 1 : 0 })
     }
 
     private var peerLabels: [UInt64: String] {
@@ -1026,18 +1068,22 @@ struct Card<Content: View, Trailing: View>: View {
     let title: String
     let icon: String
     var fill: Bool = false
+    var collapsed: Binding<Bool>?
     @ViewBuilder let trailing: Trailing
     @ViewBuilder let content: Content
 
-    init(title: String, icon: String, fill: Bool = false,
+    init(title: String, icon: String, fill: Bool = false, collapsed: Binding<Bool>? = nil,
          @ViewBuilder trailing: () -> Trailing = { EmptyView() },
          @ViewBuilder content: () -> Content) {
         self.title = title
         self.icon = icon
         self.fill = fill
+        self.collapsed = collapsed
         self.trailing = trailing()
         self.content = content()
     }
+
+    private var isCollapsed: Bool { collapsed?.wrappedValue ?? false }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -1045,15 +1091,27 @@ struct Card<Content: View, Trailing: View>: View {
                 Label(title, systemImage: icon)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.primary)
+                if collapsed != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                }
                 if Trailing.self != EmptyView.self {
                     Spacer(minLength: 8)
                     trailing
                 }
             }
-            content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard let collapsed else { return }
+                withAnimation(.easeInOut(duration: 0.18)) { collapsed.wrappedValue.toggle() }
+            }
+            if !isCollapsed { content }
         }
         .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: fill ? .infinity : nil, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: fill && !isCollapsed ? .infinity : nil, alignment: .topLeading)
         .cardSurface()
     }
 }

@@ -75,6 +75,7 @@ enum SettingsKeys {
     static let gpuIndex = "gpuIndex"
     /// Comma-separated physical GPU indices to split across (2+ entries).
     static let gpuList = "gpuList"
+    static let gpusCardCollapsed = "gpusCardCollapsed"
     static let extraArgs = "extraArgs"
 
     /// Per-model extra arguments, keyed by model path. They are appended after the

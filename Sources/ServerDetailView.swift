@@ -278,7 +278,9 @@ private struct ServerDetailHero: View {
     }
 
     private var modelMenu: some View {
-        Menu {
+        // Read once: inside the ForEach this was one full settings read per model.
+        let current = server.effectiveSettings().modelPath
+        return Menu {
             if models.models.isEmpty {
                 Text(loc.t("No hay modelos descargados", "No downloaded models"))
             } else {
@@ -289,7 +291,7 @@ private struct ServerDetailHero: View {
                                 selectModel(local.url.path)
                             } label: {
                                 Label(ModelName.forPath(local.url.path).display,
-                                      systemImage: server.effectiveSettings().modelPath == local.url.path ? "checkmark" : "cube")
+                                      systemImage: current == local.url.path ? "checkmark" : "cube")
                             }
                         }
                     }
@@ -436,7 +438,7 @@ private struct ServerConfigurationWorkspace: View {
                 }
             }
             ServerSettingRow(icon: "cpu", title: "GPU") {
-                ToshDropdown(selection: gpuChoice(settings), options: gpuOptions(settings))
+                GPUSelectionMenu(gpuIndex: gpu(settings), gpuList: gpuList(settings))
             }
             ServerSettingRow(icon: "arrow.triangle.2.circlepath", title: loc.t("Router (multi-modelo)", "Router (multi-model)"),
                              detail: loc.t("Enruta peticiones entre modelos locales", "Routes requests across local models")) {
@@ -633,20 +635,6 @@ private struct ServerConfigurationWorkspace: View {
         ServerSettings.ubatchOptions.map { .init(value: $0, title: ServerSettings.ubatchLabel($0, loc: loc)) }
     }
 
-    private func gpuOptions(_ settings: ServerSettings) -> [ToshDropdown<Int>.Option] {
-        var result: [ToshDropdown<Int>.Option] = [
-            .init(value: -1, title: loc.t("GPU predeterminada", "Default GPU"),
-                  subtitle: hardware.gpus.first.map { "\($0.name) · \($0.vramGB) GB" }, systemImage: "cpu")
-        ]
-        if gpuList(settings).wrappedValue.count >= 2 {
-            result.append(.init(value: -2,
-                                title: loc.t("Reparto · %@ GPUs", "Split · %@ GPUs", "\(gpuList(settings).wrappedValue.count)"),
-                                subtitle: gpuList(settings).wrappedValue.compactMap { index in hardware.gpus.first { $0.index == index }?.name }.joined(separator: " + "),
-                                systemImage: "square.split.2x1"))
-        }
-        result += hardware.gpus.map { .init(value: $0.index, title: $0.name, subtitle: "\($0.vramGB) GB VRAM · Metal", systemImage: "display") }
-        return result
-    }
 
     private func hardwareTile(_ icon: String, _ title: String, _ detail: String) -> some View {
         HStack(spacing: 10) {
@@ -745,13 +733,6 @@ private struct ServerConfigurationWorkspace: View {
     private func ncmoe(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalNcmoe : addedBinding(\.ncmoe, fallback: settings.ncmoe, pin: Profile.Pin.moe) }
     private func vision(_ settings: ServerSettings) -> Binding<Bool> { server.profile == nil ? $globalVision : addedBinding(\.loadVision, fallback: settings.loadVision, pin: Profile.Pin.vision).optionalValue(default: true) }
     private func gpu(_ settings: ServerSettings) -> Binding<Int> { server.profile == nil ? $globalGPU : addedBinding(\.gpuIndex, fallback: settings.gpuIndex, pin: Profile.Pin.gpu) }
-    private func gpuChoice(_ settings: ServerSettings) -> Binding<Int> {
-        Binding(get: { gpuList(settings).wrappedValue.count >= 2 ? -2 : gpu(settings).wrappedValue }, set: { value in
-            guard value != -2 else { return }
-            gpuList(settings).wrappedValue = []
-            gpu(settings).wrappedValue = value
-        })
-    }
     private func gpuList(_ settings: ServerSettings) -> Binding<[Int]> {
         if server.profile == nil {
             return Binding(get: { ServerSettings.gpuList(fromCSV: globalGPUList) },

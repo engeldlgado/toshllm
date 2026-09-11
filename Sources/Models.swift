@@ -477,6 +477,7 @@ final class ModelStore: ObservableObject {
 
     func refresh() {
         ModelTraitsCache.invalidate()
+        ModelName.forgetCachedNames()
         models = LocalModel.scan(in: directory)
         modelGroups = ModelFamilyGroup.grouped(models)
         presentFiles = Set((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])

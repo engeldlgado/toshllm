@@ -128,6 +128,9 @@ struct SettingsView: View {
         ServerSettings.mmprojPath(forModel: modelPath) != nil
     }
     private var splitSelection: [Int] { ServerSettings.gpuList(fromCSV: gpuListCSV) }
+    private var peerGroupShortcuts: [(label: String, indices: [Int])] {
+        GPUPeerTopology.groups(of: hardware.gpus)
+    }
     /// GPUs the split will actually use, which is what decides whether a tensor split
     /// still holds its generation speed.
     private var splitTargetCount: Int {
@@ -154,21 +157,14 @@ struct SettingsView: View {
     private var dynamicMoeUIUnlocked: Bool {
         ShellWords.split(extraArgs).contains("TOSH_MOE_UI=1")
     }
-    private var dynamicMoeAutoRoute: DynamicMoeAutoRoute {
-        ServerSettings.fromDefaults().dynamicMoeAutoRoute
-    }
-    private var dynamicMoeModelInfo: DynamicMoeModelInfo? {
-        ServerSettings.fromDefaults().dynamicMoeModelInfo
-    }
-    private var dynamicMoeProfile: DynamicMoeOptimizationProfile? {
-        ServerSettings.fromDefaults().dynamicMoeOptimizationProfile
-    }
-    private var dynamicMoeSlotPlan: DynamicMoeSlotPlan? {
-        ServerSettings.fromDefaults().dynamicMoeSlotPlan()
-    }
-    private var effectiveDynamicMoeSlots: Int {
-        ServerSettings.fromDefaults().effectiveDynamicMoeSlots
-    }
+    /// One read per body pass instead of five: each fromDefaults() walks about
+    /// fifty UserDefaults keys.
+    private var currentSettings: ServerSettings { ServerSettings.fromDefaults() }
+    private var dynamicMoeAutoRoute: DynamicMoeAutoRoute { currentSettings.dynamicMoeAutoRoute }
+    private var dynamicMoeModelInfo: DynamicMoeModelInfo? { currentSettings.dynamicMoeModelInfo }
+    private var dynamicMoeProfile: DynamicMoeOptimizationProfile? { currentSettings.dynamicMoeOptimizationProfile }
+    private var dynamicMoeSlotPlan: DynamicMoeSlotPlan? { currentSettings.dynamicMoeSlotPlan() }
+    private var effectiveDynamicMoeSlots: Int { currentSettings.effectiveDynamicMoeSlots }
     private var dynamicMoeSlotBinding: Binding<Int> {
         Binding(
             get: { effectiveDynamicMoeSlots },
@@ -728,23 +724,18 @@ struct SettingsView: View {
                     }
                     if multiGPU {
                         LabeledContent(loc.t("GPUs del reparto", "Split GPUs")) {
-                            Menu {
-                                Button(loc.t("Todas", "All")) { gpuListCSV = "" }
-                                Divider()
-                                ForEach(hardware.gpus) { g in
-                                    Toggle("\(g.name) · \(g.vramGB) GB", isOn: Binding(
-                                        get: { splitSelection.contains(g.index) },
-                                        set: { _ in toggleSplitGPU(g.index) }))
-                                }
-                            } label: {
-                                Text(splitSelection.count >= 2
-                                        ? loc.t("%@ elegidas", "%@ selected", "\(splitSelection.count)")
-                                        : loc.t("Todas", "All"))
-                            }
-                            .fixedSize()
+                            GPUMultiPicker(
+                                label: splitSelection.count >= 2
+                                    ? loc.t("%@ elegidas", "%@ selected", "\(splitSelection.count)")
+                                    : loc.t("Todas", "All"),
+                                selection: Set(splitSelection),
+                                defaultTitle: loc.t("Todas", "All"),
+                                onDefault: { gpuListCSV = "" },
+                                onSelect: { gpuListCSV = $0.sorted().map(String.init).joined(separator: ",") },
+                                onToggle: toggleSplitGPU)
                         }
-                        .infoTip(loc.t("Qué GPUs concretas participan en el reparto (p. ej. la 0 y la 6, saltándose las demás). Con 'Todas' se usan las primeras N del selector de arriba.",
-                                    "Which specific GPUs take part in the split (e.g. 0 and 6, skipping the rest). With 'All', the first N from the picker above are used."))
+                        .infoTip(loc.t("Qué GPUs concretas participan en el reparto (p. ej. la 0 y la 6, saltándose las demás). Con 'Todas' se usan las primeras N del selector de arriba, y cada atajo 'Fabric' elige de una vez las tarjetas unidas por un mismo puente.",
+                                    "Which specific GPUs take part in the split (e.g. 0 and 6, skipping the rest). With 'All', the first N from the picker above are used, and each 'Fabric' shortcut picks every card behind one bridge at once."))
                         if splitSelection.count == 1 {
                             Label(loc.t("Elige al menos 2 GPUs para el reparto; con una sola se usan todas.",
                                         "Pick at least 2 GPUs for the split; with only one, all are used."),
@@ -784,7 +775,7 @@ struct SettingsView: View {
                                      "Infinity Fabric Link between GPUs"), isOn: $mgpuPeer)
                             .disabled(!hasPeerLink)
                             .settingsGlyph("link")
-                            .infoTip(loc.t("Si dos GPUs del reparto comparten un puente Infinity Fabric (las dos mitades de una W6800X Duo o Vega II Duo), copia las activaciones directamente entre ellas en vez de pasar por la RAM del sistema. Repartiendo por tensores acelera la lectura del prompt un 16% sin costar generación, medido en cuatro Radeon Pro Vega II. Necesita el traspaso rápido encendido: por sí solo baja la generación a la mitad. Si el equipo no lo soporta, la copia vuelve sola al método seguro.",
+                            .infoTip(loc.t("Si dos GPUs del reparto comparten un puente Infinity Fabric (las dos mitades de una W6800X Duo o Vega II Duo, o dos tarjetas unidas por el puente externo), copia las activaciones directamente entre ellas en vez de pasar por la RAM del sistema. Repartiendo por tensores acelera la lectura del prompt un 16% sin costar generación, medido en cuatro Radeon Pro Vega II. Necesita el traspaso rápido encendido: por sí solo baja la generación a la mitad. Si el equipo no lo soporta, la copia vuelve sola al método seguro.",
                                         "If two GPUs in the split share an Infinity Fabric bridge (the two halves of a W6800X Duo or Vega II Duo, or two cards joined by the external bridge), copies activations directly between them instead of through system RAM. When splitting by tensors it reads the prompt 16% faster at no cost to generation, measured on four Radeon Pro Vega II. It needs the fast hand-off on: on its own it halves generation. If the machine doesn't support it, the copy falls back to the safe path on its own."))
                         if !hasPeerLink {
                             Label(loc.t("No se detecta ningún puente entre estas GPUs, así que no hay nada que activar. Metal las pondría en un mismo grupo de pares si lo hubiera.",

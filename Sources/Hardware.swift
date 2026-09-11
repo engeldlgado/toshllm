@@ -421,6 +421,14 @@ enum GPUPeerTopology {
         }
     }
 
+    /// Cards behind one bridge are the pairing worth selecting together.
+    static func groups(of gpus: [GPUDevice]) -> [(label: String, indices: [Int])] {
+        let items = gpus.map { (index: $0.index, groupID: $0.peerGroupID) }
+        return labels(items).sorted { $0.value < $1.value }.map { id, label in
+            (label, gpus.filter { $0.peerGroupID == id }.map(\.index).sorted())
+        }
+    }
+
     private static func letter(_ position: Int) -> String {
         position < 26
             ? String(UnicodeScalar(UInt8(65 + position)))

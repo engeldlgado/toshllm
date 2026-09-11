@@ -720,13 +720,21 @@ struct ServerSettings {
 
     /// Default engine: the one bundled with the app (portable); falls back to the dev checkout.
     static var defaultBinary: String {
+        // Cached: view bodies reach this through fromDefaults(), and hitting the
+        // filesystem on every render shows up as lag.
+        if let resolved = cachedDefaultBinary { return resolved }
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/llama-server").path,
            FileManager.default.fileExists(atPath: bundled) {
+            cachedDefaultBinary = bundled
             return bundled
         }
         // patched master build: supports recent architectures (qwen35moe / Qwen 3.6)
-        return NSString(string: "~/dev/repositorios/llama.cpp/build/bin/llama-server").expandingTildeInPath
+        let fallback = NSString(string: "~/dev/repositorios/llama.cpp/build/bin/llama-server").expandingTildeInPath
+        cachedDefaultBinary = fallback
+        return fallback
     }
+
+    nonisolated(unsafe) private static var cachedDefaultBinary: String?
 
     /// The engine to launch. "bundled" resolves against the running bundle, so two
     /// installs sharing this defaults domain each use their own binary.
@@ -1715,8 +1723,13 @@ final class ServerController: ObservableObject {
         return comps.url!
     }
 
-    nonisolated static func availableGPUs() -> [GPUDevice] {
-        MTLCopyAllDevices().enumerated().map { i, dev in
+    /// Cached: the UI reads this from view bodies, and MTLCopyAllDevices() is far
+    /// too expensive to run on every render.
+    nonisolated static func availableGPUs(rescan: Bool = false) -> [GPUDevice] {
+        gpuCacheLock.lock()
+        defer { gpuCacheLock.unlock() }
+        if !rescan, let cached = cachedGPUs { return cached }
+        let devices = MTLCopyAllDevices().enumerated().map { i, dev in
             GPUDevice(index: i, name: dev.name,
                       vramMB: Int(dev.recommendedMaxWorkingSetSize / 1_048_576),
                       isExternal: dev.location == .external,
@@ -1725,7 +1738,12 @@ final class ServerController: ObservableObject {
                       peerCount: Int(dev.peerCount),
                       supportsBF16: dev.supportsFamily(.metal3))
         }
+        cachedGPUs = devices
+        return devices
     }
+
+    nonisolated(unsafe) private static var cachedGPUs: [GPUDevice]?
+    private nonisolated static let gpuCacheLock = NSLock()
 
     /// Whether any detected GPU is an external eGPU. Used to surface the
     /// VRAM-resident-weights option, which fixes eGPU slowness over Thunderbolt.

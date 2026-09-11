@@ -37,6 +37,7 @@ final class VRAMMonitor: ObservableObject {
     @Published private(set) var sample = SystemTelemetrySample()
     private var timer: Timer?
     private var polls = 0
+    private var rescanNext = false
 
     var gpus: [GPUStat] { sample.gpus }
     var memoryUsedMB: Double { sample.memoryUsedMB }
@@ -59,9 +60,15 @@ final class VRAMMonitor: ObservableObject {
 
     nonisolated static func snapshot() -> [GPUStat] { readAllGPUs(rescanDevices: true) }
 
+    /// Re-enumerates on demand, for when the user plugs or unplugs an eGPU.
+    func refreshDevices() { rescanNext = true; poll() }
+
     private func poll() {
         polls += 1
-        let rescan = polls % 10 == 1   // catch an eGPU coming or going, without paying every tick
+        // Enumerating Metal devices can take a multi-GPU Mac Pro down, so it runs
+        // once and only again when the user asks for it.
+        let rescan = polls == 1 || rescanNext
+        rescanNext = false
         Task.detached(priority: .utility) {
             let stats = Self.readAllGPUs(rescanDevices: rescan)
             let memory = Self.readSystemMemory()
