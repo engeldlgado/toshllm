@@ -1,0 +1,146 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index af5c767..542985d 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -270,17 +270,19 @@ struct ggml_metal {
+     struct ggml_metal_xdev_link {
+         ggml_metal_device_t  src_dev;
+         void *               host;
+         size_t               cap;
+         id<MTLBuffer>        wrap_src, wrap_dst;
+         // Retaining the source keeps its cached remote view valid.
+         id<MTLBuffer>        peer_src, peer_view;
+         id<MTLSharedEvent>   ev_ready, ev_done;
++        id<MTLSharedEvent>   ev_x_ready, ev_x_done;
+         uint64_t             seq;
++        uint64_t             seq_x;
+         bool                 peer_logged;
+     } xlinks[4];
+     int n_xlinks;
+ 
+     dispatch_queue_t d_queue;
+ 
+     // additional, inference-time compiled pipelines
+     ggml_metal_pipelines_t pipelines_ext;
+@@ -590,22 +592,27 @@ void ggml_metal_free(ggml_metal_t ctx) {
+         [ctx->bounded_moe_mapped_buffers[i] release];
+     }
+ #endif
+ 
+     for (int i = 0; i < ctx->n_xlinks; ++i) {
+         if (ctx->xlinks[i].seq > 0) {
+             [ctx->xlinks[i].ev_done waitUntilSignaledValue:ctx->xlinks[i].seq timeoutMS:10000];
+         }
++        if (ctx->xlinks[i].seq_x > 0) {
++            [ctx->xlinks[i].ev_x_done waitUntilSignaledValue:ctx->xlinks[i].seq_x timeoutMS:10000];
++        }
+         [ctx->xlinks[i].wrap_src release];
+         [ctx->xlinks[i].wrap_dst release];
+         [ctx->xlinks[i].peer_view release];
+         [ctx->xlinks[i].peer_src release];
+         [ctx->xlinks[i].ev_ready release];
+         [ctx->xlinks[i].ev_done release];
++        [ctx->xlinks[i].ev_x_ready release];
++        [ctx->xlinks[i].ev_x_done release];
+         free(ctx->xlinks[i].host);
+     }
+ 
+     for (int i = 0; i < GGML_METAL_MAX_COMMAND_BUFFERS; ++i) {
+         if (ctx->cmd_bufs[i].obj) {
+             [ctx->cmd_bufs[i].obj release];
+         }
+     }
+@@ -1006,16 +1013,18 @@ static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
+             return NULL;
+         }
+         link = &ctx_dst->xlinks[ctx_dst->n_xlinks++];
+         link->src_dev = ctx_src->dev;
+         id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
+         id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
+         link->ev_ready = [dev_src newSharedEvent];
+         link->ev_done  = [dev_dst newSharedEvent];
++        link->ev_x_ready = [dev_src newSharedEvent];
++        link->ev_x_done  = [dev_dst newSharedEvent];
+         if (link->ev_ready == nil || link->ev_done == nil) {
+             [link->ev_ready release];
+             [link->ev_done release];
+             memset(link, 0, sizeof(*link));
+             ctx_dst->n_xlinks--;
+             return NULL;
+         }
+     }
+@@ -1025,20 +1034,24 @@ static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
+ 
+ static bool ggml_metal_xdev_link_reserve(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+                                         struct ggml_metal_xdev_link * link, size_t size) {
+     if (link->cap == 0) {
+         GGML_LOG_INFO("%s: cross-device hand-off via shared events and host staging (TOSH_MGPU_EVENTS)\n", __func__);
+     }
+ 
+     if (link->cap < size) {
+-        // resizing frees pages a queued blit may still read; wait out the link first
++        // resizing frees pages a queued blit may still read; both paths use these buffers, so
++        // wait each one out on the events it signals
+         if (link->seq > 0 && ![link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000]) {
+             return false;
+         }
++        if (link->seq_x > 0 && ![link->ev_x_done waitUntilSignaledValue:link->seq_x timeoutMS:10000]) {
++            return false;
++        }
+         [link->wrap_src release];
+         [link->wrap_dst release];
+         free(link->host);
+         link->cap = MAX(size, (size_t) 1*1024*1024);
+         if (posix_memalign(&link->host, (size_t) sysconf(_SC_PAGESIZE), link->cap) != 0) {
+             link->host = NULL;
+             link->cap  = 0;
+             return false;
+@@ -1498,40 +1511,42 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     }
+ 
+     if (!ggml_metal_add_inplace_supported(ctx_self, tmp_self, t_self)) {
+         return false;
+     }
+ 
+     // Both sides are handed the same number: reading it off the link races with whichever
+     // card the loop reached first. Links skip values, so the back-pressure wait names its own.
+-    const uint64_t seq_prev = link_out->seq;
++    // its own events and counter: the copies number per link and this path numbers by round,
++    // and one event cannot carry both without a value landing below the last one signalled
++    const uint64_t seq_prev = link_out->seq_x;
+     const uint64_t seq_out  = seq;
+     const uint64_t seq_in   = seq;
+-    link_out->seq = seq;
++    link_out->seq_x = seq;
+ 
+     @autoreleasepool {
+         id<MTLCommandBuffer> cmd_buf = ggml_metal_cmd_buf_continue(ctx_self);
+ 
+         if (seq_prev > 0) {
+-            [cmd_buf encodeWaitForEvent:link_out->ev_done value:seq_prev];
++            [cmd_buf encodeWaitForEvent:link_out->ev_x_done value:seq_prev];
+         }
+ 
+         id<MTLBlitCommandEncoder> enc_out = [cmd_buf blitCommandEncoder];
+         [enc_out copyFromBuffer:bid_self.metal sourceOffset:bid_self.offs
+                        toBuffer:link_out->wrap_src destinationOffset:0 size:size];
+         [enc_out endEncoding];
+-        [cmd_buf encodeSignalEvent:link_out->ev_ready value:seq_out];
++        [cmd_buf encodeSignalEvent:link_out->ev_x_ready value:seq_out];
+ 
+-        [cmd_buf encodeWaitForEvent:link_in->ev_ready value:seq_in];
++        [cmd_buf encodeWaitForEvent:link_in->ev_x_ready value:seq_in];
+         id<MTLBlitCommandEncoder> enc_in = [cmd_buf blitCommandEncoder];
+         [enc_in copyFromBuffer:link_in->wrap_dst sourceOffset:0
+                       toBuffer:bid_tmp.metal destinationOffset:bid_tmp.offs size:size];
+         [enc_in endEncoding];
+-        [cmd_buf encodeSignalEvent:link_in->ev_done value:seq_in];
++        [cmd_buf encodeSignalEvent:link_in->ev_x_done value:seq_in];
+ 
+         ggml_metal_add_inplace_into(ctx_self, cmd_buf, t_self, tmp_self);
+ 
+         ggml_metal_cmd_buf_end(ctx_self, cmd_buf, false);
+     }
+ 
+     return true;
+ }
