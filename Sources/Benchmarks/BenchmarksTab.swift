@@ -35,8 +35,6 @@ struct BenchmarksView: View {
     @State private var resultSearch = ""
     @State private var resultKind = "all"
     @State private var hardware = HardwareInfo.detect()
-    @State private var comparisonAID: UUID?
-    @State private var comparisonBID: UUID?
     @State private var outputDismissed = false
     @State private var configFieldsWide = true
 
@@ -55,7 +53,7 @@ struct BenchmarksView: View {
                     Group {
                         switch dashboardSection {
                         case .results: resultsCard
-                        case .comparison: comparisonCard
+                        case .comparison: BenchmarkComparisonCard(history: bench.history).equatable()
                         case .charts: chartsCard
                         case .history: historyCard
                         }
@@ -1072,118 +1070,7 @@ struct BenchmarksView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(color.opacity(0.25))))
     }
 
-    // MARK: comparison and charts
-
-    private var comparisonA: BenchResult? {
-        comparisonAID.flatMap { id in bench.history.first(where: { $0.id == id }) }
-            ?? bench.history.first
-    }
-
-    private var comparisonB: BenchResult? {
-        comparisonBID.flatMap { id in bench.history.first(where: { $0.id == id }) }
-            ?? bench.history.dropFirst().first
-            ?? bench.history.first
-    }
-
-    private func comparisonBinding(primary: Bool) -> Binding<UUID> {
-        Binding {
-            if primary { return comparisonA?.id ?? UUID() }
-            return comparisonB?.id ?? UUID()
-        } set: { id in
-            if primary { comparisonAID = id } else { comparisonBID = id }
-        }
-    }
-
-    @ViewBuilder private var comparisonCard: some View {
-        if bench.history.count < 2 {
-            Card(title: loc.t("Comparación", "Comparison"), icon: "arrow.left.arrow.right") {
-                ContentUnavailableView(loc.t("Se necesitan dos resultados", "Two results are required"),
-                                       systemImage: "chart.bar.xaxis",
-                                       description: Text(loc.t("Ejecuta otro benchmark para comparar.",
-                                                               "Run another benchmark to compare.")))
-                    .frame(height: 150)
-            }
-        } else if let first = comparisonA, let second = comparisonB {
-            Card(title: loc.t("Comparar ejecuciones", "Compare runs"), icon: "arrow.left.arrow.right") {
-                VStack(spacing: 16) {
-                    HStack(spacing: 12) {
-                        comparisonPicker(loc.t("Ejecución A", "Run A"), selection: comparisonBinding(primary: true))
-                        Image(systemName: "arrow.left.arrow.right")
-                            .foregroundStyle(.secondary).accessibilityHidden(true)
-                        comparisonPicker(loc.t("Ejecución B", "Run B"), selection: comparisonBinding(primary: false))
-                    }
-                    HStack(spacing: 12) {
-                        comparisonMetric(title: "Prompt", first: first.pp, second: second.pp,
-                                         color: Color.chartSecondary)
-                        comparisonMetric(title: loc.t("Generación", "Generation"),
-                                         first: first.tg, second: second.tg, color: Color.appAccent)
-                    }
-                    HStack(alignment: .top, spacing: 12) {
-                        comparisonDetails(first, label: "A")
-                        comparisonDetails(second, label: "B")
-                    }
-                }
-            }
-        }
-    }
-
-    private func comparisonPicker(_ title: String, selection: Binding<UUID>) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title.uppercased()).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-            // Not a Picker: a native pop-up is as wide as its longest item, and this one lists the whole history.
-            ToshDropdown(selection: selection,
-                         options: bench.history.map { result in
-                             .init(value: result.id, title: "\(result.shortModel) · \(result.quantization)",
-                                   subtitle: result.date.formatted(date: .abbreviated, time: .shortened))
-                         },
-                         width: nil, listWidth: 420)
-                .help(loc.t("Elige la ejecución a comparar", "Choose the run to compare"))
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func comparisonMetric(title: String, first: Double, second: Double, color: Color) -> some View {
-        let delta = first == 0 ? 0 : ((second - first) / first) * 100
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(title).font(.headline)
-                Spacer()
-                Label(String(format: "%+.1f%%", delta),
-                      systemImage: delta >= 0 ? "arrow.up.right" : "arrow.down.right")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(delta >= 0 ? Color.green : Color.orange)
-            }
-            HStack(alignment: .firstTextBaseline) {
-                Text("A").font(.caption).foregroundStyle(.secondary)
-                Text(String(format: "%.1f", first)).font(.system(size: 25, weight: .bold, design: .rounded))
-                Spacer()
-                Text("B").font(.caption).foregroundStyle(.secondary)
-                Text(String(format: "%.1f", second)).font(.system(size: 25, weight: .bold, design: .rounded))
-                    .foregroundStyle(color)
-                Text("t/s").font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .padding(14).frame(maxWidth: .infinity)
-        .background(WorkspaceStyle.inset.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color.opacity(0.22)))
-    }
-
-    private func comparisonDetails(_ result: BenchResult, label: String) -> some View {
-        HStack(spacing: 10) {
-            Text(label).font(.headline).foregroundStyle(Color.appAccent)
-            ModelBrandIcon(name: result.shortModel, size: 28)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(result.shortModel).font(.callout.weight(.semibold)).lineLimit(1)
-                Text("\(result.quantization) · \(result.configLabel)")
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
-            Text(result.gpu ?? "Default GPU").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-        }
-        .padding(10).frame(maxWidth: .infinity)
-        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(WorkspaceStyle.border))
-    }
+    // MARK: charts
 
     private var chartsCard: some View {
         let points = Array(bench.history.prefix(24).reversed())
