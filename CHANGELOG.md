@@ -3,6 +3,16 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.87.3] - 2026-09-12
+
+### Fixed
+
+- **LLMs: a model split across cards answers with text instead of nothing.** About a quarter of the requests came back empty, splitting by tensors and with TensorMesh alike: 9 of 48 runs over three models and four arrangements before, none after, and reading a prompt and generation stay where they were.
+
+- **LLMs: sparse attention returns the right answer on Radeon Vega, Radeon VII and Radeon Pro Vega.** The engine's attention suite goes from 1806 to 1812 of 1812 cases, with every other card unchanged.
+
+- **Chat: typing with a Chinese, Japanese or Korean input method no longer loses the syllable being composed.** Reported in [#99](https://github.com/engeldlgado/toshllm/issues/99).
+
 ## [0.87.2] - 2026-09-11
 
 ### Fixed
