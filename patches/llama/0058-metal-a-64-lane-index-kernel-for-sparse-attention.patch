@@ -1,0 +1,128 @@
+diff --git a/ggml/src/ggml-metal/kernels/fa.metal b/ggml/src/ggml-metal/kernels/fa.metal
+index 0a6297a..ce53861 100644
+--- a/ggml/src/ggml-metal/kernels/fa.metal
++++ b/ggml/src/ggml-metal/kernels/fa.metal
+@@ -1071,24 +1071,24 @@ constant int32_t FC_flash_attn_ext_vec_ns10 [[function_constant(FC_FLASH_ATTN_EX
+ constant int32_t FC_flash_attn_ext_vec_ns20 [[function_constant(FC_FLASH_ATTN_EXT_VEC + 21)]];
+ constant int32_t FC_flash_attn_ext_vec_nsg  [[function_constant(FC_FLASH_ATTN_EXT_VEC + 22)]];
+ constant int32_t FC_flash_attn_ext_vec_nwg  [[function_constant(FC_FLASH_ATTN_EXT_VEC + 23)]];
+ constant bool    FC_flash_attn_ext_vec_has_sparse [[function_constant(FC_FLASH_ATTN_EXT_VEC + 5)]];
+ 
+ // compress the finite entries of each KQ mask row into a list of KV indices (ascending order),
+ // padded with -1 up to n_kv_max_padded (a multiple of OP_FLASH_ATTN_EXT_VEC_NCPSG)
+ // one threadgroup per mask row; the mask remains the single source of truth for the values
+-kernel void kernel_flash_attn_ext_vec_idx(
++template<short NW>
++kernel void kernel_flash_attn_ext_vec_idx_t(
+         constant ggml_metal_kargs_flash_attn_ext_vec_idx & args,
+         device const half * mask,
+         device       int  * idx,
+         uint3   tgpig[[threadgroup_position_in_grid]],
+         ushort  tiitg[[thread_index_in_threadgroup]],
+         ushort3 ntg[[threads_per_threadgroup]]) {
+-    constexpr short NW = N_SIMDWIDTH;
+     constexpr short NLOCAL = 32; // max finite positions kept in registers per thread
+ 
+     const int i1 = tgpig[0];
+     const int i2 = tgpig[1];
+     const int i3 = tgpig[2];
+ 
+     device const half * pm  = (device const half *) ((device const char *) mask + i1*args.nb31 + i2*args.nb32 + i3*args.nb33);
+     device int * pidx = idx + (((int64_t)i3*args.ne32 + i2)*args.ne31 + i1)*args.n_kv_max_padded;
+@@ -1173,16 +1173,25 @@ kernel void kernel_flash_attn_ext_vec_idx(
+ 
+     // pad the tail of the list with -1
+     const int count = min(total, args.n_kv_max);
+     for (int i = count + tiitg; i < args.n_kv_max_padded; i += ntg.x) {
+         pidx[i] = -1;
+     }
+ }
+ 
++// the scan and the per-simdgroup counts are width-dependent, so the 64-lane cards need
++// their own instantiation instead of the 32-lane default
++typedef decltype(kernel_flash_attn_ext_vec_idx_t<N_SIMDWIDTH>) flash_attn_ext_vec_idx_t;
++
++template [[host_name("kernel_flash_attn_ext_vec_idx")]] kernel flash_attn_ext_vec_idx_t
++    kernel_flash_attn_ext_vec_idx_t<32>;
++template [[host_name("kernel_flash_attn_ext_vec_idx_w64")]] kernel flash_attn_ext_vec_idx_t
++    kernel_flash_attn_ext_vec_idx_t<64>;
++
+ template<
+     typename q4_t,  // query types in shared memory
+     typename k4_t,  // key types in shared memory
+     typename v4_t,  // value types in shared memory
+     typename qk_t,  // Q*K types
+     typename s_t,   // soft-max types
+     typename s4_t,
+     typename o4_t,  // attention accumulation types
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index c368de8..a94a1b6 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -2334,17 +2334,19 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_vec_idx(
+         ggml_metal_library_t lib,
+         const ggml_tensor * op) {
+     assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+     assert(op->src[3]);
+ 
+     char name[256];
+ 
+-    snprintf(name, 256, "kernel_flash_attn_ext_vec_idx");
++    const int nw = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
++
++    snprintf(name, 256, "kernel_flash_attn_ext_vec_idx%s", nw == 64 ? "_w64" : "");
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+     }
+ 
+     GGML_UNUSED(op);
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 1853e49..7faf201 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4383,17 +4383,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             auto pipei = ggml_metal_library_get_pipeline_flash_attn_ext_vec_idx(lib, op);
+ 
+             ggml_metal_encoder_set_pipeline(enc, pipei);
+             ggml_metal_encoder_set_bytes   (enc, &argsi, sizeof(argsi), 0);
+             ggml_metal_encoder_set_buffer  (enc, bid_src3,    1);
+             ggml_metal_encoder_set_buffer  (enc, bid_amd_idx, 2);
+ 
+             int nthi = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipei), 256);
+-            nthi = std::max(32, (nthi/32)*32);
++            // whole simdgroups only: a partial one loses its slice of the count
++            const int nwi = props_dev->simd_width;
++            nthi = std::max(nwi, (nthi/nwi)*nwi);
+ 
+             ggml_metal_encoder_dispatch_threadgroups(enc, ne31, ne32, ne33, nthi, 1, 1);
+             ggml_metal_op_concurrency_reset(ctx);
+         }
+ 
+         auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
+         if (!pipeline.pipeline) {
+             const char * nm = fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline;
+@@ -4776,17 +4778,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             auto pipeline0 = ggml_metal_library_get_pipeline_flash_attn_ext_vec_idx(lib, op);
+ 
+             ggml_metal_encoder_set_pipeline(enc, pipeline0);
+             ggml_metal_encoder_set_bytes   (enc, &args0, sizeof(args0), 0);
+             ggml_metal_encoder_set_buffer  (enc, bid_src3, 1);
+             ggml_metal_encoder_set_buffer  (enc, bid_idx,  2);
+ 
+             int nth = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline0), 256);
+-            nth = std::max(32, (nth/32)*32);
++            // whole simdgroups only: a partial one loses its slice of the count
++            const int nw0 = props_dev->simd_width;
++            nth = std::max(nw0, (nth/nw0)*nw0);
+ 
+             ggml_metal_encoder_dispatch_threadgroups(enc, ne31, ne32, ne33, nth, 1, 1);
+ 
+             need_sync = true;
+         }
+ 
+         if (has_kvpad) {
+             assert(ggml_metal_op_flash_attn_ext_extra_pad(op) != 0);
