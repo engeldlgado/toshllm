@@ -2025,7 +2025,8 @@ private struct ChatComposerTextEditor: NSViewRepresentable {
         textView.font = .systemFont(ofSize: fontSize)
         textView.textColor = .labelColor
         textView.insertionPointColor = .controlAccentColor
-        if textView.string != text {
+        // Assigning the string ends an input method's composition, even with the same value.
+        if !textView.hasMarkedText(), textView.string != text {
             textView.string = text
             textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         }
