@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Profiles: applying one brings the GPU split it was saved with.** How a model splits across cards (by tensors or by layers, and the options that ride on it) was left out of the snapshot, so two profiles differing only in the split stored the same configuration: pressing Apply changed nothing on screen, and starting the engine kept whichever split was set globally. Turning vision or local-network discovery on or off in a profile was dropped the same way. Profiles saved by an earlier build behave as before until they are saved once more.
+
 ## [0.87.3] - 2026-09-12
 
 ### Fixed

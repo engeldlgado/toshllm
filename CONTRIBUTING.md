@@ -12,14 +12,21 @@ cd toshllm
 ./scripts/build-engines.sh   # one-time: builds the patched llama.cpp engines
 ./make-app.sh                # builds and packages dist/ToshLLM.app
 open dist/ToshLLM.app
+swift test                   # unit tests (needs full Xcode, see below)
 ```
 
 Requirements: macOS 14+, Xcode Command Line Tools, CMake. No Xcode project —
-the app is plain Swift Package Manager (`swift build`).
+the app is plain Swift Package Manager (`swift build`). **Running the unit
+tests (`swift test`) additionally requires a full Xcode install**, because
+XCTest ships only with Xcode, never with Command Line Tools.
 
-> **Note on tests:** Command Line Tools do not ship XCTest, so `swift test`
-> requires a full Xcode install (or just rely on CI, which runs the suite on
-> every push and pull request).
+> **Note on tests:** installing Xcode is not enough if your active developer
+> directory still points at the Command Line Tools — `swift test` then fails
+> with `no such module 'XCTest'`. Switch once with
+> `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`, or scope
+> it to a single command with
+> `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`.
+> Or just rely on CI, which runs the suite on every push and pull request.
 
 ## Project layout
 

@@ -2245,6 +2245,35 @@ final class BenchAndProfileTests: XCTestCase {
         XCTAssertNil(p.pinned)
     }
 
+    func testSplitKnobsSurviveAProfileRoundTrip() throws {
+        // Two profiles differing only in how the model is split must stay distinct
+        // after snapshot and apply; otherwise applying one never changes the engine.
+        var tensor = ServerSettings.fromDefaults()
+        tensor.multiGPU = true
+        tensor.splitMode = "tensor"
+        tensor.splitGroupSize = 2
+        tensor.multiGPUCount = 4
+        tensor.loadVision = false
+        let pTensor = tensor.makeProfile(name: "tensor")
+        XCTAssertEqual(pTensor.splitMode, "tensor")
+
+        var layer = tensor
+        layer.splitMode = "layer"
+        layer.splitGroupSize = 0
+        let pLayer = layer.makeProfile(name: "layer")
+
+        var live = ServerSettings.fromDefaults()
+        live.apply(pTensor)
+        XCTAssertEqual(live.splitMode, "tensor")
+        XCTAssertEqual(live.splitGroupSize, 2)
+        XCTAssertEqual(live.multiGPUCount, 4)
+        XCTAssertFalse(live.loadVision)
+
+        live.apply(pLayer)
+        XCTAssertEqual(live.splitMode, "layer")
+        XCTAssertEqual(live.splitGroupSize, 0)
+    }
+
     func testBenchmarkBase64URLIsUnpadded() {
         // "+/" bytes must map to "-_" with no "=" padding (RFC 4648 base64url).
         let data = Data([0xfb, 0xff, 0xbf])   // base64 "+/+/" territory

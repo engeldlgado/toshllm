@@ -38,6 +38,12 @@ struct Profile: Codable, Identifiable {
     var dynamicMoePolicy: String? = nil
     var persistCache: Bool? = nil
     var multiGPU: Bool? = nil
+    // Split knobs optional for backward compatibility with profiles saved before they existed.
+    var multiGPUCount: Int? = nil
+    var splitMode: String? = nil
+    var splitGroupSize: Int? = nil
+    var mgpuEvents: Bool? = nil
+    var mgpuPeer: Bool? = nil
     var forcePrivateBuffers: Bool? = nil
     var cacheReuse: Bool? = nil
     var loadVision: Bool? = nil
@@ -166,7 +172,14 @@ final class ProfileStore: ObservableObject {
         if let v = p.dynamicMoePolicy { d.set(v, forKey: SettingsKeys.dynamicMoePolicy) }
         if let v = p.persistCache { d.set(v, forKey: SettingsKeys.persistCache) }
         if let v = p.multiGPU { d.set(v, forKey: SettingsKeys.multiGPU) }
+        if let v = p.multiGPUCount { d.set(v, forKey: SettingsKeys.multiGPUCount) }
+        if let v = p.splitMode { d.set(v, forKey: SettingsKeys.splitMode) }
+        if let v = p.splitGroupSize { d.set(v, forKey: SettingsKeys.splitGroupSize) }
+        if let v = p.mgpuEvents { d.set(v, forKey: SettingsKeys.mgpuEvents) }
+        if let v = p.mgpuPeer { d.set(v, forKey: SettingsKeys.mgpuPeer) }
         if let v = p.forcePrivateBuffers { d.set(v, forKey: SettingsKeys.forcePrivateBuffers) }
+        if let v = p.loadVision { d.set(v, forKey: SettingsKeys.loadVision) }
+        if let v = p.localNetworkDiscovery { d.set(v, forKey: SettingsKeys.localNetworkDiscovery) }
         if let v = p.cacheReuse { d.set(v, forKey: SettingsKeys.cacheReuse) }
         if let v = p.gpuList { d.set(v.map(String.init).joined(separator: ","), forKey: SettingsKeys.gpuList) }
         if let v = p.embeddings { d.set(v, forKey: SettingsKeys.embeddings) }
@@ -227,7 +240,10 @@ extension ServerSettings {
                 dynamicMoe: dynamicMoe, dynamicMoeSlots: dynamicMoeSlots,
                 dynamicMoePrefetch: dynamicMoePrefetch, dynamicMoePolicy: dynamicMoePolicy,
                 persistCache: persistCache,
-                multiGPU: multiGPU, forcePrivateBuffers: forcePrivateBuffers,
+                multiGPU: multiGPU, multiGPUCount: multiGPUCount,
+                splitMode: splitMode, splitGroupSize: splitGroupSize,
+                mgpuEvents: mgpuEvents, mgpuPeer: mgpuPeer,
+                forcePrivateBuffers: forcePrivateBuffers,
                 cacheReuse: cacheReuse, loadVision: loadVision,
                 localNetworkDiscovery: localNetworkDiscovery,
                 gpuList: gpuList, embeddings: embeddings, uiMcpProxy: uiMcpProxy,
@@ -256,6 +272,11 @@ extension ServerSettings {
         if let v = p.dynamicMoePolicy { dynamicMoePolicy = v }
         if let v = p.persistCache { persistCache = v }
         if let v = p.multiGPU { multiGPU = v }
+        if let v = p.multiGPUCount { multiGPUCount = v }
+        if let v = p.splitMode { splitMode = v }
+        if let v = p.splitGroupSize { splitGroupSize = v }
+        if let v = p.mgpuEvents { mgpuEvents = v }
+        if let v = p.mgpuPeer { mgpuPeer = v }
         if let v = p.forcePrivateBuffers { forcePrivateBuffers = v }
         if let v = p.cacheReuse { cacheReuse = v }
         if let v = p.loadVision { loadVision = v }
