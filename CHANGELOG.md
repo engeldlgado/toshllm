@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **GPT-OSS-20B downloads from the catalog again.** Hugging Face stores the file as `gpt-oss-20b-MXFP4.gguf`; the catalog asked for the lowercase name, which is a different path and comes back as 404, so the download failed immediately.
+
 ## [0.87.3] - 2026-09-12
 
 ### Fixed

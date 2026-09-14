@@ -2385,6 +2385,12 @@ final class CatalogTests: XCTestCase {
         }
     }
 
+    func testGPTOSS20BUsesHuggingFaceFilename() {
+        let model = Catalog.models.first { $0.name == "GPT-OSS-20B" }
+        XCTAssertEqual(model?.fileName, "gpt-oss-20b-MXFP4.gguf",
+                       "Hugging Face paths are case-sensitive; lowercase mxfp4 404s")
+    }
+
     func testRecommendationExistsForReferenceHardware() {
         let recs = Catalog.recommendations(for: referenceHW)
         XCTAssertFalse(recs.isEmpty, "debe haber modelos recomendados para 12GB VRAM + 32GB RAM")
