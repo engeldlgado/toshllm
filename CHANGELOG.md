@@ -3,6 +3,26 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **LLMs: reading a prompt on a model split by tensors across two dies of one Radeon Pro Vega II Duo.** The reduction between the dies now reads the partner's memory directly over the card's own internal link instead of passing through system memory. 785 to 990 tokens a second on an 8B and 228 to 261 on a 27B, with generation speed, perplexity and output unchanged. Turned on by the existing bridge option in Settings.
+
+- **LLMs: generating on a model split by tensors across the two dies of one Radeon Pro Vega II Duo is now faster than on a single die.** An 8B goes from 52 to 75 tokens a second, against 69 on one die, and a 27B from 19.1 to 24.1, against 18.6, with identical output.
+
+- **LLMs: a model split by tensors across two Radeon Pro Vega II Duo cards is faster.** With TensorMesh a 27B generates 23.8 tokens a second instead of 18.9, and a 177B MoE reads a prompt at 309 instead of 197 and generates 25.3 instead of 20.3. Splitting across all four dies, the 27B goes from 13.9 to 21.7.
+
+- **LLMs: long conversations on a model split by tensors across the dies of a Radeon Pro Vega II Duo generate faster.** At 8K of context an 8B goes from 52 to 59 tokens a second, a 14B from 38 to 41 and a 1B from 150 to 160, with the same output and memory.
+
+- **LLMs: Qwen3.8 Flash Next predicts several tokens at once.** The app finds the model's prediction head beside it or in its `MTP/` folder and turns speculation on by itself, with no flags to type. On a 177B MoE split across four dies generation goes from 25.8 to 28.6 tokens a second, and up to 44.0 when the text is easy to predict.
+
+- **LLMs: speculation keeps both of its graph shapes ready.** A session that alternates between verifying a batch and generating one token no longer rebuilds the plan on every switch: both are prepared once and share the same memory, so nothing extra is reserved on the card. Worth 8 to 10% of generation speed on a model split across dies, with identical output.
+
+### Fixed
+
+- **LLMs: a model split by tensors answers its first request with text instead of a run of zeros.** A new working buffer now starts cleared, so a graph that reads a region before writing it can no longer pick up whatever the driver left there.
+
 ## [0.87.3] - 2026-09-12
 
 ### Fixed
