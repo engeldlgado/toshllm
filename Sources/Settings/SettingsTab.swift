@@ -195,8 +195,8 @@ struct SettingsView: View {
         case .normalMissingModel:
             return loc.t("Auto espera un modelo válido para decidir.", "Auto is waiting for a valid model before deciding.")
         case .normalSplitOrRouter:
-            return loc.t("Auto eligió normal: Dynamic MoE aún no admite split ni router.",
-                  "Auto selected normal: Dynamic MoE does not support split or router yet.")
+            return loc.t("Auto eligió normal: Dynamic MoE es de una sola GPU. D24 (MTL0/MTL1), split y router siguen en ncmoe.",
+                  "Auto selected normal: Dynamic MoE is single-GPU. D24 (MTL0/MTL1), split, and router stay on ncmoe.")
         case .normalMissingMetadata:
             return loc.t("Auto eligió normal: el GGUF no declara capas, expertos totales y expertos activos.",
                   "Auto selected normal: the GGUF does not declare layers, total experts, and active experts.")

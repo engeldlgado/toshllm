@@ -670,22 +670,23 @@ struct ServerSettings {
             env["TOSH_MOE_CPU_BANK"] = "1"
             env["GGML_SCHED_PREFETCH_EXPERTS"] = String(effectiveDynamicMoePrefetch)
             env["GGML_METAL_NCB"] = "8"
+            // Persist expert histograms across chat sessions so later loads reuse them.
+            if let mapURL = DynamicMoeProfileStore.hotMapURL(modelPath: modelPath) {
+                if FileManager.default.fileExists(atPath: mapURL.path) {
+                    env["TOSH_MOE_HOT_MAP"] = mapURL.path
+                }
+                env["TOSH_MOE_HOT_MAP_OUT"] = mapURL.path
+                if let experts = dynamicMoeModelInfo?.expertCount {
+                    env["TOSH_MOE_HOT_MAP_K"] = String(experts)
+                }
+            }
             if dynamicMoeExecutionRoute == .split {
-                let profile = dynamicMoeOptimizationProfile
                 env["TOSH_MOE_SPLIT_BANK"] = "1"
                 env["TOSH_MOE_SLOTS"] = String(dynamicMoeSlotSplit.fixed)
                 env["TOSH_MOE_SPLIT_RING"] = String(dynamicMoeSlotSplit.ring)
                 env["TOSH_MOE_BOUNDED_STAGE"] = "1"
                 env["TOSH_MOE_BOUNDED_STAGE_FORCE"] = "1"
                 env["TOSH_MOE_DOUBLE_BUFFER"] = "1"
-                if let mapPath = profile?.hotMapPath,
-                   FileManager.default.fileExists(atPath: mapPath) {
-                    env["TOSH_MOE_HOT_MAP"] = mapPath
-                    env["TOSH_MOE_HOT_MAP_OUT"] = mapPath
-                    if let experts = dynamicMoeModelInfo?.expertCount {
-                        env["TOSH_MOE_HOT_MAP_K"] = String(experts)
-                    }
-                }
             }
         } else if prefetchExperts && (ncmoe > 0 || routerMode) {
             // At/above the measured cliff the prefetch overlap collapses and stalls the
@@ -1087,13 +1088,25 @@ struct ServerSettings {
     /// lives in VRAM. Measured on a 32 GiB machine, a 9.6 GiB bank runs fine while 12.7 and
     /// 16.9 GiB starve the compositor, because wired pages cannot be evicted and swap is
     /// capped. A third of physical RAM is the line those three points draw.
+    ///
+    /// On large-RAM hosts (64 GiB and up) that 1/3 cap is the wrong shape: a 192 GiB Mac Pro
+    /// would reject a 68 GiB MoE whose experts still leave >100 GiB for the OS. Keep the 32 GiB
+    /// compositor rule below 64 GiB; above it, leave the larger of 16 GiB or 12.5% of RAM free.
     static func dynamicMoeHostBankFitsDirectMetal(modelBytes: UInt64, gpuVRAMMB: Int,
                                                   physicalRAMBytes: UInt64) -> Bool {
         guard modelBytes > 0, gpuVRAMMB > 0, physicalRAMBytes > 0 else { return false }
         let mib = UInt64(1024 * 1024)
+        let gib = mib * 1024
         let sharedBytes = min(modelBytes, UInt64(Double(UInt64(1024) * mib) * 1.3))
         let estimatedExpertBytes = modelBytes - sharedBytes
-        return estimatedExpertBytes <= physicalRAMBytes / 3
+        let cap: UInt64
+        if physicalRAMBytes >= 64 * gib {
+            let osHeadroom = max(physicalRAMBytes / 8, 16 * gib)
+            cap = physicalRAMBytes > osHeadroom ? physicalRAMBytes - osHeadroom : 0
+        } else {
+            cap = physicalRAMBytes / 3
+        }
+        return estimatedExpertBytes <= cap
     }
 
     /// Resolves DFlash against the same physical GPU selection and memory reserve

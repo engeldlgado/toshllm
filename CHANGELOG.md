@@ -9,6 +9,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: reading a prompt on a model split by tensors across two dies of one Radeon Pro Vega II Duo.** The reduction between the dies now reads the partner's memory directly over the card's own internal link instead of passing through system memory. 785 to 990 tokens a second on an 8B and 228 to 261 on a 27B, with generation speed, perplexity and output unchanged. Turned on by the existing bridge option in Settings.
 
+- **Dynamic MoE Auto on 64 GB+ hosts admits MoE files that the old one-third RAM cap refused.** A 192 GB Mac Pro can pin a 68–120 GB expert bank and still leave 24 GB for the OS; 32 GB machines keep the compositor rule. Chat writes the expert map so later loads reuse it. Split, D24 and router stay on `ncmoe`.
+
 - **LLMs: generating on a model split by tensors across the two dies of one Radeon Pro Vega II Duo is now faster than on a single die.** An 8B goes from 52 to 75 tokens a second, against 69 on one die, and a 27B from 19.1 to 24.1, against 18.6, with identical output.
 
 - **LLMs: a model split by tensors across two Radeon Pro Vega II Duo cards is faster.** With TensorMesh a 27B generates 23.8 tokens a second instead of 18.9, and a 177B MoE reads a prompt at 309 instead of 197 and generates 25.3 instead of 20.3. Splitting across all four dies, the 27B goes from 13.9 to 21.7.

@@ -978,6 +978,8 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.environment["TOSH_MOE_CPU_BANK"], "1")
         XCTAssertEqual(s.environment["GGML_SCHED_PREFETCH_EXPERTS"], "7")
         XCTAssertEqual(s.environment["GGML_METAL_NCB"], "8")
+        XCTAssertNotNil(s.environment["TOSH_MOE_HOT_MAP_OUT"])
+        XCTAssertNil(s.environment["TOSH_MOE_HOT_MAP"], "no prior map until Optimize dMoE or a chat dump")
         XCTAssertFalse(s.arguments.contains("--n-cpu-moe"), "the cache decides the split on its own")
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--load-mode")! + 1], "mlock")
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-ot")! + 1],
@@ -1076,6 +1078,17 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertTrue(ServerSettings.dynamicMoeHostBankFitsDirectMetal(
             modelBytes: UInt64(19.45 * Double(gib)), gpuVRAMMB: 32_752,
             physicalRAMBytes: 192 * gib))
+        // 1/3 of 192 GiB is ~64 GiB and would reject 68–120 GB MoEs; the large-RAM
+        // rule leaves 12.5% (24 GiB) for the OS and admits those expert banks.
+        XCTAssertTrue(ServerSettings.dynamicMoeHostBankFitsDirectMetal(
+            modelBytes: 68 * gib, gpuVRAMMB: 16_384,
+            physicalRAMBytes: 192 * gib))
+        XCTAssertTrue(ServerSettings.dynamicMoeHostBankFitsDirectMetal(
+            modelBytes: 120 * gib, gpuVRAMMB: 16_384,
+            physicalRAMBytes: 192 * gib))
+        XCTAssertFalse(ServerSettings.dynamicMoeHostBankFitsDirectMetal(
+            modelBytes: 68 * gib, gpuVRAMMB: 12_288,
+            physicalRAMBytes: 32 * gib))
     }
 
     func testAgentToolsArgumentsAreEmittedExactlyOnce() {

@@ -161,7 +161,7 @@
   "Auto refresh": "自动刷新",
   "Auto reuses the profile measured by Optimize dMoE. It can choose the direct route when the bank fits or the split route for large models. Without a profile it uses a conservative configuration; Manual cache remains available for experiments.": "自动模式会复用“优化 dMoE”测得的配置文件。专家库放得下时走直连路径，模型较大时走拆分路径。没有配置文件时会采用保守设置；手动缓存仍可用于实验。",
   "Auto selected dynamic cache: the model does not fit in VRAM with headroom and enough RAM is available.": "已自动选择动态缓存：模型放入显存后余量不足，而内存充足。",
-  "Auto selected normal: Dynamic MoE does not support split or router yet.": "已自动选择常规模式：Dynamic MoE 尚不支持拆分或路由模式。",
+  "Auto selected normal: Dynamic MoE is single-GPU. D24 (MTL0/MTL1), split, and router stay on ncmoe.": "已自动选择常规模式：Dynamic MoE 仅支持单 GPU。D24（MTL0/MTL1）、拆分和路由仍使用 ncmoe。",
   "Auto selected normal: a compatible discrete GPU is required.": "已自动选择常规模式：需要一块兼容的独立 GPU。",
   "Auto selected normal: even the minimum expert cache does not fit with the configured headroom.": "已自动选择常规模式：按当前预留余量，连最小的专家缓存都放不下。",
   "Auto selected normal: every expert in the layer is active, so the cache would not reduce VRAM.": "已自动选择常规模式：该层的每个专家都处于活跃状态，缓存不会减少显存占用。",

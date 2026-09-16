@@ -161,7 +161,7 @@
   "Auto refresh": "",
   "Auto reuses the profile measured by Optimize dMoE. It can choose the direct route when the bank fits or the split route for large models. Without a profile it uses a conservative configuration; Manual cache remains available for experiments.": "",
   "Auto selected dynamic cache: the model does not fit in VRAM with headroom and enough RAM is available.": "",
-  "Auto selected normal: Dynamic MoE does not support split or router yet.": "",
+  "Auto selected normal: Dynamic MoE is single-GPU. D24 (MTL0/MTL1), split, and router stay on ncmoe.": "",
   "Auto selected normal: a compatible discrete GPU is required.": "",
   "Auto selected normal: even the minimum expert cache does not fit with the configured headroom.": "",
   "Auto selected normal: every expert in the layer is active, so the cache would not reduce VRAM.": "",
