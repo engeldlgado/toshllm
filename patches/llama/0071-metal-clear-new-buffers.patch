@@ -6,18 +6,15 @@ Subject: [PATCH] 0071-metal-clear-new-buffers
 ---
 
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index 63fc0ac78..118ca542b 100644
+index 63fc0ac78..fd8ec5996 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -226,6 +226,19 @@ static ggml_backend_buffer_t ggml_backend_metal_buffer_type_alloc_buffer(ggml_ba
+@@ -226,6 +226,16 @@ static ggml_backend_buffer_t ggml_backend_metal_buffer_type_alloc_buffer(ggml_ba
          return NULL;
      }
  
-+    // A freshly created private buffer starts on whatever the driver had there. A graph that
-+    // reads a region before anything wrote it then sees garbage that is finite but enormous,
-+    // which on a split model showed up as one die producing NaN in its first prompt. Clearing
-+    // the allocation once costs a single fill and removes that class of first-use bug.
-+    // TOSH_METAL_ZERO_ALLOC=0 brings the old behaviour back for A/B.
++    // A new private buffer starts on whatever the driver left there, and a graph that reads a
++    // region before writing it picks that up. TOSH_METAL_ZERO_ALLOC=0 restores the old behaviour.
 +    static const bool zero_alloc = []() {
 +        const char * s = getenv("TOSH_METAL_ZERO_ALLOC");
 +        return s == nullptr || atoi(s) != 0;

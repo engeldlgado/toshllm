@@ -6,17 +6,16 @@ Subject: [PATCH] 0070-mgpu-dual-shape-graph-cache
 ---
 
 diff --git a/ggml/include/ggml-alloc.h b/ggml/include/ggml-alloc.h
-index a7926a21a..b29774a01 100644
+index a7926a21a..8dd5eb08e 100644
 --- a/ggml/include/ggml-alloc.h
 +++ b/ggml/include/ggml-alloc.h
-@@ -47,6 +47,13 @@ typedef struct ggml_gallocr * ggml_gallocr_t;
+@@ -47,6 +47,12 @@ typedef struct ggml_gallocr * ggml_gallocr_t;
  
  GGML_API ggml_gallocr_t ggml_gallocr_new(ggml_backend_buffer_type_t buft);
  GGML_API ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs);
 +
-+// Plan into another allocator's compute buffers without owning them. The borrower never frees
-+// them and never grows them: a plan that needs more memory fails instead, and the caller drops
-+// the borrowing allocator.
++// Plan into another allocator's buffers without owning them: the borrower never frees or grows
++// them, and a plan that needs more memory fails instead.
 +GGML_API void           ggml_gallocr_share_buffers(ggml_gallocr_t dst, ggml_gallocr_t src);
 +GGML_API void           ggml_gallocr_set_shape_slot(ggml_gallocr_t galloc, int slot);
 +GGML_API void           ggml_gallocr_reset_shape_slot(ggml_gallocr_t galloc, int slot);
@@ -24,15 +23,14 @@ index a7926a21a..b29774a01 100644
  
  // pre-allocate buffers from a measure graph - does not allocate or modify the graph
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
-index cc3f8cd36..6356d35e1 100644
+index cc3f8cd36..adc4f0bd2 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
-@@ -319,6 +319,14 @@ extern "C" {
+@@ -319,6 +319,13 @@ extern "C" {
      GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
      GGML_API void                 ggml_backend_sched_free(ggml_backend_sched_t sched);
  
-+    // Shape cache: a second scheduler plans into this one's compute buffers instead of
-+    // allocating its own. The borrower must be freed before the owner.
++    // A second scheduler plans into this one's buffers; free the borrower before the owner.
 +    GGML_API void                 ggml_backend_sched_share_compute_buffers(ggml_backend_sched_t dst, ggml_backend_sched_t src);
 +    // Point the backends and the compute buffers at one of the two prepared shape slots.
 +    GGML_API void                 ggml_backend_sched_set_shape_slot(ggml_backend_sched_t sched, int slot);
@@ -42,13 +40,12 @@ index cc3f8cd36..6356d35e1 100644
      // Initialize backend buffers from a measure graph
      GGML_API void                 ggml_backend_sched_reserve_size(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph, size_t * sizes);
      GGML_API bool                 ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph); // returns success
-@@ -401,6 +409,13 @@ extern "C" {
+@@ -401,6 +408,12 @@ extern "C" {
      // create a new meta device from "simple" devices, meta buffer type/buffer/backend is then derived from this:
      // TODO: this looks a bit strange - a backend API creates a device. I think we should try
      //       express this as a backend registry functionality instead
-+    // Shape cache: a backend and the compute buffers it writes into keep two prepared sets of
-+    // per-device state, so alternating between two graph shapes costs no rebuild. -1 turns the
-+    // slots off and restores the rotating containers.
++    // Two prepared sets of per-device state, so alternating graph shapes costs no rebuild.
++    // -1 turns the slots off and restores the rotating containers.
 +    GGML_API void ggml_backend_meta_set_shape_slot(ggml_backend_t meta_backend, int slot);
 +    GGML_API void ggml_backend_meta_buffer_set_shape_slot(ggml_backend_buffer_t buffer, int slot);
 +    GGML_API void ggml_backend_meta_buffer_reset_shape_slot(ggml_backend_buffer_t buffer, int slot);
@@ -57,10 +54,10 @@ index cc3f8cd36..6356d35e1 100644
          ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud);
  
 diff --git a/ggml/src/ggml-alloc.c b/ggml/src/ggml-alloc.c
-index a71838eaf..780c4b3da 100644
+index a71838eaf..ce4228a8b 100644
 --- a/ggml/src/ggml-alloc.c
 +++ b/ggml/src/ggml-alloc.c
-@@ -493,8 +493,48 @@ struct ggml_gallocr {
+@@ -493,8 +493,47 @@ struct ggml_gallocr {
  
      struct leaf_alloc * leaf_allocs; // [n_leafs]
      int n_leafs;
@@ -77,8 +74,7 @@ index a71838eaf..780c4b3da 100644
 +    dst->shared = true;
 +}
 +
-+// The compute buffers carry the per-shape state of whichever backend owns them, so the shape
-+// slot has to reach them through the allocator that planned into them.
++// The per-shape state lives in the compute buffers, reachable only through their allocator.
 +static void ggml_gallocr_shape_slot(ggml_gallocr_t galloc, int slot, bool reset) {
 +    for (int i = 0; i < galloc->n_buffers; i++) {
 +        if (galloc->buffers[i] == NULL) {
@@ -109,7 +105,7 @@ index a71838eaf..780c4b3da 100644
  ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs) {
      ggml_gallocr_t galloc = (ggml_gallocr_t)calloc(1, sizeof(struct ggml_gallocr));
      GGML_ASSERT(galloc != NULL);
-@@ -550,7 +590,7 @@ void ggml_gallocr_free(ggml_gallocr_t galloc) {
+@@ -550,7 +589,7 @@ void ggml_gallocr_free(ggml_gallocr_t galloc) {
                      break;
                  }
              }
@@ -118,13 +114,12 @@ index a71838eaf..780c4b3da 100644
                  ggml_vbuffer_free(galloc->buffers[i]);
              }
          }
-@@ -922,6 +962,13 @@ static bool ggml_gallocr_reserve_n_impl(
+@@ -922,6 +961,12 @@ static bool ggml_gallocr_reserve_n_impl(
                  realloc = true;
              }
          }
 +        if (realloc && galloc->shared) {
-+            // the owner's allocation is too small for this plan: fail so the caller can drop the
-+            // borrowing allocator instead of freeing memory it does not own
++            // too small for this plan: fail, rather than free memory this allocator does not own
 +            GGML_LOG_DEBUG("%s: shared %s buffer would have to grow to %.02f MiB\n",
 +                __func__, ggml_backend_buft_name(galloc->bufts[i]), new_size / 1024.0 / 1024.0);
 +            return false;
@@ -133,21 +128,20 @@ index a71838eaf..780c4b3da 100644
  #ifndef NDEBUG
              {
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index 07ed5675c..fb3415b3d 100644
+index 07ed5675c..23aea6c2d 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -474,6 +474,10 @@ struct ggml_backend_meta_buffer_context {
+@@ -474,6 +474,9 @@ struct ggml_backend_meta_buffer_context {
      //     currently not possible due to graph-external operations in the backend scheduler.
      ggml_backend_meta_simple_tensor_container stc_static;
      ggml_backend_meta_simple_tensor_container stc_compute[2];
-+    // Shape cache: one container per prepared shape. While a slot is active the rotating
-+    // compute containers stand still, so returning to a shape finds its mappings intact.
++    // One container per prepared shape: while a slot is active the rotating ones stand still.
 +    ggml_backend_meta_simple_tensor_container stc_slot[2];
 +    int shape_slot             = -1;
      int stc_compute_index      = 0;
      int stc_compute_index_next = 0;
      std::vector<ggml_backend_buffer_ptr> bufs;
-@@ -490,8 +494,11 @@ struct ggml_backend_meta_buffer_context {
+@@ -490,8 +493,11 @@ struct ggml_backend_meta_buffer_context {
              ggml_backend_meta_simple_tensor_container & stc_static,
              ggml_backend_meta_simple_tensor_container & stc_compute_0,
              ggml_backend_meta_simple_tensor_container & stc_compute_1,
@@ -161,7 +155,7 @@ index 07ed5675c..fb3415b3d 100644
          this->bufs.reserve(bufs.size());
          for (ggml_backend_buffer_t buf : bufs) {
              this->bufs.emplace_back(buf);
-@@ -504,10 +511,38 @@ struct ggml_backend_meta_buffer_context {
+@@ -504,10 +510,37 @@ struct ggml_backend_meta_buffer_context {
          if (stc_static.simple_tensors.find(tensor) != stc_static.simple_tensors.end()) {
              return stc_static;
          }
@@ -172,8 +166,7 @@ index 07ed5675c..fb3415b3d 100644
      }
  };
  
-+// Shape cache. The slot is state of the compute buffers a context writes into, never of the
-+// process: two contexts alternate their own shapes without touching each other.
++// The slot belongs to these buffers, not to the process: two contexts never touch each other's.
 +extern "C" void ggml_backend_meta_buffer_set_shape_slot(ggml_backend_buffer_t buffer, int slot) {
 +    if (buffer == nullptr || !ggml_backend_buffer_is_meta(buffer)) {
 +        return;
@@ -200,7 +193,7 @@ index 07ed5675c..fb3415b3d 100644
  static void ggml_backend_meta_buffer_free_buffer(ggml_backend_buffer_t buffer) {
      GGML_ASSERT(ggml_backend_buffer_is_meta(buffer));
      ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) buffer->context;
-@@ -1840,6 +1875,8 @@ static ggml_backend_buffer_t ggml_backend_meta_buffer_type_alloc_buffer(ggml_bac
+@@ -1840,6 +1873,8 @@ static ggml_backend_buffer_t ggml_backend_meta_buffer_type_alloc_buffer(ggml_bac
      ggml_backend_meta_simple_tensor_container stc_static;
      ggml_backend_meta_simple_tensor_container stc_compute_0(params, n_simple_bufts);
      ggml_backend_meta_simple_tensor_container stc_compute_1(params, n_simple_bufts);
@@ -209,7 +202,7 @@ index 07ed5675c..fb3415b3d 100644
  
      size_t max_size = 0;
      std::vector<ggml_backend_buffer_t> bufs;
-@@ -1849,7 +1886,7 @@ static ggml_backend_buffer_t ggml_backend_meta_buffer_type_alloc_buffer(ggml_bac
+@@ -1849,7 +1884,7 @@ static ggml_backend_buffer_t ggml_backend_meta_buffer_type_alloc_buffer(ggml_bac
          GGML_ASSERT(bufs.back() != nullptr);
          max_size = std::max(max_size, ggml_backend_buffer_get_size(bufs.back()));
      }
@@ -218,7 +211,7 @@ index 07ed5675c..fb3415b3d 100644
  
      return ggml_backend_buffer_init(buft, ggml_backend_meta_buffer_iface, buf_ctx, max_size);
  }
-@@ -1871,9 +1908,11 @@ struct ggml_backend_buffer * ggml_backend_meta_alloc_ctx_tensors_from_buft(struc
+@@ -1871,9 +1906,11 @@ struct ggml_backend_buffer * ggml_backend_meta_alloc_ctx_tensors_from_buft(struc
      ggml_backend_meta_simple_tensor_container stc_static   (params_static,  n_simple_bufts);
      ggml_backend_meta_simple_tensor_container stc_compute_0(params_compute, n_simple_bufts);
      ggml_backend_meta_simple_tensor_container stc_compute_1(params_compute, n_simple_bufts);
@@ -231,13 +224,12 @@ index 07ed5675c..fb3415b3d 100644
  
      ggml_backend_buffer_t meta_buf = ggml_backend_buffer_init(buft, ggml_backend_meta_buffer_iface, meta_buf_ctx, 0);
      for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
-@@ -1950,11 +1989,55 @@ struct ggml_backend_meta_context {
+@@ -1950,11 +1987,54 @@ struct ggml_backend_meta_context {
      void *                               comm_ctx       = nullptr;
      ggml_backend_comm_allreduce_tensor_t comm_allreduce = nullptr;
  
-+    // Shape cache. Each slot holds everything that only depends on the graph's shape: the
-+    // per-device subgraphs, their node arrays and the sizes derived from them. Swapping slots
-+    // moves that state in and out of the live members, so no mapping is rebuilt.
++    // Each slot holds what only depends on the graph's shape: the per-device subgraphs and the
++    // sizes derived from them. Swapping moves that state in and out of the live members.
 +    struct shape_slot_state {
 +        std::vector<backend_config> backend_configs;
 +        ggml_context_ptr            ctx;
@@ -265,8 +257,8 @@ index 07ed5675c..fb3415b3d 100644
 +        std::swap(uid,             s.uid);
 +    }
 +
-+    // A slot whose backend_configs are empty has never been prepared: give it the same simple
-+    // backends the live state uses and let the rebuild path fill the rest.
++    // An empty slot has never been prepared: hand it the same simple backends and let the
++    // rebuild path fill the rest.
 +    void shape_prepare() {
 +        if (!backend_configs.empty()) {
 +            return;
@@ -288,7 +280,7 @@ index 07ed5675c..fb3415b3d 100644
          backend_configs.reserve(n_devs);
          simple_backends.reserve(n_devs);
          for (size_t i = 0; i < n_devs; i++) {
-@@ -1990,12 +2073,45 @@ struct ggml_backend_meta_context {
+@@ -1990,12 +2070,45 @@ struct ggml_backend_meta_context {
              GGML_ASSERT(comm_free != nullptr);
              comm_free(comm_ctx);
          }
@@ -336,7 +328,7 @@ index 07ed5675c..fb3415b3d 100644
  static const char * ggml_backend_meta_get_name(ggml_backend_t backend) {
      GGML_ASSERT(ggml_backend_is_meta(backend));
      const ggml_backend_meta_context * backend_ctx = (const ggml_backend_meta_context *) backend->context;
-@@ -2148,6 +2264,10 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+@@ -2148,6 +2261,10 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
          }
          for (ggml_backend_buffer_t buf : used_buffers) {
              ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) buf->context;
@@ -377,7 +369,7 @@ index 3e90abdc3..6c15ba3a1 100644
      if (sched == NULL) {
          return;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index cbfef8eb1..0f3555583 100644
+index cbfef8eb1..e8abe2371 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -601,6 +601,12 @@ void llama_context::sched_reserve() {
@@ -393,13 +385,12 @@ index cbfef8eb1..0f3555583 100644
      gf_res_prev.reset(new llm_graph_result(max_nodes));
      gf_res_reserve.reset(new llm_graph_result(max_nodes));
  
-@@ -709,10 +715,51 @@ void llama_context::sched_reserve() {
+@@ -709,10 +715,50 @@ void llama_context::sched_reserve() {
  
      const int64_t t_end_us = ggml_time_us();
  
-+    // Shape cache. The second scheduler plans into the buffers this one just reserved, so the
-+    // pair costs graph metadata and no device memory. The two plans lay their tensors over the
-+    // same memory, so a switch waits for whatever the other shape left running.
++    // The second scheduler plans into the buffers just reserved, so the pair costs graph
++    // metadata and no device memory.
 +    {
 +        const char * env = getenv("TOSH_MGPU_SHAPE_CACHE");
 +        if (env == nullptr || atoi(env) != 0) {
@@ -445,7 +436,7 @@ index cbfef8eb1..0f3555583 100644
  void llama_context::synchronize() {
      if (!sched) {
          return;
-@@ -820,6 +867,7 @@ bool llama_context::memory_update(bool optimize) {
+@@ -820,6 +866,7 @@ bool llama_context::memory_update(bool optimize) {
          // TODO: change the mctx->apply() to return information if a graph reserve is needed
          //       reset the graph result only if the memory module did reset the scheduler
          gf_res_prev->reset();
@@ -453,7 +444,7 @@ index cbfef8eb1..0f3555583 100644
  
          if (!mctx->apply()) {
              LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
-@@ -1345,9 +1393,39 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -1345,9 +1392,39 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
  
      // the new graph parameters
      // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
@@ -495,7 +486,7 @@ index cbfef8eb1..0f3555583 100644
          //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
  
          // with pipeline parallelism, the previous graph_compute_async may still be running
-@@ -1377,9 +1455,25 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -1377,9 +1454,25 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          }
  
          if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
@@ -524,7 +515,7 @@ index cbfef8eb1..0f3555583 100644
          }
      }
  
-@@ -2429,6 +2523,7 @@ ggml_cgraph * llama_context::graph_reserve(
+@@ -2429,6 +2522,7 @@ ggml_cgraph * llama_context::graph_reserve(
  
      // when the scheduler is reset, we cannot reuse the old graph, so we reset the previous graph result to prevent that
      gf_res_prev->reset();
@@ -533,17 +524,16 @@ index cbfef8eb1..0f3555583 100644
      // store the n_outputs as it is, and restore it afterwards
      // TODO: not sure if needed, might simplify in the future by removing this
 diff --git a/src/llama-context.h b/src/llama-context.h
-index bf91daa8b..fe35b0ac5 100644
+index bf91daa8b..571638f57 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
-@@ -367,6 +367,20 @@ private:
+@@ -367,6 +367,19 @@ private:
      llm_graph_result_ptr gf_res_prev;
      llm_graph_result_ptr gf_res_reserve;
  
-+    // Shape cache: a second prepared {graph, scheduler} pair, so a session that alternates
-+    // between two shapes (one token and a speculative batch, say) rebuilds neither. The second
-+    // scheduler plans into the first one's compute buffers and owns no memory of its own; it is
-+    // declared after `sched` so it is destroyed before the buffers it borrows.
++    // A second prepared {graph, scheduler} pair, so a session alternating between two shapes
++    // rebuilds neither. It borrows the first one's buffers, and is declared after `sched` so it
++    // is destroyed before them.
 +    llm_graph_result_ptr   gf_res_alt;
 +    ggml_backend_sched_ptr sched_alt;
 +    ggml_backend_sched_t   sched_owner = nullptr; // the scheduler that owns the compute buffers
