@@ -15,13 +15,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: long conversations on a model split by tensors across the dies of a Radeon Pro Vega II Duo generate faster.** At 8K of context an 8B goes from 52 to 59 tokens a second, a 14B from 38 to 41 and a 1B from 150 to 160, with the same output and memory.
 
-- **LLMs: Qwen3.8 Flash Next predicts several tokens at once.** The app finds the model's prediction head beside it or in its `MTP/` folder and turns speculation on by itself, with no flags to type. On a 177B MoE split across four dies generation goes from 25.8 to 28.6 tokens a second, and up to 44.0 when the text is easy to predict.
+- **LLMs: Qwen3.8 Flash Next generates faster on its own.** The app finds the model's prediction head beside it or in its `MTP/` folder and uses it without any flag: 25.8 to 28.6 tokens a second on a 177B MoE, and 44.0 on predictable text.
 
-- **LLMs: speculation keeps both of its graph shapes ready.** A session that alternates between verifying a batch and generating one token no longer rebuilds the plan on every switch: both are prepared once and share the same memory, so nothing extra is reserved on the card. Worth 8 to 10% of generation speed on a model split across dies, with identical output.
+- **LLMs: models that predict several tokens at once generate 8 to 10% faster when split across GPUs.** Nothing extra is reserved on the card and the output is identical.
 
 ### Fixed
 
-- **LLMs: a model split by tensors answers its first request with text instead of a run of zeros.** A new working buffer now starts cleared, so a graph that reads a region before writing it can no longer pick up whatever the driver left there.
+- **LLMs: a model split across GPUs answers its first request with text instead of a run of zeros.**
 
 ## [0.87.3] - 2026-09-12
 
