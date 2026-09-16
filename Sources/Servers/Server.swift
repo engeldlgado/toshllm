@@ -385,8 +385,10 @@ struct ServerSettings {
                          "-ctkd", "q8_0", "-ctvd", "q8_0"]
             } else if Self.mtpEnabled(forModel: modelPath), let draft = Self.mtpDraftPath(forModel: modelPath) {
                 args += ["-md", draft, "--spec-type", "draft-mtp"]
+                args += Self.mtpDraftWidthArgs(forModel: modelPath)
             } else if Self.mtpEnabled(forModel: modelPath), Self.modelHasMTP(at: modelPath) {
                 args += ["--spec-type", "draft-mtp"]
+                args += Self.mtpDraftWidthArgs(forModel: modelPath)
             }
         }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
@@ -1207,36 +1209,95 @@ struct ServerSettings {
         return GGUFMetadataCache.hasNextNTensor(at: path)
     }
 
-    /// Finds a separate MTP assistant stored beside its base model.
+    /// Strips what only names a build of the same model: quant, precision, shard and the
+    /// markers that say "this file is the MTP head". What is left identifies the model.
+    nonisolated static func mtpStem(_ fileName: String) -> String {
+        var s = fileName.lowercased()
+        if s.hasSuffix(".gguf") { s = String(s.dropLast(5)) }
+        s = s.replacingOccurrences(of: ".mtp.", with: "-mtp-")
+        if s.hasSuffix(".mtp") { s = String(s.dropLast(4)) + "-mtp" }
+
+        var parts = s.split(separator: "-").map(String.init)
+        let marker = { (t: String) -> Bool in
+            if ["ud", "mtp", "nextn", "shared", "draft", "of", "f16", "f32", "bf16", "mxfp4",
+                "xl", "xs", "s", "m", "l", "k"].contains(t) { return true }
+            return t.range(of: #"^((i?q\d+(_[a-z0-9]+)*)|(\d{5}))$"#, options: .regularExpression) != nil
+        }
+        while let first = parts.first, marker(first) { parts.removeFirst() }
+        while let last = parts.last, marker(last) { parts.removeLast() }
+        return parts.joined(separator: "-")
+    }
+
+    /// A head must describe the same model, or the server aborts once it starts drafting.
+    nonisolated static func mtpHeadMatches(head: String, model: String) -> Bool {
+        // An unreadable header proves nothing: the name already tied the two files together,
+        // so only a header that disagrees rejects the candidate.
+        if let headArch = ggufString("general.architecture", at: head),
+           let baseArch = ggufString("general.architecture", at: model),
+           headArch != baseArch, headArch != baseArch + "_assistant" {
+            return false
+        }
+        if let headEmbd = ggufUInt32("embedding_length", at: head),
+           let baseEmbd = ggufUInt32("embedding_length", at: model), headEmbd != baseEmbd {
+            return false
+        }
+        if let headVocab = ggufUInt32("vocab_size", at: head),
+           let baseVocab = ggufUInt32("vocab_size", at: model), headVocab != baseVocab {
+            return false
+        }
+        if let layers = ggufUInt32("nextn_predict_layers", at: head) {
+            return layers >= 1
+        }
+        return true
+    }
+
+    /// Finds the MTP head of a model: beside it, or in the `MTP/` folder the upstream
+    /// repackagers ship. Names vary (`mtp-<model>.gguf`, `<model>.mtp.gguf`, `<model>-MTP-Q8_0`),
+    /// so the file name only proposes a candidate and the header decides.
     nonisolated static func mtpDraftPath(forModel modelPath: String) -> String? {
         guard !modelPath.isEmpty, !GGUFFile.isDraft(modelPath) else { return nil }
         let modelURL = URL(fileURLWithPath: modelPath)
-        let modelStem = modelURL.deletingPathExtension().lastPathComponent.lowercased()
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: modelURL.deletingLastPathComponent(), includingPropertiesForKeys: nil
-        ) else { return nil }
+        let dir = modelURL.deletingLastPathComponent()
+        let modelStem = mtpStem(modelURL.lastPathComponent)
+
+        let fm = FileManager.default
+        var files: [URL] = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for sub in ["MTP", "mtp"] {
+            let subDir = dir.appendingPathComponent(sub)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: subDir.path, isDirectory: &isDir), isDir.boolValue {
+                files += (try? fm.contentsOfDirectory(at: subDir, includingPropertiesForKeys: nil)) ?? []
+            }
+        }
 
         let candidates = files.filter { file in
-            guard file.pathExtension.lowercased() == "gguf", GGUFFile.isDraft(file.path) else { return false }
+            guard file.pathExtension.lowercased() == "gguf", file.path != modelPath else { return false }
             let name = file.lastPathComponent.lowercased()
-            let target: String
-            if name.hasPrefix("mtp-") {
-                target = String(name.dropFirst(4).dropLast(5))
-            } else if name.hasSuffix(".mtp.gguf") {
-                target = String(name.dropLast(9))
-            } else {
-                return false
-            }
-            guard modelStem == target || modelStem.hasPrefix(target + "-") || modelStem.hasPrefix(target + ".") else {
-                return false
-            }
-            if let baseArch = ggufString("general.architecture", at: modelPath),
-               let draftArch = ggufString("general.architecture", at: file.path) {
-                return draftArch == baseArch + "_assistant"
-            }
-            return true
+            let looksLikeHead = name.hasPrefix("mtp-") || name.contains(".mtp.")
+                || name.contains("-mtp-") || name.hasSuffix("-mtp.gguf") || name.contains("nextn")
+            guard looksLikeHead else { return false }
+            let stem = mtpStem(file.lastPathComponent)
+            guard stem == modelStem || modelStem.hasPrefix(stem) || stem.hasPrefix(modelStem) else { return false }
+            return mtpHeadMatches(head: file.path, model: modelPath)
         }
-        return candidates.sorted { $0.lastPathComponent.count > $1.lastPathComponent.count }.first?.path
+
+        let exact = candidates.filter { mtpStem($0.lastPathComponent) == modelStem }
+        let pool = exact.isEmpty ? candidates : exact
+        guard pool.count <= 1 else {
+            // several heads describe this model and nothing says which build to draft with:
+            // picking one silently would ship a head the user did not choose
+            AppLog.server.error("MTP: \(pool.count) heads match \(modelURL.lastPathComponent), none selected")
+            return nil
+        }
+        return pool.first?.path
+    }
+
+    /// Draft width for this model. Flash-Next verifies three tokens faster than four
+    /// (28.6 against 28.1 t/s on a normal prompt), so it takes a width of its own; every
+    /// other architecture keeps the engine default. A user width in the extra arguments
+    /// wins, because those are appended after these.
+    nonisolated static func mtpDraftWidthArgs(forModel path: String) -> [String] {
+        ggufString("general.architecture", at: path) == "qwen4exp" ? ["--spec-draft-n-max", "2"] : []
     }
 
     nonisolated static func modelUsesMTP(at path: String) -> Bool {

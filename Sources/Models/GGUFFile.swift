@@ -97,7 +97,13 @@ enum GGUFFile {
     static func isDraft(_ path: String) -> Bool {
         let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
         if name.contains("dflash") || name.contains("dspark")
-            || name.hasPrefix("mtp-") || name.hasSuffix(".mtp.gguf") {
+            || name.hasPrefix("mtp-") || name.hasSuffix(".mtp.gguf")
+            || name.contains("-mtp-") || name.hasSuffix("-mtp.gguf") {
+            return true
+        }
+        // A head packaged under its own name only differs from a model in the header: it
+        // borrows the target's embeddings and output instead of carrying its own.
+        if GGUFMetadataCache.metadata(at: path)?.string(for: "nextn_shared_target_tensors") != nil {
             return true
         }
         // Drafts ship under many names, so the name alone lets them into the picker.
