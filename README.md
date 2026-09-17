@@ -436,6 +436,7 @@ Free to use, study, modify and redistribute. Any distributed derivative must rem
 
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) (ggml-org) — inference engine
 - [iRon-Llama](https://github.com/Basten7/iRon-Llama-RC1) (Basten7) — Metal-on-AMD research for Intel Macs
+- [Chris Hafey](https://github.com/chafey) — the multi-GPU Mac Pros every split-model measurement runs on, and engine contributions
 - Developed by **Engelbert Delgado** ([@engeldlgado](https://github.com/engeldlgado))
 
 ## Support the project

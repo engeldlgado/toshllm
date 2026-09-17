@@ -7,11 +7,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
-- **LLMs: a model split by tensors across the four dies of two Radeon Pro Vega II Duo cards reads prompts faster.** An 8B goes from 845 to 1196 prompt tokens a second and a 27B from 281 to 359, with generation and output unchanged.
+- **LLMs: a model split by tensors across the four dies of two Radeon Pro Vega II Duo cards reads prompts faster.** An 8B goes from 845 to 1196 prompt tokens a second and a 27B from 281 to 359, with generation and output unchanged. Thanks to [Chris Hafey](https://github.com/chafey) for the hardware.
 
 ### Fixed
 
-- **LLMs: a collective on a split model no longer folds in what the previous round left in its buffers.** Reading a prompt and generation stay where they were on Radeon Pro Vega II Duo.
+- **LLMs: a collective on a split model no longer folds in what the previous round left in its buffers.** Generation across the four dies of two Radeon Pro W6800X Duo cards goes from 32.7 to 43.2 tokens a second, and reading a prompt and generation stay where they were on Radeon Pro Vega II Duo. Contributed in [#104](https://github.com/engeldlgado/toshllm/pull/104).
 
 ## [0.87.5] - 2026-09-16
 
