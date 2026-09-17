@@ -1,0 +1,391 @@
+diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-context.h llama/ggml/src/ggml-metal/ggml-metal-context.h
+--- a/ggml/src/ggml-metal/ggml-metal-context.h	2026-09-17 08:20:04
++++ b/ggml/src/ggml-metal/ggml-metal-context.h	2026-09-17 09:12:03
+@@ -40,6 +40,12 @@
+ bool ggml_metal_add_inplace_supported(ggml_metal_t ctx, const struct ggml_tensor * acc, const struct ggml_tensor * add);
+ bool ggml_metal_add_inplace_async    (ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add);
+ 
++// f16 transport for the prefill allreduce (TOSH_MGPU_STAGE_F16): halve the bytes crossing
++// the peer bridge by carrying partials as f16 and folding them into the f32 accumulator.
++bool ggml_metal_f16_stage_supported(ggml_metal_t ctx, const struct ggml_tensor * t);
++bool ggml_metal_cvt_f32_f16        (ggml_metal_t ctx, const struct ggml_tensor * src, struct ggml_tensor * dst);
++bool ggml_metal_add_inplace_f16_src(ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add);
++
+ // One command buffer per card per butterfly step: both copies and the add together.
+ // t_peer lets a peer-connected pair read the partner's partial straight out of its VRAM;
+ // pass NULL and the exchange always stages through the shared host block.
+diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-context.m llama/ggml/src/ggml-metal/ggml-metal-context.m
+--- a/ggml/src/ggml-metal/ggml-metal-context.m	2026-09-17 08:20:04
++++ b/ggml/src/ggml-metal/ggml-metal-context.m	2026-09-17 09:37:28
+@@ -2183,6 +2183,162 @@
+     return ggml_metal_add_inplace_into(ctx, nil, acc, add);
+ }
+ 
++// --- f16 transport for the prefill allreduce -------------------------------------------------
++// The copy butterfly moves f32 partials across the peer bridge and at prefill payloads the
++// fabric, not the wait, is the limit. Convert locally to f16 (half the bytes in flight), move
++// those across, and fold them into the f32 accumulator with an upcast add.
++
++bool ggml_metal_f16_stage_supported(ggml_metal_t ctx, const struct ggml_tensor * t) {
++    if (ctx->has_error) {
++        return false;
++    }
++    if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t) || ggml_nelements(t) == 0) {
++        return false;
++    }
++    if (ggml_metal_get_buffer_id(t).metal == nil) {
++        return false;
++    }
++    if (ggml_metal_library_get_pipeline_cpy(ctx->lib, GGML_TYPE_F32, GGML_TYPE_F16, true).pipeline == NULL) {
++        return false;
++    }
++    if (ggml_metal_library_get_pipeline_bin_one_src1(ctx->lib, GGML_OP_ADD, GGML_TYPE_F16).pipeline == NULL) {
++        return false;
++    }
++    return true;
++}
++
++// local dispatch, its own command buffer: the peer copy that follows is ordered after it by
++// the same queue/event rules that already order a computed source tensor before its push
++bool ggml_metal_cvt_f32_f16(ggml_metal_t ctx, const struct ggml_tensor * src, struct ggml_tensor * dst) {
++    if (ctx->has_error || src->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F16) {
++        return false;
++    }
++
++    struct ggml_metal_pipeline_with_params pipe_cpy = ggml_metal_library_get_pipeline_cpy(ctx->lib, GGML_TYPE_F32, GGML_TYPE_F16, true);
++    if (pipe_cpy.pipeline == NULL) {
++        return false;
++    }
++
++    struct ggml_metal_buffer_id bid_src = ggml_metal_get_buffer_id(src);
++    struct ggml_metal_buffer_id bid_dst = ggml_metal_get_buffer_id(dst);
++    if (bid_src.metal == nil || bid_dst.metal == nil) {
++        return false;
++    }
++
++    const int64_t n = ggml_nelements(src);
++
++    ggml_metal_kargs_cpy args = {
++        /*.nk0  =*/ n,
++        /*.ne00 =*/ src->ne[0], /*.ne01 =*/ src->ne[1], /*.ne02 =*/ src->ne[2], /*.ne03 =*/ src->ne[3],
++        /*.nb00 =*/ src->nb[0], /*.nb01 =*/ src->nb[1], /*.nb02 =*/ src->nb[2], /*.nb03 =*/ src->nb[3],
++        /*.ne0  =*/ dst->ne[0], /*.ne1  =*/ dst->ne[1], /*.ne2  =*/ dst->ne[2], /*.ne3  =*/ dst->ne[3],
++        /*.nb0  =*/ dst->nb[0], /*.nb1  =*/ dst->nb[1], /*.nb2  =*/ dst->nb[2], /*.nb3  =*/ dst->nb[3],
++    };
++
++    const int nth = MIN(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipe_cpy));
++
++    @autoreleasepool {
++        id<MTLCommandBuffer> cmd_buf = ggml_metal_cmd_buf_continue(ctx);
++
++        ggml_metal_encoder_t ec = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cmd_buf, false);
++        ggml_metal_encoder_set_pipeline(ec, pipe_cpy);
++        ggml_metal_encoder_set_bytes   (ec, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer  (ec, bid_src, 1);
++        ggml_metal_encoder_set_buffer  (ec, bid_dst, 2);
++        ggml_metal_encoder_dispatch_threadgroups(ec, (n + nth - 1)/nth, 1, 1, nth, 1, 1);
++        ggml_metal_encoder_end_encoding(ec);
++        ggml_metal_encoder_free(ec);
++
++        ggml_metal_cmd_buf_end(ctx, cmd_buf, false);
++    }
++
++    return true;
++}
++
++// same encode as ggml_metal_add_inplace_into, but src1 is f16 and upcast inside the kernel
++bool ggml_metal_add_inplace_f16_src(ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add) {
++    if (ctx->has_error) {
++        return false;
++    }
++    if (acc->type != GGML_TYPE_F32 || add->type != GGML_TYPE_F16) {
++        return false;
++    }
++    if (!ggml_are_same_shape(acc, add) || !ggml_is_contiguous(acc) || !ggml_is_contiguous(add)) {
++        return false;
++    }
++
++    struct ggml_metal_buffer_id bid_acc = ggml_metal_get_buffer_id(acc);
++    struct ggml_metal_buffer_id bid_add = ggml_metal_get_buffer_id(add);
++    if (bid_acc.metal == nil || bid_add.metal == nil) {
++        return false;
++    }
++
++    struct ggml_metal_pipeline_with_params pipeline = ggml_metal_library_get_pipeline_bin_one_src1(ctx->lib, GGML_OP_ADD, GGML_TYPE_F16);
++    if (pipeline.pipeline == NULL) {
++        return false;
++    }
++
++    ggml_metal_kargs_bin args = {
++        /*.ne00 =*/ (int32_t) acc->ne[0],
++        /*.ne01 =*/ (int32_t) acc->ne[1],
++        /*.ne02 =*/ (int32_t) acc->ne[2],
++        /*.ne03 =*/ (int32_t) acc->ne[3],
++        /*.nb00 =*/ acc->nb[0],
++        /*.nb01 =*/ acc->nb[1],
++        /*.nb02 =*/ acc->nb[2],
++        /*.nb03 =*/ acc->nb[3],
++        /*.ne10 =*/ (int32_t) add->ne[0],
++        /*.ne11 =*/ (int32_t) add->ne[1],
++        /*.ne12 =*/ (int32_t) add->ne[2],
++        /*.ne13 =*/ (int32_t) add->ne[3],
++        /*.nb10 =*/ add->nb[0],
++        /*.nb11 =*/ add->nb[1],
++        /*.nb12 =*/ add->nb[2],
++        /*.nb13 =*/ add->nb[3],
++        /*.ne0  =*/ (int32_t) acc->ne[0],
++        /*.ne1  =*/ (int32_t) acc->ne[1],
++        /*.ne2  =*/ (int32_t) acc->ne[2],
++        /*.ne3  =*/ (int32_t) acc->ne[3],
++        /*.nb0  =*/ acc->nb[0],
++        /*.nb1  =*/ acc->nb[1],
++        /*.nb2  =*/ acc->nb[2],
++        /*.nb3  =*/ acc->nb[3],
++        /*.offs =*/ 0,
++        /*.o1   =*/ { bid_add.offs },
++    };
++
++    // the kernel adds the fused offsets to the src1 base itself
++    bid_add.offs = 0;
++
++    @autoreleasepool {
++        id<MTLCommandBuffer> cmd_buf = ggml_metal_cmd_buf_continue(ctx);
++
++        ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cmd_buf, false);
++
++        ggml_metal_encoder_set_pipeline(enc, pipeline);
++        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer  (enc, bid_acc, 1);
++        ggml_metal_encoder_set_buffer  (enc, bid_add, 2);
++        ggml_metal_encoder_set_buffer  (enc, bid_acc, 3);
++
++        const int nth_max = MIN(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
++
++        int nth = 1;
++        while (2*nth < args.ne0 && nth < nth_max) {
++            nth *= 2;
++        }
++
++        ggml_metal_encoder_dispatch_threadgroups(enc, args.ne01, args.ne02, args.ne03, nth, 1, 1);
++
++        ggml_metal_encoder_end_encoding(enc);
++        ggml_metal_encoder_free(enc);
++
++        ggml_metal_cmd_buf_end(ctx, cmd_buf, false);
++    }
++
++    return true;
++}
++
+ // TOSH_MGPU_PEER_MIN_BATCH, the same knob the copy path reads: below it a crossing is all
+ // latency and the shared host block is faster.
+ // rows in the exchanged tensor: one for a generated token, the whole prompt for a prefill
+diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-device.cpp llama/ggml/src/ggml-metal/ggml-metal-device.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp	2026-09-17 08:20:03
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp	2026-09-17 09:12:06
+@@ -2536,6 +2536,44 @@
+     return res;
+ }
+ 
++// The f16 allreduce transport reduces f32 += f16 with an upcast. Same shape as the f32-only
++// one-shot above, but src1 goes through the same name-pair helper the cpy pipelines use, so
++// the instantiation is resolved by type the same way everywhere else.
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one_src1(ggml_metal_library_t lib, ggml_op op, ggml_type tsrc1) {
++    char base[256];
++    char name[256];
++
++    int op_num = -1;
++
++    switch (op) {
++        case GGML_OP_ADD: op_num = 0; break;
++        case GGML_OP_SUB: op_num = 1; break;
++        case GGML_OP_MUL: op_num = 2; break;
++        case GGML_OP_DIV: op_num = 3; break;
++        default: GGML_ABORT("fatal error");
++    };
++
++    const char * t1_str = ggml_metal_tname_pair(lib, tsrc1, GGML_TYPE_F32);
++
++    snprintf(base, 256, "kernel_bin_fuse_%s_%s_%s", "f32", t1_str, "f32");
++    snprintf(name, 256, "%s_op=%d_nf=%d", base, op_num, 1);
++
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        ggml_metal_cv_t cv = ggml_metal_cv_init();
++
++        ggml_metal_cv_set_int16(cv, op_num, FC_BIN + 0);
++        ggml_metal_cv_set_int16(cv, 1,      FC_BIN + 1);
++        ggml_metal_cv_set_bool (cv, false,  FC_BIN + 2);
++
++        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
++
++        ggml_metal_cv_free(cv);
++    }
++
++    return res;
++}
++
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_l2_norm(ggml_metal_library_t lib, const ggml_tensor * op) {
+     assert(op->op == GGML_OP_L2_NORM);
+ 
+diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-device.h llama/ggml/src/ggml-metal/ggml-metal-device.h
+--- a/ggml/src/ggml-metal/ggml-metal-device.h	2026-09-17 08:20:03
++++ b/ggml/src/ggml-metal/ggml-metal-device.h	2026-09-17 09:38:06
+@@ -155,6 +155,8 @@
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_merge       (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin               (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t n_fuse );
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one           (ggml_metal_library_t lib, enum ggml_op op);
++// scalar f32-accumulator bin pipeline with an explicit src1 type (f16 allreduce transport):
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one_src1      (ggml_metal_library_t lib, enum ggml_op op, enum ggml_type tsrc1);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_l2_norm           (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_group_norm        (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_norm              (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t n_fuse);
+diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal.cpp llama/ggml/src/ggml-metal/ggml-metal.cpp
+--- a/ggml/src/ggml-metal/ggml-metal.cpp	2026-09-17 08:20:04
++++ b/ggml/src/ggml-metal/ggml-metal.cpp	2026-09-17 09:36:20
+@@ -993,6 +993,9 @@
+     // overwrite what the previous one is still reducing
+     std::vector<ggml_backend_buffer_t>  tmp;
+     std::vector<size_t>                 tmp_size;
++    // f16 transport staging (TOSH_MGPU_STAGE_F16): same slotting as the f32 scratch
++    std::vector<ggml_backend_buffer_t>  tmp_f16;
++    std::vector<size_t>                 tmp_f16_size;
+     size_t                              n_steps = 0;
+ };
+ 
+@@ -1044,6 +1047,11 @@ static void ggml_backend_metal_comm_free(void * comm_ctx_v) {
+             ggml_backend_buffer_free(buf);
+         }
+     }
++    for (auto & buf : comm_ctx->tmp_f16) {
++        if (buf != nullptr) {
++            ggml_backend_buffer_free(buf);
++        }
++    }
+     delete comm_ctx;
+ }
+ 
+@@ -1160,6 +1163,76 @@
+     // the batch decides: peer wins the prefill, events the decode.
+     const bool prefer_events = ne / tensors[0]->ne[0] < ggml_metal_peer_min_batch();
+ 
++    // TOSH_MGPU_STAGE_F16=1: carry the partials across the bridge as f16 and fold them in
++    // with an upcast add. At prefill payloads the copy butterfly is fabric-bound, so halving
++    // the bytes is the lever; decode is latency-bound and stays f32. All-or-nothing per
++    // collective: every device must support both kernels or today's path runs unchanged.
++    // bf16 was the first attempt: the scalar bf16e kernels (these cards have no bfloat type)
++    // faulted the AMD driver within minutes - see .bench/bf16-stage/fault-hunt.md.
++    static int stage = -1;
++    if (stage < 0) {
++        const char * v = getenv("TOSH_MGPU_STAGE_F16");
++        stage = (v && v[0] == '1') ? 1 : 0;
++    }
++
++    // v < n_backends: inbox view, v >= n_backends: outbox view (see the registry below)
++    std::vector<ggml_tensor> tmp_f16(2*n_backends);
++    // the lever only exists at fabric-sized payloads; decode rounds are latency, and the two
++    // extra kernel dispatches per push would cost more there than the bytes they save
++    bool stage_f16 = stage == 1 && !prefer_events;
++    if (stage_f16) {
++        for (size_t i = 0; i < n_backends; i++) {
++            ggml_metal_t ctx = (ggml_metal_t) comm_ctx->backends[i]->context;
++            if (!ggml_metal_f16_stage_supported(ctx, tensors[i])) {
++                stage_f16 = false;
++                break;
++            }
++        }
++    }
++    if (stage_f16) {
++        const size_t size_f16 = (size + 1)/2;
++        // [0, n_backends*n_steps): inboxes, where a partner's staged partial is pulled to.
++        // [n_backends*n_steps, 2*n_backends*n_steps): outboxes, where this card stages its own
++        // conversion for the partner to pull. The f32 butterfly only ever stages incoming
++        // partials (a sender pushes its tensor straight across), so it can share one slot space;
++        // f16 stages both sides, and a shared slot means cvt overwrites the partial the
++        // partner's blit just landed there - silently wrong sums and cross-device read races.
++        if (comm_ctx->tmp_f16.size() < 2*n_backends*n_steps) {
++            comm_ctx->tmp_f16.resize(2*n_backends*n_steps, nullptr);
++            comm_ctx->tmp_f16_size.resize(2*n_backends*n_steps, 0);
++        }
++        for (size_t k = 0; k < 2*n_backends*n_steps; k++) {
++            if (comm_ctx->tmp_f16_size[k] < size_f16) {
++                ggml_backend_buffer_t buf = ggml_backend_alloc_buffer(comm_ctx->backends[(k/n_steps) % n_backends], size_f16);
++                if (buf == nullptr) {
++                    stage_f16 = false;
++                    break;
++                }
++                if (comm_ctx->tmp_f16[k] != nullptr) {
++                    ggml_backend_buffer_free(comm_ctx->tmp_f16[k]);
++                }
++                comm_ctx->tmp_f16[k]      = buf;
++                comm_ctx->tmp_f16_size[k] = size_f16;
++            }
++        }
++    }
++
++    // v indexes the doubled slot space: inbox v, outbox v = n_backends + i
++    auto view_tmp_f16 = [&](size_t v, size_t step) {
++        tmp_f16[v] = *tensors[v % n_backends];
++        tmp_f16[v].type     = GGML_TYPE_F16;
++        tmp_f16[v].buffer   = comm_ctx->tmp_f16[v*n_steps + step];
++        tmp_f16[v].data     = ggml_backend_buffer_get_base(tmp_f16[v].buffer);
++        tmp_f16[v].view_src = nullptr;
++        tmp_f16[v].view_offs = 0;
++        tmp_f16[v].nb[0]    = 2;
++        tmp_f16[v].nb[1]    = 2*tensors[v % n_backends]->ne[0];
++        tmp_f16[v].nb[2]    = tmp_f16[v].nb[1]*tensors[v % n_backends]->ne[1];
++        tmp_f16[v].nb[3]    = tmp_f16[v].nb[2]*tensors[v % n_backends]->ne[2];
++        tmp_f16[v].src[0]   = nullptr;
++        tmp_f16[v].src[1]   = nullptr;
++    };
++
+     // the add goes into the command buffer the copy already opened; kill switch because that
+     // buffer stays open between the two calls
+     static int fuse = -1;
+@@ -1199,8 +1272,18 @@
+     bool reduced = false;
+     auto push = [&](size_t j_src, size_t j_dst, size_t step, bool hold) {
+         view_tmp(j_dst, step);
+-        const bool ok = ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
+-                                                              tensors[j_src], &tmp[j_dst], prefer_events, hold);
++        bool ok;
++        if (stage_f16) {
++            view_tmp_f16(n_backends + j_src, step);   // this card's outbox
++            view_tmp_f16(j_dst, step);                // the receiving card's inbox
++            ggml_metal_t ctx_src = (ggml_metal_t) comm_ctx->backends[j_src]->context;
++            ok = ggml_metal_cvt_f32_f16(ctx_src, tensors[j_src], &tmp_f16[n_backends + j_src]) &&
++                 ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
++                                                        &tmp_f16[n_backends + j_src], &tmp_f16[j_dst], prefer_events, hold);
++        } else {
++            ok = ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
++                                                        tensors[j_src], &tmp[j_dst], prefer_events, hold);
++        }
+         if (!ok && reduced) {
+             // the partial sums are already folded in, so the fallback would add them a
+             // second time - a failed butterfly has no safe way out
+@@ -1210,7 +1293,10 @@
+     };
+     auto reduce = [&](size_t j_dst) {
+         ggml_metal_t ctx = (ggml_metal_t) comm_ctx->backends[j_dst]->context;
+-        if (!ggml_metal_add_inplace_async(ctx, tensors[j_dst], &tmp[j_dst])) {
++        const bool ok = stage_f16
++            ? ggml_metal_add_inplace_f16_src(ctx, tensors[j_dst], &tmp_f16[j_dst])
++            : ggml_metal_add_inplace_async(ctx, tensors[j_dst], &tmp[j_dst]);
++        if (!ok) {
+             if (reduced) {
+                 GGML_ABORT("%s: allreduce add failed after partial reduction\n", __func__);
+             }
+diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/kernels/binbcast.metal llama/ggml/src/ggml-metal/kernels/binbcast.metal
+--- a/ggml/src/ggml-metal/kernels/binbcast.metal	2026-09-17 08:19:59
++++ b/ggml/src/ggml-metal/kernels/binbcast.metal	2026-09-17 09:06:06
+@@ -165,6 +165,10 @@
+ template [[host_name("kernel_bin_fuse_f32_f32_f32_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float4, float4, float4>;
+ template [[host_name("kernel_bin_fuse_f16_f16_f16")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<half,   half,   half>;
+ template [[host_name("kernel_bin_fuse_f16_f16_f16_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<half4,  half4,  half4>;
++// f16 src1 against an f32 accumulator: the upcast add for the f16 allreduce transport.
++// (bf16 src1 is deliberately not instantiated: the scalar bf16e kernels fault the AMD driver
++// on these cards - see .bench/bf16-stage/fault-hunt.md.)
++template [[host_name("kernel_bin_fuse_f32_f16_f32")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float,  half,   float>;
+ 
+ kernel void kernel_add_id(
+         constant ggml_metal_kargs_add_id & args,

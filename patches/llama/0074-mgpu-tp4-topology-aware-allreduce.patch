@@ -1,0 +1,260 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.h b/ggml/src/ggml-metal/ggml-metal-context.h
+index 73063fc80..56fad64d0 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.h
++++ b/ggml/src/ggml-metal/ggml-metal-context.h
+@@ -18,6 +18,7 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch);
+ void ggml_metal_free(ggml_metal_t ctx);
+ 
+ const char * ggml_metal_get_name(ggml_metal_t ctx);
++uint64_t     ggml_metal_peer_group_id(ggml_metal_t ctx);
+ 
+ void ggml_metal_synchronize(ggml_metal_t ctx);
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index db641b7fc..71b6a8d15 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1180,6 +1180,18 @@ const char * ggml_metal_get_name(ggml_metal_t ctx) {
+     return ctx->name;
+ }
+ 
++uint64_t ggml_metal_peer_group_id(ggml_metal_t ctx) {
++#if TARGET_OS_OSX
++    if (@available(macOS 10.15, *)) {
++        id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
++        return device.peerGroupID;
++    }
++#else
++    GGML_UNUSED(ctx);
++#endif
++    return 0;
++}
++
+ void ggml_metal_synchronize(ggml_metal_t ctx) {
+     // nothing completes while a command buffer is still held open
+     ggml_metal_cmd_buf_hold_flush(ctx);
+diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+index 801569682..fe7f401c4 100644
+--- a/ggml/src/ggml-metal/ggml-metal.cpp
++++ b/ggml/src/ggml-metal/ggml-metal.cpp
+@@ -997,8 +997,60 @@ struct ggml_backend_metal_comm_context {
+     std::vector<ggml_backend_buffer_t>  tmp_f16;
+     std::vector<size_t>                 tmp_f16_size;
+     size_t                              n_steps = 0;
++    bool                                hierarchical = false;
++    uint64_t                            seq_round = 0;
++    size_t                              leaders[2] = {};
++    size_t                              followers[2] = {};
+ };
+ 
++// A four-device machine can expose two peer groups of two devices. A flat butterfly starts
++// with four transfers across the slow boundary. Reduce inside each group first, exchange only
++// the two group leaders, then copy the result back to their followers: two cross-group
++// transfers instead of four, and four adds instead of eight.
++static bool ggml_backend_metal_comm_hierarchical_init(ggml_backend_metal_comm_context * comm_ctx) {
++    if (comm_ctx->backends.size() != 4) {
++        return false;
++    }
++
++    uint64_t groups[2] = {};
++    size_t members[2][2] = {};
++    size_t counts[2] = {};
++    size_t n_groups = 0;
++
++    for (size_t i = 0; i < comm_ctx->backends.size(); ++i) {
++        ggml_metal_t ctx = (ggml_metal_t) comm_ctx->backends[i]->context;
++        const uint64_t group = ggml_metal_peer_group_id(ctx);
++        if (group == 0) {
++            return false;
++        }
++
++        size_t j = 0;
++        while (j < n_groups && groups[j] != group) {
++            ++j;
++        }
++        if (j == n_groups) {
++            if (n_groups == 2) {
++                return false;
++            }
++            groups[n_groups++] = group;
++        }
++        if (counts[j] == 2) {
++            return false;
++        }
++        members[j][counts[j]++] = i;
++    }
++
++    if (n_groups != 2 || counts[0] != 2 || counts[1] != 2) {
++        return false;
++    }
++
++    for (size_t j = 0; j < 2; ++j) {
++        comm_ctx->leaders[j] = members[j][0];
++        comm_ctx->followers[j] = members[j][1];
++    }
++    return true;
++}
++
+ // Butterfly reduction over the largest power of two that fits, same schedule as the generic
+ // path: fold the devices past it, exchange, then copy the result back to them.
+ static size_t ggml_backend_metal_comm_offset_max(size_t n_backends) {
+@@ -1037,6 +1089,23 @@ static void * ggml_backend_metal_comm_init(ggml_backend_t * backends, size_t n_b
+     comm_ctx->tmp.assign(n_backends*comm_ctx->n_steps, nullptr);
+     comm_ctx->tmp_size.assign(n_backends*comm_ctx->n_steps, 0);
+ 
++    const char * hierarchical = getenv("TOSH_MGPU_HIERARCHICAL");
++    const char * peer = getenv("TOSH_MGPU_PEER");
++    const bool peer_enabled = peer != nullptr && peer[0] == '1';
++    if (peer_enabled && (hierarchical == nullptr || hierarchical[0] != '0')) {
++        comm_ctx->hierarchical = ggml_backend_metal_comm_hierarchical_init(comm_ctx);
++        if (comm_ctx->hierarchical) {
++            GGML_LOG_WARN("%s: topology-aware four-device allreduce enabled (%zu,%zu) <-> (%zu,%zu)\n",
++                          __func__, comm_ctx->leaders[0], comm_ctx->followers[0],
++                          comm_ctx->leaders[1], comm_ctx->followers[1]);
++        } else if (hierarchical != nullptr) {
++            GGML_LOG_WARN("%s: topology-aware allreduce requested, but the devices are not two peer groups of two\n",
++                          __func__);
++        }
++    } else if (!peer_enabled && hierarchical != nullptr && hierarchical[0] == '1') {
++        GGML_LOG_WARN("%s: topology-aware allreduce requires peer transfers\n", __func__);
++    }
++
+     if (n_backends > 2) {
+         GGML_LOG_WARN("%s: reducing across %zu devices in %zu steps\n", __func__, n_backends, comm_ctx->n_steps);
+     }
+@@ -1075,11 +1144,6 @@ static bool ggml_backend_metal_comm_allreduce_noop(void) {
+     return v == 1;
+ }
+ 
+-// Round number for every collective the comm layer runs, one-shot rounds and staged exchanges
+-// alike. The links order on it, so the two paths must draw from the same counter: links may
+-// skip values but a value must never go backwards or land below one already signalled.
+-static uint64_t g_metal_comm_seq = 0;
+-
+ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_tensor ** tensors) {
+     if (ggml_backend_metal_comm_allreduce_noop()) {
+         return true;
+@@ -1184,7 +1248,9 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     std::vector<ggml_tensor> tmp_f16(2*n_backends);
+     // the lever only exists at fabric-sized payloads; decode rounds are latency, and the two
+     // extra kernel dispatches per push would cost more there than the bytes they save
+-    bool stage_f16 = stage == 1 && !prefer_events;
++    // Keep the topology-aware path in f32: its directed schedule already halves the slow-link
++    // traffic, and combining two numerical/transport changes needs its own validation.
++    bool stage_f16 = stage == 1 && !prefer_events && !comm_ctx->hierarchical;
+     if (stage_f16) {
+         for (size_t i = 0; i < n_backends; i++) {
+             ggml_metal_t ctx = (ggml_metal_t) comm_ctx->backends[i]->context;
+@@ -1255,8 +1321,8 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+         for (size_t i = 0; i < n_backends; i++) {
+             ctxs[i] = (ggml_metal_t) comm_ctx->backends[i]->context;
+         }
+-        if (ggml_metal_allreduce_oneshot(ctxs, tensors, n_backends, g_metal_comm_seq + 1, (uint32_t) zero_mask)) {
+-            g_metal_comm_seq++;
++        if (ggml_metal_allreduce_oneshot(ctxs, tensors, n_backends, comm_ctx->seq_round + 1, (uint32_t) zero_mask)) {
++            comm_ctx->seq_round++;
+             return true;
+         }
+     }
+@@ -1275,7 +1341,7 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     // Bailing out is only safe while no device has reduced anything: past that the generic
+     // path would add the partial sums a second time.
+     bool reduced = false;
+-    auto push = [&](size_t j_src, size_t j_dst, size_t step, bool hold) {
++    auto push = [&](size_t j_src, size_t j_dst, size_t step, bool hold, bool events) {
+         view_tmp(j_dst, step);
+         bool ok;
+         if (stage_f16) {
+@@ -1284,10 +1350,10 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+             ggml_metal_t ctx_src = (ggml_metal_t) comm_ctx->backends[j_src]->context;
+             ok = ggml_metal_cvt_f32_f16(ctx_src, tensors[j_src], &tmp_f16[n_backends + j_src]) &&
+                  ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
+-                                                        &tmp_f16[n_backends + j_src], &tmp_f16[j_dst], prefer_events, hold);
++                                                        &tmp_f16[n_backends + j_src], &tmp_f16[j_dst], events, hold);
+         } else {
+             ok = ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
+-                                                        tensors[j_src], &tmp[j_dst], prefer_events, hold);
++                                                        tensors[j_src], &tmp[j_dst], events, hold);
+         }
+         if (!ok && reduced) {
+             // the partial sums are already folded in, so the fallback would add them a
+@@ -1311,12 +1377,57 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+         return true;
+     };
+ 
++    if (comm_ctx->hierarchical && !prefer_events) {
++        // Phase 1: one directed reduction inside each peer group. The leaders retain the
++        // complete per-group sums; follower tensors may be overwritten only after phase 2.
++        for (size_t j = 0; j < 2; ++j) {
++            if (!push(comm_ctx->followers[j], comm_ctx->leaders[j], 0, hold_dst, false)) {
++                return false;
++            }
++        }
++        for (size_t j = 0; j < 2; ++j) {
++            if (!reduce(comm_ctx->leaders[j])) {
++                return false;
++            }
++        }
++
++        // Phase 2: only the leaders cross the peer-group boundary. Passing no peer tensor
++        // forces the destination-side staged path on machines without a direct bridge.
++        const uint64_t seq_round = ++comm_ctx->seq_round;
++        for (size_t j = 0; j < 2; ++j) {
++            view_tmp(comm_ctx->leaders[j], 1);
++        }
++        for (size_t j = 0; j < 2; ++j) {
++            const size_t self = comm_ctx->leaders[j];
++            const size_t peer = comm_ctx->leaders[j ^ 1];
++            if (!ggml_backend_metal_exchange_reduce(comm_ctx->backends[self], comm_ctx->backends[peer],
++                                                    tensors[self], nullptr, &tmp[self], seq_round)) {
++                GGML_ABORT("%s: hierarchical leader exchange failed after local reduction\n", __func__);
++            }
++        }
++        reduced = true;
++
++        // Phase 3: destination-side pulls copy the final sum back inside each peer group.
++        // The copy primitives signal from the leader queue after phase 2 and make the follower
++        // wait, so the next subgraph cannot observe a partial result.
++        for (size_t j = 0; j < 2; ++j) {
++            const size_t src = comm_ctx->leaders[j];
++            const size_t dst = comm_ctx->followers[j];
++            if (!ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[src], comm_ctx->backends[dst],
++                                                        tensors[src], tensors[dst], /*prefer_events =*/ false,
++                                                        /*hold_dst =*/ false)) {
++                GGML_ABORT("%s: hierarchical local broadcast failed\n", __func__);
++            }
++        }
++        return true;
++    }
++
+     const size_t offset_max = ggml_backend_metal_comm_offset_max(n_backends);
+ 
+     size_t step = 0;
+     if (n_backends > 2*offset_max) {
+         for (size_t j_src = 2*offset_max; j_src < n_backends; j_src++) {
+-            if (!push(j_src, j_src - 2*offset_max, step, hold_dst)) {
++            if (!push(j_src, j_src - 2*offset_max, step, hold_dst, prefer_events)) {
+                 return false;
+             }
+         }
+@@ -1337,8 +1448,8 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+ 
+     for (size_t offset = offset_max; offset >= 1; offset /= 2) {
+         if (fused && prefer_events) {
+-            g_metal_comm_seq++;
+-            const uint64_t seq_round = g_metal_comm_seq;
++            comm_ctx->seq_round++;
++            const uint64_t seq_round = comm_ctx->seq_round;
+             bool ok = true;
+             for (size_t j = 0; j < 2*offset_max; j++) {
+                 view_tmp(j, step);
+@@ -1418,7 +1529,7 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+             }
+         }
+         for (size_t j = 0; j < 2*offset_max; j++) {
+-            if (!push(j, j ^ offset, step, hold_dst)) {
++            if (!push(j, j ^ offset, step, hold_dst, prefer_events)) {
+                 return false;
+             }
+         }
+
