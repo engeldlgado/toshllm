@@ -15,6 +15,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: a collective on a split model no longer folds in what the previous round left in its buffers.** Generation across the four dies of two Radeon Pro W6800X Duo cards goes from 32.7 to 43.2 tokens a second, and reading a prompt and generation stay where they were on Radeon Pro Vega II Duo. Contributed in [#104](https://github.com/engeldlgado/toshllm/pull/104).
 
+- **Typing into a settings field and leaving for another tab no longer discards what you typed.** The field wrote its value only when it lost focus, and changing tabs takes it away before that happens.
+
 ## [0.87.5] - 2026-09-16
 
 ### Improved

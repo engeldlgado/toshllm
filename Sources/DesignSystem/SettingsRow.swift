@@ -88,6 +88,9 @@ struct DeferredSettingsTextField: View {
             .onSubmit(commit)
             .onChange(of: focused) { _, active in if !active { commit() } }
             .onChange(of: text) { _, value in if !focused { draft = value } }
+            // switching tabs tears the field down without ever dropping focus, so a draft
+            // that only commits on blur would be lost
+            .onDisappear(perform: commit)
             .workspaceTextField(width: width)
     }
 
@@ -122,6 +125,7 @@ struct DeferredNumberField<Value: LosslessStringConvertible & Equatable>: View {
             .onSubmit(commit)
             .onChange(of: focused) { _, active in if !active { commit() } }
             .onChange(of: value) { _, new in if !focused { draft = String(new) } }
+            .onDisappear(perform: commit)
             .workspaceTextField(width: width)
     }
 
@@ -161,6 +165,7 @@ struct DeferredSettingsIntegerField: View {
             .onSubmit(commit)
             .onChange(of: focused) { _, active in if !active { commit() } }
             .onChange(of: value) { _, newValue in if !focused { draft = String(newValue) } }
+            .onDisappear(perform: commit)
             .workspaceTextField(width: width)
     }
 
