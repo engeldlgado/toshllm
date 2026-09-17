@@ -3,6 +3,16 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **LLMs: a model split by tensors across the four dies of two Radeon Pro Vega II Duo cards reads prompts faster.** An 8B goes from 845 to 1196 prompt tokens a second and a 27B from 281 to 359, with generation and output unchanged.
+
+### Fixed
+
+- **LLMs: a collective on a split model no longer folds in what the previous round left in its buffers.** Reading a prompt and generation stay where they were on Radeon Pro Vega II Duo.
+
 ## [0.87.5] - 2026-09-16
 
 ### Improved
