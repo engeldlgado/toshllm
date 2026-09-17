@@ -1,0 +1,18 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index a3d1798f7..1bebb115f 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4262,8 +4262,11 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             }
+ 
+             // it fits in registers with nothing to spare; a compiler bump could
+-            // push it under the 256 threads it dispatches
+-            if (ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) >= 256) {
++            // push it under the 256 threads it dispatches. A driver that refused to build
++            // the kernel leaves the pipeline null, which the tile path below covers: older
++            // GCN cards reject these over their local storage limit.
++            if (pipeline.pipeline &&
++                ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) >= 256) {
+                 ggml_metal_encoder_set_pipeline(enc, pipeline);
+                 ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);

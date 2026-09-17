@@ -11,6 +11,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **LLMs: the engine no longer quits on the first request on the FirePro D500 and D700 of a Mac Pro 6,1.** Reading a prompt now falls back to the generic attention kernels when the driver refuses the AMD ones, the way generating already did. Reported in [#12](https://github.com/engeldlgado/toshllm/issues/12).
+
 - **LLMs: a collective on a split model no longer folds in what the previous round left in its buffers.** Generation across the four dies of two Radeon Pro W6800X Duo cards goes from 32.7 to 43.2 tokens a second, and reading a prompt and generation stay where they were on Radeon Pro Vega II Duo. Contributed in [#104](https://github.com/engeldlgado/toshllm/pull/104).
 
 ## [0.87.5] - 2026-09-16
