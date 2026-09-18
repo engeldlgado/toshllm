@@ -12,6 +12,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   bump:
@@ -36,6 +37,32 @@ jobs:
         if: steps.upstream.outputs.sha != steps.upstream.outputs.current
         run: |
           sed -i '' "s/LLAMA_COMMIT:-[a-f0-9]*/LLAMA_COMMIT:-${{ steps.upstream.outputs.sha }}/" scripts/build-engines.sh
+
+      - name: Check which patches apply
+        id: series
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
+        continue-on-error: true
+        run: |
+          # the report is the point of this step, so publish it before honouring the status
+          ./scripts/check-patch-series.sh "${{ steps.upstream.outputs.sha }}" /tmp/series.md && rc=0 || rc=$?
+          cat /tmp/series.md >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Report a series that no longer applies
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current && steps.series.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Weekly engine bump: the patch series no longer applies"
+          BODY=/tmp/series.md
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number -q '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file "$BODY"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY" --label "area: engine/metal"
+          fi
+          echo "the series does not apply to ${{ steps.upstream.outputs.sha }}; see the job summary" >&2
+          exit 1
 
       - name: Build engines with patches (native arch, for smoke test)
         if: steps.upstream.outputs.sha != steps.upstream.outputs.current
@@ -76,7 +103,7 @@ jobs:
           body: |
             Automated inference engine update.
 
-            - AMD patches: apply cleanly ✅
+            - AMD patches: apply cleanly ✅ (per-patch report in the run summary)
             - Static build: OK ✅
             - Smoke test (model load + real inference): OK ✅
             - Unit tests: OK ✅
