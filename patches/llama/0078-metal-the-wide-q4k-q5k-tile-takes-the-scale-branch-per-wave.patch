@@ -1,0 +1,191 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 7a979d90c..b0c4d5d1d 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1061,12 +1061,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     const bool w64 = simd_width == 64 && use_mm_manual && !has_tensor &&
+                      op->ne[1] >= w64_floor &&
+                      getenv("TOSH_MM_W64_DISABLE") == nullptr;
+ 
+     snprintf(base, 256, "kernel_mul_mm_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
+-    snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d",
+-             base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual + 2*narrow, use_mm_double_buffer, acc_f32);
++    // measured on 32 lanes only; the 64-lane tile lives in its own kernel
++    const bool uniform_scale = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K) && wide && !w64 &&
++                               use_mm_manual && !has_tensor && simd_width == 32 &&
++                               getenv("TOSH_MM_UNIFORM_SCALE_DISABLE") == nullptr;
++
++    snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d_us=%d",
++             base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual + 2*narrow, use_mm_double_buffer, acc_f32, uniform_scale);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+@@ -1078,10 +1083,11 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+         ggml_metal_cv_set_int16(cv, r2,    FC_MUL_MM + 4);
+         ggml_metal_cv_set_int16(cv, r3,    FC_MUL_MM + 5);
+         ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
+         ggml_metal_cv_set_bool(cv, use_mm_double_buffer, FC_MUL_MM + 8);
+         ggml_metal_cv_set_bool(cv, acc_f32, FC_MUL_MM + 9);
++        ggml_metal_cv_set_bool(cv, uniform_scale, FC_MUL_MM + 10);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+         ggml_metal_cv_free(cv);
+     }
+diff --git a/ggml/src/ggml-metal/kernels/dequantize.h b/ggml/src/ggml-metal/kernels/dequantize.h
+index 45d09c38e..0367ea031 100644
+--- a/ggml/src/ggml-metal/kernels/dequantize.h
++++ b/ggml/src/ggml-metal/kernels/dequantize.h
+@@ -474,32 +474,35 @@ void dequantize_q3_K(device const block_q3_K *xb, short il, thread type4x4 & reg
+     }
+ 
+     reg = (type4x4) reg_f;
+ }
+ 
+-static inline uchar2 get_scale_min_k4_just2(int j, int k, device const uchar * q) {
+-    return j < 4 ? uchar2{uchar(q[j+0+k] & 63), uchar(q[j+4+k] & 63)}
++// uniform: j < 4 comes in as j_lo, known for the whole wave
++template <bool uniform>
++static inline uchar2 get_scale_min_k4_just2(int j, int k, device const uchar * q, bool j_lo) {
++    return (uniform ? j_lo : j < 4) ? uchar2{uchar(q[j+0+k] & 63), uchar(q[j+4+k] & 63)}
+                  : uchar2{uchar((q[j+4+k] & 0xF) | ((q[j-4+k] & 0xc0) >> 2)), uchar((q[j+4+k] >> 4) | ((q[j-0+k] & 0xc0) >> 2))};
+ }
+ 
+-static inline uchar2 get_scale_min_k4_just2_w(int j, int k, uint w0, uint w1, uint w2) {
++template <bool uniform>
++static inline uchar2 get_scale_min_k4_just2_w(int j, int k, uint w0, uint w1, uint w2, bool j_lo) {
+     const int  a  = j + k;
+     const uint sh = 8*(a & 3);
+ 
+     const uint lo = (a < 4 ? w0 : w1) >> sh; // byte a
+     const uint hi = (a < 4 ? w1 : w2) >> sh; // byte a+4
+ 
+-    if (j < 4) {
++    if (uniform ? j_lo : j < 4) {
+         return uchar2{uchar(lo & 63), uchar(hi & 63)};
+     }
+ 
+     const uint pv = w0 >> sh;                // byte a-4, only reached when j >= 4
+     return uchar2{uchar((hi & 0xF) | ((pv & 0xc0) >> 2)), uchar(((hi & 0xFF) >> 4) | ((lo & 0xc0) >> 2))};
+ }
+ 
+-template <typename type4x4>
+-void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & reg) {
++template <bool uniform, typename type4x4>
++void dequantize_q4_K_impl(device const block_q4_K * xb, short il, bool lo, thread type4x4 & reg) {
+     // high nibble picked by a shifted mask and folded into the scale (as in dequantize_q4_0).
+     // int offsets: AMD miscompiles short device address math.
+     // 128-bit load: the block is 144 bytes (9*16) so the window lands 16-byte aligned
+     const int qoff = (int) (il/4) * 32 + 16 * ((int) il & 1);
+     const uint4 qsv = *(device const uint4 *)(xb->qs + qoff);
+@@ -509,11 +512,11 @@ void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & re
+     const uint4 hdr = *(device const uint4 *) xb;
+     const half2 dm  = as_type<half2>(hdr.x);
+ 
+     short is = (il/4) * 2;
+     il = il & 3;
+-    const uchar2 sc = get_scale_min_k4_just2_w(is, il/2, hdr.y, hdr.z, hdr.w);
++    const uchar2 sc = get_scale_min_k4_just2_w<uniform>(is, il/2, hdr.y, hdr.z, hdr.w, lo);
+     const float d   = il < 2 ? (float) dm[0] : (float) (dm[0] / 16.h);
+     const float min = dm[1];
+     const float dl = d * sc[0];
+     const float ml = min * sc[1];
+ 
+@@ -528,22 +531,27 @@ void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & re
+         reg[i/2][2*(i%2) + 1] = dl2 * (qsi & mask1) - ml;
+     }
+ }
+ 
+ template <typename type4x4>
+-void dequantize_q5_K(device const block_q5_K *xb, short il, thread type4x4 & reg) {
++void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & reg) {
++    dequantize_q4_K_impl<false>(xb, il, false, reg);
++}
++
++template <bool uniform, typename type4x4>
++void dequantize_q5_K_impl(device const block_q5_K *xb, short il, bool lo, thread type4x4 & reg) {
+     // 128-bit loads: the block is 176 bytes (11*16) and both windows land 16-byte aligned
+     const int qoff = 32 * (int) (il/4) + 16 * ((int) il & 1);
+     const int hoff = 16 * ((int) il & 1);
+     const uint4 qsv = *(device const uint4 *)(xb->qs + qoff);
+     const uint4 qhv = *(device const uint4 *)(xb->qh + hoff);
+ 
+     short is = (il/4) * 2;
+     const ushort ul0 = 1 << (il/2);
+     const ushort ul1 = ul0 << 8;
+     il = il & 3;
+-    const uchar2 sc = get_scale_min_k4_just2(is, il/2, xb->scales);
++    const uchar2 sc = get_scale_min_k4_just2<uniform>(is, il/2, xb->scales, lo);
+     const float d = il < 2 ? xb->d : xb->d / 16.f;
+     const float min = xb->dmin;
+     const float dl = d * sc[0];
+     const float ml = min * sc[1];
+ 
+@@ -562,10 +570,29 @@ void dequantize_q5_K(device const block_q5_K *xb, short il, thread type4x4 & reg
+     }
+ 
+     reg = (type4x4) reg_f;
+ }
+ 
++template <typename type4x4>
++void dequantize_q5_K(device const block_q5_K *xb, short il, thread type4x4 & reg) {
++    dequantize_q5_K_impl<false>(xb, il, false, reg);
++}
++
++// for kernels that know j < 4 per wave; a no-op for every other block type
++template <typename block_q, typename type4x4>
++void dequantize_lo(device const block_q * xb, short il, bool lo, thread type4x4 & reg) {}
++
++template <typename type4x4>
++void dequantize_lo(device const block_q4_K * xb, short il, bool lo, thread type4x4 & reg) {
++    dequantize_q4_K_impl<true>(xb, il, lo, reg);
++}
++
++template <typename type4x4>
++void dequantize_lo(device const block_q5_K * xb, short il, bool lo, thread type4x4 & reg) {
++    dequantize_q5_K_impl<true>(xb, il, lo, reg);
++}
++
+ template <typename type4x4>
+ void dequantize_q6_K(device const block_q6_K *xb, short il, thread type4x4 & reg) {
+     const half d_all = xb->d;
+     device const uint16_t * ql = (device const uint16_t *)xb->ql;
+     device const uint16_t * qh = (device const uint16_t *)xb->qh;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+index daa1e301c..9bd37ef3f 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
+@@ -9,10 +9,11 @@ constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
+ constant short FC_mul_mm_r3    [[function_constant(FC_MUL_MM + 5)]];
+ constant bool  FC_mul_mm_manual [[function_constant(FC_MUL_MM + 6)]];
+ constant bool  FC_mul_mm_narrow [[function_constant(FC_MUL_MM + 7)]];
+ constant bool  FC_mul_mm_double_buffer [[function_constant(FC_MUL_MM + 8)]];
+ constant bool  FC_mul_mm_acc_f32 [[function_constant(FC_MUL_MM + 9)]];
++constant bool  FC_mul_mm_uniform_scale [[function_constant(FC_MUL_MM + 10)]];
+ 
+ // each block_q contains 16*nl weights
+ #ifdef GGML_METAL_HAS_TENSOR
+ template<
+     typename SA, typename SA_4x4, typename SA_8x8,
+@@ -267,11 +268,18 @@ kernel void kernel_mul_mm(
+                 *(sa + 64*ib + el) = loop_k + 16*il + i < args.ne00 ? *((device T0 *) x + i) : 0;
+             }
+         } else {
+             S0_4x4 temp_a;
+             if (loadA) {
+-                dequantize_func(x, il, temp_a);
++                // q4_K/q5_K wide: il is il0 + 2*(t % 8) with t = loop_k/NK, so the scale pair's
++                // j < 4 is (loop_k & 128) == 0, uniform per wave instead of derived per lane
++                if (FC_mul_mm_uniform_scale && NLR == 8 &&
++                    (is_same<block_q, block_q4_K>::value || is_same<block_q, block_q5_K>::value)) {
++                    dequantize_lo(x, il, (loop_k & 128) == 0, temp_a);
++                } else {
++                    dequantize_func(x, il, temp_a);
++                }
+             }
+ 
+             if (!FC_mul_mm_double_buffer) {
+                 threadgroup_barrier(mem_flags::mem_threadgroup);
+             }
