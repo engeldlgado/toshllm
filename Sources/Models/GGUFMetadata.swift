@@ -47,6 +47,7 @@ struct GGUFMetadata: Sendable {
         30: "IQ4_XS", 31: "IQ1_M", 32: "BF16",
         36: "TQ1_0", 37: "TQ2_0", 38: "MXFP4", 39: "NVFP4",
         40: "Q1_0", 41: "Q2_0",
+        141: "PQ2_0", 142: "PQ2_0", 143: "PTQ1_0",
     ]
 }
 
@@ -81,6 +82,8 @@ private func ggufBytesPerElement(_ typeID: UInt32) -> Double {
     case 20: return 18.0/32                // IQ4_NL
     case 23: return 136.0/256              // IQ4_XS
     case 39: return 17.0/32                // MXFP4
+    case 142: return 34.0/128              // PQ2_0
+    case 143: return 28.0/128              // PTQ1_0
     default: return 144.0/256
     }
 }

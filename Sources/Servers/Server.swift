@@ -2088,7 +2088,12 @@ final class ServerController: ObservableObject {
             return "Este modelo no trae cabezal MTP: descarga la variante -MTP- / model has no MTP head: download the -MTP- variant"
         }
         if tail.contains("invalid ggml type") || tail.contains("should be in [0,") {
-            return "Cuantización no soportada por el motor (formato de un fork, p. ej. Prism ML): usa un GGUF con quant estándar (Q4_K_M, Q8_0, Q2_0_g64…) / quantization not supported by the engine (a fork's format, e.g. Prism ML): use a GGUF with a standard quant (Q4_K_M, Q8_0, Q2_0_g64…)"
+            return "Cuantización no soportada por el motor (formato de un fork): usa un GGUF con quant estándar (Q4_K_M, Q8_0, Q2_0_g64…) / quantization not supported by the engine (a fork's format): use a GGUF with a standard quant (Q4_K_M, Q8_0, Q2_0_g64…)"
+        }
+        // Prism ML models store rotated weights; a transform this engine does not know would
+        // load and answer with garbage, so the engine refuses it instead
+        if tail.contains("prism.hadamard") || tail.contains("Hadamard") {
+            return "El modelo pide una rotación de Hadamard que este motor no admite: usa otra versión del GGUF / the model asks for a Hadamard rotation this engine does not support: use another build of the GGUF"
         }
         if tail.contains("invalid magic") || tail.contains("failed to load model")
             || tail.contains("error loading model") {

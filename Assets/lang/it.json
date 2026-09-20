@@ -1510,7 +1510,7 @@
   "Summarize this content and highlight the main ideas:": "Riassumi questo contenuto ed evidenzia le idee principali:",
   "Summarizes completed history so the next turn processes less context. The full chat remains visible and saved.": "Riassume la cronologia completata affinché il prossimo turno elabori meno contesto. La chat completa rimane visibile e salvata.",
   "Summarizing older messages with the model to free context.": "Riassunto dei messaggi più vecchi con il modello per liberare il contesto.",
-  "Support development by card on Getly": "Supporta lo sviluppo tramite carta su Getly",
+  "Support ToshLLM development": "Supporta lo sviluppo di ToshLLM",
   "Support the project": "Sostieni il progetto",
   "Supported": "Supportato",
   "Supports local and remote servers.": "Supporta server locali e remoti.",

@@ -1510,7 +1510,7 @@
   "Summarize this content and highlight the main ideas:": "总结这段内容并突出主要观点：",
   "Summarizes completed history so the next turn processes less context. The full chat remains visible and saved.": "把已经结束的历史记录总结起来，让下一轮少处理一些上下文。完整的聊天内容仍然可见并保存。",
   "Summarizing older messages with the model to free context.": "正在用模型总结较早的消息，以腾出上下文。",
-  "Support development by card on Getly": "在 Getly 上用银行卡支持开发",
+  "Support ToshLLM development": "支持 ToshLLM 的开发",
   "Support the project": "支持这个项目",
   "Supported": "支持",
   "Supports local and remote servers.": "支持本地和远程服务器。",

@@ -1510,7 +1510,7 @@
   "Summarize this content and highlight the main ideas:": "この内容を要約し、要点を挙げて:",
   "Summarizes completed history so the next turn processes less context. The full chat remains visible and saved.": "済んだ履歴を要約し、次の応答で処理するコンテキストを減らします。チャット全体は表示も保存もされたままです。",
   "Summarizing older messages with the model to free context.": "コンテキストを空けるため、古いメッセージをモデルで要約しています。",
-  "Support development by card on Getly": "Getlyでカード決済により開発を支援",
+  "Support ToshLLM development": "ToshLLMの開発を支援",
   "Support the project": "プロジェクトを支援",
   "Supported": "対応",
   "Supports local and remote servers.": "ローカルとリモートのサーバーに対応しています。",
