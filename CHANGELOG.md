@@ -3,6 +3,30 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **LLMs: Prism ML's Ternary Bonsai 2 27B runs in both of its packings, PQ2_0 and PTQ1_0, with its vision projector.** On a Radeon RX 6700 XT the PQ2_0 file reads prompts at 258 tokens a second and generates at 33.4, against 59 and 24.8 with Prism's own build, with the same output; the 1.2 GB smaller PTQ1_0 file gets 236 and 33.1. On a Radeon Pro Vega II Duo PQ2_0 runs at 204 and 36.9, where Prism's build does not run.
+
+### Improved
+
+- **LLMs: Qwen3.5, Qwen3.6 and Qwen3.8 models read prompts and generate faster, most of all on Radeon Vega, Radeon VII and Radeon Pro Vega.** On a Radeon Pro Vega II Duo Qwen3.8-27B Q4_0 goes from 161 to 191 prompt tokens a second and from 23.8 to 25.9 generated; on a Radeon RX 6700 XT Qwen3.5-9B goes from 52.8 to 55.8 generated tokens a second. Across the four dies of two Radeon Pro Vega II Duo cards, Qwen3.8 Flash Next goes from 276 to 305 prompt tokens a second, and the same 27B split across two dies from 281 to 321 and from 27.7 to 29.2 generated.
+
+- **LLMs: Q4_K and Q5_K models read prompts slightly faster on AMD RDNA2 (tested on the Radeon RX 6700 XT).** Prompt processing is 0.14 to 0.15 percent faster with Q4_K and 0.20 to 0.25 percent faster with Q5_K, with the same output.
+
+### Changed
+
+- **The sponsor button in the app and the README now opens the new support page.** The previous card payment page is no longer used.
+
+### Fixed
+
+- **LLMs: Qwen3.8 Flash Next split by tensors no longer quits when the batch size is raised above 512.** At 1024 it now reads a 13K-token prompt across the four dies of two Radeon Pro Vega II Duo cards at 294 tokens a second instead of 236, with the same generation speed and output.
+
+### Known issues
+
+- **LLMs: Qwen3.8 Flash Next split by tensors can still stop in the middle of a long answer.** Rarely, generation stalls with a GPU timeout or turns into a run of zeros; it is under investigation. Until then, keep its batch size at 1024 or below.
+
 ## [0.87.6] - 2026-09-17
 
 ### Improved
