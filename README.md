@@ -443,9 +443,9 @@ Free to use, study, modify and redistribute. Any distributed derivative must rem
 
 ToshLLM is free and open source, built in the open for the Mac AMD community. If it's useful to you, sponsoring keeps it independent and moving forward.
 
-### 💜 [Become a sponsor on Getly](https://www.getly.store/product/toshllm-for-intel-macs-open-source-development-sponsor)
+### 💜 [Become a sponsor](https://youpay.me/engeldlgado/bio)
 
-Pay by card, quick and friendly. Every contribution funds continued development. Thank you for being part of this.
+Quick and friendly. Every contribution funds continued development. Thank you for being part of this.
 
 Prefer crypto?
 
@@ -516,9 +516,9 @@ Descarga el `.dmg` desde [Releases](https://github.com/engeldlgado/toshllm/relea
 
 ToshLLM es libre y de código abierto, hecho para la comunidad Mac AMD. Si te resulta útil, patrocinarlo lo mantiene independiente y avanzando.
 
-#### 💜 [Conviértete en patrocinador en Getly](https://www.getly.store/product/toshllm-for-intel-macs-open-source-development-sponsor)
+#### 💜 [Conviértete en patrocinador](https://youpay.me/engeldlgado/bio)
 
-Pago con tarjeta, rápido y sencillo. Cada aporte financia el desarrollo. Gracias por ser parte de esto.
+Rápido y sencillo. Cada aporte financia el desarrollo. Gracias por ser parte de esto.
 
 ¿Prefieres cripto? **Binance Pay**: alias `engeldlgado` · **USDT (TRC-20)**: `TFUG271bbbQEmFu4wkFHyvNNkYRZC5JDUf`
 

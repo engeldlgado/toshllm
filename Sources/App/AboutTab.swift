@@ -18,7 +18,7 @@ enum AppInfo {
     static let issuesURL = repositoryURL + "/issues"
     static let featureRequestURL = repositoryURL + "/issues/new?template=feature_request.yml"
     static let discussionsURL = repositoryURL + "/discussions"
-    static let sponsorURL = "https://www.getly.store/product/toshllm-for-intel-macs-open-source-development-sponsor"
+    static let sponsorURL = "https://youpay.me/engeldlgado/bio"
     static let binancePayID = "engeldlgado"
     static let usdtTRC20 = "TFUG271bbbQEmFu4wkFHyvNNkYRZC5JDUf"
     static let donateNoteES = "Si ToshLLM te resulta útil, puedes apoyar el desarrollo con una donación."

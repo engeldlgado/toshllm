@@ -19,7 +19,7 @@ struct DonateView: View {
                 .font(.callout).multilineTextAlignment(.center)
                 .frame(width: 300)
 
-            // Card-based sponsorship (Getly) is the easiest path, so it leads.
+            // The sponsor page is the easiest path, so it leads.
             Button {
                 NSWorkspace.shared.open(URL(string: AppInfo.sponsorURL)!)
             } label: {
@@ -28,8 +28,8 @@ struct DonateView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(loc.t("Conviértete en patrocinador", "Become a sponsor"))
                             .fontWeight(.semibold)
-                        Text(loc.t("Apoya el desarrollo con tarjeta en Getly",
-                                   "Support development by card on Getly"))
+                        Text(loc.t("Apoya el desarrollo de ToshLLM",
+                                   "Support ToshLLM development"))
                             .font(.caption2).opacity(0.85)
                     }
                     Spacer(minLength: 4)
