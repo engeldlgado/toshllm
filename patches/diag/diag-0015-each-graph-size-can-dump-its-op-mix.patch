@@ -1,0 +1,58 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -4069,7 +4069,54 @@
+     return v == 1;
+ }
+ 
++// diagnostic: TOSH_GRAPH_DUMP=1 prints, once per distinct graph size, how many nodes of each op
++// the graph has and the widest token count among its matmuls, to tell graphs of one size apart
++static void tosh_graph_dump(struct ggml_cgraph * gf) {
++    static int on = -1;
++    if (on < 0) {
++        on = TOSH_ENV("TOSH_GRAPH_DUMP") != NULL;
++    }
++    if (!on) {
++        return;
++    }
++
++    static int seen[64];
++    static int n_seen = 0;
++    const int nn = ggml_graph_n_nodes(gf);
++    for (int i = 0; i < n_seen; ++i) {
++        if (seen[i] == nn) {
++            return;
++        }
++    }
++    if (n_seen < 64) {
++        seen[n_seen++] = nn;
++    }
++
++    int cnt[GGML_OP_COUNT] = { 0 };
++    int64_t max_tok = 0;
++    int64_t gdn_tok = 0;
++    for (int i = 0; i < nn; ++i) {
++        const struct ggml_tensor * t = ggml_graph_node(gf, i);
++        cnt[t->op]++;
++        if ((t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID) && t->src[1] && t->src[1]->ne[1] > max_tok) {
++            max_tok = t->src[1]->ne[1];
++        }
++        if (t->op == GGML_OP_GATED_DELTA_NET && t->src[0]) {
++            gdn_tok = t->src[0]->ne[2] > gdn_tok ? t->src[0]->ne[2] : gdn_tok;
++        }
++    }
++    fprintf(stderr, "TOSH_GRAPH_DUMP n_nodes=%d widest_matmul_tokens=%lld gdn_tokens=%lld :", nn, (long long) max_tok, (long long) gdn_tok);
++    for (int o = 0; o < GGML_OP_COUNT; ++o) {
++        if (cnt[o]) {
++            fprintf(stderr, " %s=%d", ggml_op_name((enum ggml_op) o), cnt[o]);
++        }
++    }
++    fprintf(stderr, "\n");
++}
++
+ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
++    tosh_graph_dump(gf);
++
+     if (tosh_mgpu_trace()) { atomic_fetch_add(&g_tr_graphs, 1); }
+     // command buffers run in commit order, so a held one has to go in before this graph
+     if (!ggml_metal_merge_graph()) {

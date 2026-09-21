@@ -1,0 +1,131 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -638,7 +638,10 @@
+             } break;
+         case GGML_OP_ARGSORT:
+             {
+-                n_fuse = ggml_metal_op_argsort(ctx, idx);
++                n_fuse = ggml_metal_op_topk_moe(ctx, idx);
++                if (n_fuse == 0) {
++                    n_fuse = ggml_metal_op_argsort(ctx, idx);
++                }
+             } break;
+         case GGML_OP_TOP_K:
+             {
+@@ -6948,6 +6951,7 @@
+ struct ggml_metal_topk_moe_plan {
+     int n_fuse = 0;
+     bool with_norm = false;
++    bool delayed = false;
+     float clamp = 0.0f;
+     ggml_tensor * logits = nullptr;
+     ggml_tensor * ids = nullptr;
+@@ -6966,9 +6970,9 @@
+ }
+ 
+ static bool ggml_metal_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_topk_moe_plan & plan) {
+-    // measured neutral on RDNA2 (pp512 +0.1%, tg128 -1%, both inside the noise), so the
+-    // dispatch saving does not pay for itself here; opt-in until a device shows a gain
+-    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_ENABLE") != nullptr;
++    // decode on these cards is bound by the host, and the router chain is five small dispatches
++    // per MoE layer; where the experts run on the CPU instead it measures neutral
++    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_DISABLE") == nullptr;
+     if (!enabled || !ctx->use_fusion) {
+         return false;
+     }
+@@ -7058,12 +7062,72 @@
+ 
+     plan.logits = softmax->src[0];
+     plan.ids    = argsort;
++    return true;
++}
++
++// the router that picks on the raw logits and takes the softmax over the picked ones only
++// (gpt-oss): argsort, get_rows, softmax
++static bool ggml_metal_topk_moe_delayed_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_topk_moe_plan & plan) {
++    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_DISABLE") == nullptr;
++    if (!enabled || !ctx->use_fusion || idx + 2 >= ctx->n_nodes()) {
++        return false;
++    }
++
++    ggml_tensor * argsort = ctx->node(idx + 0);
++    ggml_tensor * getrows = ctx->node(idx + 1);
++    ggml_tensor * softmax = ctx->node(idx + 2);
++
++    if (argsort->op != GGML_OP_ARGSORT || getrows->op != GGML_OP_GET_ROWS || softmax->op != GGML_OP_SOFT_MAX) {
++        return false;
++    }
++    if (ggml_get_op_params_i32(argsort, 0) != GGML_SORT_ORDER_DESC || softmax->src[1] || softmax->src[2]) {
++        return false;
++    }
++    if (argsort->src[0]->type != GGML_TYPE_F32 || argsort->type != GGML_TYPE_I32 ||
++        getrows->type != GGML_TYPE_F32 || softmax->type != GGML_TYPE_F32) {
++        return false;
++    }
++
++    float scale = 1.0f;
++    float bias  = 0.0f;
++    memcpy(&scale, ((const int32_t *) softmax->op_params) + 0, sizeof(float));
++    memcpy(&bias,  ((const int32_t *) softmax->op_params) + 1, sizeof(float));
++    if (scale != 1.0f || bias != 0.0f) {
++        return false;
++    }
++
++    ggml_tensor * logits = argsort->src[0];
++    if (!ggml_metal_topk_moe_same(getrows->src[0], logits) ||
++        !ggml_metal_topk_moe_same(getrows->src[1], argsort) ||
++        !ggml_metal_topk_moe_same(softmax->src[0], getrows)) {
++        return false;
++    }
++    if (!ggml_is_contiguous(logits) || !ggml_is_contiguous(argsort) ||
++        !ggml_is_contiguous(getrows) || !ggml_is_contiguous(softmax) ||
++        !ctx->has_n_uses(idx + 1, 1)) {
++        return false;
++    }
++
++    const int64_t n_expert = logits->ne[0];
++    if (n_expert > 512 || n_expert < 1 || softmax->ne[0] != getrows->src[1]->ne[0]) {
++        return false;
++    }
++
++    plan.n_fuse    = 3;
++    plan.delayed   = true;
++    plan.with_norm = false;
++    plan.logits    = logits;
++    plan.ids       = argsort;
++    plan.weights   = softmax;
+     return true;
+ }
+ 
+ int ggml_metal_op_topk_moe(ggml_metal_op_t ctx, int idx) {
+     ggml_metal_topk_moe_plan plan;
+-    if (!ggml_metal_topk_moe_fusion(ctx, idx, plan)) {
++    const bool matched = ctx->node(idx)->op == GGML_OP_ARGSORT ?
++        ggml_metal_topk_moe_delayed_fusion(ctx, idx, plan) :
++        ggml_metal_topk_moe_fusion(ctx, idx, plan);
++    if (!matched) {
+         return 0;
+     }
+ 
+@@ -7076,7 +7140,7 @@
+     }
+ 
+     const int32_t n_expert      = plan.logits->ne[0];
+-    const int32_t n_expert_used = plan.weights->ne[1];
++    const int32_t n_expert_used = plan.delayed ? plan.weights->ne[0] : plan.weights->ne[1];
+     const int32_t nrows         = ggml_nrows(plan.logits);
+ 
+     int nth = 32;
+@@ -7091,9 +7155,9 @@
+         /*.n_expert        =*/ n_expert,
+         /*.n_expert_used   =*/ n_expert_used,
+         /*.nrows           =*/ nrows,
+-        /*.mode            =*/ 0,
++        /*.mode            =*/ plan.delayed ? 3 : 0,
+         /*.with_norm       =*/ plan.with_norm ? 1 : 0,
+-        /*.delayed_softmax =*/ 0,
++        /*.delayed_softmax =*/ plan.delayed ? 1 : 0,
+         /*.has_bias        =*/ 0,
+         /*.clamp           =*/ plan.clamp,
+         /*.scale           =*/ 1.0f,

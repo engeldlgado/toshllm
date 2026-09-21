@@ -1,26 +1,28 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4012,6 +4012,22 @@
-             if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
-                 getenv("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
-                 ntg0 += 1;
-+            }
-+
-+            // diagnostic: extra token tiles are inert (the kernel returns when its tile starts past
+@@ -4092,7 +4092,23 @@
+                     ntg0 += 1;
+                 }
+ 
+-                ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
++                // diagnostic: extra token tiles are inert (the kernel returns when its tile starts past
 +            // the expert's token count), so padding the grid moves the geometry without moving the
 +            // work. It separates a pathology that follows the tile count from one that follows n.
 +            static const int gridx_pad = []() {
-+                const char * s = getenv("TOSH_MMID_GRIDX_PAD");
++                const char * s = TOSH_ENV("TOSH_MMID_GRIDX_PAD");
 +                return s ? atoi(s) : 0;
 +            }();
 +            ntg0 += gridx_pad;
 +
-+            static const bool geom_dbg = getenv("TOSH_MMID_GEOM") != nullptr;
++            static const bool geom_dbg = TOSH_ENV("TOSH_MMID_GEOM") != nullptr;
 +            if (geom_dbg) {
 +                fprintf(stderr, "TOSH_MMID_GEOM n=%d experts=%d m=%d k=%d nr1=%d grid=(%d,%d,%d) tpt=128 pad=%d\n",
 +                        (int) ne21, (int) ne02_run, (int) ne01, (int) ne00, nr1,
 +                        ntg0, (int) ((ne01 + 63)/64), (int) ne02_run, gridx_pad);
-             }
- 
-             ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
++            }
++
++            ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
+         }
+     } else {
+         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);

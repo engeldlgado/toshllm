@@ -9,7 +9,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: mixture of experts models read prompts much faster on Radeon Pro Vega and Radeon VII.** The expert matrix kernel was leaving most of the card idle whenever the prompt fell on certain lengths: a 128 token batch of an 8 expert model now takes 1.33 ms instead of 4.47 ms, a 256 token batch 1.42 ms instead of 4.57 ms, and a 64 token batch 1.26 ms instead of 2.22 ms, with the same output.
 
-- **LLMs: mixture of experts models read medium length prompts faster on Radeon RX 6000 and RX 7000.** An expert narrower than the tile was multiplying padding columns. OLMoE-1B-7B Q5_K_M reads a 128 token prompt at 2439 tokens a second instead of 2261, and Qwen3.6-35B-A3B gains between 1.3 and 2.2 percent from 64 to 512 tokens, with the same output.
+- **LLMs: generating with an 8-bit KV cache and running several requests at once on 8-bit models is faster on Radeon Pro Vega and Radeon VII.** With the KV cache in q8_0, Qwen3-4B at a 4,400 token context now generates 51.7 tokens a second instead of 39.0, and a Q8_0 model serving two to eight requests together produces 20 to 25 percent more tokens a second, with the same output.
+
+- **LLMs: follow-up messages in a chat start answering sooner with Qwen3.5, Qwen3.6, Qwen3.8 and Gemma models.** Saving the conversation state between turns now reads it back from the card in a few large transfers instead of one per layer: on a Radeon RX 6700 XT a follow-up to Qwen3.5-4B starts in 149 ms instead of 161, and on a Radeon Pro Vega II in 160 ms instead of 165, with the same output.
+
+- **LLMs: mixture of experts models generate faster on Radeon Pro Vega, Radeon VII and AMD RDNA2 (tested on the Radeon RX 6700 XT).** Choosing the experts for each token now runs as one kernel instead of several small ones, both for routers that take the softmax first (Qwen, OLMoE) and for the ones that take it after picking (gpt-oss). On a Radeon Pro Vega II Qwen3.6-35B-A3B generates 68.3 tokens a second instead of 65.5 and gpt-oss-20B 90.8 instead of 88.6; on a Radeon RX 6700 XT gpt-oss-20B goes from 99.9 to 101.1 and OLMoE-1B-7B from 215 to 220. With the experts offloaded to the CPU the speed does not change. Same output.
+
+- **LLMs: short batches of four to eight tokens run faster on Q4_K models on Radeon Pro Vega and Radeon VII.** The matrix kernel now covers four weight rows per thread there, where two rows ran almost as slowly as one pass per token. On a Radeon Pro Vega II Qwen3.5-4B Q4_K_M processes four token batches 2.0 percent faster and eight token batches 1.7 percent faster; the kernel alone is between 19 and 41 percent faster. Single token generation is unchanged. Same output.
+
+- **LLMs: mixture of experts models load their two expert projections as one matrix on Radeon Pro Vega and Radeon VII.** Qwen3.6-35B-A3B reads prompts between 3.9 and 4.3 percent faster from 32 to 512 tokens and generates 2 percent faster, with the same output.
+
+- **LLMs: mixture of experts models read medium length prompts faster on AMD RDNA2 (tested on the Radeon RX 6700 XT).** An expert narrower than the tile was multiplying padding columns. OLMoE-1B-7B Q5_K_M reads a 128 token prompt at 2439 tokens a second instead of 2261, and Qwen3.6-35B-A3B gains between 1.3 and 2.2 percent from 64 to 512 tokens, with the same output.
 
 ## [0.87.7] - 2026-09-19
 

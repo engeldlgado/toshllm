@@ -1,35 +1,128 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-metal-common.h
 --- a/ggml/src/ggml-metal/ggml-metal-common.h
 +++ b/ggml/src/ggml-metal/ggml-metal-common.h
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,8 @@
  #include "ggml.h"
  
  #include <stdbool.h>
 +#include <stdlib.h>
++#include <math.h>
  
  #ifdef __cplusplus
  extern "C" {
-@@ -58,8 +59,22 @@
+@@ -58,10 +60,86 @@
             has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[1]->ne[1] > ne11_mm_min;
  }
  
-+// diagnostic: the row count at which the expert path leaves the mat-vec kernel for the tile
-+// one. 32 is upstream's value; a sweep needs to move it without a rebuild
-+static inline int ggml_metal_mul_mat_id_mm_floor(void) {
-+    static int v = 0;
-+    if (v == 0) {
-+        const char * s = getenv("TOSH_MMID_MM_FLOOR");
-+        v = s ? atoi(s) : 32;
-+        if (v < 1) {
-+            v = 1;
-+        }
-+    }
-+    return v;
-+}
-+
- static inline bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
+-static inline bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
 -    return has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[2]->ne[1] >= 32;
-+    return has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[2]->ne[1] >= ggml_metal_mul_mat_id_mm_floor();
++// tokens per expert at which the expert tile starts beating the mat-vec, fitted per quant and
++// wave width over both routes forced on every measured shape; 0 = not measured, keep the 32 rows
++static inline float ggml_metal_mul_mat_id_tpe_floor(enum ggml_type t, int simd_width) {
++    const bool w64 = simd_width == 64;
++    switch (t) {
++        case GGML_TYPE_Q4_0:  return w64 ? 7.25f : 4.25f;
++        case GGML_TYPE_Q4_K:  return w64 ? 5.25f : 3.25f;
++        case GGML_TYPE_Q5_K:  return w64 ? 3.75f : 2.75f;
++        case GGML_TYPE_Q6_K:  return w64 ? 6.25f : 3.25f;
++        case GGML_TYPE_Q8_0:  return w64 ? 7.25f : 2.75f;
++        case GGML_TYPE_MXFP4: return w64 ? 6.25f : 7.25f;
++        default:              return 0.0f;
++    }
  }
  
++// diagnostic: predicted log(mat-vec / expert tile) for a shape, fitted per wave width over
++// both routes forced on every measured shape; positive means the tile is predicted to win
++static inline float ggml_metal_mul_mat_id_cost_margin(enum ggml_type t, int simd_width,
++        float tpe, float m, float k) {
++    const bool w64 = simd_width == 64;
++    float off = 0.0f;
++    switch (t) {
++        case GGML_TYPE_MXFP4: off = 0.0f;                     break;
++        case GGML_TYPE_Q4_0:  off = w64 ? -0.152f :  0.140f;   break;
++        case GGML_TYPE_Q4_K:  off = w64 ?  0.213f :  0.400f;   break;
++        case GGML_TYPE_Q5_K:  off = w64 ?  0.410f :  0.416f;   break;
++        case GGML_TYPE_Q6_K:  off = w64 ? -0.065f :  0.283f;   break;
++        case GGML_TYPE_Q8_0:  off = w64 ? -0.209f :  0.529f;   break;
++        default:              return 0.0f;
++    }
++    const float a = w64 ?  3.706f :  2.037f;
++    const float b = w64 ?  0.701f :  0.697f;
++    const float c = w64 ? -0.070f : -0.033f;
++    const float d = w64 ? -0.587f : -0.384f;
++    return a + b*logf(tpe) + c*logf(m) + d*logf(k) + off;
++}
++
++static inline bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm, int simd_width) {
++    if (!has_simdgroup_mm || op->src[0]->ne[0] < 64) {
++        return false;
++    }
++    // diagnostic: TOSH_MMID_MM_FLOOR=<rows> forces a fixed row floor (1 = always the tile,
++    // 4096 = never); the tokens-per-expert rule below is opt-in with TOSH_MMID_POLICY=tpe,
++    // so by default the switch stays the production 32-row one
++    static int diag_floor = -1;
++    static int diag_tpe   = -1;
++    if (diag_floor < 0) {
++        const char * s = getenv("TOSH_MMID_MM_FLOOR");
++        diag_floor = s ? (atoi(s) > 0 ? atoi(s) : 1) : 0;
++        const char * p = getenv("TOSH_MMID_POLICY");
++        diag_tpe   = p ? (p[0] == 't' ? 1 : (p[0] == 'c' ? 2 : 0)) : 0;
++    }
++    if (diag_floor > 0) {
++        return op->src[2]->ne[1] >= diag_floor;
++    }
++    if (!diag_tpe) {
++        return op->src[2]->ne[1] >= 32;
++    }
++    const float tpe_all = op->src[0]->ne[2] > 0
++        ? (float) (op->src[2]->ne[1]*op->src[2]->ne[0]) / (float) op->src[0]->ne[2]
++        : 0.0f;
++    if (diag_tpe == 2) {
++        // a single row floor cannot hold: the crossover moves with the expert width and depth
++        // as well as with the rows, so predict which route is cheaper for this shape
++        if (tpe_all <= 0.0f) {
++            return op->src[2]->ne[1] >= 32;
++        }
++        const float margin = ggml_metal_mul_mat_id_cost_margin(op->src[0]->type, simd_width,
++                tpe_all, (float) op->src[0]->ne[1], (float) op->src[0]->ne[0]);
++        return margin != 0.0f ? margin > 0.0f : op->src[2]->ne[1] >= 32;
++    }
++    // the crossover follows how many rows each expert gets, not the batch: a fixed row count
++    // switches too early with many experts and too late with few
++    const float floor = ggml_metal_mul_mat_id_tpe_floor(op->src[0]->type, simd_width);
++    if (floor <= 0.0f || op->src[0]->ne[2] <= 0) {
++        return op->src[2]->ne[1] >= 32;
++    }
++    return tpe_all >= floor;
++}
++
  #ifdef __cplusplus
+ }
+ #endif
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3915,7 +3915,7 @@
+     const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
+         TOSH_ENV("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
+ 
+-    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok))) {
++    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok), props_dev->simd_width)) {
+         // some Metal matrix data types require aligned pointers
+         // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
+         //switch (op->src[0]->type) {
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -2438,7 +2438,7 @@
+             if (has_simdgroup_reduction) {
+                 return ggml_metal_supports_mul_mat_op(
+                         has_simdgroup_reduction, op, false,
+-                        ggml_metal_op_mul_mat_id_use_mm(op, has_simdgroup_mm));
++                        ggml_metal_op_mul_mat_id_use_mm(op, has_simdgroup_mm, dev->props.simd_width));
+             }
+             // wave64: mul_mv_id reuses the width-parameterized decode impls and the
+             // manual mm_id prefill uses virtual 32-wide indices; both run on the GPU.
+

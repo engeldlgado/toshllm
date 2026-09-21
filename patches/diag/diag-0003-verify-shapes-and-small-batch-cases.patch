@@ -1,12 +1,10 @@
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -4985,6 +4985,83 @@
- 
-     void initialize_tensors(ggml_context * ctx) override {
+@@ -4987,7 +4987,90 @@
          init_mul_mat_id_tensors(ctx, n_mats);
-+    }
-+};
+     }
+ };
 +
 +// GGML_OP_MUL_MAT_ID with a wide activation range: a half-precision accumulator saturates
 +// around 65504, so this is the stress shape for upstream #26223
@@ -18,14 +16,14 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 +    const int64_t n;
 +    const int64_t k;
 +    const float amp;
-+
+ 
 +    std::string op_desc(ggml_tensor * t) override {
 +        GGML_UNUSED(t);
 +        return "MUL_MAT_ID_AMP";
 +    }
 +
 +    std::string vars() override {
-+        return VARS_TO_STR7(type_a, n_mats, n_used, m, n, k, amp);
++        return VARS_TO_STR8(type_a, n_mats, n_used, m, n, k, amp, shared);
 +    }
 +
 +    double max_nmse_err() override {
@@ -37,8 +35,10 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 +        return 2 * m * k * n * n_used;
 +    }
 +
-+    test_mul_mat_id_amp(ggml_type type_a, int n_mats, int n_used, int64_t m, int64_t n, int64_t k, float amp)
-+        : type_a(type_a), n_mats(n_mats), n_used(n_used), m(m), n(n), k(k), amp(amp) {
++    const bool shared; // every token routes to the same experts: the most weight reuse possible
++
++    test_mul_mat_id_amp(ggml_type type_a, int n_mats, int n_used, int64_t m, int64_t n, int64_t k, float amp, bool shared = false)
++        : type_a(type_a), n_mats(n_mats), n_used(n_used), m(m), n(n), k(k), amp(amp), shared(shared) {
 +            GGML_ASSERT(n_used <= n_mats);
 +        }
 +
@@ -68,12 +68,16 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 +        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
 +            if (t->type == GGML_TYPE_I32) {
 +                if (ggml_is_view_op(t->op)) { continue; }
++                std::vector<int32_t> first(t->ne[0]);
 +                for (int64_t r = 0; r < ggml_nrows(t); r++) {
 +                    std::vector<int32_t> data(t->ne[0]);
 +                    for (int i = 0; i < t->ne[0]; i++) {
 +                        data[i] = i % n_mats;
 +                    }
 +                    std::shuffle(data.begin(), data.end(), rng);
++                    if (shared) {
++                        if (r == 0) { first = data; } else { data = first; }
++                    }
 +                    ggml_backend_tensor_set(t, data.data(), r * t->nb[1], t->ne[0] * sizeof(int32_t));
 +                }
 +            } else if (strcmp(t->name, "b") == 0) {
@@ -82,26 +86,29 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 +                init_tensor_uniform(t);
 +            }
 +        }
-     }
- };
- 
-@@ -10770,6 +10847,15 @@
-     for (int kv : { 1, 7, 8, 63, 64, 65 }) {
-         for (ggml_type type_K : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_0}) {
-             test_cases.emplace_back(new test_lightning_indexer(128, 64, kv, 32, 4, 1, type_K));
-+        }
 +    }
++};
 +
+ // GGML_OP_MUL_MAT_ID + GGML_OP_ADD or GGML_OP_MUL
+ struct test_mul_mat_id_fusion : public test_case {
+     const ggml_type type_a;
+@@ -10773,6 +10856,15 @@
+         }
+     }
+ 
 +    // #26223: a wide activation range is what would saturate a half accumulator in the
 +    // expert tile, so the correctness check needs shapes the stock list never reaches
 +    for (float amp : {1.0f, 32.0f, 512.0f}) {
 +        for (ggml_type type_a : {GGML_TYPE_Q4_K, GGML_TYPE_Q8_0, GGML_TYPE_MXFP4}) {
 +            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 128, 8, 768,  64, 2048, amp));
 +            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 32,  4, 1792, 64, 2048, amp));
-         }
-     }
- 
-@@ -11007,6 +11093,72 @@
++        }
++    }
++
+     return test_cases;
+ }
+ #ifdef _MSC_VER
+@@ -11007,6 +11099,121 @@
          test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 4, false, 2880, bs, 2880));
      }
  
@@ -152,6 +159,55 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 +        for (ggml_type type_a : {GGML_TYPE_Q4_K, GGML_TYPE_Q8_0, GGML_TYPE_MXFP4}) {
 +            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 128, 8, 768,  64, 2048, amp));
 +            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 32,  4, 1792, 64, 2048, amp));
++        }
++    }
++
++    // MTP rollback snapshots: the GDN op of a Qwen3.5-4B layer writing K state copies per step
++    for (int64_t T : {1, 2, 3, 4}) {
++        for (int64_t K : {1, 2, 3, 4}) {
++            test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, T, 1, 2, false, false, K));
++        }
++    }
++
++    // small-batch expert reuse: the same batch with uniform routing and with every token on the
++    // same experts, which bounds what a kernel reusing weights across tokens could gain
++    for (int bs : {1, 2, 4, 8}) {
++        for (bool sh : {false, true}) {
++            test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q4_K,  256, 8, 512,  bs, 2048, 1.0f, sh));
++            test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q4_K,  128, 8, 768,  bs, 2048, 1.0f, sh));
++            test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_MXFP4, 32,  4, 2880, bs, 2880, 1.0f, sh));
++            test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q5_K,  64,  8, 1024, bs, 2048, 1.0f, sh));
++        }
++    }
++
++    // tile cost against the token-tile count: one row count per grid width, 1..17 tiles
++    for (int g = 1; g <= 17; ++g) {
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_K,  GGML_TYPE_F32, 256, 8, false, 2048, 32*g, 512));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32,  4, false, 2880, 32*g, 2880));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q5_K,  GGML_TYPE_F32, 64,  8, false, 1024, 32*g, 2048));
++    }
++
++    // the expert shapes of the models the dispatch is validated on: Qwen3.6-35B-A3B (256/8),
++    // OLMoE (64/8) and gpt-oss (32/4), gate/up and down, both routes swept per row count
++    for (int bs : {16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 256}) {
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_K, GGML_TYPE_F32, 256, 8, false, 512,  bs, 2048));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_K, GGML_TYPE_F32, 256, 8, false, 2048, bs, 512));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q6_K, GGML_TYPE_F32, 256, 8, false, 2048, bs, 512));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q5_K, GGML_TYPE_F32, 64,  8, false, 1024, bs, 2048));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q5_K, GGML_TYPE_F32, 64,  8, false, 2048, bs, 1024));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q6_K, GGML_TYPE_F32, 64,  8, false, 2048, bs, 1024));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_0, GGML_TYPE_F32, 64,  8, false, 1024, bs, 2048));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_0, GGML_TYPE_F32, 64,  8, false, 2048, bs, 1024));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 4, false, 2880, bs, 2880));
++    }
++
++    // decode attention over a quantized cache: the K/V types the app offers, one query row
++    for (int64_t kv : {4096, 16384}) {
++        for (ggml_type tk : {GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
++            for (ggml_type tv : {GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
++                test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1}, kv, 1, true, false, 0.0f, 0.0f,
++                            GGML_PREC_F32, tk, tv));
++            }
 +        }
 +    }
 +

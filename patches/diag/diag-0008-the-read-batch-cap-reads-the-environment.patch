@@ -1,0 +1,23 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -3332,10 +3332,15 @@
+ 
+ static void ggml_metal_device_stage_batch_flush(ggml_metal_device_t dev);
+ 
+-// a read batch drains every few MiB: larger batches wait less on a desktop host but copy out
+-// of the staging buffer slower on a Xeon W one, and 4 MiB was the size that won on both
++// diagnostic: cap on the bytes one read batch stages before it drains
+ static size_t ggml_metal_stage_batch_cap(void) {
+-    return (size_t) 4*1024*1024;
++    static size_t cap = 0;
++    if (cap == 0) {
++        const char * e = TOSH_ENV("TOSH_STAGE_BATCH_MB");
++        const size_t v = e ? (size_t) atoi(e) * 1024 * 1024 : GGML_METAL_STAGE_BUF_MAX;
++        cap = v > 0 && v < GGML_METAL_STAGE_BUF_MAX ? v : GGML_METAL_STAGE_BUF_MAX;
++    }
++    return cap;
+ }
+ 
+ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_src, void * data, size_t size) {
+

@@ -1,0 +1,19 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3473,8 +3473,14 @@
+         const bool nr0_wide = nr0_min_rows > 0 && props_dev->simd_width == 32 &&
+                               op->src[0]->type == GGML_TYPE_Q4_K && ne01 >= nr0_min_rows;
+ 
+-        const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : (nr0_wide ? 4 : 2)) : 1;
++        // on 64 lanes a q4_K group of four or more columns runs out of the two-row variant's
++        // registers and ends up as slow as one pass per column (measured 4.0x one column at four
++        // columns, 2.4x with four rows); two and three columns stay faster with two rows
++        const bool nr0_w64 = props_dev->simd_width == 64 && op->src[0]->type == GGML_TYPE_Q4_K && ne11 >= 4 &&
++                             TOSH_ENV("TOSH_EXT_NR0_W64_DISABLE") == nullptr;
+ 
++        const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : ((nr0_wide || nr0_w64) ? 4 : 2)) : 1;
++
+         // each group makes a full pass over the weights, so the cost is groups by group width:
+         // nine and ten columns fit in two groups of five instead of three of four
+         if (ext_wide_group(op->src[0]->type) && (ne11 == 9 || ne11 == 10)) {

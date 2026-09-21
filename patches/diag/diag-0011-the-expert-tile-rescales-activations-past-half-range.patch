@@ -1,0 +1,594 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -14,6 +14,8 @@
+ #define N_MM_SIMD_GROUP_X 2
+ #define N_MM_SIMD_GROUP_Y 2
+ 
++#define N_MM_NPART_AMAX 256
++
+ // kernel parameters for mat-vec threadgroups
+ //
+ // N_R0: number of src0 rows to process per simdgroup
+@@ -616,9 +618,18 @@
+ 
+ typedef struct {
+     int32_t  ne00;
++    int32_t  ne01;
+     int32_t  ne02;
++    int32_t  npart;
+     uint64_t nb01;
+     uint64_t nb02;
++} ggml_metal_kargs_mul_mm_id_amax;
++
++typedef struct {
++    int32_t  ne00;
++    int32_t  ne02;
++    uint64_t nb01;
++    uint64_t nb02;
+     uint64_t nb03;
+     int32_t  ne11;
+     uint64_t nb10;
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -143,7 +143,9 @@
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0    (ggml_metal_library_t lib, int ne02, int ne20);
+-struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax(ggml_metal_library_t lib);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax_part(ggml_metal_library_t lib);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op, int scaled);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argmax            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_topk_moe          (ggml_metal_library_t lib);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1702,7 +1702,42 @@
+     res.nr1  = nr1;
+     res.nsg  = nsg;
+     res.smem = smem;
++
++    return res;
++}
++
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax_part(ggml_metal_library_t lib) {
++    char base[256];
++    char name[256];
++
++    snprintf(base, 256, "kernel_mul_mm_id_amax_part_f32");
++    snprintf(name, 256, "%s", base);
++
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
++    }
++
++    // one slot per lane of the widest simdgroup, because the fold indexes by lane id
++    res.smem = 64*sizeof(float);
++
++    return res;
++}
+ 
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax(ggml_metal_library_t lib) {
++    char base[256];
++    char name[256];
++
++    snprintf(base, 256, "kernel_mul_mm_id_amax_f32");
++    snprintf(name, 256, "%s", base);
++
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
++    }
++
++    res.smem = 32*sizeof(float);
++
+     return res;
+ }
+ 
+@@ -1724,7 +1759,7 @@
+     return res;
+ }
+ 
+-ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_metal_library_t lib, const ggml_tensor * op) {
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_metal_library_t lib, const ggml_tensor * op, int scaled) {
+     char base[256];
+     char name[256];
+ 
+@@ -1790,7 +1825,7 @@
+                      TOSH_ENV("TOSH_MMID_W64_DISABLE") == nullptr;
+ 
+     snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
+-    snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d", base, bc_inp, use_mm_manual, acc_f32);
++    snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d_sc=%d", base, bc_inp, use_mm_manual, acc_f32, scaled);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+@@ -1799,6 +1834,7 @@
+         ggml_metal_cv_set_bool(cv, bc_inp,        FC_MUL_MM + 0);
+         ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
+         ggml_metal_cv_set_bool(cv, acc_f32,       FC_MUL_MM + 9);
++        ggml_metal_cv_set_int16(cv, scaled,       FC_MUL_MM + 11);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
+--- a/ggml/src/ggml-metal/ggml-metal-ops.h
++++ b/ggml/src/ggml-metal/ggml-metal-ops.h
+@@ -43,6 +43,7 @@
+ 
+ // id map [n_tokens, n_expert]
+ size_t ggml_metal_op_mul_mat_id_extra_ids(const struct ggml_tensor * op);
++size_t ggml_metal_op_mul_mat_id_extra_amax(const struct ggml_tensor * op);
+ 
+ // return true if we should use the FA vector kernel for this op
+ bool ggml_metal_op_flash_attn_ext_use_vec(const struct ggml_tensor * op);
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3676,6 +3676,15 @@
+     const int64_t ne21 = op->src[2]->ne[1]; // n_token
+ 
+     return ggml_type_size(GGML_TYPE_I32)*ne02*ne21;
++}
++
++size_t ggml_metal_op_mul_mat_id_extra_amax(const ggml_tensor * op) {
++    assert(op->op == GGML_OP_MUL_MAT_ID);
++
++    GGML_UNUSED(op);
++
++    // the two factors, then one partial per threadgroup of the first reduction stage
++    return 8 + N_MM_NPART_AMAX*sizeof(float);
+ }
+ 
+ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+@@ -3931,7 +3940,44 @@
+ 
+         ggml_metal_buffer_id bid_ids = bid_tpe;
+         bid_ids.offs += ggml_metal_op_mul_mat_id_extra_tpe(op);
++
++        ggml_metal_buffer_id bid_amax = bid_ids;
++        bid_amax.offs += ggml_metal_op_mul_mat_id_extra_ids(op);
++
++        // diagnostic: TOSH_NAN_OFF=1 encodes the op exactly as before the rescale, for an A/B in
++        // one binary
++        static const bool nan_off = TOSH_ENV("TOSH_NAN_OFF") != nullptr;
++
++        const int npart_amax = N_MM_NPART_AMAX;
++
++        // src1 rescale factors, computed before the matmul
++        // ref: https://github.com/ggml-org/llama.cpp/pull/26223
++        if (!nan_off) {
++            ggml_metal_kargs_mul_mm_id_amax args = {
++                /*.ne00  =*/ ne10,
++                /*.ne01  =*/ ne11,
++                /*.ne02  =*/ ne12,
++                /*.npart =*/ npart_amax,
++                /*.nb01  =*/ nb11,
++                /*.nb02  =*/ nb12,
++            };
++
++            auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id_amax_part(lib);
++
++            const size_t smem = pipeline.smem;
++
++            GGML_ASSERT(smem <= props_dev->max_theadgroup_memory_size);
++
++            ggml_metal_encoder_set_pipeline(enc, pipeline);
++            ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++            ggml_metal_encoder_set_buffer  (enc, bid_src1, 1);
++            ggml_metal_encoder_set_buffer  (enc, bid_amax, 2);
++
++            ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
+ 
++            ggml_metal_encoder_dispatch_threadgroups(enc, npart_amax, 1, 1, 256, 1, 1);
++        }
++
+         {
+             ggml_metal_kargs_mul_mm_id_map0 args = {
+                 ne02_run,
+@@ -3963,58 +4009,90 @@
+             ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, ne02_run, 1, 1);
+         }
+ 
+-        // this barrier is always needed because the next kernel has to wait for the id maps to be computed
+         ggml_metal_op_concurrency_reset(ctx);
+ 
+-        {
+-            auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op);
++        if (!nan_off) {
++            auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id_amax(lib);
+ 
+-            ggml_metal_kargs_mul_mm_id args = {
+-                /*.ne00  =*/ ne00,
+-                /*.ne02  =*/ ne02_run,
+-                /*.nb01  =*/ nb01,
+-                /*.nb02  =*/ nb02,
+-                /*.nb03  =*/ nb03,
+-                /*.ne11  =*/ ne11, // n_expert_used (bcast)
+-                /*.nb10  =*/ nb10,
+-                /*.nb11  =*/ nb11,
+-                /*.nb12  =*/ nb12,
+-                /*.nb13  =*/ nb13,
+-                /*.ne20  =*/ ne20, // n_expert_used
+-                /*.ne21  =*/ ne21, // n_tokens
+-                /*.ne0   =*/ ne0,
+-                /*.ne1   =*/ ne1,
+-                /*.r2    =*/ r2,
+-                /*.r3    =*/ r3,
++            ggml_metal_kargs_mul_mm_id_amax args = {
++                /*.ne00  =*/ ne10,
++                /*.ne01  =*/ ne11,
++                /*.ne02  =*/ ne12,
++                /*.npart =*/ npart_amax,
++                /*.nb01  =*/ nb11,
++                /*.nb02  =*/ nb12,
+             };
+ 
+             ggml_metal_encoder_set_pipeline(enc, pipeline);
+             ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+-            ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
+-            ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
+-            ggml_metal_encoder_set_buffer  (enc, bid_tpe,  3);
+-            ggml_metal_encoder_set_buffer  (enc, bid_ids,  4);
+-            ggml_metal_encoder_set_buffer  (enc, bid_dst,  5);
++            ggml_metal_encoder_set_buffer  (enc, bid_amax, 1);
+ 
+-            const size_t smem = pipeline.smem;
++            ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, 32, 1, 1);
++        }
+ 
+-            ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
++        // the next kernel has to wait for the id maps and for the rescale factors
++        ggml_metal_op_concurrency_reset(ctx);
+ 
+-            const int nr1 = pipeline.nr1;
++        // the rescaled src1 needs the float accumulator, and which case this is only becomes
++        // known on the GPU. Two pipelines, each returning at once when the scale is not its own,
++        // keep the common case on the registers it had. Where one accumulator serves both,
++        // a single pipeline takes every magnitude.
++        // diagnostic: TOSH_NAN_ONE_PIPE=1 serves both magnitudes from one pipeline, to price
++        // the second dispatch apart from the reduction that feeds it
++        {
++            // one pipeline takes both magnitudes: the factor leaves the products small enough
++            // for the accumulator this path already had
++            const int scaled = nan_off ? 3 : 2;
+ 
+-            int ntg0 = (ne21 + nr1 - 1)/nr1;
++                auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op, scaled);
+ 
+-            // a 64-lane card hands consecutive threadgroups to its four shader engines in turn,
+-            // and only the first token tile of an expert has work while the experts stay narrower
+-            // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
+-            // them on half the engines and a multiple of four on a single one (measured 1.8x and
+-            // 3.4x). One inert tile restores the spread; it returns before reading anything.
+-            if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
+-                TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
+-                ntg0 += 1;
+-            }
++                ggml_metal_kargs_mul_mm_id args = {
++                    /*.ne00  =*/ ne00,
++                    /*.ne02  =*/ ne02_run,
++                    /*.nb01  =*/ nb01,
++                    /*.nb02  =*/ nb02,
++                    /*.nb03  =*/ nb03,
++                    /*.ne11  =*/ ne11, // n_expert_used (bcast)
++                    /*.nb10  =*/ nb10,
++                    /*.nb11  =*/ nb11,
++                    /*.nb12  =*/ nb12,
++                    /*.nb13  =*/ nb13,
++                    /*.ne20  =*/ ne20, // n_expert_used
++                    /*.ne21  =*/ ne21, // n_tokens
++                    /*.ne0   =*/ ne0,
++                    /*.ne1   =*/ ne1,
++                    /*.r2    =*/ r2,
++                    /*.r3    =*/ r3,
++                };
+ 
+-            ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
++                ggml_metal_encoder_set_pipeline(enc, pipeline);
++                ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++                ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
++                ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
++                ggml_metal_encoder_set_buffer  (enc, bid_tpe,  3);
++                ggml_metal_encoder_set_buffer  (enc, bid_ids,  4);
++                ggml_metal_encoder_set_buffer  (enc, bid_dst,  5);
++                ggml_metal_encoder_set_buffer  (enc, bid_amax, 6);
++
++                const size_t smem = pipeline.smem;
++
++                ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
++
++                const int nr1 = pipeline.nr1;
++
++                int ntg0 = (ne21 + nr1 - 1)/nr1;
++
++                // a 64-lane card hands consecutive threadgroups to its four shader engines in turn,
++                // and only the first token tile of an expert has work while the experts stay narrower
++                // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
++                // them on half the engines and a multiple of four on a single one (measured 1.8x and
++                // 3.4x). One inert tile restores the spread; it returns before reading anything.
++                if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
++                    TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
++                    ntg0 += 1;
++                }
++
++                ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
+         }
+     } else {
+         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);
+diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+--- a/ggml/src/ggml-metal/ggml-metal.cpp
++++ b/ggml/src/ggml-metal/ggml-metal.cpp
+@@ -251,6 +251,7 @@
+             {
+                 res += ggml_metal_op_mul_mat_id_extra_tpe(tensor);
+                 res += ggml_metal_op_mul_mat_id_extra_ids(tensor);
++                res += ggml_metal_op_mul_mat_id_extra_amax(tensor);
+             } break;
+         case GGML_OP_FLASH_ATTN_EXT:
+             {
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+--- a/ggml/src/ggml-metal/kernels/mul_mm.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
+@@ -12,6 +12,11 @@
+ constant bool  FC_mul_mm_double_buffer [[function_constant(FC_MUL_MM + 8)]];
+ constant bool  FC_mul_mm_acc_f32 [[function_constant(FC_MUL_MM + 9)]];
+ constant bool  FC_mul_mm_uniform_scale [[function_constant(FC_MUL_MM + 10)]];
++// which src1 magnitudes this expert pipeline serves: 0 = the ones that need no rescaling,
++// 1 = the rescaled ones, 2 = both, 3 = no rescaling at all. The two cases run different
++// accumulators, and putting both in one pipeline costs the common case its registers
++// (measured -30% pp512)
++constant short FC_mul_mm_id_scaled [[function_constant(FC_MUL_MM + 11)]];
+ 
+ // each block_q contains 16*nl weights
+ #ifdef GGML_METAL_HAS_TENSOR
+@@ -594,6 +599,89 @@
+ 
+     device uint32_t * tpe_u32 = (device uint32_t *) (htpe);
+     tpe_u32[ide] = n_all;
++}
++
++kernel void kernel_mul_mm_id_amax_part_f32(
++        constant ggml_metal_kargs_mul_mm_id_amax & args,
++        device   const char * src1,
++        device         char * dst,
++        threadgroup    char * shmem [[threadgroup(0)]],
++        uint  tgpig[[threadgroup_position_in_grid]],
++        ushort tiitg[[thread_index_in_threadgroup]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]],
++        ushort   ntg[[threads_per_threadgroup]]) {
++    const int nrow = args.ne01*args.ne02;
++
++    float lmax = 0.0f;
++
++    for (int ir = tgpig; ir < nrow; ir += args.npart) {
++        const int i01 = ir % args.ne01;
++        const int i02 = ir / args.ne01;
++
++        device const float * row = (device const float *) (src1 + i02*args.nb02 + i01*args.nb01);
++
++        for (int i00 = tiitg; i00 < args.ne00; i00 += ntg) {
++            lmax = max(lmax, fabs(row[i00]));
++        }
++    }
++
++    float amax = simd_max(lmax);
++
++    threadgroup float * shared_amax = (threadgroup float *) shmem;
++
++    // the lane index runs to the hardware width, which is 64 on the cards that have one
++    if (ntg > N_SIMDWIDTH) {
++        if (sgitg == 0) {
++            shared_amax[tiisg] = 0.0f;
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        if (tiisg == 0) {
++            shared_amax[sgitg] = amax;
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        amax = shared_amax[tiisg];
++        amax = simd_max(amax);
++    }
++
++    if (tiitg == 0) {
++        ((device float *) (dst + 8))[tgpig] = amax;
++    }
++}
++
++kernel void kernel_mul_mm_id_amax_f32(
++        constant ggml_metal_kargs_mul_mm_id_amax & args,
++        device char * dst,
++        ushort tiitg[[thread_index_in_threadgroup]]) {
++    device const float * part = (device const float *) (dst + 8);
++
++    float amax = 0.0f;
++
++    for (int i = tiitg; i < args.npart; i += N_SIMDWIDTH) {
++        amax = max(amax, part[i]);
++    }
++
++    amax = simd_max(amax);
++
++    if (tiitg == 0) {
++        // The operand has to fit f16, and on the manual path the partials hold a 32 deep sum of
++        // products, so the target leaves room for that sum too: 2^6 against the 2^15 the operand
++        // alone would allow. The factor is a power of two, so both multiplications stay exact.
++        float scale = 1.0f;
++
++        // src1 that is already inf or nan is not ours to fix: keep the scale at 1.0
++        // instead of turning it into a different failure
++        if (isfinite(amax) && amax > 64.0f) {
++            scale = exp2(ceil(log2(amax)) - 6.0f);
++        }
++
++        device float * d = (device float *) dst;
++
++        d[0] = 1.0f/scale; // exact: scale is a power of two
++        d[1] = scale;
++    }
+ }
+ 
+ typedef decltype(kernel_mul_mm_id_map0<1>) kernel_mul_mm_id_map0_t;
+@@ -607,6 +695,7 @@
+         device const char * htpe,
+         device const char * hids,
+         device       char * dst,
++        device const char * amax,
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiitg[[thread_index_in_threadgroup]],
+@@ -621,6 +710,17 @@
+     threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
+ #endif
+ 
++    // power-of-two rescaling of src1, so activations beyond the f16 range survive the narrowing.
++    // Mode 3 is the original kernel: the host has seen this model stay inside the range, so the
++    // factors are not even computed and nothing is read here.
++    const float s1_inv   = FC_mul_mm_id_scaled == 3 ? 1.0f : ((device const float *) amax)[0];
++    const float s1_scale = FC_mul_mm_id_scaled == 3 ? 1.0f : ((device const float *) amax)[1];
++
++    if ((FC_mul_mm_id_scaled == 0 && s1_scale != 1.0f) ||
++        (FC_mul_mm_id_scaled == 1 && s1_scale == 1.0f)) {
++        return;
++    }
++
+     constexpr int NR0 = 64;
+     constexpr int NR1 = NLR == 8 ? 64 : 32;
+ 
+@@ -791,17 +891,17 @@
+ 
+             if (FC_mul_mm_bc_inp) {
+                 for (short i = 0; i < 8; ++i) {
+-                    *(sb + 64*ib + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
++                    *(sb + 64*ib + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) (*((device T1 *) y + i) * (T1) s1_inv) : 0;
+                 }
+                 if (colb) {
+                     for (short i = 0; i < 8; ++i) {
+-                        *(sb + 64*(ib + 4) + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) yb + i) : 0;
++                        *(sb + 64*(ib + 4) + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) (*((device T1 *) yb + i) * (T1) s1_inv) : 0;
+                     }
+                 }
+             } else {
+-                *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
++                *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)((*((device T1_2x4 *) y)) * (T1) s1_inv);
+                 if (colb) {
+-                    *(threadgroup S1_2x4 *)(sb + 64*(ib + 4) + 8*ly) = (S1_2x4)(*((device T1_2x4 *) yb));
++                    *(threadgroup S1_2x4 *)(sb + 64*(ib + 4) + 8*ly) = (S1_2x4)((*((device T1_2x4 *) yb)) * (T1) s1_inv);
+                 }
+             }
+         }
+@@ -851,7 +951,7 @@
+                 //const short lx = (tiitg/NL1)%8;
+                 //const short ly = i;
+ 
+-                *(sb + NK*(8*sy + ly) + 8*sx + lx) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
++                *(sb + NK*(8*sy + ly) + 8*sx + lx) = loop_k + iy + i < args.ne00 ? (S1) (*((device T1 *) y + i) * (T1) s1_inv) : 0;
+             }
+         } else {
+             const short sx = (tiitg%NL1);
+@@ -862,7 +962,7 @@
+             //const short lx = (tiitg/NL1)%8;
+             //const short ly = i;
+ 
+-            *(threadgroup S1_2x4 *)(sb + NK*(8*sy + ly) + 8*sx) = (S1_2x4)(*((device T1_2x4 *) y));
++            *(threadgroup S1_2x4 *)(sb + NK*(8*sy + ly) + 8*sx) = (S1_2x4)((*((device T1_2x4 *) y)) * (T1) s1_inv);
+         }
+ #endif
+ 
+@@ -1076,12 +1176,12 @@
+ 
+             int i = lane;
+             for (; i < nr0/4; i += 32) {
+-                *(D4 + i) = *(C4 + i);
++                *(D4 + i) = *(C4 + i) * s1_scale;
+             }
+ 
+             i = (4*(nr0/4)) + lane;
+             for (; i < nr0; i += 32) {
+-                *(D + i) = *(C + i);
++                *(D + i) = *(C + i) * s1_scale;
+             }
+         }
+     }
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+--- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+@@ -21,6 +21,8 @@
+ constant bool  FC_mul_mm_narrow        [[function_constant(FC_MUL_MM + 7)]];
+ constant bool  FC_mul_mm_double_buffer [[function_constant(FC_MUL_MM + 8)]];
+ constant bool  FC_mul_mm_acc_f32       [[function_constant(FC_MUL_MM + 9)]];
++// which src1 magnitudes this expert pipeline serves: 0 = unscaled, 1 = rescaled, 2 = both
++constant short FC_mul_mm_id_scaled     [[function_constant(FC_MUL_MM + 11)]];
+ 
+ // NLR rows and NCC columns of the output per lane. NCC 4 with 8 lanes per row block gives a
+ // wave 32 columns, which is what keeps the accumulator count equal to the 32-lane path.
+@@ -324,6 +326,7 @@
+         device const char * htpe,
+         device const char * hids,
+         device       char * dst,
++        device const char * amax,
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiitg[[thread_index_in_threadgroup]],
+@@ -331,6 +334,17 @@
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+     threadgroup S0 * sa = (threadgroup S0 *)(shmem);
+     threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
++
++    // power-of-two rescaling of src1, so activations beyond the f16 range survive the narrowing.
++    // Mode 3 is the original kernel: the host has seen this model stay inside the range, so the
++    // factors are not even computed and nothing is read here.
++    const float s1_inv   = FC_mul_mm_id_scaled == 3 ? 1.0f : ((device const float *) amax)[0];
++    const float s1_scale = FC_mul_mm_id_scaled == 3 ? 1.0f : ((device const float *) amax)[1];
++
++    if ((FC_mul_mm_id_scaled == 0 && s1_scale != 1.0f) ||
++        (FC_mul_mm_id_scaled == 1 && s1_scale == 1.0f)) {
++        return;
++    }
+ 
+     constexpr int NR0 = 64;
+     constexpr int NR1 = NLR == 8 ? 64 : 32;
+@@ -457,17 +471,17 @@
+ 
+             if (FC_mul_mm_bc_inp) {
+                 for (short i = 0; i < 8; ++i) {
+-                    *(sb + 64*ib + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
++                    *(sb + 64*ib + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) (*((device T1 *) y + i) * (T1) s1_inv) : 0;
+                 }
+                 if (colb) {
+                     for (short i = 0; i < 8; ++i) {
+-                        *(sb + 64*(ib + 4) + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) yb + i) : 0;
++                        *(sb + 64*(ib + 4) + 8*ly + i) = loop_k + iy + i < args.ne00 ? (S1) (*((device T1 *) yb + i) * (T1) s1_inv) : 0;
+                     }
+                 }
+             } else {
+-                *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
++                *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)((*((device T1_2x4 *) y)) * (T1) s1_inv);
+                 if (colb) {
+-                    *(threadgroup S1_2x4 *)(sb + 64*(ib + 4) + 8*ly) = (S1_2x4)(*((device T1_2x4 *) yb));
++                    *(threadgroup S1_2x4 *)(sb + 64*(ib + 4) + 8*ly) = (S1_2x4)((*((device T1_2x4 *) yb)) * (T1) s1_inv);
+                 }
+             }
+         }
+@@ -583,12 +597,12 @@
+ 
+             int i = lane;
+             for (; i < nr0/4; i += 64) {
+-                *(D4 + i) = *(C4 + i);
++                *(D4 + i) = *(C4 + i) * s1_scale;
+             }
+ 
+             i = (4*(nr0/4)) + lane;
+             for (; i < nr0; i += 64) {
+-                *(D + i) = *(C + i);
++                *(D + i) = *(C + i) * s1_scale;
+             }
+         }
+     }

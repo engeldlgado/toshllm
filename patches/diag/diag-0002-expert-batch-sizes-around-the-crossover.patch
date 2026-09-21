@@ -25,3 +25,4 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
  
      // gpt-oss-20b
      for (int bs : {1, 4, 8, 512}) {
+

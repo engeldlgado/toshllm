@@ -1,0 +1,32 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+--- a/ggml/src/ggml-metal/ggml-metal.cpp
++++ b/ggml/src/ggml-metal/ggml-metal.cpp
+@@ -690,7 +690,12 @@
+         /* .context   = */ ctx,
+     };
+ 
+-    ggml_backend_metal_set_n_cb(backend, 1);
++    // diagnostic: how many threads encode the graph beside the main one
++    static const int n_cb_env = []() {
++        const char * e = getenv("TOSH_METAL_N_CB");
++        return e ? atoi(e) : 1;
++    }();
++    ggml_backend_metal_set_n_cb(backend, n_cb_env > 0 ? n_cb_env : 1);
+ 
+     return backend;
+ }
+@@ -789,7 +794,12 @@
+         /* .context   = */ ctx,
+     };
+ 
+-    ggml_backend_metal_set_n_cb(backend, 1);
++    // diagnostic: how many threads encode the graph beside the main one
++    static const int n_cb_env = []() {
++        const char * e = getenv("TOSH_METAL_N_CB");
++        return e ? atoi(e) : 1;
++    }();
++    ggml_backend_metal_set_n_cb(backend, n_cb_env > 0 ? n_cb_env : 1);
+ 
+     return backend;
+ 
+

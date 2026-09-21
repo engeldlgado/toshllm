@@ -1,0 +1,113 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -879,7 +879,54 @@
+     id<MTLComputeCommandEncoder> obj;
+ };
+ 
++// diagnostic: TOSH_ENC_COUNT=1 counts and times the encode calls by category, so the host gap
++// can be split between the calls themselves and what surrounds them
++static _Atomic uint64_t g_enc_n[8];
++static _Atomic uint64_t g_enc_ns[8];
++enum { ENC_INIT = 0, ENC_PIPE, ENC_BYTES, ENC_BUF, ENC_TGMEM, ENC_DISP, ENC_BARRIER, ENC_END };
++
++static bool tosh_enc_count_on(void) {
++    static int st = 0;
++    if (st == 0) {
++        const char * e = TOSH_ENV("TOSH_ENC_COUNT");
++        st = (e && strcmp(e, "0") != 0) ? 2 : 1;
++    }
++    return st == 2;
++}
++
++static inline uint64_t tosh_enc_now(void) {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t) ts.tv_sec*1000000000ull + ts.tv_nsec;
++}
++
++static void tosh_enc_report(void) {
++    static const char * names[8] = { "encoder init", "set pipeline", "set bytes", "set buffer",
++                                     "threadgroup mem", "dispatch", "barrier", "end encoding" };
++    uint64_t tot = 0;
++    for (int i = 0; i < 8; ++i) {
++        tot += atomic_load(&g_enc_ns[i]);
++    }
++    fprintf(stderr, "TOSH_ENC_COUNT total %.3f ms in the encode calls\n", tot/1e6);
++    for (int i = 0; i < 8; ++i) {
++        const uint64_t n = atomic_load(&g_enc_n[i]);
++        const uint64_t t = atomic_load(&g_enc_ns[i]);
++        if (n) {
++            fprintf(stderr, "TOSH_ENC_COUNT   %-16s %10llu calls  %9.3f ms  %7.1f ns/call  %5.1f%%\n",
++                    names[i], (unsigned long long) n, t/1e6, (double) t/n, tot ? 100.0*t/tot : 0.0);
++        }
++    }
++}
++
++#define TOSH_ENC_T0() const bool _ec = tosh_enc_count_on(); const uint64_t _t0 = _ec ? tosh_enc_now() : 0
++#define TOSH_ENC_T1(k) do { if (_ec) { \
++        static _Atomic int _once = 0; int _e = 0; \
++        if (atomic_compare_exchange_strong(&_once, &_e, 1)) { atexit(tosh_enc_report); } \
++        atomic_fetch_add(&g_enc_n[k], 1); \
++        atomic_fetch_add(&g_enc_ns[k], tosh_enc_now() - _t0); } } while (0)
++
+ ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent) {
++    TOSH_ENC_T0();
+     ggml_metal_encoder_t res = calloc(1, sizeof(struct ggml_metal_encoder));
+ 
+     id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
+@@ -892,6 +939,8 @@
+ 
+     [res->obj retain];
+ 
++    TOSH_ENC_T1(ENC_INIT);
++
+     return res;
+ }
+ 
+@@ -911,31 +960,45 @@
+ }
+ 
+ void ggml_metal_encoder_set_pipeline(ggml_metal_encoder_t encoder, struct ggml_metal_pipeline_with_params pipeline) {
++    TOSH_ENC_T0();
+     [encoder->obj setComputePipelineState:pipeline.pipeline->obj];
++    TOSH_ENC_T1(ENC_PIPE);
+ }
+ 
+ void ggml_metal_encoder_set_bytes(ggml_metal_encoder_t encoder, void * data, size_t size, int idx) {
++    TOSH_ENC_T0();
+     [encoder->obj setBytes:data length:size atIndex:idx];
++    TOSH_ENC_T1(ENC_BYTES);
+ }
+ 
+ void ggml_metal_encoder_set_buffer(ggml_metal_encoder_t encoder, struct ggml_metal_buffer_id buffer, int idx) {
++    TOSH_ENC_T0();
+     [encoder->obj setBuffer:buffer.metal offset:buffer.offs atIndex:idx];
++    TOSH_ENC_T1(ENC_BUF);
+ }
+ 
+ void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder, size_t size, int idx) {
++    TOSH_ENC_T0();
+     [encoder->obj setThreadgroupMemoryLength:size atIndex:idx];
++    TOSH_ENC_T1(ENC_TGMEM);
+ }
+ 
+ void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int tg0, int tg1, int tg2, int tptg0, int tptg1, int tptg2) {
++    TOSH_ENC_T0();
+     [encoder->obj dispatchThreadgroups:MTLSizeMake(tg0, tg1, tg2) threadsPerThreadgroup:MTLSizeMake(tptg0, tptg1, tptg2)];
++    TOSH_ENC_T1(ENC_DISP);
+ }
+ 
+ void ggml_metal_encoder_memory_barrier(ggml_metal_encoder_t encoder) {
++    TOSH_ENC_T0();
+     [encoder->obj memoryBarrierWithScope:MTLBarrierScopeBuffers];
++    TOSH_ENC_T1(ENC_BARRIER);
+ }
+ 
+ void ggml_metal_encoder_end_encoding(ggml_metal_encoder_t encoder) {
++    TOSH_ENC_T0();
+     [encoder->obj endEncoding];
++    TOSH_ENC_T1(ENC_END);
+ }
+ 
+ #define GGML_METAL_HOST_WRAP_MAX 256
