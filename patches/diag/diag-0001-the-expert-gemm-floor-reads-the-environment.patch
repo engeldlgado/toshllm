@@ -1,0 +1,35 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-metal-common.h
+--- a/ggml/src/ggml-metal/ggml-metal-common.h
++++ b/ggml/src/ggml-metal/ggml-metal-common.h
+@@ -5,6 +5,7 @@
+ #include "ggml.h"
+ 
+ #include <stdbool.h>
++#include <stdlib.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -58,8 +59,22 @@
+            has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[1]->ne[1] > ne11_mm_min;
+ }
+ 
++// diagnostic: the row count at which the expert path leaves the mat-vec kernel for the tile
++// one. 32 is upstream's value; a sweep needs to move it without a rebuild
++static inline int ggml_metal_mul_mat_id_mm_floor(void) {
++    static int v = 0;
++    if (v == 0) {
++        const char * s = getenv("TOSH_MMID_MM_FLOOR");
++        v = s ? atoi(s) : 32;
++        if (v < 1) {
++            v = 1;
++        }
++    }
++    return v;
++}
++
+ static inline bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
+-    return has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[2]->ne[1] >= 32;
++    return has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[2]->ne[1] >= ggml_metal_mul_mat_id_mm_floor();
+ }
+ 
+ #ifdef __cplusplus

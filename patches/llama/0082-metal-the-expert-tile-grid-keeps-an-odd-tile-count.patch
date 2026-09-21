@@ -1,0 +1,24 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4002,7 +4002,19 @@
+ 
+             const int nr1 = pipeline.nr1;
+ 
+-            ggml_metal_encoder_dispatch_threadgroups(enc, (ne21 + nr1 - 1)/nr1, (ne01 + 63)/64, ne02_run, 128, 1, 1);
++            int ntg0 = (ne21 + nr1 - 1)/nr1;
++
++            // a 64-lane card hands consecutive threadgroups to its four shader engines in turn,
++            // and only the first token tile of an expert has work while the experts stay narrower
++            // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
++            // them on half the engines and a multiple of four on a single one (measured 1.8x and
++            // 3.4x). One inert tile restores the spread; it returns before reading anything.
++            if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
++                getenv("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
++                ntg0 += 1;
++            }
++
++            ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
+         }
+     } else {
+         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);

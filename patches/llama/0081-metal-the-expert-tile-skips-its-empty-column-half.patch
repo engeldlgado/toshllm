@@ -1,0 +1,12 @@
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+--- a/ggml/src/ggml-metal/kernels/mul_mm.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
+@@ -698,7 +698,7 @@ kernel void kernel_mul_mm_id(
+
+     // an expert narrower than the tile leaves whole simdgroups on padding columns; they still
+     // load and hit the barriers, they just skip the products
+-    const bool sg_live = NLR != 8 || 16*vsg < nr1;
++    const bool sg_live = 16*(NLR == 8 ? vsg : vsg/2) < nr1;
+
+     // manual path: NLRx4 register tile per lane, rows 8*rr + lr, cols lc + 4*cc
+     // of the simdgroup's output subtile

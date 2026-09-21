@@ -1,0 +1,176 @@
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -4985,6 +4985,83 @@
+ 
+     void initialize_tensors(ggml_context * ctx) override {
+         init_mul_mat_id_tensors(ctx, n_mats);
++    }
++};
++
++// GGML_OP_MUL_MAT_ID with a wide activation range: a half-precision accumulator saturates
++// around 65504, so this is the stress shape for upstream #26223
++struct test_mul_mat_id_amp : public test_case {
++    const ggml_type type_a;
++    const int n_mats;
++    const int n_used;
++    const int64_t m;
++    const int64_t n;
++    const int64_t k;
++    const float amp;
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "MUL_MAT_ID_AMP";
++    }
++
++    std::string vars() override {
++        return VARS_TO_STR7(type_a, n_mats, n_used, m, n, k, amp);
++    }
++
++    double max_nmse_err() override {
++        return 5e-4;
++    }
++
++    uint64_t op_flops(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return 2 * m * k * n * n_used;
++    }
++
++    test_mul_mat_id_amp(ggml_type type_a, int n_mats, int n_used, int64_t m, int64_t n, int64_t k, float amp)
++        : type_a(type_a), n_mats(n_mats), n_used(n_used), m(m), n(n), k(k), amp(amp) {
++            GGML_ASSERT(n_used <= n_mats);
++        }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * as = ggml_new_tensor_3d(ctx, type_a, k, m, n_mats);
++        ggml_set_name(as, "as");
++
++        ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_mats, n);
++        ggml_set_name(ids, "ids");
++        if (n_used != n_mats) {
++            ids = ggml_view_2d(ctx, ids, n_used, n, ids->nb[1], 0);
++            ggml_set_name(ids, "view_of_ids");
++        }
++
++        ggml_tensor * b = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, n_used, n);
++        ggml_set_name(b, "b");
++
++        ggml_tensor * out = ggml_mul_mat_id(ctx, as, b, ids);
++        ggml_set_name(out, "out");
++
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        std::random_device rd;
++        std::default_random_engine rng(rd());
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
++            if (t->type == GGML_TYPE_I32) {
++                if (ggml_is_view_op(t->op)) { continue; }
++                for (int64_t r = 0; r < ggml_nrows(t); r++) {
++                    std::vector<int32_t> data(t->ne[0]);
++                    for (int i = 0; i < t->ne[0]; i++) {
++                        data[i] = i % n_mats;
++                    }
++                    std::shuffle(data.begin(), data.end(), rng);
++                    ggml_backend_tensor_set(t, data.data(), r * t->nb[1], t->ne[0] * sizeof(int32_t));
++                }
++            } else if (strcmp(t->name, "b") == 0) {
++                init_tensor_uniform(t, -amp, amp);
++            } else {
++                init_tensor_uniform(t);
++            }
++        }
+     }
+ };
+ 
+@@ -10770,6 +10847,15 @@
+     for (int kv : { 1, 7, 8, 63, 64, 65 }) {
+         for (ggml_type type_K : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_0}) {
+             test_cases.emplace_back(new test_lightning_indexer(128, 64, kv, 32, 4, 1, type_K));
++        }
++    }
++
++    // #26223: a wide activation range is what would saturate a half accumulator in the
++    // expert tile, so the correctness check needs shapes the stock list never reaches
++    for (float amp : {1.0f, 32.0f, 512.0f}) {
++        for (ggml_type type_a : {GGML_TYPE_Q4_K, GGML_TYPE_Q8_0, GGML_TYPE_MXFP4}) {
++            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 128, 8, 768,  64, 2048, amp));
++            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 32,  4, 1792, 64, 2048, amp));
+         }
+     }
+ 
+@@ -11007,6 +11093,72 @@
+         test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 4, false, 2880, bs, 2880));
+     }
+ 
++    // the wave64 tile kernel is not monotonic in n, so sample the neighbours of every
++    // multiple of 32 instead of only the multiples themselves
++    for (int bs : {136, 144, 152, 168, 176, 184, 200, 208, 216, 232, 240, 248, 264, 272, 288, 352, 384, 448}) {
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_K, GGML_TYPE_F32, 128, 8, false, 768, bs, 2048));
++    }
++
++    // the quants the stock list only brackets, at the same resolution as q4_K/q5_K
++    for (int bs : {16, 24, 40, 48, 56, 96, 160, 192, 224, 320}) {
++        for (ggml_type type_a : {GGML_TYPE_Q4_0, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 128, 8, false, 768,  bs, 2048));
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 32,  4, false, 1792, bs, 2048));
++        }
++    }
++
++    // wave64 crosses over much later than wave32, so carry the same quants upward
++    for (int bs : {384, 640, 768, 1024}) {
++        for (ggml_type type_a : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 128, 8, false, 768,  bs, 2048));
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 32,  4, false, 1792, bs, 2048));
++        }
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 4, false, 2880, bs, 2880));
++    }
++
++    // small-batch amortisation: the expert and the dense path of the same quant and shape
++    for (int bs : {1, 2, 3, 4, 5, 6, 8}) {
++        for (ggml_type type_a : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_MXFP4}) {
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 128, 8, false, 768,  bs, 2048));
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 32,  4, false, 1792, bs, 2048));
++            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 768,  bs, 2048, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 1792, bs, 2048, {1, 1}, {1, 1}));
++        }
++    }
++
++    // gate+up as one matrix: same math and same weight bytes as two mul_mat_id of half
++    // the output rows, with one expert-index setup instead of two
++    for (int bs : {1, 2, 4, 8, 16, 32, 64, 128, 256, 512}) {
++        for (ggml_type type_a : {GGML_TYPE_Q4_K, GGML_TYPE_MXFP4}) {
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 128, 8, false, 1536, bs, 2048));
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 32,  4, false, 3584, bs, 2048));
++        }
++    }
++
++    // #26223 stress: how far the activation range can go before the half accumulator saturates
++    for (float amp : {1.0f, 8.0f, 32.0f, 128.0f, 512.0f}) {
++        for (ggml_type type_a : {GGML_TYPE_Q4_K, GGML_TYPE_Q8_0, GGML_TYPE_MXFP4}) {
++            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 128, 8, 768,  64, 2048, amp));
++            test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 32,  4, 1792, 64, 2048, amp));
++        }
++    }
++
++    // the verify window of a speculative step: how attention scales with q_len at a fixed kv
++    for (int64_t kv : {1024, 4096, 8192, 16384}) {
++        for (int64_t nb : {1, 2, 3, 4, 5, 8}) {
++            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1}, kv, nb, true, false, 0.0f, 0.0f,
++                        GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
++        }
++    }
++
++    // GDN small batch: the conv takes the fused-SiLU decode kernel at T == 1 and the
++    // batched one from T == 2, with only 2 threads per threadgroup up to T == 4
++    for (int64_t T : {1, 2, 3, 4, 5, 6, 8, 16}) {
++        test_cases.emplace_back(new test_ssm_conv_bias_silu(GGML_TYPE_F32, {4 - 1 + T, 2048, 1, 1}, {4, 2048, 1, 1}, true));
++        test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {4 - 1 + T, 2048, 1, 1}, {4, 2048, 1, 1}));
++        test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, T, 1));
++    }
++
+     // gpt-oss-20b
+     for (int bs : {1, 4, 8, 512}) {
+         for (ggml_type type_a : {GGML_TYPE_MXFP4}) {

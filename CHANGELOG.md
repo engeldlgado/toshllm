@@ -3,6 +3,14 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **LLMs: mixture of experts models read prompts much faster on Radeon Pro Vega and Radeon VII.** The expert matrix kernel was leaving most of the card idle whenever the prompt fell on certain lengths: a 128 token batch of an 8 expert model now takes 1.33 ms instead of 4.47 ms, a 256 token batch 1.42 ms instead of 4.57 ms, and a 64 token batch 1.26 ms instead of 2.22 ms, with the same output.
+
+- **LLMs: mixture of experts models read medium length prompts faster on Radeon RX 6000 and RX 7000.** An expert narrower than the tile was multiplying padding columns. OLMoE-1B-7B Q5_K_M reads a 128 token prompt at 2439 tokens a second instead of 2261, and Qwen3.6-35B-A3B gains between 1.3 and 2.2 percent from 64 to 512 tokens, with the same output.
+
 ## [0.87.7] - 2026-09-19
 
 ### Added

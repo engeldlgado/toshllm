@@ -1,0 +1,27 @@
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -10989,9 +10989,23 @@
+                 test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, 32, 4, false, 1792, bs, 2048));
+                 test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 32, 4, false, 1792, bs, 2048, 1));
+             }
++        }
++    }
++
++
++    // diagnostic: the batch sizes around the expert mat-vec / tile crossover, which the
++    // stock list steps over (1, 4, 8, 32, ...). needed to place the switch per wave width
++    for (int bs : {16, 24, 40, 48, 56, 96, 160, 192, 224, 320}) {
++        for (ggml_type type_a : {GGML_TYPE_Q4_K, GGML_TYPE_Q5_K}) {
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 128, 8, false, 768, bs, 2048));
++            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 32,  4, false, 1792, bs, 2048));
+         }
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 4, false, 2880, bs, 2880));
+     }
+ 
++    for (int bs : {16, 32, 48, 64, 128, 256}) {
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 4, false, 2880, bs, 2880));
++    }
+ 
+     // gpt-oss-20b
+     for (int bs : {1, 4, 8, 512}) {

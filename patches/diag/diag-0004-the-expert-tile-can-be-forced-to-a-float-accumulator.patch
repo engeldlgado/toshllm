@@ -1,0 +1,16 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1733,7 +1733,11 @@
+ 
+     const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
+ 
+-    const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
++    // the diagnostic override widens the same accumulator to every expert weight, to check
++    // whether contiguous quantised experts also leave half range (upstream #26223)
++    const bool acc_f32 = use_mm_manual &&
++                         (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16 ||
++                          getenv("TOSH_MM_ID_FORCE_ACC_F32") != nullptr) &&
+                          getenv("TOSH_MM_ACC_F32_DISABLE") == nullptr;
+ 
+     // one grid per expert already keeps the GPU in threadgroups, so the 8x4 tile does not need
