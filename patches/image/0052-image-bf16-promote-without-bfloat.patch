@@ -1,29 +1,8 @@
-diff -U8 -r old/src/core/ggml_extend_backend.h new/src/core/ggml_extend_backend.h
---- old/src/core/ggml_extend_backend.h	2026-08-29 12:59:12
-+++ new/src/core/ggml_extend_backend.h	2026-08-29 12:59:12
-@@ -81,16 +81,17 @@
- 
- private:
-     bool validate(std::string* error) const;
-     ggml_backend_t init_cached_backend(const std::string& name);
- };
- 
- bool sd_backend_is(ggml_backend_t backend, const std::string& name);
- bool sd_backend_is_cpu(ggml_backend_t backend);
-+bool sd_backend_supports_bf16(ggml_backend_t backend);
- ggml_backend_t sd_backend_cpu_init();
- bool sd_backend_cpu_set_n_threads(ggml_backend_t backend_cpu, int n_threads);
- ggml_status sd_backend_graph_compute_with_eval_callback(ggml_backend_t backend,
-                                                         ggml_cgraph* gf,
-                                                         sd_graph_eval_callback_t callback_eval,
-                                                         void* callback_eval_user_data);
- std::string sd_backend_resolve_name(const std::string& name);
- const char* sd_backend_module_name(SDBackendModule module);
-diff -U8 -r old/src/core/ggml_extend_backend.cpp new/src/core/ggml_extend_backend.cpp
---- old/src/core/ggml_extend_backend.cpp	2026-08-29 12:59:12
-+++ new/src/core/ggml_extend_backend.cpp	2026-08-29 12:59:12
-@@ -411,17 +411,50 @@
-     if (ggml_backend_dev_t dev = resolve_first_device_by_registry_name(resolved)) {
+diff --git a/src/core/ggml_extend_backend.cpp b/src/core/ggml_extend_backend.cpp
+index f3049dc..dc584dc 100644
+--- a/src/core/ggml_extend_backend.cpp
++++ b/src/core/ggml_extend_backend.cpp
+@@ -420,16 +420,49 @@ static ggml_backend_t init_named_backend(const std::string& name) {
          return ggml_backend_dev_init(dev, nullptr);
      }
      if (resolved.empty()) {
@@ -31,7 +10,7 @@ diff -U8 -r old/src/core/ggml_extend_backend.cpp new/src/core/ggml_extend_backen
      }
      return ggml_backend_init_by_name(resolved.c_str(), nullptr);
  }
-+
+ 
 +// Whether the device behind this backend can run bf16 weights. Metal on cards
 +// without the bfloat feature rejects every op that touches bf16, and a weight it
 +// cannot place aborts the whole load, so the loader converts them up front.
@@ -43,7 +22,7 @@ diff -U8 -r old/src/core/ggml_extend_backend.cpp new/src/core/ggml_extend_backen
 +    if (dev == nullptr) {
 +        return true;
 +    }
- 
++
 +    // A matmul of bf16 weights against f32 activations: the shape every diffusion
 +    // model runs its bf16 tensors through.
 +    ggml_init_params params = {
@@ -73,31 +52,33 @@ diff -U8 -r old/src/core/ggml_extend_backend.cpp new/src/core/ggml_extend_backen
      return dev != nullptr && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU;
  }
  
-diff -U8 -r old/src/model_loader.h new/src/model_loader.h
---- old/src/model_loader.h	2026-08-29 12:59:12
-+++ new/src/model_loader.h	2026-08-29 12:59:12
-@@ -62,16 +62,17 @@
-     std::map<ggml_type, uint32_t> get_conditioner_wtype_stat();
-     std::map<ggml_type, uint32_t> get_diffusion_model_wtype_stat();
-     std::map<ggml_type, uint32_t> get_vae_wtype_stat();
-     String2TensorStorage& get_tensor_storage_map() { return tensor_storage_map; }
-     const String2TensorStorage& get_tensor_storage_map() const { return tensor_storage_map; }
-     const std::map<std::string, std::string>& get_metadata() const { return metadata_; }
-     void set_n_threads(int n_threads);
-     void set_wtype_override(ggml_type wtype, std::string tensor_type_rules = "");
-+    size_t override_unsupported_bf16(ggml_type dst_type);
-     void process_model_files(bool enable_mmap = false, bool writable_mmap = true);
-     std::vector<MmapTensorStore> mmap_tensors(std::map<std::string, ggml_tensor*>& tensors,
-                                               std::set<std::string> ignore_tensors = {},
-                                               bool writable                        = true);
-     bool load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
-                       bool use_mmap                                    = false,
-                       const std::set<std::string>* target_tensor_names = nullptr,
-                       bool log_progress                                = true);
-diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
---- old/src/model_loader.cpp	2026-08-29 12:59:12
-+++ new/src/model_loader.cpp	2026-08-29 12:59:12
-@@ -681,28 +681,35 @@
+diff --git a/src/core/ggml_extend_backend.h b/src/core/ggml_extend_backend.h
+index b2ebd7e..4b936d0 100644
+--- a/src/core/ggml_extend_backend.h
++++ b/src/core/ggml_extend_backend.h
+@@ -82,16 +82,17 @@ public:
+ 
+ private:
+     bool validate(std::string* error) const;
+     ggml_backend_t init_cached_backend(const std::string& name);
+ };
+ 
+ bool sd_backend_is(ggml_backend_t backend, const std::string& name);
+ bool sd_backend_is_cpu(ggml_backend_t backend);
++bool sd_backend_supports_bf16(ggml_backend_t backend);
+ bool sd_backend_supports_cuda_mma(ggml_backend_t backend);
+ ggml_backend_t sd_backend_cpu_init();
+ bool sd_backend_cpu_set_n_threads(ggml_backend_t backend_cpu, int n_threads);
+ ggml_status sd_backend_graph_compute_with_eval_callback(ggml_backend_t backend,
+                                                         ggml_cgraph* gf,
+                                                         sd_graph_eval_callback_t callback_eval,
+                                                         void* callback_eval_user_data);
+ std::string sd_backend_resolve_name(const std::string& name);
+diff --git a/src/model_loader.cpp b/src/model_loader.cpp
+index b3ac097..2090639 100644
+--- a/src/model_loader.cpp
++++ b/src/model_loader.cpp
+@@ -681,79 +681,86 @@ SDVersion ModelLoader::get_sd_version() const {
          if (!has_middle_block_1) {
              return has_attn_1024 ? VERSION_SDXS_09 : VERSION_SD2_TINY_UNET;
          }
@@ -113,13 +94,9 @@ diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
 +                                                           : tensor_storage.type;
 +}
 +
- std::map<ggml_type, uint32_t> ModelLoader::get_wtype_stat() {
+ std::map<ggml_type, uint32_t> ModelLoader::get_wtype_stat() const {
      std::map<ggml_type, uint32_t> wtype_stat;
      for (auto& [name, tensor_storage] : tensor_storage_map) {
-         if (is_unused_tensor(tensor_storage.name)) {
-             continue;
-         }
- 
 -        auto iter = wtype_stat.find(tensor_storage.type);
 +        auto iter = wtype_stat.find(effective_wtype(tensor_storage));
          if (iter != wtype_stat.end()) {
@@ -132,11 +109,9 @@ diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
      return wtype_stat;
  }
  
- std::map<ggml_type, uint32_t> ModelLoader::get_conditioner_wtype_stat() {
+ std::map<ggml_type, uint32_t> ModelLoader::get_conditioner_wtype_stat() const {
      std::map<ggml_type, uint32_t> wtype_stat;
      for (auto& [name, tensor_storage] : tensor_storage_map) {
-@@ -712,42 +719,42 @@
- 
          if ((tensor_storage.name.find("text_encoders") == std::string::npos &&
               tensor_storage.name.find("cond_stage_model") == std::string::npos &&
               tensor_storage.name.find("te.text_model.") == std::string::npos &&
@@ -156,13 +131,9 @@ diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
      return wtype_stat;
  }
  
- std::map<ggml_type, uint32_t> ModelLoader::get_diffusion_model_wtype_stat() {
+ std::map<ggml_type, uint32_t> ModelLoader::get_diffusion_model_wtype_stat() const {
      std::map<ggml_type, uint32_t> wtype_stat;
      for (auto& [name, tensor_storage] : tensor_storage_map) {
-         if (is_unused_tensor(tensor_storage.name)) {
-             continue;
-         }
- 
          if (tensor_storage.name.find("model.diffusion_model.") == std::string::npos && tensor_storage.name.find("unet.") == std::string::npos) {
              continue;
          }
@@ -179,13 +150,9 @@ diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
      return wtype_stat;
  }
  
- std::map<ggml_type, uint32_t> ModelLoader::get_vae_wtype_stat() {
+ std::map<ggml_type, uint32_t> ModelLoader::get_vae_wtype_stat() const {
      std::map<ggml_type, uint32_t> wtype_stat;
      for (auto& [name, tensor_storage] : tensor_storage_map) {
-@@ -755,21 +762,21 @@
-             continue;
-         }
- 
          if (tensor_storage.name.find("vae.") == std::string::npos &&
              tensor_storage.name.find("first_stage_model") == std::string::npos) {
              continue;
@@ -206,13 +173,13 @@ diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
  TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules) {
      TensorTypeRules result;
      for (const auto& item : split_string(tensor_type_rules, ',')) {
-@@ -821,16 +828,35 @@
-         }
-         if (!tensor_should_be_converted(tensor_storage, dst_type)) {
+@@ -810,16 +817,32 @@ void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_ru
              continue;
          }
          tensor_storage.expected_type = dst_type;
      }
+     invalidate_file_data();
+     ++revision_;
  }
  
 +// Convert every bf16 tensor to `dst_type`, ignoring the name exclusions of
@@ -223,9 +190,6 @@ diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
 +    size_t count = 0;
 +    for (auto& [name, tensor_storage] : tensor_storage_map) {
 +        if (tensor_storage.type != GGML_TYPE_BF16) {
-+            continue;
-+        }
-+        if (is_unused_tensor(tensor_storage.name)) {
 +            continue;
 +        }
 +        tensor_storage.expected_type = dst_type;
@@ -241,49 +205,71 @@ diff -U8 -r old/src/model_loader.cpp new/src/model_loader.cpp
  
      std::vector<TensorStorage> processed_tensor_storages;
      for (const auto& [name, tensor_storage] : tensor_storage_map) {
-         if (is_unused_tensor(tensor_storage.name)) {
-diff -U8 -r old/src/stable-diffusion.cpp new/src/stable-diffusion.cpp
---- old/src/stable-diffusion.cpp	2026-08-29 12:59:12
-+++ new/src/stable-diffusion.cpp	2026-08-29 12:59:12
-@@ -923,16 +923,41 @@
+         processed_tensor_storages.push_back(tensor_storage);
+diff --git a/src/model_loader.h b/src/model_loader.h
+index c5335b5..7823318 100644
+--- a/src/model_loader.h
++++ b/src/model_loader.h
+@@ -112,16 +112,17 @@ public:
+     std::map<ggml_type, uint32_t> get_conditioner_wtype_stat() const;
+     std::map<ggml_type, uint32_t> get_diffusion_model_wtype_stat() const;
+     std::map<ggml_type, uint32_t> get_vae_wtype_stat() const;
+     String2TensorStorage& get_tensor_storage_map() { return tensor_storage_map; }
+     const String2TensorStorage& get_tensor_storage_map() const { return tensor_storage_map; }
+     const std::map<std::string, std::string>& get_metadata() const { return metadata_; }
+     void set_n_threads(int n_threads);
+     void set_wtype_override(ggml_type wtype, std::string tensor_type_rules = "");
++    size_t override_unsupported_bf16(ggml_type dst_type);
+     void process_model_files(bool enable_mmap = false, bool writable_mmap = true);
+     std::vector<MmapTensorStore> mmap_tensors(std::map<std::string, ggml_tensor*>& tensors,
+                                               std::set<std::string> ignore_tensors = {},
+                                               bool writable                        = true);
+     bool load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
+                       bool use_mmap                                    = false,
+                       const std::set<std::string>* target_tensor_names = nullptr,
+                       bool log_progress                                = true);
+diff --git a/src/pipeline/diffusion_engine.cpp b/src/pipeline/diffusion_engine.cpp
+index 96f0d0e..4c95c91 100644
+--- a/src/pipeline/diffusion_engine.cpp
++++ b/src/pipeline/diffusion_engine.cpp
+@@ -1006,16 +1006,40 @@ bool StableDiffusionGGML::init(const sd_ctx_params_t* sd_ctx_params) {
+     }
+     {
+         std::string error;
+         if (!max_vram_assignment.canonicalize_backend_keys(&error)) {
+             LOG_ERROR("%s", error.c_str());
+             return false;
          }
-         {
-             std::string error;
-             if (!max_vram_assignment.canonicalize_backend_keys(&error)) {
-                 LOG_ERROR("%s", error.c_str());
-                 return false;
-             }
-         }
-+        // bf16 weights on a Metal device without the bfloat feature: every op that
-+        // touches them is rejected, and the weight is already placed in the device
-+        // buffer, so the load aborts instead of falling back. f16 keeps the same
-+        // footprint; SD_BF16_PROMOTE_F32 trades 2 bytes per weight for the full
-+        // exponent range if a model ever needs it.
-+        {
-+            const SDBackendModule modules[] = {SDBackendModule::DIFFUSION, SDBackendModule::TE,
-+                                               SDBackendModule::CLIP_VISION, SDBackendModule::VAE,
-+                                               SDBackendModule::CONTROL_NET};
-+            bool bf16_supported = true;
-+            for (SDBackendModule module : modules) {
-+                for (ggml_backend_t backend : backend_manager.runtime_backends(module)) {
-+                    bf16_supported = bf16_supported && sd_backend_supports_bf16(backend);
-+                }
-+            }
-+            if (!bf16_supported) {
-+                ggml_type dst = getenv("SD_BF16_PROMOTE_F32") ? GGML_TYPE_F32 : GGML_TYPE_F16;
-+                size_t n      = model_loader.override_unsupported_bf16(dst);
-+                if (n > 0) {
-+                    LOG_INFO("device has no bfloat: converting %zu bf16 tensors to %s on load",
-+                             n, ggml_type_name(dst));
-+                }
+     }
++    // bf16 weights on a Metal device without the bfloat feature: every op that
++    // touches them is rejected, and the weight is already placed in the device
++    // buffer, so the load aborts instead of falling back. f16 keeps the same
++    // footprint; SD_BF16_PROMOTE_F32 trades 2 bytes per weight for the full
++    // exponent range if a model ever needs it.
++    {
++        const SDBackendModule modules[] = {SDBackendModule::DIFFUSION, SDBackendModule::TE,
++                                           SDBackendModule::CLIP_VISION, SDBackendModule::VAE,
++                                           SDBackendModule::CONTROL_NET};
++        bool bf16_supported = true;
++        for (SDBackendModule module : modules) {
++            for (ggml_backend_t backend : backend_manager.runtime_backends(module)) {
++                bf16_supported = bf16_supported && sd_backend_supports_bf16(backend);
 +            }
 +        }
-+
-         if (stream_layers && !backend_manager.params_backend_is_cpu(SDBackendModule::DIFFUSION)) {
-             LOG_WARN("--stream-layers has no effect unless diffusion params backend is cpu; ignoring");
-             stream_layers = false;
-         }
-         if (eager_load && graph_cut_layer_split_active()) {
-             LOG_WARN("--eager-load is not supported with graph-cut layer split; weights will be prepared lazily");
-             eager_load = false;
-         }
++        if (!bf16_supported) {
++            ggml_type dst = getenv("SD_BF16_PROMOTE_F32") ? GGML_TYPE_F32 : GGML_TYPE_F16;
++            size_t n      = model_loader.override_unsupported_bf16(dst);
++            if (n > 0) {
++                LOG_INFO("device has no bfloat: converting %zu bf16 tensors to %s on load",
++                         n, ggml_type_name(dst));
++            }
++        }
++    }
+     if (eager_load && graph_cut_layer_split_active()) {
+         LOG_WARN("--eager-load is not supported with graph-cut layer split; weights will be prepared lazily");
+         eager_load = false;
+     }
+ 
+     diffusion_conv_direct = sd_ctx_params->diffusion_conv_direct;
+     return apply_model_update(std::move(model_loader), std::move(configuration), all_runner_groups());
+ }

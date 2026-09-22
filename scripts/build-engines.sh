@@ -13,7 +13,7 @@ ROOT="$PWD"
 
 LLAMA_COMMIT="${LLAMA_COMMIT:-465e49b9c}"   # llama.cpp commit validated against the patches
 WHISPER_COMMIT="${WHISPER_COMMIT:-371b5a7561823ab2bb32142d2751e35e7534727b}" # whisper.cpp v1.9.3
-SD_COMMIT="${SD_COMMIT:-97d2990}"         # stable-diffusion.cpp commit validated for image gen
+SD_COMMIT="${SD_COMMIT:-6dcb5bb}"         # stable-diffusion.cpp commit validated for image gen
 ARCH="${ARCH:-$(uname -m)}"
 DEPLOYMENT_TARGET="14.0"        # same floor as the app (Package.swift)
 if [ "$ARCH" = "universal" ]; then
@@ -321,6 +321,12 @@ build_image_engine() {
     # Cast an f16 weight to f32 before adding a LoRA diff: the diff is f32, Metal wants both
     # operands in one type, and a weight in private VRAM cannot fall back to the CPU for the add.
     git apply -p1 "$ROOT/patches/image/0053-image-lora-f16-weight-cast.patch"
+    # Report free VRAM from what this backend holds: the AMD driver's own figure counts
+    # buffers it has not reclaimed yet, and the engine then refuses work that fits.
+    git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/image/0055-image-metal-live-vram-report.patch"
+    # Half partials again, as upstream: float everywhere cost 14% on SDXL on RDNA2 and gave
+    # the same image on every model measured. TOSH_MM_ACC_F32=1 brings it back.
+    git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/image/0056-image-metal-half-partials.patch"
     echo "applied ggml-metal hunks of 0001 + 0003 + core fallback 0004 + ext wave64 0008 to stable-diffusion.cpp"
 
     # This ggml is on a different commit, so an ambiguous hunk can land on the wrong

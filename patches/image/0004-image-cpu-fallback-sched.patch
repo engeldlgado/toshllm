@@ -1,20 +1,39 @@
-diff --git a/src/core/ggml_extend.hpp b/src/core/ggml_extend.hpp
-index b7f348f..08bc16f 100644
---- a/src/core/ggml_extend.hpp
-+++ b/src/core/ggml_extend.hpp
-@@ -2197,10 +2197,15 @@ protected:
+diff --git a/src/core/compute_workspace.cpp b/src/core/compute_workspace.cpp
+index 54f0538..0b17873 100644
+--- a/src/core/compute_workspace.cpp
++++ b/src/core/compute_workspace.cpp
+@@ -1,11 +1,12 @@
+ #include "core/compute_workspace.h"
  
-     bool graph_requires_backend_fallback(ggml_cgraph* gf) const {
-         if (gf == nullptr || sd_backend_is_cpu(runtime_backend)) {
-             return false;
+ #include <algorithm>
++#include <cstdlib>
+ #include <cstring>
+ #include <exception>
+ #include <map>
+ #include <unordered_map>
+ #include <unordered_set>
+ 
+ #include "core/ggml_extend_backend.h"
+ #include "core/ggml_graph_cut.h"
+@@ -27,16 +28,21 @@ namespace sd {
+             extra_backends_ = backends;
+         }
+     }
+ 
+     bool ComputeWorkspace::needs_scheduler(ggml_cgraph* graph) const {
+         if (!extra_backends_.empty()) {
+             return true;
          }
 +        // escape hatch for a wave64 card that miscomputes an op supports_op accepts
 +        static const bool forced = getenv("SD_TOSH_CPU_FALLBACK") != nullptr;
-+        if (forced) {
++        if (forced && !sd_backend_is_cpu(backend_)) {
 +            return true;
 +        }
-         const int n_nodes = ggml_graph_n_nodes(gf);
-         for (int i = 0; i < n_nodes; ++i) {
-             ggml_tensor* node = ggml_graph_node(gf, i);
-             if (node != nullptr && !ggml_backend_supports_op(runtime_backend, node)) {
+         for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+             if (!ggml_backend_supports_op(backend_, ggml_graph_node(graph, i))) {
                  return true;
+             }
+         }
+         return false;
+     }
+ 

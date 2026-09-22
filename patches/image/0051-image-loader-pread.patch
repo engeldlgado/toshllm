@@ -1,11 +1,11 @@
 diff --git a/src/model_loader.cpp b/src/model_loader.cpp
-index 891a417..ddd3bf6 100644
+index ee5aa49..b3ac097 100644
 --- a/src/model_loader.cpp
 +++ b/src/model_loader.cpp
-@@ -9,16 +9,19 @@
- #include <mutex>
+@@ -10,16 +10,19 @@
  #include <regex>
  #include <set>
+ #include <stdexcept>
  #include <string>
  #include <thread>
  #include <unordered_map>
@@ -22,7 +22,7 @@ index 891a417..ddd3bf6 100644
  #include "model_loader.h"
  #include "runtime/imatrix.h"
  #include "stable-diffusion.h"
-@@ -1056,28 +1059,37 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
+@@ -1054,28 +1057,37 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
  
          std::atomic<size_t> tensor_idx(0);
          std::atomic<bool> failed(false);
@@ -63,7 +63,7 @@ index 891a417..ddd3bf6 100644
  
                  std::vector<uint8_t> read_buffer;
                  std::vector<uint8_t> convert_buffer;
-@@ -1161,21 +1173,27 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
+@@ -1159,21 +1171,27 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
                              }
                              zip_entry_close(zip);
                          } else if (mmapped) {

@@ -15,7 +15,7 @@ import UniformTypeIdentifiers
 
 /// One downloadable piece of an image model, tagged with the sd-cli flag it maps to.
 struct ImageGenComponent: Identifiable {
-    enum Kind { case checkpoint, diffusion, vae, audioVAE, connectors, textEncoder, t5, clipL }
+    enum Kind { case checkpoint, diffusion, vae, audioVAE, connectors, textEncoder, llmVision, t5, clipL }
     let kind: Kind
     let urlString: String
     let fileName: String
@@ -31,6 +31,7 @@ struct ImageGenComponent: Identifiable {
         case .audioVAE:    return "--audio-vae"
         case .connectors:  return "--embeddings-connectors"
         case .textEncoder: return "--llm"
+        case .llmVision:   return "--llm_vision"
         case .t5:          return "--t5xxl"
         case .clipL:       return "--clip_l"
         }
@@ -43,6 +44,7 @@ struct ImageGenComponent: Identifiable {
         case .vae:         return "VAE"
         case .audioVAE:    return spanish ? "VAE de audio" : "Audio VAE"
         case .connectors:  return spanish ? "Conectores" : "Connectors"
+        case .llmVision:   return spanish ? "Proyector de visión" : "Vision projector"
         case .textEncoder, .t5, .clipL: return spanish ? "Codificador de texto" : "Text encoder"
         }
     }
@@ -102,6 +104,13 @@ struct ImageGenModel: Identifiable {
             && !ImageGenLimits.baseSizes(vramGB: mainVRAM, residentGB: residentGB,
                                          attnVRAMSq: attnVRAMSq, maxLongEdge: maxLongEdge).isEmpty
     }
+
+    /// Reference images the model takes (0 = none). They go to the text encoder and
+    /// to the VAE, so the edit follows what is in them instead of a noisy start.
+    var maxReferenceImages: Int = 0
+    /// Side (px) references are scaled to before the VAE sees them; each one keeps its
+    /// aspect. The model was tuned at 1024.
+    var referenceResolution: Int = 1024
 
     /// Extra sd-cli flags this model needs (e.g. Flux 2 samples with euler).
     var extraArgs: [String] = []
@@ -274,11 +283,64 @@ enum ImageGenCatalog {
         defaultSteps: 20, cfgScale: 2.5, minVRAMGB: 16,
         extraArgs: ["--backend", "vae=cpu"])
 
+    /// Qwen-Image 2.1 (7B MMDiT, Apache). Writes legible text and edits from
+    /// reference images. Its encoder is Qwen3-VL-8B, which runs off the card.
+    private static func qwenImage21(_ name: String, detailES: String, detailEN: String,
+                                    file: String, sizeGB: Double, minVRAMGB: Double,
+                                    recommendable: Bool) -> ImageGenModel {
+        ImageGenModel(
+            name: name, detailES: detailES, detailEN: detailEN,
+            components: [
+                ImageGenComponent(kind: .diffusion,
+                    urlString: "https://huggingface.co/leejet/Qwen-Image-2.1-GGUF/resolve/main/\(file)",
+                    fileName: file, sizeGB: sizeGB),
+                ImageGenComponent(kind: .vae,
+                    urlString: "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
+                    fileName: "qwen_image_2.1_vae_bf16.safetensors", sizeGB: 0.68),
+                ImageGenComponent(kind: .textEncoder,
+                    urlString: "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+                    fileName: "Qwen3VL-8B-Instruct-Q4_K_M.gguf", sizeGB: 5.03),
+                ImageGenComponent(kind: .llmVision,
+                    urlString: "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+                    fileName: "mmproj-Qwen3VL-8B-Instruct-F16.gguf", sizeGB: 1.16),
+            ],
+            // The published recipe: 25 steps at guidance 1, Euler on the simple schedule.
+            defaultSteps: 25, cfgScale: 1.0, minVRAMGB: minVRAMGB, recommendable: recommendable,
+            nativeLongEdge: 1024,
+            maxReferenceImages: 16,
+            extraArgs: ["--sampling-method", "euler", "--scheduler", "simple"])
+    }
+
+    static let qwenImage21Q3 = qwenImage21(
+        "Qwen-Image 2.1 (Q3)",
+        detailES: "7B. Escribe texto legible y edita desde imágenes de referencia. Versión ligera para 8 GB.",
+        detailEN: "7B. Writes legible text and edits from reference images. Light build for 8 GB cards.",
+        file: "qwen_image_2.1-Q3_K.gguf", sizeGB: 3.27, minVRAMGB: 8, recommendable: false)
+
+    static let qwenImage21Q4 = qwenImage21(
+        "Qwen-Image 2.1",
+        detailES: "7B. Escribe texto legible dentro de la imagen y edita desde imágenes de referencia.",
+        detailEN: "7B. Writes legible text inside the image and edits from reference images.",
+        file: "qwen_image_2.1-Q4_K.gguf", sizeGB: 4.20, minVRAMGB: 12, recommendable: false)
+
+    static let qwenImage21Q6 = qwenImage21(
+        "Qwen-Image 2.1 (Q6)",
+        detailES: "7B con más precisión, para tarjetas de 16 GB en adelante.",
+        detailEN: "7B at higher precision, for 16 GB cards and up.",
+        file: "qwen_image_2.1-Q6_K.gguf", sizeGB: 6.00, minVRAMGB: 16, recommendable: false)
+
+    static let qwenImage21Q8 = qwenImage21(
+        "Qwen-Image 2.1 (Q8)",
+        detailES: "7B casi sin pérdida, para tarjetas grandes.",
+        detailEN: "7B at near-lossless precision, for large cards.",
+        file: "qwen_image_2.1-Q8_0.gguf", sizeGB: 7.69, minVRAMGB: 24, recommendable: false)
+
     /// Curated order (small to large). Z-Image sits before SDXL so it wins the
     /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD);
     /// klein 9B sits before schnell to win the 16 GB tie the same way.
-    static let models: [ImageGenModel] = [sd15, zImageTurbo, sdxlTurbo,
-                                          flux2Klein4B, flux2Klein9B, fluxSchnell, qwenImage, flux2Dev]
+    static let models: [ImageGenModel] = [sd15, zImageTurbo, sdxlTurbo, qwenImage21Q3,
+                                          flux2Klein4B, qwenImage21Q4, flux2Klein9B, fluxSchnell,
+                                          qwenImage21Q6, qwenImage, qwenImage21Q8, flux2Dev]
 
     /// The best model this GPU can run: the highest min-VRAM tier that fits, and
     /// within a tie the earliest listed (curated preference).
@@ -585,7 +647,8 @@ final class ImageGenerator: ObservableObject {
                   format: ImageFormat, offloadToCPU: Bool, gpuIndex: Int,
                   auxGPUIndex: Int = -1,
                   initImagePath: String = "", maskPath: String = "",
-                  strength: Double = 0.75) {
+                  strength: Double = 0.75,
+                  referenceImagePaths: [String] = []) {
         guard !isBusy else { return }
         lastPrompt = prompt; lastSeed = seed; lastWidth = width; lastHeight = height
         let dir = models.imagenDirectory
@@ -641,6 +704,14 @@ final class ImageGenerator: ObservableObject {
         if !initImagePath.isEmpty {
             args += ["-i", initImagePath, "--strength", String(format: "%.2f", strength)]
             if !maskPath.isEmpty { args += ["--mask", maskPath] }
+        }
+        // Reference images (edit mode): each one is read by the text encoder and encoded
+        // by the VAE, and the engine resizes them to the model's own reference size.
+        let refs = referenceImagePaths.filter { !$0.isEmpty }.prefix(max(0, model.maxReferenceImages))
+        for ref in refs { args += ["-r", ref] }
+        if !refs.isEmpty && model.referenceResolution > 0 {
+            let px = model.referenceResolution * model.referenceResolution
+            args += ["--ref-image-args", "vae_input_max_pixels=\(px)"]
         }
         let split = auxGPUIndex >= 0 && auxGPUIndex != gpuIndex && gpuIndex >= 0
             && MTLCopyAllDevices().count > 1
@@ -822,6 +893,8 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     /// Ignored at CFG 1: the sampler never runs the unconditional branch there.
     var negativePrompt = ""
     var initImagePath = ""
+    /// Reference images for the models that edit from them (Qwen-Image 2.1).
+    var referenceImagePaths: [String] = []
     /// Inpainting mask for the init image: white repaints, black keeps.
     var maskPath = ""
     var strength = 0.6
@@ -852,6 +925,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
         prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
         negativePrompt = (try? c.decode(String.self, forKey: .negativePrompt)) ?? ""
         initImagePath = (try? c.decode(String.self, forKey: .initImagePath)) ?? ""
+        referenceImagePaths = (try? c.decode([String].self, forKey: .referenceImagePaths)) ?? []
         maskPath = (try? c.decode(String.self, forKey: .maskPath)) ?? ""
         strength = (try? c.decode(Double.self, forKey: .strength)) ?? 0.6
         aspect = (try? c.decode(String.self, forKey: .aspect)) ?? ImageAspect.square.rawValue
@@ -1106,7 +1180,8 @@ final class ImageGenPool: ObservableObject {
                          width: w, height: h, steps: c.steps, seed: job.seed, format: c.formatValue,
                          offloadToCPU: c.offloadCPU, gpuIndex: c.gpuIndex, auxGPUIndex: aux ?? -1,
                          initImagePath: job.initImagePath ?? c.initImagePath,
-                         maskPath: c.maskPath, strength: c.strength)
+                         maskPath: c.maskPath, strength: c.strength,
+                         referenceImagePaths: c.referenceImagePaths)
         }
         if queue.isEmpty && !anyBusy { queueActive = false }
     }

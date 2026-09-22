@@ -936,6 +936,7 @@ struct ImageInstanceForm: View {
                 Text(loc.t("Descripción", "Prompt")).font(.headline)
                 promptEditor
                 negativePromptSection
+                if model.maxReferenceImages > 0 { referenceImagesSection }
                 img2imgSection
                 settingsGrid
                 if !fitsVRAM { vramWarning }
@@ -1127,6 +1128,42 @@ struct ImageInstanceForm: View {
                 Label(loc.t("Este modelo va a CFG %@ y no usa el prompt negativo. Necesita un modelo con CFG mayor que 1 (SD 1.5, Qwen-Image) o subir el CFG en un modelo propio.", "This model runs at CFG %@ and ignores the negative prompt. It needs a model with CFG above 1 (SD 1.5, Qwen-Image), or a higher CFG on your own model.", "\(String(format: "%.1f", model.cfgScale))"),
                       systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.yellow)
+            }
+        }
+    }
+
+    /// Reference images (edit mode): the model reads them and keeps what they show,
+    /// which is a different thing from img2img seeding the noise with one.
+    private var referenceImagesSection: some View {
+        let tip = loc.t("Imágenes que el modelo mira para editar: describe el cambio en la descripción y menciona cada una como <image1>, <image2>… El motor las escala a \(model.referenceResolution) px de lado.",
+                        "Images the model looks at to edit: describe the change in the prompt and refer to each one as <image1>, <image2>… The engine scales them to \(model.referenceResolution) px a side.")
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(loc.t("Imágenes de referencia", "Reference images")).font(.subheadline).help(tip)
+                Spacer(minLength: 6)
+                Text("\(cfg.referenceImagePaths.count)/\(model.maxReferenceImages)")
+                    .font(.caption).foregroundStyle(.secondary).help(tip)
+            }
+            ForEach(Array(cfg.referenceImagePaths.enumerated()), id: \.offset) { index, path in
+                HStack(spacing: 6) {
+                    Text("<image\(index + 1)>")
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    Text((path as NSString).lastPathComponent)
+                        .font(.caption).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 6)
+                    Button {
+                        cfg.referenceImagePaths.remove(at: index)
+                    } label: { Label(loc.t("Quitar", "Remove"), systemImage: "xmark.circle") }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(GlassIconButtonStyle())
+                        .iconHelp(loc.t("Quitar esta referencia", "Remove this reference"))
+                }
+            }
+            if cfg.referenceImagePaths.count < model.maxReferenceImages {
+                Button {
+                    pickFile(types: ["png", "jpg", "jpeg", "webp"]) { cfg.referenceImagePaths.append($0) }
+                } label: { Label(loc.t("Añadir referencia…", "Add reference…"), systemImage: "photo.badge.plus") }
+                    .font(.caption).help(tip)
             }
         }
     }

@@ -5,7 +5,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Images: Qwen-Image 2.1.** A 7B model that writes legible text inside the image and edits from up to sixteen reference images, with its Qwen3-VL encoder off the card. On a Radeon RX 6700 XT a 1024x1024 image takes 4 min 52 s at the published recipe of 25 steps, and on a Radeon Pro Vega II it runs too; 1920x1088 works with the lighter file. Four sizes are offered so every card gets one that fits, from 8 GB up.
+
+### Fixed
+
+- **Images and Video: generating large sizes no longer stops saying there is no memory.** The AMD driver keeps buffers counted as allocated for tens of seconds after they are released, and at times reports more than the card holds, so the engine refused work that fits: a 2048x2048 image, a 16:9 frame, an edit from a reference image, or the video decoder. The free figure now comes from what the engine itself holds. It also hands back the sampler's weights before decoding, which is what left the video decoder without room on a 12 GB card.
+
 ### Improved
+
+- **Images: images generate faster on AMD RDNA2 (tested on the Radeon RX 6700 XT).** The matrix kernel went back to half precision partial sums, which give the same image. SDXL Turbo takes 8.97 s instead of 10.36 s at 1024x1024 and Qwen-Image 2.1 12.6 percent less per step.
 
 - **LLMs: mixture of experts models read prompts much faster on Radeon Pro Vega and Radeon VII.** The expert matrix kernel was leaving most of the card idle whenever the prompt fell on certain lengths: a 128 token batch of an 8 expert model now takes 1.33 ms instead of 4.47 ms, a 256 token batch 1.42 ms instead of 4.57 ms, and a 64 token batch 1.26 ms instead of 2.22 ms, with the same output.
 
@@ -18,6 +28,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **LLMs: short batches of four to eight tokens run faster on Q4_K models on Radeon Pro Vega and Radeon VII.** The matrix kernel now covers four weight rows per thread there, where two rows ran almost as slowly as one pass per token. On a Radeon Pro Vega II Qwen3.5-4B Q4_K_M processes four token batches 2.0 percent faster and eight token batches 1.7 percent faster; the kernel alone is between 19 and 41 percent faster. Single token generation is unchanged. Same output.
 
 - **LLMs: mixture of experts models load their two expert projections as one matrix on Radeon Pro Vega and Radeon VII.** Qwen3.6-35B-A3B reads prompts between 3.9 and 4.3 percent faster from 32 to 512 tokens and generates 2 percent faster, with the same output.
+
+- **LLMs: IQ4_XS models answer faster when they predict several tokens at once, on Radeon Pro Vega, Radeon VII and AMD RDNA2 (tested on the Radeon RX 6700 XT).** Batches of two to eight tokens now read each block of weights once for up to three tokens instead of once per token. On a Radeon Pro Vega II Qwen3.8-27B UD-IQ4_XS reads four token batches 16 percent faster and eight token batches 20 percent faster, and with multi-token prediction it generates 4 to 6 percent faster; on a Radeon RX 6700 XT a 9B IQ4_XS model gains 22 percent on four token batches and 5 to 6 percent with multi-token prediction. Single token generation is unchanged. Same output.
 
 - **LLMs: mixture of experts models read medium length prompts faster on AMD RDNA2 (tested on the Radeon RX 6700 XT).** An expert narrower than the tile was multiplying padding columns. OLMoE-1B-7B Q5_K_M reads a 128 token prompt at 2439 tokens a second instead of 2261, and Qwen3.6-35B-A3B gains between 1.3 and 2.2 percent from 64 to 512 tokens, with the same output.
 

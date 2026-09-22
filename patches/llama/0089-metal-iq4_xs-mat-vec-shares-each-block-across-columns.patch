@@ -1,0 +1,310 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 6c3f68bcb..731115f99 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1570,10 +1570,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 smem = 32*sizeof(float);
+                 // the 64-lane twin of this kernel lives in mul_mv_w64.metal
+                 if (simd_width == 64 && TOSH_ENV("TOSH_MV_W64_DISABLE") == nullptr) {
+                     w64 = true;
+                 }
++                // up to three columns share one pass over the weights; four columns spill
++                // the registers, so wider batches split into even groups of two or three
++                if (ne11 >= 2 && suffix[0] == '\0' && TOSH_ENV("TOSH_MV_IQ4_XS_NC_DISABLE") == nullptr) {
++                    const int passes = (ne11 + 2)/3;
++                    nr1 = (ne11 + passes - 1)/passes;
++                    if (w64) {
++                        nr0 = N_R0_IQ4_XS_NC_W64;
++                    }
++                    snprintf(sweep_sfx, sizeof(sweep_sfx), "_c%d", nr1);
++                    suffix = sweep_sfx;
++                }
+             } break;
+         case GGML_TYPE_TQ2_0:
+             {
+                 nsg = N_SG_TQ2_0;
+                 nr0 = N_R0_TQ2_0;
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index 2491dabe3..cb2c2610b 100644
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -94,10 +94,11 @@
+ 
+ #define N_R0_IQ4_NL 2
+ #define N_SG_IQ4_NL 2
+ 
+ #define N_R0_IQ4_XS 2
++#define N_R0_IQ4_XS_NC_W64 4
+ #define N_SG_IQ4_XS 2
+ 
+ #define N_R0_TQ2_0 4
+ #define N_SG_TQ2_0 2
+ 
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index bfdddbf3a..351e74b6a 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -3789,10 +3789,133 @@ kernel void kernel_mul_mv_iq4_nl_f32_r8(
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
+     kernel_mul_mv_iq4_nl_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
++// a few columns share one dequant of each block
++template<int NR0, int NC>
++void kernel_mul_mv_iq4_xs_f32_nc_impl(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem,
++        uint3  tgpig,
++        ushort tiisg,
++        ushort sgitg) {
++    const short NSG = FC_mul_mv_nsg;
++
++    threadgroup float * shmem_f32 = (threadgroup float *) shmem;
++
++    const int r0 = tgpig.x;
++    const int r1 = tgpig.y*NC;
++    const int im = tgpig.z;
++    const int first_row = (r0 * NSG + sgitg) * NR0;
++
++    const uint i12 = im%FC_mul_mv_ne12;
++    const uint i13 = im/FC_mul_mv_ne12;
++
++    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
++
++    device const block_iq4_xs * x = (device const block_iq4_xs *) (src0 + offset0);
++
++    const int nb   = args.ne00/QK_K;
++    const int ns01 = args.nb01/args.nb00;
++
++    const short NG = FC_mul_mv_nw/16;
++    const short ix = tiisg/16;
++    const short it = tiisg%16;
++    const short ib = it/2;
++    const short il = it%2;
++
++    shmem_f32[tiisg] = kvalues_iq4nl_f[tiisg%16];
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // a column past the end reads the last one and is not written
++    device const float * yb[NC];
++    FOR_UNROLL (short c = 0; c < NC; c++) {
++        const int col = min(r1 + c, (int) args.ne11 - 1);
++        yb[c] = (device const float *) (src1 + col*args.nb11 + i12*args.nb12 + i13*args.nb13) + ix * QK_K + ib * 32 + il * 8;
++    }
++
++    float4 yl[NC][4];
++    float sumf[NR0][NC];
++    FOR_UNROLL (short row = 0; row < NR0; row++) {
++        FOR_UNROLL (short c = 0; c < NC; c++) {
++            sumf[row][c] = 0.f;
++        }
++    }
++
++    uint32_t aux32[2];
++    thread const uint8_t * q8 = (thread const uint8_t *)aux32;
++
++    for (int ibl = ix; ibl < nb && ibl < ns01; ibl += NG) {
++        FOR_UNROLL (short c = 0; c < NC; c++) {
++            device const float4 * y4 = (device const float4 *)yb[c];
++            yl[c][0] = y4[0];
++            yl[c][1] = y4[4];
++            yl[c][2] = y4[1];
++            yl[c][3] = y4[5];
++            yb[c] += NG * QK_K;
++        }
++
++        FOR_UNROLL (short row = 0; row < NR0; ++row) {
++            device const block_iq4_xs & xb = x[row*ns01 + ibl];
++            device const uint32_t * q4 = (device const uint32_t *)(xb.qs + 16*ib + 8*il);
++
++            float4 qf[4];
++            aux32[0] = (q4[0]     ) & 0x0f0f0f0f;
++            aux32[1] = (q4[0] >> 4) & 0x0f0f0f0f;
++            qf[0] = {shmem_f32[q8[0]], shmem_f32[q8[1]], shmem_f32[q8[2]], shmem_f32[q8[3]]};
++            qf[1] = {shmem_f32[q8[4]], shmem_f32[q8[5]], shmem_f32[q8[6]], shmem_f32[q8[7]]};
++            aux32[0] = (q4[1]     ) & 0x0f0f0f0f;
++            aux32[1] = (q4[1] >> 4) & 0x0f0f0f0f;
++            qf[2] = {shmem_f32[q8[0]], shmem_f32[q8[1]], shmem_f32[q8[2]], shmem_f32[q8[3]]};
++            qf[3] = {shmem_f32[q8[4]], shmem_f32[q8[5]], shmem_f32[q8[6]], shmem_f32[q8[7]]};
++
++            const int ls = (((xb.scales_l[ib/2] >> 4*(ib%2)) & 0xf) | (((xb.scales_h >> 2*ib) & 3) << 4)) - 32;
++            const float dl = (float)xb.d * ls;
++
++            FOR_UNROLL (short c = 0; c < NC; c++) {
++                const float4 acc = yl[c][0]*qf[0] + yl[c][1]*qf[1] + yl[c][2]*qf[2] + yl[c][3]*qf[3];
++                sumf[row][c] += dl * (acc[0] + acc[1] + acc[2] + acc[3]);
++            }
++        }
++    }
++
++    FOR_UNROLL (short c = 0; c < NC; c++) {
++        if (r1 + c >= args.ne11) {
++            break;
++        }
++        device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)(r1 + c)*args.ne0;
++
++        for (int row = 0; row < NR0 && first_row + row < args.ne0; ++row) {
++            const float sum_all = simd_sum(sumf[row][c]);
++            if (tiisg == 0) {
++                dst_f32[first_row + row] = sum_all;
++            }
++        }
++    }
++}
++
++#define IQ4_XS_MV_NC(NC) \
++[[host_name("kernel_mul_mv_iq4_xs_f32_c" #NC)]] \
++kernel void kernel_mul_mv_iq4_xs_f32_c##NC( \
++        constant ggml_metal_kargs_mul_mv & args, \
++        device const char * src0, \
++        device const char * src1, \
++        device       char * dst, \
++        threadgroup  char * shmem [[threadgroup(0)]], \
++        uint3  tgpig[[threadgroup_position_in_grid]], \
++        ushort tiisg[[thread_index_in_simdgroup]], \
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) { \
++    kernel_mul_mv_iq4_xs_f32_nc_impl<N_R0_IQ4_XS, NC>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg); \
++}
++
++IQ4_XS_MV_NC(2)
++IQ4_XS_MV_NC(3)
++
+ template<int NR0, typename args_t>
+ void kernel_mul_mv_iq4_xs_f32_impl(
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+index ab342c912..474a7ea23 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+@@ -3187,10 +3187,125 @@ void kernel_mul_mv_iq4_xs_f32_w64_impl(
+         }
+     }
+ }
+ 
+ 
++// a few columns share one dequant of each block
++template<int NR0, int NC>
++void kernel_mul_mv_iq4_xs_f32_nc_w64_impl(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem,
++        uint3  tgpig,
++        ushort tiisg,
++        ushort sgitg) {
++    const short NSG = FC_mul_mv_nsg;
++
++    threadgroup float * shmem_f32 = (threadgroup float *) shmem;
++
++    const int r0 = tgpig.x;
++    const int r1 = tgpig.y*NC;
++    const int im = tgpig.z;
++    const int first_row = (r0 * NSG + sgitg) * NR0;
++
++    const uint i12 = im%FC_mul_mv_ne12;
++    const uint i13 = im/FC_mul_mv_ne12;
++
++    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
++
++    device const block_iq4_xs * x = (device const block_iq4_xs *) (src0 + offset0);
++
++    const int nb   = args.ne00/QK_K;
++    const int ns01 = args.nb01/args.nb00;
++
++    const short NG = FC_mul_mv_nw/32;
++    const short ix = tiisg/32;
++    const short ib = (tiisg%32)/4;
++    const short hl = tiisg%4;
++
++    shmem_f32[tiisg] = kvalues_iq4nl_f[tiisg%16];
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // a column past the end reads the last one and is not written
++    device const float * yb[NC];
++    FOR_UNROLL (short c = 0; c < NC; c++) {
++        const int col = min(r1 + c, (int) args.ne11 - 1);
++        yb[c] = (device const float *) (src1 + col*args.nb11 + i12*args.nb12 + i13*args.nb13) + ix * QK_K + ib * 32;
++    }
++
++    float4 yl[NC][2];
++    float sumf[NR0][NC];
++    FOR_UNROLL (short row = 0; row < NR0; row++) {
++        FOR_UNROLL (short c = 0; c < NC; c++) {
++            sumf[row][c] = 0.f;
++        }
++    }
++
++    uint32_t aux32[2];
++    thread const uint8_t * q8 = (thread const uint8_t *)aux32;
++
++    for (int ibl = ix; ibl < nb && ibl < ns01; ibl += NG) {
++        FOR_UNROLL (short c = 0; c < NC; c++) {
++            device const float4 * y4 = (device const float4 *)yb[c];
++            yl[c][0] = y4[hl    ];
++            yl[c][1] = y4[hl + 4];
++            yb[c] += NG * QK_K;
++        }
++
++        FOR_UNROLL (short row = 0; row < NR0; ++row) {
++            device const block_iq4_xs & xb = x[row*ns01 + ibl];
++            device const uint32_t * q4 = (device const uint32_t *)(xb.qs + 16*ib + 4*hl);
++
++            aux32[0] = (q4[0]     ) & 0x0f0f0f0f;
++            aux32[1] = (q4[0] >> 4) & 0x0f0f0f0f;
++            const float4 qf1 = {shmem_f32[q8[0]], shmem_f32[q8[1]], shmem_f32[q8[2]], shmem_f32[q8[3]]};
++            const float4 qf2 = {shmem_f32[q8[4]], shmem_f32[q8[5]], shmem_f32[q8[6]], shmem_f32[q8[7]]};
++
++            const int ls = (((xb.scales_l[ib/2] >> 4*(ib%2)) & 0xf) | (((xb.scales_h >> 2*ib) & 3) << 4)) - 32;
++            const float dl = (float)xb.d * ls;
++
++            FOR_UNROLL (short c = 0; c < NC; c++) {
++                const float4 acc = yl[c][0] * qf1 + yl[c][1] * qf2;
++                sumf[row][c] += dl * (acc[0] + acc[1] + acc[2] + acc[3]);
++            }
++        }
++    }
++
++    FOR_UNROLL (short c = 0; c < NC; c++) {
++        if (r1 + c >= args.ne11) {
++            break;
++        }
++        device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)(r1 + c)*args.ne0;
++
++        for (int row = 0; row < NR0 && first_row + row < args.ne0; ++row) {
++            const float sum_all = simd_sum(sumf[row][c]);
++            if (tiisg == 0) {
++                dst_f32[first_row + row] = sum_all;
++            }
++        }
++    }
++}
++
++#define IQ4_XS_MV_NC_W64(NC) \
++[[host_name("kernel_mul_mv_iq4_xs_f32_c" #NC "_w64")]] \
++kernel void kernel_mul_mv_iq4_xs_f32_c##NC##_w64( \
++        constant ggml_metal_kargs_mul_mv & args, \
++        device const char * src0, \
++        device const char * src1, \
++        device       char * dst, \
++        threadgroup  char * shmem [[threadgroup(0)]], \
++        uint3  tgpig[[threadgroup_position_in_grid]], \
++        ushort tiisg[[thread_index_in_simdgroup]], \
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) { \
++    kernel_mul_mv_iq4_xs_f32_nc_w64_impl<N_R0_IQ4_XS_NC_W64, NC>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg); \
++}
++
++IQ4_XS_MV_NC_W64(2)
++IQ4_XS_MV_NC_W64(3)
++
+ [[host_name("kernel_mul_mv_iq4_xs_f32_w64")]]
+ kernel void kernel_mul_mv_iq4_xs_f32_w64(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0,
+         device const char * src1,
