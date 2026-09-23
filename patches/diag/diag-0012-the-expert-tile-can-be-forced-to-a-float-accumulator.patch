@@ -1,7 +1,10 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index ef5ae84ac..459c9281b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1770,7 +1770,9 @@
+@@ -1779,11 +1779,13 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+ 
+     const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
  
      const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
  
@@ -12,3 +15,5 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                           TOSH_ENV("TOSH_MM_ACC_F32_DISABLE") == nullptr;
  
      // one grid per expert already keeps the GPU in threadgroups, so the 8x4 tile does not need
+     // the dense token floor. What it needs is an average expert that fills the narrow tile:
+     // below that its 64 columns are mostly padding and it loses (measured -5% at 14 tokens

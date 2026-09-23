@@ -1,5 +1,5 @@
 diff --git a/src/model_manager.cpp b/src/model_manager.cpp
-index 930c6f4..4752f10 100644
+index 930c6f4..bc6b1c4 100644
 --- a/src/model_manager.cpp
 +++ b/src/model_manager.cpp
 @@ -1112,40 +1112,42 @@ void ModelManager::free_params_storage_block(ParamsStorageBlock& block) {
@@ -48,7 +48,7 @@ index 930c6f4..4752f10 100644
                  auto& stats = released[ggml_backend_buffer_get_type(block->buffer)];
                  stats.bytes += ggml_backend_buffer_get_size(block->buffer);
                  stats.tensors += block->states.size();
-@@ -1476,16 +1478,29 @@ void ModelManager::finish_compute_backend_usage(const std::vector<TensorState*>&
+@@ -1476,16 +1478,30 @@ void ModelManager::finish_compute_backend_usage(const std::vector<TensorState*>&
              continue;
          }
          if (state->pin_count > 0) {
@@ -57,15 +57,16 @@ index 930c6f4..4752f10 100644
      }
  }
  
-+void ModelManager::unload_params(const std::vector<ggml_tensor*>& tensors) {
-+    if (tensors.empty()) {
++void ModelManager::unload_component(ModelComponent component) {
++    std::unordered_set<TensorState*> target_states;
++    for (const auto& state : tensor_states_) {
++        if (state != nullptr && state->component == component) {
++            target_states.insert(state.get());
++        }
++    }
++    if (target_states.empty()) {
 +        return;
 +    }
-+    std::vector<TensorState*> required_states;
-+    if (!resolve_required_tensor_states(tensors, required_states) || required_states.empty()) {
-+        return;
-+    }
-+    std::unordered_set<TensorState*> target_states(required_states.begin(), required_states.end());
 +    release_compute_staging_blocks(false, &target_states);
 +    release_params_storage_blocks(false, &target_states, true);
 +}
@@ -79,7 +80,7 @@ index 930c6f4..4752f10 100644
          return;
      }
 diff --git a/src/model_manager.h b/src/model_manager.h
-index f3a6e32..e132da7 100644
+index f3a6e32..745c729 100644
 --- a/src/model_manager.h
 +++ b/src/model_manager.h
 @@ -160,17 +160,18 @@ private:
@@ -112,9 +113,9 @@ index f3a6e32..e132da7 100644
      bool prefetch_enabled() const override { return !prefetch_disabled_; }
      void release_compute_backend_params(const std::vector<ggml_tensor*>& tensors) override;
 +
-+    // hand back the video memory a module's weights hold, even when they are resident
-+    // rather than streamed from disk. The caller has to know the module is done.
-+    void unload_params(const std::vector<ggml_tensor*>& tensors);
++    // hand back the video memory a component's weights hold, even when they are resident
++    // rather than streamed from disk. The caller has to know the component is done.
++    void unload_component(ModelComponent component);
      void evict_compute_backend_params(const std::vector<ggml_tensor*>& tensors) override;
      WeightResidencyInfo inspect_compute_backend_params(
          const std::vector<ggml_tensor*>& tensors) const override;
@@ -124,10 +125,10 @@ index f3a6e32..e132da7 100644
      bool ensure_compute_backend_capacity(
          const DeviceMemoryRequest& request,
 diff --git a/src/pipeline/diffusion_engine.cpp b/src/pipeline/diffusion_engine.cpp
-index e020a2d..96f0d0e 100644
+index e020a2d..3144c04 100644
 --- a/src/pipeline/diffusion_engine.cpp
 +++ b/src/pipeline/diffusion_engine.cpp
-@@ -198,16 +198,40 @@ void StableDiffusionGGML::end_runners() {
+@@ -198,16 +198,33 @@ void StableDiffusionGGML::end_runners() {
          control_net->runner_end();
      for (auto& extension : generation_extensions)
          extension->runner_end();
@@ -143,21 +144,14 @@ index e020a2d..96f0d0e 100644
 +    if (model_manager == nullptr) {
 +        return;
 +    }
-+    const std::shared_ptr<DiffusionModelRunner> runners[] = {diffusion_model, high_noise_diffusion_model};
-+    for (const std::shared_ptr<DiffusionModelRunner>& runner : runners) {
-+        if (runner == nullptr) {
-+            continue;
++    // by component: a finished runner cannot always list its own parameters
++    for (const std::shared_ptr<DiffusionModelRunner>& runner : {diffusion_model, high_noise_diffusion_model}) {
++        if (runner != nullptr) {
++            runner->runner_end();
 +        }
-+        runner->runner_end();
-+        std::map<std::string, ggml_tensor*> params;
-+        runner->get_param_tensors(params);
-+        std::vector<ggml_tensor*> tensors;
-+        tensors.reserve(params.size());
-+        for (const auto& pair : params) {
-+            tensors.push_back(pair.second);
-+        }
-+        model_manager->unload_params(tensors);
 +    }
++    model_manager->unload_component(ModelComponent::Diffusion);
++    model_manager->unload_component(ModelComponent::HighNoiseDiffusion);
 +}
 +
  bool StableDiffusionGGML::reset_runners(const RunnerGroups& groups) {

@@ -1,7 +1,10 @@
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index d0f22b39a..0ab2d3773 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -3538,7 +3538,9 @@
+@@ -3536,11 +3536,13 @@ void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid,
+ 
+     // a file with the two projections apart still runs them as one on a 64-lane card, where the
      // wider matrix measured 4% more prompt throughput and 1.4% more generation on Qwen3.6-35B
      if (layer.ffn_gate_up_exps == nullptr && !(flags & TENSOR_SKIP)) {
          const char * simd_width = getenv("TOSH_METAL_SIMD_WIDTH");
@@ -12,3 +15,5 @@ diff --git a/src/llama-model.cpp b/src/llama-model.cpp
              layer.ffn_gate_up_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS, "weight", bid),
                      {n_embd_, n_ff_ * 2, n_expert_}, TENSOR_NOT_REQUIRED | TENSOR_FUSE_GATE_UP);
          }
+     }
+ 

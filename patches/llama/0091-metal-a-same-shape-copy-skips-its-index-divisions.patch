@@ -1,0 +1,32 @@
+diff --git a/ggml/src/ggml-metal/kernels/quantize.metal b/ggml/src/ggml-metal/kernels/quantize.metal
+index deb4b6e6e..cfb3945ef 100644
+--- a/ggml/src/ggml-metal/kernels/quantize.metal
++++ b/ggml/src/ggml-metal/kernels/quantize.metal
+@@ -19,12 +19,21 @@ kernel void kernel_cpy_t_t(
+         return;
+     }
+ 
+-    const int64_t n = i03*args.ne02*args.ne01*args.ne00 + i02*args.ne01*args.ne00 + i01*args.ne00;
+-
+-    const int32_t i3 = n/(args.ne2*args.ne1*args.ne0);
+-    const int32_t i2 = (n - i3*args.ne2*args.ne1*args.ne0)/(args.ne1*args.ne0);
+-    const int32_t i1 = (n - i3*args.ne2*args.ne1*args.ne0 - i2*args.ne1*args.ne0)/args.ne0;
+-    const int32_t i0 = (n - i3*args.ne2*args.ne1*args.ne0 - i2*args.ne1*args.ne0 - i1*args.ne0);
++    int32_t i3 = i03;
++    int32_t i2 = i02;
++    int32_t i1 = i01;
++    int32_t i0 = 0;
++
++    // with the same shape on both sides a row maps to itself, and the 64-bit divisions
++    // below cost more than the copy
++    if (args.ne00 != args.ne0 || args.ne01 != args.ne1 || args.ne02 != args.ne2) {
++        const int64_t n = i03*args.ne02*args.ne01*args.ne00 + i02*args.ne01*args.ne00 + i01*args.ne00;
++
++        i3 = n/(args.ne2*args.ne1*args.ne0);
++        i2 = (n - i3*args.ne2*args.ne1*args.ne0)/(args.ne1*args.ne0);
++        i1 = (n - i3*args.ne2*args.ne1*args.ne0 - i2*args.ne1*args.ne0)/args.ne0;
++        i0 = (n - i3*args.ne2*args.ne1*args.ne0 - i2*args.ne1*args.ne0 - i1*args.ne0);
++    }
+ 
+     device T1 * dst_data = (device T1 *) (dst + i3*args.nb3 + i2*args.nb2 + i1*args.nb1 + i0*args.nb0);
+ 

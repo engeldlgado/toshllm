@@ -525,6 +525,31 @@ enum EngineLock {
         save([])
         return reaped
     }
+
+    /// Kills engines from one of our bundles that launchd has adopted: a router child whose
+    /// parent engine died, or an engine whose app went away. A live engine always hangs off
+    /// the app or off its router, so nothing running is touched.
+    static func reapStrayEngines() {
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return }
+        var pids = [pid_t](repeating: 0, count: Int(count) + 64)
+        let n = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        guard n > 0 else { return }
+        for pid in pids.prefix(Int(n)) where pid > 1 {
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_ppid == 1 else { continue }
+            var buffer = [CChar](repeating: 0, count: 4096)
+            guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { continue }
+            let path = String(cString: buffer)
+            guard path.contains("ToshLLM.app/Contents/Resources/bin"), path.hasSuffix("/llama-server") else { continue }
+            AppLog.app.warning("Reaping stray engine pid \(pid) at \(path)")
+            kill(pid, SIGTERM)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
+                if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            }
+        }
+    }
 }
 
 // MARK: - File hashing

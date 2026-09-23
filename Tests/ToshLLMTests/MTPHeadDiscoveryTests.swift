@@ -29,6 +29,15 @@ final class MTPHeadDiscoveryTests: XCTestCase {
     func testFlashNextTakesItsOwnDraftWidth() {
         XCTAssertEqual(ServerSettings.mtpDraftWidthArgs(forModel: "/models/missing.gguf"), [])
     }
+
+    func testDraftWidthFollowsTheCardLaneWidth() {
+        let m = "/models/missing.gguf"
+        XCTAssertEqual(ServerSettings.mtpDraftWidthArgs(forModel: m, gpuArchitecture: "GCN / Vega"), ["--spec-draft-n-max", "1"])
+        XCTAssertEqual(ServerSettings.mtpDraftWidthArgs(forModel: m, gpuArchitecture: "RDNA 2"), ["--spec-draft-n-max", "2"])
+        XCTAssertEqual(ServerSettings.mtpDraftWidthArgs(forModel: m, gpuArchitecture: "Apple Silicon"), [])
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon Pro Vega II Duo"), "GCN / Vega")
+        XCTAssertEqual(GPUArchitectureClassifier.architecture(for: "AMD Radeon RX 6700 XT"), "RDNA 2")
+    }
 }
 
 /// The launch environment for a split, written straight from the settings the UI exposes.

@@ -94,10 +94,25 @@ enum ChatStreamIdentity {
         return "\(conversationID.uuidString)::\(model)"
     }
 
+    /// The engine keys a session by the conv_id query parameter, not by a path segment.
     static func resumeURL(port: Int, identity: String, from offset: Int) -> URL? {
-        var allowed = CharacterSet.urlPathAllowed
-        allowed.remove(charactersIn: "/")
-        guard let encoded = identity.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
-        return URL(string: "http://127.0.0.1:\(port)/v1/stream/\(encoded)?from=\(offset)")
+        var comps = URLComponents(string: "http://127.0.0.1:\(port)/v1/stream")
+        comps?.percentEncodedQueryItems = [URLQueryItem(name: "conv_id", value: encode(identity)),
+                                           URLQueryItem(name: "from", value: String(offset))]
+        return comps?.url
+    }
+
+    /// DELETE here cancels the generation. Closing the connection does not: the engine
+    /// keeps a keyed stream running so a dropped client can pick it up again.
+    static func stopURL(port: Int, identity: String) -> URL? {
+        var comps = URLComponents(string: "http://127.0.0.1:\(port)/v1/stream")
+        comps?.percentEncodedQueryItems = [URLQueryItem(name: "conv_id", value: encode(identity))]
+        return comps?.url
+    }
+
+    private static func encode(_ identity: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "/&=+?#")
+        return identity.addingPercentEncoding(withAllowedCharacters: allowed) ?? identity
     }
 }

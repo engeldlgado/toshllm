@@ -1,0 +1,109 @@
+diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/eval-callback.cpp
+index 4ce8d600b..21af6a645 100644
+--- a/examples/eval-callback/eval-callback.cpp
++++ b/examples/eval-callback/eval-callback.cpp
+@@ -8,6 +8,81 @@
+ #include <string>
+ #include <vector>
+ 
++
++#include "ggml-backend.h"
++#include "ggml-cpu.h"
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++
++// TOSH_AMAX=1: for every matrix product wide enough to take the tiled path, the largest
++// activation and the largest sum of |x| over a 32-deep slice, times the largest weight.
++// That product bounds the half partial the AMD tile keeps; 65504 is where it breaks.
++struct tosh_amax_row { double x_max = 0, s32 = 0, w_max = 0, bound = 0; int n = 0; long long ne11 = 0; };
++static std::map<std::string, tosh_amax_row> g_amax;
++static std::map<const ggml_tensor *, double> g_wmax;
++
++static double tosh_weight_max(const ggml_tensor * w) {
++    auto it = g_wmax.find(w);
++    if (it != g_wmax.end()) return it->second;
++    const auto * tr = ggml_get_type_traits(w->type);
++    const int64_t n = ggml_nelements(w);
++    std::vector<uint8_t> raw(ggml_nbytes(w));
++    ggml_backend_tensor_get(w, raw.data(), 0, raw.size());
++    double m = 0;
++    const int64_t chunk = w->ne[0];
++    std::vector<float> f(chunk);
++    for (int64_t r = 0; r < n/chunk; ++r) {
++        const uint8_t * src = raw.data() + r*ggml_row_size(w->type, chunk);
++        if (w->type == GGML_TYPE_F32) { memcpy(f.data(), src, chunk*4); }
++        else if (tr->to_float) { tr->to_float(src, f.data(), chunk); }
++        else { break; }
++        for (float v : f) m = std::max(m, (double) std::fabs(v));
++    }
++    g_wmax[w] = m;
++    return m;
++}
++
++static bool tosh_amax_cb(struct ggml_tensor * t, bool ask, void * ud) {
++    (void) ud;
++    const bool mm = t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID;
++    if (ask) return mm && t->src[1] && t->src[1]->type == GGML_TYPE_F32 && t->src[1]->ne[t->op == GGML_OP_MUL_MAT_ID ? 2 : 1] > 8;
++    if (!mm) return true;
++    const ggml_tensor * x = t->src[1];
++    if (!ggml_is_contiguous(x)) return true;
++    std::vector<float> xs(ggml_nelements(x));
++    ggml_backend_tensor_get(x, xs.data(), 0, ggml_nbytes(x));
++    const int64_t k = x->ne[0];
++    double xm = 0, s32 = 0;
++    for (int64_t r = 0; r < (int64_t) xs.size()/k; ++r) {
++        for (int64_t c = 0; c < k; c += 32) {
++            double s = 0;
++            for (int64_t j = c; j < std::min(k, c + 32); ++j) { const double a = std::fabs(xs[r*k + j]); s += a; xm = std::max(xm, a); }
++            s32 = std::max(s32, s);
++        }
++    }
++    const double wm = tosh_weight_max(t->src[0]);
++    std::string key = std::string(ggml_op_desc(t)) + " " + t->src[0]->name;
++    // fold layer numbers so one line covers the same tensor in every block
++    std::string fk; for (size_t i = 0; i < key.size(); ++i) { if (isdigit(key[i]) && i && key[i-1] == '.') { while (i < key.size() && isdigit(key[i])) ++i; fk += "N"; --i; } else fk += key[i]; }
++    auto & row = g_amax[fk];
++    row.n++; row.ne11 = std::max<long long>(row.ne11, x->ne[t->op == GGML_OP_MUL_MAT_ID ? 2 : 1]);
++    row.x_max = std::max(row.x_max, xm); row.s32 = std::max(row.s32, s32); row.w_max = std::max(row.w_max, wm);
++    row.bound = std::max(row.bound, s32*wm);
++    return true;
++}
++
++static void tosh_amax_dump() {
++    double worst = 0;
++    for (auto & [k, r] : g_amax) {
++        fprintf(stderr, "TOSH_AMAX %-44s n=%-4d tok=%-5lld x_max=%-10.3g s32=%-10.3g w_max=%-8.3g bound=%-10.3g headroom=%.1fx\n",
++            k.c_str(), r.n, r.ne11, r.x_max, r.s32, r.w_max, r.bound, r.bound > 0 ? 65504.0/r.bound : 0.0);
++        worst = std::max(worst, r.bound);
++    }
++    fprintf(stderr, "TOSH_AMAX worst bound=%.4g headroom=%.1fx\n", worst, worst > 0 ? 65504.0/worst : 0.0);
++}
++
+ static bool run(llama_context * ctx, const common_params & params) {
+     const llama_model * model = llama_get_model(ctx);
+     const llama_vocab * vocab = llama_model_get_vocab(model);
+@@ -54,6 +129,11 @@ int main(int argc, char ** argv) {
+     // it will be executed for each node during the graph computation
+     params.cb_eval = common_debug_cb_eval;
+     params.cb_eval_user_data = &cb_data;
++    const bool amax = getenv("TOSH_AMAX") != nullptr;
++    if (amax) {
++        params.cb_eval = tosh_amax_cb;
++        params.cb_eval_user_data = nullptr;
++    }
+     params.warmup = false;
+ 
+     // init
+@@ -79,6 +159,10 @@ int main(int argc, char ** argv) {
+         return 1;
+     }
+ 
++    if (amax) {
++        tosh_amax_dump();
++    }
++
+     LOG("\n");
+     llama_perf_context_print(ctx);
+ 

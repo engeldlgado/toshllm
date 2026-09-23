@@ -384,6 +384,8 @@ final class ChatStore: ObservableObject {
 
     private var task: Task<Void, Never>?
     private var watchdog: Task<Void, Never>?
+    /// Where the running reply is streamed from, so Stop can cancel it on the engine too.
+    private var activeStream: (port: Int, identity: String)?
     private var lastStreamActivity = Date()
     private var sawFirstToken = false
     private var slotConvID: UUID?
@@ -710,6 +712,8 @@ final class ChatStore: ObservableObject {
         // must land in the one this request started from, found by id.
         let convID = conversations[i].id
         let toolCwd = effectiveWorkingDirectory(for: convID)
+        activeStream = (port, ChatStreamIdentity.value(conversationID: convID,
+                                                       model: ServerSettings.activeRouterModel()))
         let systemWithCwd = toolCwd.map {
             (system.isEmpty ? "" : system + "\n\n")
             + "File tools work inside \($0). Use paths relative to it, and never call them for text that only exists in this conversation."
@@ -1764,6 +1768,16 @@ final class ChatStore: ObservableObject {
         watchdog?.cancel()
         watchdog = nil
         task?.cancel()
+        if let stream = activeStream, let url = ChatStreamIdentity.stopURL(port: stream.port, identity: stream.identity) {
+            activeStream = nil
+            var req = URLRequest(url: url)
+            req.httpMethod = "DELETE"
+            req.timeoutInterval = 5
+            if let key = ServerSettings.activeAPIKey() {
+                req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+            }
+            Task.detached { _ = try? await URLSession.shared.data(for: req) }
+        }
     }
 
     /// Removes the last user message (and its response, if any) so it can be

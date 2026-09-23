@@ -1,0 +1,135 @@
+diff --git a/examples/eval-callback/eval-callback.cpp b/examples/eval-callback/eval-callback.cpp
+index 21af6a645..e4d7780d1 100644
+--- a/examples/eval-callback/eval-callback.cpp
++++ b/examples/eval-callback/eval-callback.cpp
+@@ -83,6 +83,87 @@ static void tosh_amax_dump() {
+     fprintf(stderr, "TOSH_AMAX worst bound=%.4g headroom=%.1fx\n", worst, worst > 0 ? 65504.0/worst : 0.0);
+ }
+ 
++#include "ggml-backend.h"
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++
++// TOSH_NANFIND=1: report the first node whose output holds a NaN or a +Inf, with its op and
++// inputs, then stop checking
++static bool g_nan_found = false;
++static long g_nan_nodes = 0;
++// TOSH_LAYERSUM=1: print the sum and the absolute sum of every layer output, to line up a
++// CPU run against a GPU one and find the first layer and batch where they part
++static long g_ls_calls = 0;
++static bool tosh_layersum_cb(struct ggml_tensor * t, bool ask, void * ud) {
++    (void) ud;
++    // TOSH_LAYERSUM_NAMES: comma list of name prefixes, default the per-layer residual
++    static const std::vector<std::string> names = []() {
++        std::vector<std::string> v;
++        const char * e = getenv("TOSH_LAYERSUM_NAMES");
++        std::string s = e ? e : "l_out,result_norm";
++        size_t a = 0;
++        while (a <= s.size()) {
++            size_t b = s.find(',', a);
++            if (b == std::string::npos) b = s.size();
++            if (b > a) v.push_back(s.substr(a, b - a));
++            a = b + 1;
++        }
++        return v;
++    }();
++    bool match = false;
++    for (const auto & n : names) {
++        if (strncmp(t->name, n.c_str(), n.size()) == 0) { match = true; break; }
++    }
++    const bool want = t->type == GGML_TYPE_F32 && match;
++    if (ask) {
++        return want;
++    }
++    if (!want || !ggml_is_contiguous(t)) {
++        return true;
++    }
++    std::vector<float> v(ggml_nelements(t));
++    ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
++    double sum = 0, asum = 0, last_asum = 0;
++    const int64_t row = t->ne[0];
++    for (size_t i = 0; i < v.size(); ++i) {
++        sum += v[i]; asum += std::fabs(v[i]);
++        if ((int64_t) i >= (int64_t) v.size() - row) last_asum += std::fabs(v[i]);
++    }
++    fprintf(stderr, "TOSH_LS %ld %s ne1=%lld sum=%.6g asum=%.6g last_asum=%.6g\n", g_ls_calls++, t->name,
++        (long long) t->ne[1], sum, asum, last_asum);
++    return true;
++}
++
++static bool tosh_nanfind_cb(struct ggml_tensor * t, bool ask, void * ud) {
++    (void) ud;
++    if (ask) {
++        return !g_nan_found && t->type == GGML_TYPE_F32;
++    }
++    if (g_nan_found || t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t)) {
++        return true;
++    }
++    g_nan_nodes++;
++    std::vector<float> v(ggml_nelements(t));
++    ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
++    long bad = 0, first = -1;
++    for (size_t i = 0; i < v.size(); ++i) {
++        // masks and scores carry -inf on purpose; only NaN and +inf are faults
++        if (std::isnan(v[i]) || v[i] == INFINITY) { if (first < 0) first = (long) i; bad++; }
++    }
++    if (bad > 0) {
++        g_nan_found = true;
++        fprintf(stderr, "TOSH_NANFIND node #%ld '%s' op=%s ne=[%lld,%lld,%lld,%lld] bad=%ld first=%ld val=%g\n",
++            g_nan_nodes, t->name, ggml_op_desc(t), (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
++            bad, first, v[first]);
++        for (int j = 0; j < GGML_MAX_SRC && t->src[j]; ++j) {
++            fprintf(stderr, "TOSH_NANFIND   src%d '%s' op=%s type=%s ne=[%lld,%lld,%lld,%lld]\n", j, t->src[j]->name, ggml_op_desc(t->src[j]),
++                ggml_type_name(t->src[j]->type), (long long) t->src[j]->ne[0], (long long) t->src[j]->ne[1], (long long) t->src[j]->ne[2], (long long) t->src[j]->ne[3]);
++        }
++    }
++    return true;
++}
++
+ static bool run(llama_context * ctx, const common_params & params) {
+     const llama_model * model = llama_get_model(ctx);
+     const llama_vocab * vocab = llama_model_get_vocab(model);
+@@ -106,6 +187,16 @@ static bool run(llama_context * ctx, const common_params & params) {
+         return false;
+     }
+ 
++    // the most likely next token, so a run can be judged without generating
++    if (const float * logits = llama_get_logits_ith(ctx, -1)) {
++        const int n_vocab = llama_vocab_n_tokens(vocab);
++        int best = 0;
++        for (int i = 1; i < n_vocab; ++i) {
++            if (logits[i] > logits[best]) best = i;
++        }
++        fprintf(stderr, "TOSH_TOP token=%d '%s' logit=%.3f\n", best, common_token_to_piece(ctx, best).c_str(), logits[best]);
++    }
++
+     return true;
+ }
+ 
+@@ -129,6 +220,15 @@ int main(int argc, char ** argv) {
+     // it will be executed for each node during the graph computation
+     params.cb_eval = common_debug_cb_eval;
+     params.cb_eval_user_data = &cb_data;
++    if (getenv("TOSH_NANFIND") != nullptr) {
++        params.cb_eval = tosh_nanfind_cb;
++        params.cb_eval_user_data = nullptr;
++    }
++    if (getenv("TOSH_LAYERSUM") != nullptr) {
++        params.cb_eval = tosh_layersum_cb;
++        params.cb_eval_user_data = nullptr;
++    }
++    params.warmup = false;
+     const bool amax = getenv("TOSH_AMAX") != nullptr;
+     if (amax) {
+         params.cb_eval = tosh_amax_cb;
+@@ -162,6 +262,9 @@ int main(int argc, char ** argv) {
+     if (amax) {
+         tosh_amax_dump();
+     }
++    if (getenv("TOSH_NANFIND") != nullptr) {
++        fprintf(stderr, "TOSH_NANFIND done: %s after %ld checked nodes\n", g_nan_found ? "found" : "none", g_nan_nodes);
++    }
+ 
+     LOG("\n");
+     llama_perf_context_print(ctx);

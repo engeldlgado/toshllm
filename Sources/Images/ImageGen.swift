@@ -75,6 +75,14 @@ struct ImageGenModel: Identifiable {
     /// Largest long-edge (px) to offer as a quality guard: UNet models blur past
     /// their native size. VRAM is handled separately by attnVRAMSq.
     var maxLongEdge: Int = 2048
+    /// Lower ceiling for a card that also draws the desktop, where a long diffusion step
+    /// starves the window server until the GPU is reset. 0 = same as `maxLongEdge`.
+    var displayMaxLongEdge: Int = 0
+
+    /// The ceiling on the card the run goes to.
+    func maxLongEdge(drivesDisplay: Bool) -> Int {
+        drivesDisplay && displayMaxLongEdge > 0 ? min(maxLongEdge, displayMaxLongEdge) : maxLongEdge
+    }
     /// Long edge (px) this model is known to hold up to. Past it the composition
     /// starts to repeat (two horizons, duplicated subjects), which is the model's
     /// limit and not the app's, so the UI says so instead of leaving the user
@@ -104,6 +112,14 @@ struct ImageGenModel: Identifiable {
             && !ImageGenLimits.baseSizes(vramGB: mainVRAM, residentGB: residentGB,
                                          attnVRAMSq: attnVRAMSq, maxLongEdge: maxLongEdge).isEmpty
     }
+
+    /// A transformer (DiT) ships its denoiser as a diffusion model file; the UNet models
+    /// come as one checkpoint.
+    var isTransformer: Bool { components.contains { $0.kind == .diffusion } }
+
+    /// Half precision partial sums in the matrix kernel: faster, but some models (Z-Image)
+    /// overflow them and come out blank, so only models checked for it opt in.
+    var halfPartials: Bool = false
 
     /// Reference images the model takes (0 = none). They go to the text encoder and
     /// to the VAE, so the edit follows what is in them instead of a noisy start.
@@ -149,7 +165,7 @@ enum ImageGenCatalog {
         // square only: measured 08-19, 512x288 and 768x432 come back with magenta blotches
         // in the background at the same steps that give a clean 512x512
         defaultSteps: 20, cfgScale: 7.0, minVRAMGB: 3, maxLongEdge: 768,
-        nativeLongEdge: 512, trainedSquareOnly: true, attnVRAMSq: 3.4e-12)
+        nativeLongEdge: 512, trainedSquareOnly: true, attnVRAMSq: 3.4e-12, halfPartials: true)
 
     /// SDXL Turbo (3.5B, single checkpoint). Few steps, opens the LoRA/style world.
     static let sdxlTurbo = ImageGenModel(
@@ -162,7 +178,7 @@ enum ImageGenCatalog {
         // measured 08-19: 5060 MB resident (its encoder goes to RAM) + 492 MB of graph.
         // attnVRAMSq only applies on cards without the attention kernels (safe mode).
         defaultSteps: 6, cfgScale: 1.0, minVRAMGB: 6, maxLongEdge: 1280,
-        nativeLongEdge: 512, attnVRAMSq: 5e-13)
+        nativeLongEdge: 512, attnVRAMSq: 5e-13, halfPartials: true)
 
     /// Z-Image Turbo (6B DiT, 8 steps, Apache). Diffusion + VAE + Qwen3-4B encoder.
     static let zImageTurbo = ImageGenModel(
@@ -222,7 +238,7 @@ enum ImageGenCatalog {
                 urlString: "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
                 fileName: "Qwen3-4B-Q4_K_M.gguf", sizeGB: 2.5),
         ],
-        defaultSteps: 4, cfgScale: 1.0, minVRAMGB: 6, recommendable: false,
+        defaultSteps: 4, cfgScale: 1.0, minVRAMGB: 6, recommendable: false, halfPartials: true,
         extraArgs: ["--sampling-method", "euler"])
 
     /// Flux.2 klein 9B (step-distilled, Apache). Flux 2 quality for 16 GB GPUs.
@@ -305,8 +321,10 @@ enum ImageGenCatalog {
                     fileName: "mmproj-Qwen3VL-8B-Instruct-F16.gguf", sizeGB: 1.16),
             ],
             // The published recipe: 25 steps at guidance 1, Euler on the simple schedule.
+            // 2048 completes on a card without a display and hangs one that draws the desktop.
             defaultSteps: 25, cfgScale: 1.0, minVRAMGB: minVRAMGB, recommendable: recommendable,
-            nativeLongEdge: 1024,
+            maxLongEdge: 2048, displayMaxLongEdge: 1920, nativeLongEdge: 2048,
+            halfPartials: true,
             maxReferenceImages: 16,
             extraArgs: ["--sampling-method", "euler", "--scheduler", "simple"])
     }
@@ -325,15 +343,15 @@ enum ImageGenCatalog {
 
     static let qwenImage21Q6 = qwenImage21(
         "Qwen-Image 2.1 (Q6)",
-        detailES: "7B con más precisión, para tarjetas de 16 GB en adelante.",
-        detailEN: "7B at higher precision, for 16 GB cards and up.",
-        file: "qwen_image_2.1-Q6_K.gguf", sizeGB: 6.00, minVRAMGB: 16, recommendable: false)
+        detailES: "7B con más precisión. Mismo ritmo que la Q4.",
+        detailEN: "7B at higher precision, at the same pace as the Q4 build.",
+        file: "qwen_image_2.1-Q6_K.gguf", sizeGB: 6.00, minVRAMGB: 12, recommendable: false)
 
     static let qwenImage21Q8 = qwenImage21(
         "Qwen-Image 2.1 (Q8)",
-        detailES: "7B casi sin pérdida, para tarjetas grandes.",
-        detailEN: "7B at near-lossless precision, for large cards.",
-        file: "qwen_image_2.1-Q8_0.gguf", sizeGB: 7.69, minVRAMGB: 24, recommendable: false)
+        detailES: "7B casi sin pérdida, para tarjetas de 16 GB en adelante.",
+        detailEN: "7B at near-lossless precision, for 16 GB cards and up.",
+        file: "qwen_image_2.1-Q8_0.gguf", sizeGB: 7.69, minVRAMGB: 16, recommendable: false)
 
     /// Curated order (small to large). Z-Image sits before SDXL so it wins the
     /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD);
@@ -430,6 +448,15 @@ enum ImageGenLimits {
         return streamsAttention(gpuName: name, extraArgs: extra)
     }
 
+    /// Whether the selected card draws the desktop (not headless).
+    static func drivesDisplay(gpuIndex: Int) -> Bool {
+        let devices = MTLCopyAllDevices()
+        guard gpuIndex >= 0 && gpuIndex < devices.count else {
+            return !(MTLCreateSystemDefaultDevice()?.isHeadless ?? true)
+        }
+        return !devices[gpuIndex].isHeadless
+    }
+
     static func baseSizes(vramGB: Double, residentGB: Double,
                           attnVRAMSq: Double = 0, maxLongEdge: Int = .max,
                           streamedAttention: Bool = true) -> [Int] {
@@ -459,6 +486,14 @@ enum ImageGenLimits {
                              streamedAttention: Bool = true) -> Double {
         estVRAMGB(px: width * height, residentGB: residentGB, attnVRAMSq: attnVRAMSq,
                   streamedAttention: streamedAttention) / max(0.1, vramGB)
+    }
+
+    /// Pixels each reference image is scaled to: full size for one or two, then an even
+    /// share of two full-size references, so sixteen of them stay a bounded sequence.
+    static func referencePixels(count: Int, resolution: Int) -> Int? {
+        guard count > 0, resolution > 0 else { return nil }
+        let full = resolution * resolution
+        return count <= 2 ? full : max(256 * 256, 2 * full / count)
     }
 
     /// Command buffers to split each diffusion step into so none exceeds the
@@ -520,6 +555,28 @@ enum ImageFormat: String, CaseIterable, Identifiable {
     case png, jpg
     var id: String { rawValue }
     var ext: String { rawValue }
+}
+
+/// Step caching in the sampler: a cached step reuses the previous output instead of running
+/// the model. Faster, at the cost of detail. Measured on Qwen-Image 2.1 at 1024x1024 and ten
+/// steps against no cache: cache-dit 1.13x (PSNR 31.4 dB), spectrum 1.45x (30.6 dB),
+/// easycache 1.69x (28.5 dB).
+enum ImageFastMode: String, CaseIterable, Identifiable {
+    case off, cacheDit = "cache-dit", spectrum, easycache
+    var id: String { rawValue }
+
+    /// cache-dit and easycache work on transformer models only; spectrum also on UNets.
+    func supports(_ model: ImageGenModel) -> Bool {
+        switch self {
+        case .off, .spectrum: return true
+        case .cacheDit, .easycache: return model.isTransformer
+        }
+    }
+
+    /// sd-cli arguments for this mode on this model; empty when off or not supported.
+    func args(for model: ImageGenModel) -> [String] {
+        self == .off || !supports(model) ? [] : ["--cache-mode", rawValue]
+    }
 }
 
 /// Drives one text-to-image run: resolves the bundled engine and the installed
@@ -648,8 +705,17 @@ final class ImageGenerator: ObservableObject {
                   auxGPUIndex: Int = -1,
                   initImagePath: String = "", maskPath: String = "",
                   strength: Double = 0.75,
-                  referenceImagePaths: [String] = []) {
+                  referenceImagePaths: [String] = [],
+                  fastMode: ImageFastMode = .off) {
         guard !isBusy else { return }
+        // A reference that went missing would shift every <imageN> after it, so the run
+        // stops instead of editing against the wrong picture.
+        let refs = Array(referenceImagePaths.filter { !$0.isEmpty }.prefix(max(0, model.maxReferenceImages)))
+        if refs.contains(where: { !FileManager.default.fileExists(atPath: $0) }) {
+            state = .failed("MISSING_REF")
+            onFinish?()
+            return
+        }
         lastPrompt = prompt; lastSeed = seed; lastWidth = width; lastHeight = height
         let dir = models.imagenDirectory
         // Timestamp plus a short token: a batch fired in the same second (one run
@@ -706,11 +772,10 @@ final class ImageGenerator: ObservableObject {
             if !maskPath.isEmpty { args += ["--mask", maskPath] }
         }
         // Reference images (edit mode): each one is read by the text encoder and encoded
-        // by the VAE, and the engine resizes them to the model's own reference size.
-        let refs = referenceImagePaths.filter { !$0.isEmpty }.prefix(max(0, model.maxReferenceImages))
+        // by the VAE. Every reference lengthens the sequence the model attends over, so past
+        // two they share a budget of two full-size references instead of one each.
         for ref in refs { args += ["-r", ref] }
-        if !refs.isEmpty && model.referenceResolution > 0 {
-            let px = model.referenceResolution * model.referenceResolution
+        if let px = ImageGenLimits.referencePixels(count: refs.count, resolution: model.referenceResolution) {
             args += ["--ref-image-args", "vae_input_max_pixels=\(px)"]
         }
         let split = auxGPUIndex >= 0 && auxGPUIndex != gpuIndex && gpuIndex >= 0
@@ -729,6 +794,9 @@ final class ImageGenerator: ObservableObject {
         // Offloading the diffusion model to CPU trades speed for VRAM; measured to
         // make no difference here, so it's off by default and only a fallback.
         args += extra
+        if !extra.contains("--cache-mode") {
+            args += fastMode.args(for: model)
+        }
         if offloadToCPU && !extra.contains("--offload-to-cpu") {
             args.append("--offload-to-cpu")
         }
@@ -737,6 +805,7 @@ final class ImageGenerator: ObservableObject {
         // The wide matmul tile is tuned for LLM prefill shapes; on diffusion it costs
         // 1.7% on SDXL and 3% on Wan, with byte-identical output. Measured 08-14.
         env["TOSH_MM_WIDE_DISABLE"] = "1"
+        if model.halfPartials { env["TOSH_MM_ACC_HALF"] = "1" }
         // The flash-attention kernels for AMD are opt-in; without this the backend
         // turns --diffusion-fa down and the attention is materialized instead.
         env["TOSH_FA_AMD"] = "1"
@@ -910,6 +979,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     var seed = -1
     var format = ImageFormat.png.rawValue
     var offloadCPU = false
+    var fastMode = ImageFastMode.off.rawValue
 
     init() {}
 
@@ -937,6 +1007,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
         seed = (try? c.decode(Int.self, forKey: .seed)) ?? -1
         format = (try? c.decode(String.self, forKey: .format)) ?? ImageFormat.png.rawValue
         offloadCPU = (try? c.decode(Bool.self, forKey: .offloadCPU)) ?? false
+        fastMode = (try? c.decode(String.self, forKey: .fastMode)) ?? ImageFastMode.off.rawValue
     }
 
     var isCustom: Bool { modelID == ImageGenCatalog.customID }
@@ -950,6 +1021,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
 
     var aspectValue: ImageAspect { ImageAspect(rawValue: aspect) ?? .square }
     var formatValue: ImageFormat { ImageFormat(rawValue: format) ?? .png }
+    var fastModeValue: ImageFastMode { ImageFastMode(rawValue: fastMode) ?? .off }
     var dimensions: (Int, Int) {
         aspectValue == .custom
             ? ImageAspect.customDimensions(ratio: customAspect, base: baseSize)
@@ -1181,7 +1253,8 @@ final class ImageGenPool: ObservableObject {
                          offloadToCPU: c.offloadCPU, gpuIndex: c.gpuIndex, auxGPUIndex: aux ?? -1,
                          initImagePath: job.initImagePath ?? c.initImagePath,
                          maskPath: c.maskPath, strength: c.strength,
-                         referenceImagePaths: c.referenceImagePaths)
+                         referenceImagePaths: c.referenceImagePaths,
+                         fastMode: c.fastModeValue)
         }
         if queue.isEmpty && !anyBusy { queueActive = false }
     }

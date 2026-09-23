@@ -1,8 +1,11 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 31ce26d16..6816a77e0 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4092,7 +4092,23 @@
-                     ntg0 += 1;
+@@ -4109,11 +4109,27 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+                     } else if (ntg0 == 9 || ntg0 == 10) {
+                         ntg0 = 11;
+                     }
                  }
  
 -                ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
@@ -26,3 +29,5 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
          }
      } else {
          auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);
+ 
+         const int nr0 = pipeline.nr0;

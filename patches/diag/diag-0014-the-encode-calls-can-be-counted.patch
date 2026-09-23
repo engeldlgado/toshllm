@@ -1,7 +1,10 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 2ac344a56..d8b6aaebb 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -879,7 +879,54 @@
+@@ -877,11 +877,58 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+ 
+ struct ggml_metal_encoder {
      id<MTLComputeCommandEncoder> obj;
  };
  
@@ -56,7 +59,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
      ggml_metal_encoder_t res = calloc(1, sizeof(struct ggml_metal_encoder));
  
      id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
-@@ -892,6 +939,8 @@
+ 
+     if (concurrent) {
+@@ -890,10 +937,12 @@ ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, b
+         res->obj = [cmd_buf computeCommandEncoder];
+     }
  
      [res->obj retain];
  
@@ -65,7 +72,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
      return res;
  }
  
-@@ -911,31 +960,45 @@
+ void ggml_metal_encoder_free(ggml_metal_encoder_t encoder) {
+     [encoder->obj release];
+@@ -909,35 +958,49 @@ void ggml_metal_encoder_debug_group_push(ggml_metal_encoder_t encoder, const cha
+ void ggml_metal_encoder_debug_group_pop (ggml_metal_encoder_t encoder) {
+     [encoder->obj popDebugGroup];
  }
  
  void ggml_metal_encoder_set_pipeline(ggml_metal_encoder_t encoder, struct ggml_metal_pipeline_with_params pipeline) {
@@ -111,3 +122,5 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
  }
  
  #define GGML_METAL_HOST_WRAP_MAX 256
+ 
+ struct ggml_metal_device {

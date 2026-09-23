@@ -1,7 +1,10 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+index fe7f401c4..a2ac49127 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -690,7 +690,12 @@
+@@ -688,11 +688,16 @@ ggml_backend_t ggml_backend_metal_init(void) {
+         /* .interface = */ ggml_backend_metal_i,
+         /* .device    = */ dev,
          /* .context   = */ ctx,
      };
  
@@ -15,7 +18,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal
  
      return backend;
  }
-@@ -789,7 +794,12 @@
+ 
+ bool ggml_backend_is_metal(ggml_backend_t backend) {
+@@ -787,11 +792,16 @@ static ggml_backend_t ggml_backend_metal_device_init_backend(ggml_backend_dev_t
+         /* .interface = */ ggml_backend_metal_i,
+         /* .device    = */ dev,
          /* .context   = */ ctx,
      };
  
@@ -29,4 +36,5 @@ diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal
  
      return backend;
  
-
+     GGML_UNUSED(params);
+ }

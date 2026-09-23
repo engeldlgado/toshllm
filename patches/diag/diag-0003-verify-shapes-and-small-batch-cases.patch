@@ -1,11 +1,13 @@
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 714d7c360..ffe52236b 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -4987,7 +4987,90 @@
+@@ -4986,10 +4986,93 @@ struct test_mul_mat_id : public test_case {
+     void initialize_tensors(ggml_context * ctx) override {
          init_mul_mat_id_tensors(ctx, n_mats);
      }
  };
-+
+ 
 +// GGML_OP_MUL_MAT_ID with a wide activation range: a half-precision accumulator saturates
 +// around 65504, so this is the stress shape for upstream #26223
 +struct test_mul_mat_id_amp : public test_case {
@@ -16,7 +18,7 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 +    const int64_t n;
 +    const int64_t k;
 +    const float amp;
- 
++
 +    std::string op_desc(ggml_tensor * t) override {
 +        GGML_UNUSED(t);
 +        return "MUL_MAT_ID_AMP";
@@ -92,7 +94,11 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
  // GGML_OP_MUL_MAT_ID + GGML_OP_ADD or GGML_OP_MUL
  struct test_mul_mat_id_fusion : public test_case {
      const ggml_type type_a;
-@@ -10773,6 +10856,15 @@
+     const ggml_type type_b;
+     const int n_mats;
+@@ -10771,10 +10854,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+         for (ggml_type type_K : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_0}) {
+             test_cases.emplace_back(new test_lightning_indexer(128, 64, kv, 32, 4, 1, type_K));
          }
      }
  
@@ -108,7 +114,11 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
      return test_cases;
  }
  #ifdef _MSC_VER
-@@ -11007,6 +11099,121 @@
+ #pragma optimize("", on)
+ #endif
+@@ -11005,10 +11097,125 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+ 
+     for (int bs : {16, 32, 48, 64, 128, 256}) {
          test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 4, false, 2880, bs, 2880));
      }
  
@@ -230,3 +240,5 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
      // gpt-oss-20b
      for (int bs : {1, 4, 8, 512}) {
          for (ggml_type type_a : {GGML_TYPE_MXFP4}) {
+             for (ggml_type type_b : {GGML_TYPE_F32}) {
+                 test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, 32, 4, false, 2880, bs, 2880));

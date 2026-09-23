@@ -715,6 +715,42 @@ final class ImageGenTests: XCTestCase {
         XCTAssertGreaterThan(port.1, port.0)
     }
 
+    func testFastModeOnlyReachesModelsThatTakeIt() {
+        let qwen = ImageGenCatalog.qwenImage21Q4
+        let sd15 = ImageGenCatalog.sd15
+        XCTAssertEqual(ImageFastMode.spectrum.args(for: qwen), ["--cache-mode", "spectrum"])
+        XCTAssertEqual(ImageFastMode.easycache.args(for: qwen), ["--cache-mode", "easycache"])
+        XCTAssertEqual(ImageFastMode.off.args(for: qwen), [])
+        XCTAssertEqual(ImageFastMode.spectrum.args(for: sd15), ["--cache-mode", "spectrum"])
+        XCTAssertEqual(ImageFastMode.cacheDit.args(for: sd15), [])
+        XCTAssertEqual(ImageFastMode.easycache.args(for: sd15), [])
+        XCTAssertEqual(ImageInstanceConfig().fastModeValue, .off)
+    }
+
+    func testReferenceImagesShareAPixelBudget() {
+        XCTAssertNil(ImageGenLimits.referencePixels(count: 0, resolution: 1024))
+        // one or two references keep full size, as the model was tuned
+        XCTAssertEqual(ImageGenLimits.referencePixels(count: 1, resolution: 1024), 1024 * 1024)
+        XCTAssertEqual(ImageGenLimits.referencePixels(count: 2, resolution: 1024), 1024 * 1024)
+        // past two they split two full-size references, with a floor
+        XCTAssertEqual(ImageGenLimits.referencePixels(count: 4, resolution: 1024), 1024 * 1024 / 2)
+        XCTAssertEqual(ImageGenLimits.referencePixels(count: 16, resolution: 1024), 2 * 1024 * 1024 / 16)
+        XCTAssertEqual(ImageGenLimits.referencePixels(count: 64, resolution: 1024), 256 * 256)
+        // the Qwen-Image 2.1 entries take up to sixteen and run at the published recipe
+        let q = ImageGenCatalog.qwenImage21Q4
+        XCTAssertEqual(q.maxReferenceImages, 16)
+        XCTAssertEqual(q.cfgScale, 1.0)
+        XCTAssertEqual(q.defaultSteps, 25)
+        XCTAssertTrue(q.components.contains { $0.kind == .llmVision && $0.flag == "--llm_vision" })
+        // 2048 only where the card does not also draw the desktop
+        // half partial sums only where validated: Z-Image comes out blank with them
+        XCTAssertTrue(q.halfPartials)
+        XCTAssertFalse(ImageGenCatalog.zImageTurbo.halfPartials)
+        XCTAssertEqual(q.maxLongEdge(drivesDisplay: false), 2048)
+        XCTAssertEqual(q.maxLongEdge(drivesDisplay: true), 1920)
+        XCTAssertEqual(ImageGenCatalog.sd15.maxLongEdge(drivesDisplay: true), ImageGenCatalog.sd15.maxLongEdge)
+    }
+
     func testRecommendationScalesWithVRAM() {
         // A tiny 2 GB card gets nothing; bigger cards get progressively larger models.
         XCTAssertNil(ImageGenCatalog.recommended(for: hw(vramMB: 2048)))
@@ -1932,8 +1968,13 @@ final class ChatMessageTests: XCTestCase {
         let identity = ChatStreamIdentity.value(conversationID: id, model: "model/name")
         XCTAssertEqual(identity, "11111111-1111-1111-1111-111111111111::model/name")
         let url = try XCTUnwrap(ChatStreamIdentity.resumeURL(port: 8080, identity: identity, from: 42))
-        XCTAssertTrue(url.absoluteString.contains("model%2Fname"))
-        XCTAssertTrue(url.absoluteString.hasSuffix("?from=42"))
+        XCTAssertEqual(url.path, "/v1/stream")
+        XCTAssertTrue(url.absoluteString.contains("conv_id=11111111-1111-1111-1111-111111111111::model%2Fname"))
+        XCTAssertTrue(url.absoluteString.hasSuffix("&from=42"))
+        let stop = try XCTUnwrap(ChatStreamIdentity.stopURL(port: 8080, identity: identity))
+        XCTAssertEqual(stop.path, "/v1/stream")
+        XCTAssertEqual(URLComponents(url: stop, resolvingAgainstBaseURL: false)?.queryItems?.first?.value,
+                       "11111111-1111-1111-1111-111111111111::model/name")
     }
 
     func testLegacyConversationWithoutCompactionFieldsDecodes() throws {

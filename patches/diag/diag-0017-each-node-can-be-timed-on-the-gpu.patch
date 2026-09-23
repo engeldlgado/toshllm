@@ -1,0 +1,104 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index de8ccb2db..bc6600eb1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -4114,8 +4114,99 @@ static void tosh_graph_dump(struct ggml_cgraph * gf) {
+     fprintf(stderr, "\n");
+ }
+ 
++
++// TOSH_NODE_PROF=1: every node in its own synchronous command buffer, GPU time summed per op
++// kind and weight type, bucketed by graph size and printed at exit. Diagnostic only: it
++// serializes the graph, so absolute totals include one submission per node.
++#define TOSH_NP_BUCKETS 16
++#define TOSH_NP_KEYS    96
++struct tosh_np_key { char name[48]; uint64_t n; uint64_t ns; };
++struct tosh_np_bucket { int n_nodes; int n_tok; uint64_t n_graphs; uint64_t ns; struct tosh_np_key k[TOSH_NP_KEYS]; };
++static struct tosh_np_bucket g_np[TOSH_NP_BUCKETS];
++
++static void tosh_np_dump(void) {
++    for (int b = 0; b < TOSH_NP_BUCKETS; ++b) {
++        struct tosh_np_bucket * B = &g_np[b];
++        if (B->n_nodes == 0 || B->n_graphs == 0) continue;
++        fprintf(stderr, "TOSH_NP graph nodes=%d tok=%d graphs=%llu gpu_ms/graph=%.3f\n", B->n_nodes, B->n_tok,
++            (unsigned long long) B->n_graphs, B->ns/1e6/B->n_graphs);
++        for (int i = 0; i < TOSH_NP_KEYS; ++i) {
++            int best = -1;
++            for (int j = 0; j < TOSH_NP_KEYS; ++j) {
++                if (B->k[j].n && (best < 0 || B->k[j].ns > B->k[best].ns)) best = j;
++            }
++            if (best < 0) break;
++            fprintf(stderr, "TOSH_NP   %-40s n/graph=%7.1f us/graph=%9.1f %5.1f%%\n", B->k[best].name,
++                (double) B->k[best].n/B->n_graphs, B->k[best].ns/1e3/B->n_graphs, 100.0*B->k[best].ns/B->ns);
++            B->k[best].n = 0;
++        }
++    }
++}
++
++static bool tosh_np_on(void) {
++    static int v = -1;
++    if (v < 0) { v = TOSH_ENV("TOSH_NODE_PROF") != NULL; if (v) atexit(tosh_np_dump); }
++    return v;
++}
++
++static void tosh_np_key_of(const struct ggml_tensor * t, int n_fused, char * out, size_t sz) {
++    const char * lm = strncmp(t->name, "result_output", 13) == 0 ? " lm_head" : "";
++    if ((t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID || t->op == GGML_OP_GET_ROWS) && t->src[0]) {
++        snprintf(out, sz, "%s %s%s%s", ggml_op_desc(t), ggml_type_name(t->src[0]->type), lm, n_fused > 1 ? " +f" : "");
++    } else if (t->op == GGML_OP_CPY) {
++        snprintf(out, sz, "CPY %s %lldK", ggml_is_contiguous(t->src[0]) && ggml_is_contiguous(t) ? "contig" : "strided",
++            (long long) (ggml_nelements(t)/1024));
++    } else {
++        snprintf(out, sz, "%s%s", ggml_op_desc(t), n_fused > 1 ? " +f" : "");
++    }
++}
++
++static enum ggml_status tosh_np_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
++    if (ctx->cmd_buf_last) { [ctx->cmd_buf_last waitUntilCompleted]; ctx->cmd_buf_last = nil; }
++    struct tosh_np_bucket * B = NULL;
++    for (int b = 0; b < TOSH_NP_BUCKETS; ++b) {
++        if (g_np[b].n_nodes == gf->n_nodes) { B = &g_np[b]; break; }
++        if (g_np[b].n_nodes == 0) { B = &g_np[b]; B->n_nodes = gf->n_nodes; break; }
++    }
++    int * list = (int *) malloc(sizeof(int)*(gf->n_nodes + 1));
++    int nl = 0;
++    for (int i = 0; i < gf->n_nodes; ++i) {
++        if (!ggml_op_is_empty(gf->nodes[i]->op) && !ggml_is_empty(gf->nodes[i])) list[nl++] = i;
++    }
++    enum ggml_status st = GGML_STATUS_SUCCESS;
++    for (int p = 0; p < nl; ) {
++        @autoreleasepool {
++            id<MTLCommandBuffer> cb = [ctx->queue commandBufferWithUnretainedReferences];
++            ggml_metal_op_t op = ggml_metal_op_init(ctx->dev, cb, gf, list[p], gf->n_nodes,
++                ctx->use_fusion, false, false, ctx->debug_graph, ctx->debug_fusion);
++            const int res = ggml_metal_op_encode(op, 0);
++            ggml_metal_op_free(op);
++            [cb commit];
++            [cb waitUntilCompleted];
++            if (cb.status != MTLCommandBufferStatusCompleted) { st = GGML_STATUS_FAILED; }
++            if (B != NULL) {
++                const struct ggml_tensor * t = gf->nodes[list[p]];
++                if (strncmp(t->name, "result_output", 13) == 0 && t->src[1]) B->n_tok = (int) t->src[1]->ne[1];
++                char key[48];
++                tosh_np_key_of(t, res, key, sizeof(key));
++                const uint64_t d = cb.GPUEndTime > cb.GPUStartTime ? (uint64_t)((cb.GPUEndTime - cb.GPUStartTime)*1e9) : 0;
++                B->ns += d;
++                for (int j = 0; j < TOSH_NP_KEYS; ++j) {
++                    if (B->k[j].n == 0 && B->k[j].name[0] == 0) { strncpy(B->k[j].name, key, 47); }
++                    if (strcmp(B->k[j].name, key) == 0) { B->k[j].n++; B->k[j].ns += d; break; }
++                }
++            }
++            p += res > 0 ? res : 1;
++        }
++    }
++    if (B != NULL) B->n_graphs++;
++    free(list);
++    return st;
++}
++
+ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+     tosh_graph_dump(gf);
++    if (tosh_np_on()) { return tosh_np_compute(ctx, gf); }
+ 
+     if (tosh_mgpu_trace()) { atomic_fetch_add(&g_tr_graphs, 1); }
+     // command buffers run in commit order, so a held one has to go in before this graph

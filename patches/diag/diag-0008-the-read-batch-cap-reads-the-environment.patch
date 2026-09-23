@@ -1,7 +1,10 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 1afe7eba1..2ac344a56 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -3332,10 +3332,15 @@
+@@ -3330,14 +3330,19 @@ void ggml_metal_device_read_batch_end(ggml_metal_device_t dev) {
+     [dev->stage_lock unlock];
+ }
  
  static void ggml_metal_device_stage_batch_flush(ggml_metal_device_t dev);
  
@@ -20,4 +23,5 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
  }
  
  bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_src, void * data, size_t size) {
-
+     if (size == 0) {
+         return true;

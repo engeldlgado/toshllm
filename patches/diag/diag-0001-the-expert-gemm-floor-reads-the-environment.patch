@@ -1,7 +1,10 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-metal-common.h
+index 08f86f002..0f072ae20 100644
 --- a/ggml/src/ggml-metal/ggml-metal-common.h
 +++ b/ggml/src/ggml-metal/ggml-metal-common.h
-@@ -5,6 +5,8 @@
+@@ -3,10 +3,12 @@
+ #pragma once
+ 
  #include "ggml.h"
  
  #include <stdbool.h>
@@ -10,7 +13,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-
  
  #ifdef __cplusplus
  extern "C" {
-@@ -58,10 +60,86 @@
+ #endif
+ 
+@@ -56,12 +58,88 @@ static inline bool ggml_metal_op_mul_mat_use_mm(const struct ggml_tensor * op, b
+     return !ggml_is_transposed(op->src[0]) &&
+            !ggml_is_transposed(op->src[1]) &&
             has_simdgroup_mm && op->src[0]->ne[0] >= 64 && op->src[1]->ne[1] > ne11_mm_min;
  }
  
@@ -29,8 +36,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-
 +        case GGML_TYPE_MXFP4: return w64 ? 6.25f : 7.25f;
 +        default:              return 0.0f;
 +    }
- }
- 
++}
++
 +// diagnostic: predicted log(mat-vec / expert tile) for a shape, fitted per wave width over
 +// both routes forced on every measured shape; positive means the tile is predicted to win
 +static inline float ggml_metal_mul_mat_id_cost_margin(enum ggml_type t, int simd_width,
@@ -94,29 +101,18 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-common.h b/ggml/src/ggml-metal/ggml-
 +        return op->src[2]->ne[1] >= 32;
 +    }
 +    return tpe_all >= floor;
-+}
-+
+ }
+ 
  #ifdef __cplusplus
  }
  #endif
-
-diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
---- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3915,7 +3915,7 @@
-     const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
-         TOSH_ENV("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
- 
--    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok))) {
-+    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok), props_dev->simd_width)) {
-         // some Metal matrix data types require aligned pointers
-         // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
-         //switch (op->src[0]->type) {
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index c310f8a64..1afe7eba1 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -2438,7 +2438,7 @@
+@@ -2436,11 +2436,11 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                 return false;
+             }
              if (has_simdgroup_reduction) {
                  return ggml_metal_supports_mul_mat_op(
                          has_simdgroup_reduction, op, false,
@@ -125,4 +121,22 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
              }
              // wave64: mul_mv_id reuses the width-parameterized decode impls and the
              // manual mm_id prefill uses virtual 32-wide indices; both run on the GPU.
-
+             return wave64_decode && op->src[0]->ne[0] >= 32 &&
+                 (op->src[0]->type == GGML_TYPE_F16 ||
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 4425eb3ef..0dd0b04bc 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3922,11 +3922,11 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+ 
+     // escape hatch: revert wave64 MoE prefill to the mat-vec route
+     const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
+         TOSH_ENV("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
+ 
+-    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok))) {
++    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok), props_dev->simd_width)) {
+         // some Metal matrix data types require aligned pointers
+         // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
+         //switch (op->src[0]->type) {
+         //    case GGML_TYPE_F32:  GGML_ASSERT(nb01 % 16 == 0); break;
+         //    case GGML_TYPE_F16:  GGML_ASSERT(nb01 % 8  == 0); break;

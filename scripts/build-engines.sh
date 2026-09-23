@@ -89,6 +89,22 @@ retry_git() {
     done
 }
 
+# A build-static left from before a system or Command Line Tools update keeps the old SDK and
+# compiler paths in its cache, and cmake never re-detects them: the link then fails with
+# "library 'System' not found". Drop such a cache so the next configure starts clean.
+reset_stale_cmake_cache() {
+    local cache="$1/CMakeCache.txt" key cached
+    [ -f "$cache" ] || return 0
+    for key in CMAKE_OSX_SYSROOT CMAKE_C_COMPILER CMAKE_CXX_COMPILER; do
+        cached=$(sed -n "s/^$key:[A-Z]*=//p" "$cache")
+        if [ -n "$cached" ] && [ "${cached#/}" != "$cached" ] && [ ! -e "$cached" ]; then
+            echo "stale cmake cache in $1 ($key -> $cached); reconfiguring"
+            rm -rf "$cache" "$1/CMakeFiles"
+            return 0
+        fi
+    done
+}
+
 CMAKE_FLAGS=(
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_SHARED_LIBS=OFF
@@ -145,6 +161,7 @@ build_engine() {
         echo "applied ${patch#$ROOT/patches/}"
     done
 
+    reset_stale_cmake_cache build-static
     cmake -B build-static "${CMAKE_FLAGS[@]}"
     cmake --build build-static --config Release -j "$(sysctl -n hw.ncpu)" -t llama-server llama-bench llama-perplexity test-backend-ops
 
@@ -208,6 +225,7 @@ build_whisper_engine() {
     done
 
     local isa=("${ISA_FLAGS[@]}")
+    reset_stale_cmake_cache build-static
     cmake -B build-static \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
@@ -324,8 +342,8 @@ build_image_engine() {
     # Report free VRAM from what this backend holds: the AMD driver's own figure counts
     # buffers it has not reclaimed yet, and the engine then refuses work that fits.
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/image/0055-image-metal-live-vram-report.patch"
-    # Half partials again, as upstream: float everywhere cost 14% on SDXL on RDNA2 and gave
-    # the same image on every model measured. TOSH_MM_ACC_F32=1 brings it back.
+    # Half partials as an opt-in: float stays the default because some models overflow half,
+    # and the app sets TOSH_MM_ACC_HALF only for the models checked with it.
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/image/0056-image-metal-half-partials.patch"
     echo "applied ggml-metal hunks of 0001 + 0003 + core fallback 0004 + ext wave64 0008 to stable-diffusion.cpp"
 
@@ -344,6 +362,7 @@ build_image_engine() {
     fi
 
     local isa=("${ISA_FLAGS[@]}")
+    reset_stale_cmake_cache build-static
     cmake -B build-static \
         -DCMAKE_BUILD_TYPE=Release \
         -DSD_METAL=ON \

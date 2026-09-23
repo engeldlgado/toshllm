@@ -1,18 +1,13 @@
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index ffe52236b..1f8deab5c 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -5063,6 +5063,40 @@
-                     ggml_backend_tensor_set(t, data.data(), r * t->nb[1], t->ne[0] * sizeof(int32_t));
-                 }
-             } else if (strcmp(t->name, "b") == 0) {
-+                init_tensor_uniform(t, -amp, amp);
-+            } else {
-+                init_tensor_uniform(t);
-+            }
-+        }
-+    }
-+};
-+
+@@ -5069,10 +5069,44 @@ struct test_mul_mat_id_amp : public test_case {
+             }
+         }
+     }
+ };
+ 
 +// GGML_OP_MUL_MAT with a wide activation range, to check the dense tile the same way
 +struct test_mul_mat_amp : public test_case {
 +    const ggml_type type_a;
@@ -39,21 +34,31 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 +    void initialize_tensors(ggml_context * ctx) override {
 +        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
 +            if (strcmp(t->name, "b") == 0) {
-                 init_tensor_uniform(t, -amp, amp);
-             } else {
-                 init_tensor_uniform(t);
-@@ -10863,8 +10897,21 @@
++                init_tensor_uniform(t, -amp, amp);
++            } else {
++                init_tensor_uniform(t);
++            }
++        }
++    }
++};
++
+ // GGML_OP_MUL_MAT_ID + GGML_OP_ADD or GGML_OP_MUL
+ struct test_mul_mat_id_fusion : public test_case {
+     const ggml_type type_a;
+     const ggml_type type_b;
+     const int n_mats;
+@@ -10863,10 +10897,23 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
              test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 128, 8, 768,  64, 2048, amp));
              test_cases.emplace_back(new test_mul_mat_id_amp(type_a, 32,  4, 1792, 64, 2048, amp));
          }
-+    }
-+
+     }
+ 
 +    // the dense tile with the same range: n=8 stays on the mat-vec and is the control
 +    for (int n : {8, 32, 64}) {
 +        test_cases.emplace_back(new test_mul_mat_amp(GGML_TYPE_Q4_K, 1024, n, 2048, 1e5f));
 +        test_cases.emplace_back(new test_mul_mat_amp(GGML_TYPE_Q8_0, 512,  n, 256,  1e5f));
-     }
- 
++    }
++
 +    // past the f16 range the expert tile saturates on load; n=16 stays on the mat-vec and is
 +    // the control that has to keep passing
 +    for (int n : {16, 32, 64}) {
@@ -64,7 +69,11 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
      return test_cases;
  }
  #ifdef _MSC_VER
-@@ -11156,6 +11203,31 @@
+ #pragma optimize("", on)
+ #endif
+@@ -11154,10 +11201,35 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+         for (int64_t K : {1, 2, 3, 4}) {
+             test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 128, T, 1, 2, false, false, K));
          }
      }
  
@@ -96,3 +105,5 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
      // small-batch expert reuse: the same batch with uniform routing and with every token on the
      // same experts, which bounds what a kernel reusing weights across tokens could gain
      for (int bs : {1, 2, 4, 8}) {
+         for (bool sh : {false, true}) {
+             test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q4_K,  256, 8, 512,  bs, 2048, 1.0f, sh));

@@ -1,7 +1,7 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -833,18 +833,20 @@
+@@ -833,18 +833,21 @@
              case GGML_TYPE_Q4_K:
              case GGML_TYPE_Q5_K: break;
              default: wide = false; break;
@@ -12,10 +12,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      // accumulator; bfloat has no native arithmetic here, so float is faster for it too
 -    // diffusion activations overflow half partials, so always accumulate in float here
 -    const bool acc_f32 = use_mm_manual;
-+    // float partials where half is known to overflow; TOSH_MM_ACC_F32 forces them everywhere
-+    static const bool acc_f32_all = getenv("TOSH_MM_ACC_F32") != nullptr;
++    // diffusion activations overflow half partials on some models, so float stays the default;
++    // TOSH_MM_ACC_HALF opts a model validated in half back into the faster path
++    static const bool acc_half = getenv("TOSH_MM_ACC_HALF") != nullptr;
 +    const bool acc_f32 = use_mm_manual &&
-+                         (acc_f32_all || !ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16);
++                         (!acc_half || !ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16);
  
      snprintf(base, 256, "kernel_mul_mm_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), wide ? "_w" : "");
      snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d",
@@ -24,7 +25,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
          ggml_metal_cv_t cv = ggml_metal_cv_init();
-@@ -1135,18 +1137,20 @@
+@@ -1135,18 +1138,21 @@
  
      const ggml_type tsrc0 = op->src[0]->type;
      const ggml_type tsrc1 = op->src[1]->type;
@@ -35,10 +36,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
 -    // diffusion activations overflow half partials, so always accumulate in float here
 -    const bool acc_f32 = use_mm_manual;
-+    // float partials where half is known to overflow; TOSH_MM_ACC_F32 forces them everywhere
-+    static const bool acc_f32_all = getenv("TOSH_MM_ACC_F32") != nullptr;
++    // diffusion activations overflow half partials on some models, so float stays the default;
++    // TOSH_MM_ACC_HALF opts a model validated in half back into the faster path
++    static const bool acc_half = getenv("TOSH_MM_ACC_HALF") != nullptr;
 +    const bool acc_f32 = use_mm_manual &&
-+                         (acc_f32_all || !ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16);
++                         (!acc_half || !ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16);
  
      snprintf(base, 256, "kernel_mul_mm_id_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
      snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d", base, bc_inp, use_mm_manual, acc_f32);

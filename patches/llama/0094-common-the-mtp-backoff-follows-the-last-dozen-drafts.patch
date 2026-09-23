@@ -1,0 +1,15 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 0763e65da..2f4922f49 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1971,7 +1971,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+         }
+ 
+         if ((int) acc_ewma.size() == (int) n_seq && n_last_draft[seq_id] > 0) {
+-            static const float alpha = getenv("TOSH_MTP_EWMA") ? (float) atof(getenv("TOSH_MTP_EWMA")) : 0.5f;
++            // one rejected draft of two halved the average at 0.5 and turned drafting off while
++            // acceptance still paid; 0.92 follows the last dozen drafts instead
++            static const float alpha = getenv("TOSH_MTP_EWMA") ? (float) atof(getenv("TOSH_MTP_EWMA")) : 0.92f;
+             const float acc = std::min(1.0f, (float) n_accepted / (float) n_last_draft[seq_id]);
+             const float a = acc > acc_ewma[seq_id] ? 0.2f : alpha;  // rise fast, fall at alpha
+             acc_ewma[seq_id] = a * acc_ewma[seq_id] + (1.0f - a) * acc;

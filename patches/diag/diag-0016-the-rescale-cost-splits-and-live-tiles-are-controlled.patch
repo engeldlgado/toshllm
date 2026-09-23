@@ -1,0 +1,42 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 6816a77e0..92b845d9e 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4049,11 +4049,14 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+         // diagnostic: TOSH_NAN_ONE_PIPE=1 serves both magnitudes from one pipeline, to price
+         // the second dispatch apart from the reduction that feeds it
+         {
+             // one pipeline takes both magnitudes: the factor leaves the products small enough
+             // for the accumulator this path already had
+-            const int scaled = nan_off ? 3 : 2;
++            // diagnostic: TOSH_NAN_RED_ONLY=1 keeps the reduction but runs the unscaled tile,
++            // to price the reduction apart from the scaled tile
++            static const bool red_only = TOSH_ENV("TOSH_NAN_RED_ONLY") != nullptr;
++            const int scaled = (nan_off || red_only) ? 3 : 2;
+ 
+                 auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op, scaled);
+ 
+                 ggml_metal_kargs_mul_mm_id args = {
+                     /*.ne00  =*/ ne00,
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 1f8deab5c..3b3340c4d 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -11222,10 +11222,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+ 
+     // grid geometry: the same shapes across the batch sizes a real prompt hits, to read which
+     // tile counts the card lays out badly
+     for (int bs : {16, 24, 32, 48, 64, 96, 128, 192, 256, 320, 384, 512}) {
+         test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q4_K,  256, 8, 512,  bs, 2048, 1.0f));
++        // diagnostic: every token on the same experts, so live tiles = n/32 exactly
++        if (bs == 32 || bs == 64 || bs == 96 || bs == 128 || bs == 192 || bs == 256) {
++            test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q4_K, 32, 4, 1024, bs, 2048, 1.0f, true));
++            // every expert used by every token: all of them live, n/32 tiles each
++            test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q4_K, 8, 8, 1024, bs, 2048, 1.0f));
++            test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q4_K, 16, 16, 1024, bs, 2048, 1.0f));
++        }
+         test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_MXFP4, 32,  4, 2880, bs, 2880, 1.0f));
+         test_cases.emplace_back(new test_mul_mat_id_amp(GGML_TYPE_Q5_K,  64,  8, 1024, bs, 2048, 1.0f));
+     }
+ 
+     // small-batch expert reuse: the same batch with uniform routing and with every token on the

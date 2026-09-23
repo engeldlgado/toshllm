@@ -1,59 +1,11 @@
-diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
---- a/ggml/src/ggml-metal/ggml-metal-impl.h
-+++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -14,6 +14,8 @@
- #define N_MM_SIMD_GROUP_X 2
- #define N_MM_SIMD_GROUP_Y 2
- 
-+#define N_MM_NPART_AMAX 256
-+
- // kernel parameters for mat-vec threadgroups
- //
- // N_R0: number of src0 rows to process per simdgroup
-@@ -616,9 +618,18 @@
- 
- typedef struct {
-     int32_t  ne00;
-+    int32_t  ne01;
-     int32_t  ne02;
-+    int32_t  npart;
-     uint64_t nb01;
-     uint64_t nb02;
-+} ggml_metal_kargs_mul_mm_id_amax;
-+
-+typedef struct {
-+    int32_t  ne00;
-+    int32_t  ne02;
-+    uint64_t nb01;
-+    uint64_t nb02;
-     uint64_t nb03;
-     int32_t  ne11;
-     uint64_t nb10;
-diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
---- a/ggml/src/ggml-metal/ggml-metal-device.h
-+++ b/ggml/src/ggml-metal/ggml-metal-device.h
-@@ -143,7 +143,9 @@
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm            (ggml_metal_library_t lib, const struct ggml_tensor * op);
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv            (ggml_metal_library_t lib, const struct ggml_tensor * op);
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0    (ggml_metal_library_t lib, int ne02, int ne20);
--struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
-+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax(ggml_metal_library_t lib);
-+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax_part(ggml_metal_library_t lib);
-+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op, int scaled);
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argmax            (ggml_metal_library_t lib, const struct ggml_tensor * op);
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_topk_moe          (ggml_metal_library_t lib);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 4c298f677..40c78e2ea 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1702,7 +1702,42 @@
-     res.nr1  = nr1;
-     res.nsg  = nsg;
-     res.smem = smem;
-+
-+    return res;
-+}
-+
+@@ -1772,6 +1772,41 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     return res;
+ }
+ 
 +ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax_part(ggml_metal_library_t lib) {
 +    char base[256];
 +    char name[256];
@@ -71,7 +23,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
 +
 +    return res;
 +}
- 
++
 +ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax(ggml_metal_library_t lib) {
 +    char base[256];
 +    char name[256];
@@ -86,10 +38,13 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
 +
 +    res.smem = 32*sizeof(float);
 +
-     return res;
- }
- 
-@@ -1724,7 +1759,7 @@
++    return res;
++}
++
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(ggml_metal_library_t lib, int ne02, int ne20) {
+     char base[256];
+     char name[256];
+@@ -1790,7 +1825,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(g
      return res;
  }
  
@@ -98,7 +53,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      char base[256];
      char name[256];
  
-@@ -1790,7 +1825,7 @@
+@@ -1856,7 +1891,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
                       TOSH_ENV("TOSH_MMID_W64_DISABLE") == nullptr;
  
      snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
@@ -107,7 +62,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
-@@ -1799,6 +1834,7 @@
+@@ -1865,6 +1900,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
          ggml_metal_cv_set_bool(cv, bc_inp,        FC_MUL_MM + 0);
          ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
          ggml_metal_cv_set_bool(cv, acc_f32,       FC_MUL_MM + 9);
@@ -115,26 +70,58 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
-diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
---- a/ggml/src/ggml-metal/ggml-metal-ops.h
-+++ b/ggml/src/ggml-metal/ggml-metal-ops.h
-@@ -43,6 +43,7 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index 0f29bb363..b9135ffcf 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -147,7 +147,9 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv
+ // 0 if the batch does not take it
+ int ggml_metal_mv_nc2_rows(enum ggml_type type, int simd_width, int ne11);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0    (ggml_metal_library_t lib, int ne02, int ne20);
+-struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax(ggml_metal_library_t lib);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax_part(ggml_metal_library_t lib);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op, int scaled);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argmax            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_topk_moe          (ggml_metal_library_t lib);
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index cb2c2610b..eb8cd0489 100644
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -14,6 +14,8 @@
+ #define N_MM_SIMD_GROUP_X 2
+ #define N_MM_SIMD_GROUP_Y 2
  
- // id map [n_tokens, n_expert]
- size_t ggml_metal_op_mul_mat_id_extra_ids(const struct ggml_tensor * op);
-+size_t ggml_metal_op_mul_mat_id_extra_amax(const struct ggml_tensor * op);
++#define N_MM_NPART_AMAX 256
++
+ // kernel parameters for mat-vec threadgroups
+ //
+ // N_R0: number of src0 rows to process per simdgroup
+@@ -615,6 +617,15 @@ typedef struct {
+     uint64_t nb21;
+ } ggml_metal_kargs_mul_mm_id_map0;
  
- // return true if we should use the FA vector kernel for this op
- bool ggml_metal_op_flash_attn_ext_use_vec(const struct ggml_tensor * op);
++typedef struct {
++    int32_t  ne00;
++    int32_t  ne01;
++    int32_t  ne02;
++    int32_t  npart;
++    uint64_t nb01;
++    uint64_t nb02;
++} ggml_metal_kargs_mul_mm_id_amax;
++
+ typedef struct {
+     int32_t  ne00;
+     int32_t  ne02;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index cb5c19496..17aeabdca 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3676,6 +3676,15 @@
-     const int64_t ne21 = op->src[2]->ne[1]; // n_token
- 
+@@ -3707,6 +3707,15 @@ size_t ggml_metal_op_mul_mat_id_extra_ids(const ggml_tensor * op) {
      return ggml_type_size(GGML_TYPE_I32)*ne02*ne21;
-+}
-+
+ }
+ 
 +size_t ggml_metal_op_mul_mat_id_extra_amax(const ggml_tensor * op) {
 +    assert(op->op == GGML_OP_MUL_MAT_ID);
 +
@@ -142,14 +129,15 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +
 +    // the two factors, then one partial per threadgroup of the first reduction stage
 +    return 8 + N_MM_NPART_AMAX*sizeof(float);
- }
- 
++}
++
  int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
-@@ -3931,7 +3940,44 @@
+     ggml_tensor * op = ctx->node(idx);
  
+@@ -3961,6 +3970,43 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
          ggml_metal_buffer_id bid_ids = bid_tpe;
          bid_ids.offs += ggml_metal_op_mul_mat_id_extra_tpe(op);
-+
+ 
 +        ggml_metal_buffer_id bid_amax = bid_ids;
 +        bid_amax.offs += ggml_metal_op_mul_mat_id_extra_ids(op);
 +
@@ -183,14 +171,14 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +            ggml_metal_encoder_set_buffer  (enc, bid_amax, 2);
 +
 +            ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
- 
++
 +            ggml_metal_encoder_dispatch_threadgroups(enc, npart_amax, 1, 1, 256, 1, 1);
 +        }
 +
          {
              ggml_metal_kargs_mul_mm_id_map0 args = {
                  ne02_run,
-@@ -3963,58 +4009,90 @@
+@@ -3992,68 +4038,100 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
              ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, ne02_run, 1, 1);
          }
  
@@ -199,9 +187,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
  
 -        {
 -            auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op);
-+        if (!nan_off) {
-+            auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id_amax(lib);
- 
+-
 -            ggml_metal_kargs_mul_mm_id args = {
 -                /*.ne00  =*/ ne00,
 -                /*.ne02  =*/ ne02_run,
@@ -219,6 +205,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 -                /*.ne1   =*/ ne1,
 -                /*.r2    =*/ r2,
 -                /*.r3    =*/ r3,
++        if (!nan_off) {
++            auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id_amax(lib);
++
 +            ggml_metal_kargs_mul_mm_id_amax args = {
 +                /*.ne00  =*/ ne10,
 +                /*.ne01  =*/ ne11,
@@ -256,19 +245,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +            // one pipeline takes both magnitudes: the factor leaves the products small enough
 +            // for the accumulator this path already had
 +            const int scaled = nan_off ? 3 : 2;
- 
--            int ntg0 = (ne21 + nr1 - 1)/nr1;
++
 +                auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op, scaled);
- 
--            // a 64-lane card hands consecutive threadgroups to its four shader engines in turn,
--            // and only the first token tile of an expert has work while the experts stay narrower
--            // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
--            // them on half the engines and a multiple of four on a single one (measured 1.8x and
--            // 3.4x). One inert tile restores the spread; it returns before reading anything.
--            if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
--                TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
--                ntg0 += 1;
--            }
++
 +                ggml_metal_kargs_mul_mm_id args = {
 +                    /*.ne00  =*/ ne00,
 +                    /*.ne02  =*/ ne02_run,
@@ -288,7 +267,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +                    /*.r3    =*/ r3,
 +                };
  
--            ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
+-            int ntg0 = (ne21 + nr1 - 1)/nr1;
 +                ggml_metal_encoder_set_pipeline(enc, pipeline);
 +                ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
 +                ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
@@ -297,7 +276,16 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +                ggml_metal_encoder_set_buffer  (enc, bid_ids,  4);
 +                ggml_metal_encoder_set_buffer  (enc, bid_dst,  5);
 +                ggml_metal_encoder_set_buffer  (enc, bid_amax, 6);
-+
+ 
+-            // a 64-lane card hands consecutive threadgroups to its four shader engines in turn,
+-            // and only the first token tile of an expert has work while the experts stay narrower
+-            // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
+-            // them on half the engines and a multiple of four on a single one (measured 1.8x and
+-            // 3.4x). One inert tile restores the spread; it returns before reading anything.
+-            if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
+-                TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
+-                ntg0 += 1;
+-            }
 +                const size_t smem = pipeline.smem;
 +
 +                ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
@@ -305,7 +293,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +                const int nr1 = pipeline.nr1;
 +
 +                int ntg0 = (ne21 + nr1 - 1)/nr1;
-+
+ 
+-            // on 32 lanes these tile counts leave part of the card idle, and one or two more inert
+-            // tiles avoid them; like the tile above they return before reading anything
+-            if (props_dev->simd_width == 32 && TOSH_ENV("TOSH_MMID_RDNA2_GRID_DISABLE") == nullptr) {
+-                if (ntg0 == 3 || ntg0 == 5) {
 +                // a 64-lane card hands consecutive threadgroups to its four shader engines in turn,
 +                // and only the first token tile of an expert has work while the experts stay narrower
 +                // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
@@ -313,17 +305,44 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +                // 3.4x). One inert tile restores the spread; it returns before reading anything.
 +                if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
 +                    TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
-+                    ntg0 += 1;
+                     ntg0 += 1;
+-                } else if (ntg0 == 9 || ntg0 == 10) {
+-                    ntg0 = 11;
+                 }
+-            }
+ 
+-            ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
++                // on 32 lanes these tile counts leave part of the card idle, and one or two more inert
++                // tiles avoid them; like the tile above they return before reading anything
++                if (props_dev->simd_width == 32 && TOSH_ENV("TOSH_MMID_RDNA2_GRID_DISABLE") == nullptr) {
++                    if (ntg0 == 3 || ntg0 == 5) {
++                        ntg0 += 1;
++                    } else if (ntg0 == 9 || ntg0 == 10) {
++                        ntg0 = 11;
++                    }
 +                }
 +
 +                ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
          }
      } else {
          auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
+index ff6ef1f0e..a04e0f40c 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.h
++++ b/ggml/src/ggml-metal/ggml-metal-ops.h
+@@ -43,6 +43,7 @@ size_t ggml_metal_op_mul_mat_id_extra_tpe(const struct ggml_tensor * op);
+ 
+ // id map [n_tokens, n_expert]
+ size_t ggml_metal_op_mul_mat_id_extra_ids(const struct ggml_tensor * op);
++size_t ggml_metal_op_mul_mat_id_extra_amax(const struct ggml_tensor * op);
+ 
+ // return true if we should use the FA vector kernel for this op
+ bool ggml_metal_op_flash_attn_ext_use_vec(const struct ggml_tensor * op);
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+index a2ac49127..71fc98c11 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -251,6 +251,7 @@
+@@ -251,6 +251,7 @@ static size_t ggml_backend_metal_buffer_type_get_alloc_size(ggml_backend_buffer_
              {
                  res += ggml_metal_op_mul_mat_id_extra_tpe(tensor);
                  res += ggml_metal_op_mul_mat_id_extra_ids(tensor);
@@ -332,9 +351,10 @@ diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal
          case GGML_OP_FLASH_ATTN_EXT:
              {
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+index c4b748a28..24a35c755 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
-@@ -12,6 +12,11 @@
+@@ -12,6 +12,11 @@ constant bool  FC_mul_mm_narrow [[function_constant(FC_MUL_MM + 7)]];
  constant bool  FC_mul_mm_double_buffer [[function_constant(FC_MUL_MM + 8)]];
  constant bool  FC_mul_mm_acc_f32 [[function_constant(FC_MUL_MM + 9)]];
  constant bool  FC_mul_mm_uniform_scale [[function_constant(FC_MUL_MM + 10)]];
@@ -346,12 +366,10 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
  
  // each block_q contains 16*nl weights
  #ifdef GGML_METAL_HAS_TENSOR
-@@ -594,6 +599,89 @@
- 
-     device uint32_t * tpe_u32 = (device uint32_t *) (htpe);
+@@ -596,6 +601,89 @@ kernel void kernel_mul_mm_id_map0(
      tpe_u32[ide] = n_all;
-+}
-+
+ }
+ 
 +kernel void kernel_mul_mm_id_amax_part_f32(
 +        constant ggml_metal_kargs_mul_mm_id_amax & args,
 +        device   const char * src1,
@@ -433,10 +451,12 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
 +        d[0] = 1.0f/scale; // exact: scale is a power of two
 +        d[1] = scale;
 +    }
- }
- 
++}
++
  typedef decltype(kernel_mul_mm_id_map0<1>) kernel_mul_mm_id_map0_t;
-@@ -607,6 +695,7 @@
+ 
+ 
+@@ -607,6 +695,7 @@ kernel void kernel_mul_mm_id(
          device const char * htpe,
          device const char * hids,
          device       char * dst,
@@ -444,7 +464,7 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
          threadgroup  char * shmem [[threadgroup(0)]],
          uint3  tgpig[[threadgroup_position_in_grid]],
          ushort tiitg[[thread_index_in_threadgroup]],
-@@ -621,6 +710,17 @@
+@@ -621,6 +710,17 @@ kernel void kernel_mul_mm_id(
      threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
  #endif
  
@@ -462,7 +482,7 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
      constexpr int NR0 = 64;
      constexpr int NR1 = NLR == 8 ? 64 : 32;
  
-@@ -791,17 +891,17 @@
+@@ -791,17 +891,17 @@ kernel void kernel_mul_mm_id(
  
              if (FC_mul_mm_bc_inp) {
                  for (short i = 0; i < 8; ++i) {
@@ -484,7 +504,7 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
                  }
              }
          }
-@@ -851,7 +951,7 @@
+@@ -851,7 +951,7 @@ kernel void kernel_mul_mm_id(
                  //const short lx = (tiitg/NL1)%8;
                  //const short ly = i;
  
@@ -493,7 +513,7 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
              }
          } else {
              const short sx = (tiitg%NL1);
-@@ -862,7 +962,7 @@
+@@ -862,7 +962,7 @@ kernel void kernel_mul_mm_id(
              //const short lx = (tiitg/NL1)%8;
              //const short ly = i;
  
@@ -502,7 +522,7 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
          }
  #endif
  
-@@ -1076,12 +1176,12 @@
+@@ -1076,12 +1176,12 @@ kernel void kernel_mul_mm_id(
  
              int i = lane;
              for (; i < nr0/4; i += 32) {
@@ -518,9 +538,10 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kern
          }
      }
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+index 4064360b5..2198f6d8e 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
-@@ -21,6 +21,8 @@
+@@ -21,6 +21,8 @@ constant bool  FC_mul_mm_manual        [[function_constant(FC_MUL_MM + 6)]];
  constant bool  FC_mul_mm_narrow        [[function_constant(FC_MUL_MM + 7)]];
  constant bool  FC_mul_mm_double_buffer [[function_constant(FC_MUL_MM + 8)]];
  constant bool  FC_mul_mm_acc_f32       [[function_constant(FC_MUL_MM + 9)]];
@@ -529,7 +550,7 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/
  
  // NLR rows and NCC columns of the output per lane. NCC 4 with 8 lanes per row block gives a
  // wave 32 columns, which is what keeps the accumulator count equal to the 32-lane path.
-@@ -324,6 +326,7 @@
+@@ -324,6 +326,7 @@ kernel void kernel_mul_mm_id_w64(
          device const char * htpe,
          device const char * hids,
          device       char * dst,
@@ -537,11 +558,10 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/
          threadgroup  char * shmem [[threadgroup(0)]],
          uint3  tgpig[[threadgroup_position_in_grid]],
          ushort tiitg[[thread_index_in_threadgroup]],
-@@ -331,6 +334,17 @@
-         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+@@ -332,6 +335,17 @@ kernel void kernel_mul_mm_id_w64(
      threadgroup S0 * sa = (threadgroup S0 *)(shmem);
      threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
-+
+ 
 +    // power-of-two rescaling of src1, so activations beyond the f16 range survive the narrowing.
 +    // Mode 3 is the original kernel: the host has seen this model stay inside the range, so the
 +    // factors are not even computed and nothing is read here.
@@ -552,10 +572,11 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/
 +        (FC_mul_mm_id_scaled == 1 && s1_scale == 1.0f)) {
 +        return;
 +    }
- 
++
      constexpr int NR0 = 64;
      constexpr int NR1 = NLR == 8 ? 64 : 32;
-@@ -457,17 +471,17 @@
+     constexpr short NCC = 4;
+@@ -457,17 +471,17 @@ kernel void kernel_mul_mm_id_w64(
  
              if (FC_mul_mm_bc_inp) {
                  for (short i = 0; i < 8; ++i) {
@@ -577,7 +598,7 @@ diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/
                  }
              }
          }
-@@ -583,12 +597,12 @@
+@@ -583,12 +597,12 @@ kernel void kernel_mul_mm_id_w64(
  
              int i = lane;
              for (; i < nr0/4; i += 64) {

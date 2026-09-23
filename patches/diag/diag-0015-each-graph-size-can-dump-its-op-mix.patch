@@ -1,7 +1,10 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index ea2eb8396..de8ccb2db 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -4069,7 +4069,54 @@
+@@ -4067,11 +4067,58 @@ static bool ggml_metal_merge_graph(void) {
+         v = s ? (s[0] == '1' ? 1 : 0) : 1;
+     }
      return v == 1;
  }
  
@@ -56,3 +59,5 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml
      if (tosh_mgpu_trace()) { atomic_fetch_add(&g_tr_graphs, 1); }
      // command buffers run in commit order, so a held one has to go in before this graph
      if (!ggml_metal_merge_graph()) {
+         ggml_metal_cmd_buf_hold_flush(ctx);
+     }

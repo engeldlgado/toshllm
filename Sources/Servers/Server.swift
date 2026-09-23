@@ -385,10 +385,10 @@ struct ServerSettings {
                          "-ctkd", "q8_0", "-ctvd", "q8_0"]
             } else if Self.mtpEnabled(forModel: modelPath), let draft = Self.mtpDraftPath(forModel: modelPath) {
                 args += ["-md", draft, "--spec-type", "draft-mtp"]
-                args += Self.mtpDraftWidthArgs(forModel: modelPath)
+                args += Self.mtpDraftWidthArgs(forModel: modelPath, gpuArchitecture: selectedGPUArchitecture)
             } else if Self.mtpEnabled(forModel: modelPath), Self.modelHasMTP(at: modelPath) {
                 args += ["--spec-type", "draft-mtp"]
-                args += Self.mtpDraftWidthArgs(forModel: modelPath)
+                args += Self.mtpDraftWidthArgs(forModel: modelPath, gpuArchitecture: selectedGPUArchitecture)
             }
         }
         if let ui = Self.chatUIPath { args += ["--path", ui] }
@@ -515,8 +515,14 @@ struct ServerSettings {
             } else if Self.mtpEnabled(forModel: path), let draft = Self.mtpDraftPath(forModel: path) {
                 lines.append("model-draft = \(draft)")
                 lines.append("spec-type = draft-mtp")
+                if let n = Self.mtpDraftWidth(forModel: path, gpuArchitecture: selectedGPUArchitecture) {
+                    lines.append("spec-draft-n-max = \(n)")
+                }
             } else if Self.mtpEnabled(forModel: path), Self.modelHasMTP(at: path) {
                 lines.append("spec-type = draft-mtp")
+                if let n = Self.mtpDraftWidth(forModel: path, gpuArchitecture: selectedGPUArchitecture) {
+                    lines.append("spec-draft-n-max = \(n)")
+                }
             }
             sections.append(lines.joined(separator: "\n"))
         }
@@ -1292,12 +1298,30 @@ struct ServerSettings {
         return pool.first?.path
     }
 
-    /// Draft width for this model. Flash-Next verifies three tokens faster than four
-    /// (28.6 against 28.1 t/s on a normal prompt), so it takes a width of its own; every
-    /// other architecture keeps the engine default. A user width in the extra arguments
-    /// wins, because those are appended after these.
-    nonisolated static func mtpDraftWidthArgs(forModel path: String) -> [String] {
-        ggufString("general.architecture", at: path) == "qwen4exp" ? ["--spec-draft-n-max", "2"] : []
+    /// Draft width for this model on this card. Flash-Next verifies three tokens faster than
+    /// four, so it keeps a width of its own. On AMD the verify pass grows faster than the
+    /// accepted tokens past two drafts on 32-lane cards and past one on 64-lane cards; other
+    /// GPUs keep the engine default. A user width in the extra arguments wins, because those
+    /// are appended after these.
+    nonisolated static func mtpDraftWidth(forModel path: String, gpuArchitecture: String?) -> Int? {
+        if ggufString("general.architecture", at: path) == "qwen4exp" { return 2 }
+        guard let arch = gpuArchitecture else { return nil }
+        if arch == "GCN / Vega" { return 1 }
+        if arch.hasPrefix("RDNA") { return 2 }
+        return nil
+    }
+
+    nonisolated static func mtpDraftWidthArgs(forModel path: String, gpuArchitecture: String? = nil) -> [String] {
+        mtpDraftWidth(forModel: path, gpuArchitecture: gpuArchitecture).map { ["--spec-draft-n-max", String($0)] } ?? []
+    }
+
+    /// Architecture shared by every card the server runs on, or nil when they differ.
+    var selectedGPUArchitecture: String? {
+        let indices = selectedGPUIndices
+        let archs = Set(ServerController.availableGPUs().filter { indices.contains($0.index) }
+            .map { GPUArchitectureClassifier.architecture(for: $0.name) ?? "" })
+        guard archs.count == 1, let arch = archs.first, !arch.isEmpty else { return nil }
+        return arch
     }
 
     nonisolated static func modelUsesMTP(at path: String) -> Bool {
@@ -2007,6 +2031,10 @@ final class ServerController: ObservableObject {
                 self.healthTask?.cancel()
                 self.stopDiscovery()
                 EngineLock.remove(pid: proc.processIdentifier)
+                // a router that died leaves its model children behind, holding their weights
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+                    EngineLock.reapStrayEngines()
+                }
                 if case .failed = self.state { return }
                 if proc.terminationStatus == 0 || proc.terminationStatus == 15 {
                     self.state = .stopped
@@ -2150,6 +2178,8 @@ final class ServerController: ObservableObject {
             // working set has to be freed.
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6) {
                 if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+                // children that outlived their engine are adopted by launchd by now
+                EngineLock.reapStrayEngines()
             }
             if prewarm {
                 // Snapshot slot 0 to disk before killing the engine, so the next
@@ -2283,7 +2313,15 @@ final class ServerController: ObservableObject {
             await MainActor.run {
                 self?.state = .failed("El servidor no respondió al health check")
                 self?.stopDiscovery()
-                self?.process?.terminate()
+                if let p = self?.process {
+                    let pid = p.processIdentifier
+                    Self.reapChildren(of: pid)
+                    p.terminate()
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6) {
+                        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+                        EngineLock.reapStrayEngines()
+                    }
+                }
             }
         }
     }
