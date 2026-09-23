@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **LLMs: multi-token prediction (MTP) now speeds up Q4_0 models on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II Qwen3.8-27B Q4_0 generates 26.0 tokens a second with it against 25.6 without, where it used to lose 12 percent. The same model in Q4_K_S goes from 21.2 to 21.5 with MTP, and in IQ4_XS from 20.8 to 21.0.
+
 ## [0.87.8] - 2026-09-22
 
 ### Added
