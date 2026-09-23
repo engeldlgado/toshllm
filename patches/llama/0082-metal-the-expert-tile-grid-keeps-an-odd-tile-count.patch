@@ -1,7 +1,13 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 3aed316f3..a9871f1f4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4002,7 +4002,19 @@
+@@ -4086,17 +4086,29 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+             ggml_metal_encoder_set_buffer  (enc, bid_amax, 6);
+ 
+             const size_t smem = pipeline.smem;
+ 
+             ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
  
              const int nr1 = pipeline.nr1;
  
@@ -22,3 +28,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
          }
      } else {
          auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);
+ 
+         const int nr0 = pipeline.nr0;
+         const int nr1 = pipeline.nr1;
+         const int nsg = pipeline.nsg;
+ 

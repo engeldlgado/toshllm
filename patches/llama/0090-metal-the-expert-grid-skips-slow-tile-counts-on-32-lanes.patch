@@ -1,8 +1,11 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 01da6ee2a..4425eb3ef 100644
+index 976541751..e1394d247 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4021,10 +4021,20 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+@@ -4107,16 +4107,26 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+             // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
+             // them on half the engines and a multiple of four on a single one (measured 1.8x and
+             // 3.4x). One inert tile restores the spread; it returns before reading anything.
              if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
                  TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
                  ntg0 += 1;
@@ -23,3 +26,6 @@ index 01da6ee2a..4425eb3ef 100644
      } else {
          auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);
  
+         const int nr0 = pipeline.nr0;
+         const int nr1 = pipeline.nr1;
+         const int nsg = pipeline.nsg;

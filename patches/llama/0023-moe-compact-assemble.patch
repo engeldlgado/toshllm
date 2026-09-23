@@ -1,18 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:12 -0400
-Subject: [PATCH] 0024-moe-compact-assemble
-
----
- tosh-moe/tosh-moe-lru.metal | 36 ++++++++++++++++++++++++++++++++++++
- tosh-moe/tosh-moe.h         |  4 +++-
- 2 files changed, 39 insertions(+), 1 deletion(-)
-
 diff --git a/tosh-moe/tosh-moe-lru.metal b/tosh-moe/tosh-moe-lru.metal
 index 3af62d3bf..97c8427e2 100644
 --- a/tosh-moe/tosh-moe-lru.metal
 +++ b/tosh-moe/tosh-moe-lru.metal
-@@ -217,6 +217,7 @@ kernel void tosh_moe_stage(
+@@ -212,27 +212,63 @@ kernel void tosh_moe_stage(
+ }
+ 
+ // Reconstructs one logical full bank in private scratch without ever wrapping the complete
+ // CPU bank as a Metal resource. Hot rows come from private resident slots; cold rows arrive
+ // packed in a bounded shared buffer.
  struct tosh_assemble_args {
      uint32_t row_u4;
      uint32_t n_expert;
@@ -20,7 +15,9 @@ index 3af62d3bf..97c8427e2 100644
  };
  
  kernel void tosh_moe_assemble(
-@@ -226,13 +227,48 @@ kernel void tosh_moe_assemble(
+         constant tosh_assemble_args & args        [[buffer(0)]],
+         device       uint4          * dst         [[buffer(1)]],
+         device const uint4          * cold        [[buffer(2)]],
          device const uint4          * slots       [[buffer(3)]],
          device const int32_t        * slot_for_id [[buffer(4)]],
          device const int32_t        * cold_for_id [[buffer(5)]],
@@ -73,7 +70,12 @@ diff --git a/tosh-moe/tosh-moe.h b/tosh-moe/tosh-moe.h
 index 3e62af81b..6b6b1ad67 100644
 --- a/tosh-moe/tosh-moe.h
 +++ b/tosh-moe/tosh-moe.h
-@@ -70,7 +70,7 @@ static inline int tosh_moe_ids_room(int n_expert) {
+@@ -65,27 +65,29 @@ const void * tosh_moe_host_buft(void);
+ // per expert, so the room needed is tokens times experts, not tokens times experts used.
+ #define TOSH_MOE_MAX_TOKENS 512
+ 
+ static inline int tosh_moe_ids_room(int n_expert) {
+     return TOSH_MOE_MAX_TOKENS*n_expert;
  }
  
  static inline int tosh_moe_state_ints(int n_expert, int n_slots, int max_fetch) {
@@ -82,7 +84,10 @@ index 3e62af81b..6b6b1ad67 100644
  }
  static inline int tosh_moe_off_slot_for_id(int n_expert, int n_slots, int max_fetch) { (void) n_expert; (void) n_slots; (void) max_fetch; return 0; }
  static inline int tosh_moe_off_cold_for_id(int n_expert, int n_slots, int max_fetch) { (void) n_slots; (void) max_fetch; return n_expert; }
-@@ -81,6 +81,8 @@ static inline int tosh_moe_off_n_indices  (int n_expert, int n_slots, int max_fe
+ static inline int tosh_moe_off_id_of_slot (int n_expert, int n_slots, int max_fetch) { (void) n_slots; (void) max_fetch; return 2*n_expert; }
+ static inline int tosh_moe_off_usage      (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return 2*n_expert + n_slots; }
+ static inline int tosh_moe_off_step       (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return 2*n_expert + 2*n_slots; }
+ static inline int tosh_moe_off_n_indices  (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return 2*n_expert + 2*n_slots + 1; }
  static inline int tosh_moe_off_evict      (int n_expert, int n_slots, int max_fetch) { (void) max_fetch; return 2*n_expert + 2*n_slots + 2; }
  static inline int tosh_moe_off_src        (int n_expert, int n_slots, int max_fetch) { return 2*n_expert + 2*n_slots + 2 + max_fetch; }
  static inline int tosh_moe_off_ids        (int n_expert, int n_slots, int max_fetch) { return 2*n_expert + 2*n_slots + 2 + 2*max_fetch; }
@@ -91,3 +96,8 @@ index 3e62af81b..6b6b1ad67 100644
  
  // Slots per expert bank, 0 when the cache is off.
  int tosh_moe_slots_want(void);
+ 
+ // Ties a bank of VRAM slots to the weights that stay in RAM. Keys are ggml tensors, kept as
+ // void so this stays independent of ggml.
+ void         tosh_moe_bind(const void * slots, const void * ram);
+ void         tosh_moe_bind_experts(const void * slots, int n_expert);

@@ -1,15 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Wed, 16 Sep 2026 08:11:26 -0500
-Subject: [PATCH] 0072-metal-zero-filled-collectives-and-one-shot-allreduce
-
----
-
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index 23aea6c2d..e1a4947e1 100644
+index da733d9e8..1fb695fc4 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -2793,6 +2793,24 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+@@ -2835,16 +2835,34 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+                     auto & bcj = backend_ctx->backend_configs[j];
+                     ggml_cgraph * cgraph_ij = bcj.cgraphs[i].cgraph_main;
+                     nodes.push_back(cgraph_ij->nodes[cgraph_ij->n_nodes-1]);
+                 }
+                 backend_allreduce_success = backend_ctx->comm_allreduce(backend_ctx->comm_ctx, nodes.data());
              }
  
              if (!backend_allreduce_success) {
@@ -34,11 +32,21 @@ index 23aea6c2d..e1a4947e1 100644
                  const ggml_status status = allreduce_fallback(i);
                  if (status != GGML_STATUS_SUCCESS) {
                      return status;
+                 }
+             }
+         }
+     }
+     return GGML_STATUS_SUCCESS;
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.h b/ggml/src/ggml-metal/ggml-metal-context.h
-index 10f5d0163..486ce1696 100644
+index fef606412..119e8b65b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.h
 +++ b/ggml/src/ggml-metal/ggml-metal-context.h
-@@ -47,6 +47,23 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+@@ -42,16 +42,33 @@ bool ggml_metal_add_inplace_async    (ggml_metal_t ctx, struct ggml_tensor * acc
+ 
+ // One command buffer per card per butterfly step: both copies and the add together.
+ // t_peer lets a peer-connected pair read the partner's partial straight out of its VRAM;
+ // pass NULL and the exchange always stages through the shared host block.
+ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
                                  struct ggml_tensor * t_self, struct ggml_tensor * t_peer,
                                  struct ggml_tensor * tmp_self, uint64_t seq);
  
@@ -62,11 +70,21 @@ index 10f5d0163..486ce1696 100644
  enum ggml_status ggml_metal_graph_compute (ggml_metal_t ctx, struct ggml_cgraph * gf);
  void             ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf);
  
+ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev);
+ void ggml_metal_event_wait  (ggml_metal_t ctx, ggml_metal_event_t ev);
+ 
+ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx);
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 57dfaa7b9..26792cc0d 100644
+index 3622fe6cb..cd9dfa040 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -293,6 +293,11 @@ static void tosh_cbp_dump_dev(ggml_metal_device_t dev) {
+@@ -290,16 +290,21 @@ struct ggml_metal {
+         id<MTLBuffer>        shadow[2];
+         id<MTLBuffer>        peer_x_view2[2];
+         size_t               shadow_cap;
+         int                  peer_x_ok; // -1 unknown, 0 ineligible, 1 eligible
+         id<MTLSharedEvent>   ev_ready, ev_done;
          id<MTLSharedEvent>   ev_x_ready, ev_x_done;
          uint64_t             seq;
          uint64_t             seq_x;
@@ -78,7 +96,17 @@ index 57dfaa7b9..26792cc0d 100644
          bool                 peer_logged;
          bool                 peer_x_logged;
      } xlinks[4];
-@@ -391,6 +396,7 @@ static bool ggml_metal_defer_waits(void) {
+     int n_xlinks;
+ 
+     dispatch_queue_t d_queue;
+ 
+     // additional, inference-time compiled pipelines
+@@ -385,16 +390,17 @@ static _Atomic uint64_t g_tr_merge_waits = 0; // waits that had queued in betwee
+                                               // been dropped before this was fixed
+ static _Atomic uint64_t g_tr_signals     = 0; // cross-device event signals encoded
+ static _Atomic uint64_t g_tr_waits       = 0; // cross-device event waits encoded
+ 
+ 
  // TOSH_MGPU_TRACE: where the collective's time and bytes go. The counters are only touched
  // when it is on, so a release run pays one cached branch per crossing.
  static _Atomic uint64_t g_tr_reduce      = 0; // exchange_reduce calls
@@ -86,7 +114,17 @@ index 57dfaa7b9..26792cc0d 100644
  static _Atomic uint64_t g_tr_copy        = 0; // plain cross-device copies
  static _Atomic uint64_t g_tr_bytes_peer  = 0; // crossed through a remote buffer view
  static _Atomic uint64_t g_tr_bytes_host  = 0; // crossed through the shared host block
-@@ -832,6 +838,7 @@ static void tosh_mgpu_trace_report(void) {
+ static _Atomic uint64_t g_tr_cmd_bufs    = 0; // command buffers the collective created
+ static _Atomic uint64_t g_tr_rv_new      = 0; // remote views built
+ static _Atomic uint64_t g_tr_rv_hit      = 0; // remote views reused
+ static _Atomic uint64_t g_tr_encode_ns   = 0; // CPU time inside the collective
+ static _Atomic uint64_t g_tr_gpu_ns      = 0; // GPU execution of the collective's buffers
+@@ -826,16 +832,17 @@ static void tosh_mgpu_trace_report(void) {
+             for (int k = 0; k < 3; k++) {
+                 fprintf(stderr, "    %s us ", rn[k]);
+                 for (int i = 0; i < 8; i++) { fprintf(stderr, "%s %.1f%%  ", lbl[i], 100.0*atomic_load(&hh[k][i])/nn); }
+                 fprintf(stderr, "\n");
+             }
          }
      }
      fprintf(stderr, "  fused boundaries      %llu\n", (unsigned long long) atomic_load(&g_tr_fused_bnd));
@@ -94,7 +132,17 @@ index 57dfaa7b9..26792cc0d 100644
      fprintf(stderr, "  remote views new/hit  %llu/%llu\n",
              (unsigned long long) atomic_load(&g_tr_rv_new),
              (unsigned long long) atomic_load(&g_tr_rv_hit));
-@@ -2708,8 +2715,338 @@ static bool ggml_metal_exchange_reduce_peer(ggml_metal_t ctx_self, ggml_metal_t
+     fprintf(stderr, "  encode CPU            %.1f ms\n", atomic_load(&g_tr_encode_ns)/1e6);
+     fprintf(stderr, "  collective GPU        %.1f ms\n", atomic_load(&g_tr_gpu_ns)/1e6);
+     fprintf(stderr, "  commit to GPU start   %.1f ms\n", atomic_load(&g_tr_sched_ns)/1e6);
+     // decode-only, per card per token
+     if (atomic_load(&g_snap_taken)) {
+@@ -2726,18 +2733,348 @@ static bool ggml_metal_exchange_reduce_peer(ggml_metal_t ctx_self, ggml_metal_t
+     return true;
+ #else
+     GGML_UNUSED(ctx_self); GGML_UNUSED(ctx_peer); GGML_UNUSED(link_out); GGML_UNUSED(link_in);
+     GGML_UNUSED(t_self); GGML_UNUSED(t_peer); GGML_UNUSED(tmp_self); GGML_UNUSED(seq);
+     return false;
  #endif
  }
  
@@ -433,7 +481,17 @@ index 57dfaa7b9..26792cc0d 100644
  bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
                                  struct ggml_tensor * t_self, struct ggml_tensor * t_peer,
                                  struct ggml_tensor * tmp_self, uint64_t seq) {
-@@ -2793,6 +3130,10 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     struct ggml_metal_xdev_link * link_out = ggml_metal_xdev_link_get(ctx_self, ctx_peer);
+     struct ggml_metal_xdev_link * link_in  = ggml_metal_xdev_link_get(ctx_peer, ctx_self);
+     if (link_out == NULL || link_in == NULL) {
+         return false;
+     }
+@@ -2811,16 +3148,20 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     // Both sides are handed the same number: reading it off the link races with whichever
+     // card the loop reached first. Links skip values, so the back-pressure wait names its own.
+     // its own events and counter: the copies number per link and this path numbers by round,
+     // and one event cannot carry both without a value landing below the last one signalled
+     const uint64_t seq_prev = link_out->seq_x;
      const uint64_t seq_out  = seq;
      const uint64_t seq_in   = seq;
      link_out->seq_x = seq;
@@ -444,11 +502,21 @@ index 57dfaa7b9..26792cc0d 100644
  
      @autoreleasepool {
          id<MTLCommandBuffer> cmd_buf = ggml_metal_cmd_buf_continue(ctx_self);
+ 
+         if (seq_prev > 0) {
+             if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_waits, 1);
+             if (ggml_metal_bp_satisfied()) {
+                 [cmd_buf encodeWaitForEvent:tosh_wait_dummy(ctx_self) value:1];
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index fd8ec5996..ea51ac7f8 100644
+index c90cb36e3..348a24c1e 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -16,6 +16,10 @@ static inline void tosh_moe_set_host_buft(const void *) {}
+@@ -12,16 +12,20 @@
+ static inline void tosh_moe_set_host_buft(const void *) {}
+ #endif
+ #include "ggml-metal-context.h"
+ #include "ggml-metal-ops.h"
+ #include "ggml-metal-tuning.h"
  
  #include <mutex>
  #include <string>
@@ -459,7 +527,17 @@ index fd8ec5996..ea51ac7f8 100644
  
  #define GGML_METAL_NAME "MTL"
  #define GGML_METAL_MAX_DEVICES 16
-@@ -1073,6 +1077,11 @@ static bool ggml_backend_metal_comm_allreduce_noop(void) {
+ 
+ // number of Metal devices
+ // note: can be overridden with GGML_METAL_DEVICES env to simulate virtual devices
+ static int g_devices = 1;
+ 
+@@ -1088,48 +1092,64 @@ static bool ggml_backend_metal_comm_allreduce_noop(void) {
+         if (v) {
+             fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_ALLREDUCE_NOOP=1, the reduction is "
+                             "skipped and the output is meaningless. Benchmark only.\n");
+         }
+     }
      return v == 1;
  }
  
@@ -471,7 +549,9 @@ index fd8ec5996..ea51ac7f8 100644
  static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_tensor ** tensors) {
      if (ggml_backend_metal_comm_allreduce_noop()) {
          return true;
-@@ -1082,7 +1091,11 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     }
+ 
+     auto * comm_ctx = (ggml_backend_metal_comm_context *) comm_ctx_v;
  
      const size_t n_backends = comm_ctx->backends.size();
  
@@ -483,7 +563,8 @@ index fd8ec5996..ea51ac7f8 100644
          return false;
      }
  
-@@ -1091,20 +1104,27 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     const int64_t ne = ggml_nelements(tensors[0]);
+     if (ne == 0) {
          return true;
      }
  
@@ -513,7 +594,17 @@ index fd8ec5996..ea51ac7f8 100644
          }
      }
  
-@@ -1141,6 +1161,7 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     const size_t size = ggml_nbytes(tensors[0]);
+     const size_t n_steps = comm_ctx->n_steps;
+ 
+     for (size_t k = 0; k < n_backends*n_steps; k++) {
+         if (comm_ctx->tmp_size[k] < size) {
+@@ -1156,32 +1176,59 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+         tmp[i].src[0]    = nullptr;
+         tmp[i].src[1]    = nullptr;
+     };
+ 
+     for (size_t i = 0; i < n_backends; i++) {
          view_tmp(i, 0);
          ggml_metal_t ctx = (ggml_metal_t) comm_ctx->backends[i]->context;
          if (!ggml_metal_add_inplace_supported(ctx, tensors[i], &tmp[i])) {
@@ -521,7 +612,16 @@ index fd8ec5996..ea51ac7f8 100644
              return false;
          }
      }
-@@ -1157,6 +1178,32 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+ 
+     // The peer copy has the higher bandwidth and the event hand-off the lower fixed cost, so
+     // the batch decides: peer wins the prefill, events the decode.
+     const bool prefer_events = ne / tensors[0]->ne[0] < ggml_metal_peer_min_batch();
+ 
+     // the add goes into the command buffer the copy already opened; kill switch because that
+     // buffer stays open between the two calls
+     static int fuse = -1;
+     if (fuse < 0) {
+         fuse = getenv("TOSH_MGPU_FUSE_ADD_DISABLE") == NULL ? 1 : 0;
      }
      const bool hold_dst = fuse == 1;
  
@@ -554,7 +654,17 @@ index fd8ec5996..ea51ac7f8 100644
      // Bailing out is only safe while no device has reduced anything: past that the generic
      // path would add the partial sums a second time.
      bool reduced = false;
-@@ -1209,8 +1256,8 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     auto push = [&](size_t j_src, size_t j_dst, size_t step, bool hold) {
+         view_tmp(j_dst, step);
+         const bool ok = ggml_backend_metal_cpy_tensor_async_ex(comm_ctx->backends[j_src], comm_ctx->backends[j_dst],
+                                                               tensors[j_src], &tmp[j_dst], prefer_events, hold);
+         if (!ok && reduced) {
+@@ -1224,39 +1271,81 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     // so the copies all go out before any of the adds.
+     static int fused = -1;
+     if (fused < 0) {
+         fused = getenv("TOSH_MGPU_FUSED_EXCHANGE_DISABLE") == NULL ? 1 : 0;
+     }
  
      for (size_t offset = offset_max; offset >= 1; offset /= 2) {
          if (fused && prefer_events) {
@@ -565,7 +675,11 @@ index fd8ec5996..ea51ac7f8 100644
              bool ok = true;
              for (size_t j = 0; j < 2*offset_max; j++) {
                  view_tmp(j, step);
-@@ -1222,16 +1269,58 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+             }
+             // Only the tensor-to-tensor variant needs the partner's tensor, and it is the one
+             // that would thrash its view cache when a step's partner changes between rounds,
+             // so it is handed the partner for a pair and nothing otherwise. The default path
+             // publishes into an inbox instead and engages at any device count: on four dies it
              // takes the two intra-card links and leaves the cross-card ones to the staged path,
              // which is what a two-card TensorMesh row already relies on.
              const bool pair = 2*offset_max == 2;
@@ -627,3 +741,8 @@ index fd8ec5996..ea51ac7f8 100644
              for (size_t jj = 0; jj < 2*offset_max && ok; jj++) {
                  const size_t j = flip ? (2*offset_max - 1 - jj) : jj;
                  ok = ggml_backend_metal_exchange_reduce(comm_ctx->backends[j], comm_ctx->backends[j ^ offset],
+                                                         tensors[j], pair ? tensors[j ^ offset] : nullptr,
+                                                         &tmp[j], seq_round);
+             }
+             if (ok) {
+                 reduced = true;

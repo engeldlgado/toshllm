@@ -1,7 +1,13 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 6db894c8b..976541751 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3473,8 +3473,14 @@
+@@ -3503,17 +3503,23 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+             const char * s = TOSH_ENV("TOSH_EXT_NR0_MINROWS");
+             // off by default: the win depends on the weight's shape and one measured model
+             // still regresses at four columns, so it stays opt-in until that is understood
+             return s ? (int64_t) atoll(s) : (int64_t) 0;
+         }();
          const bool nr0_wide = nr0_min_rows > 0 && props_dev->simd_width == 32 &&
                                op->src[0]->type == GGML_TYPE_Q4_K && ne01 >= nr0_min_rows;
  
@@ -11,9 +17,13 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +        // columns, 2.4x with four rows); two and three columns stay faster with two rows
 +        const bool nr0_w64 = props_dev->simd_width == 64 && op->src[0]->type == GGML_TYPE_Q4_K && ne11 >= 4 &&
 +                             TOSH_ENV("TOSH_EXT_NR0_W64_DISABLE") == nullptr;
- 
-+        const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : ((nr0_wide || nr0_w64) ? 4 : 2)) : 1;
 +
++        const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : ((nr0_wide || nr0_w64) ? 4 : 2)) : 1;
+ 
          // each group makes a full pass over the weights, so the cost is groups by group width:
          // nine and ten columns fit in two groups of five instead of three of four
          if (ext_wide_group(op->src[0]->type) && (ne11 == 9 || ne11 == 10)) {
+             r1ptg = 5;
+         }
+ 
+         // the wave64 q6_K variant keeps four rows per simdgroup, so the row split does not apply

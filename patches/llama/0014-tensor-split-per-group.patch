@@ -1,19 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:09 -0400
-Subject: [PATCH] 0014-tensor-split-per-group
-
----
- src/llama-model.cpp | 11 +++++++++--
- src/llama-model.h   |  9 +++++++++
- src/llama.cpp       | 22 ++++++++++++++++------
- 3 files changed, 34 insertions(+), 8 deletions(-)
-
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index b1e7f88e8..0133eb91a 100644
+index 6274fc5cd..cd029ff6f 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -802,7 +802,8 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+@@ -824,17 +824,18 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+     tensor_config tc = get_tensor_config();
+     split_state.axis = tc.axis;
+     if (split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS) {
+         const int64_t blck_size = ggml_blck_size(tc.tensor_axis_0->type);
+         const float * tensor_split = ud->model->tensor_split();
          std::vector<float> tensor_split_scan;
          tensor_split_scan.reserve(ud->n_devices);
          for (size_t j = 0; j < ud->n_devices; j++) {
@@ -23,7 +17,17 @@ index b1e7f88e8..0133eb91a 100644
              if (j > 0) {
                  tensor_split_scan[j] += tensor_split_scan[j - 1];
              }
-@@ -1472,7 +1473,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+         }
+         const std::vector<std::pair<int64_t, uint32_t>> segments = get_split_segments(split_state.axis, tc.il);
+         const std::vector<int64_t> granularity = get_split_granularity(blck_size, tc.il, segments);
+         for (size_t is = 0; is < segments.size(); is++) {
+             const int64_t  ne_s = segments[is].first;
+@@ -1509,17 +1510,23 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+             // have any to report. in this case, we will use the host memory as a fallback
+             // fixes: https://github.com/ggml-org/llama.cpp/issues/18577
+             if (free == 0 && total == 0) {
+                 ggml_backend_dev_memory(cpu_dev, &free, &total);
+             }
              splits[i] = free;
          }
      } else {
@@ -38,11 +42,21 @@ index b1e7f88e8..0133eb91a 100644
      }
  
      // sum and normalize the splits to get the split points
+     float split_sum = 0.0f;
+     for (size_t i = 0; i < n_devices(); ++i) {
+         split_sum += splits[i];
+         splits[i] = split_sum;
+     }
 diff --git a/src/llama-model.h b/src/llama-model.h
-index 4c4a30e01..2dca2de87 100644
+index 984b2cf38..7f6de0b1b 100644
 --- a/src/llama-model.h
 +++ b/src/llama-model.h
-@@ -601,6 +601,9 @@ struct llama_device {
+@@ -599,16 +599,19 @@ struct llama_layer {
+ struct llama_device {
+     bool is_meta;
+ 
+     ggml_backend_dev_t dev;
+ };
  
  struct llama_meta_device_get_split_state_userdata {
      size_t                     n_devices;
@@ -52,7 +66,17 @@ index 4c4a30e01..2dca2de87 100644
      const struct llama_model * model;
  };
  
-@@ -709,6 +712,12 @@ struct llama_model {
+ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata);
+ 
+ struct llama_model {
+     llm_type type = LLM_TYPE_UNKNOWN;
+     llm_arch arch = LLM_ARCH_UNKNOWN;
+@@ -710,16 +713,22 @@ struct llama_model {
+     std::vector<std::pair<std::string, struct ggml_tensor *>> tensors_by_name;
+ 
+     // for keeping track of associated LoRA adapters
+     std::unordered_set<llama_adapter_lora *> loras;
+ 
      // statically allocated context for assigning
      struct llama_meta_device_get_split_state_userdata get_split_state_ud;
  
@@ -65,11 +89,21 @@ index 4c4a30e01..2dca2de87 100644
      int64_t t_load_us  = 0;
      int64_t t_start_us = 0;
  
+     explicit llama_model(const llama_model_params & params);
+     virtual ~llama_model();
+ 
+     std::string arch_name() const;
+     std::string type_name() const;
 diff --git a/src/llama.cpp b/src/llama.cpp
 index da2ef8f2f..395e5b8dc 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -199,12 +199,17 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
+@@ -194,22 +194,27 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
+             LLAMA_LOG_INFO("%s: creating a Meta device with %zu devices\n", __func__, n_devs);
+             for (size_t i = 0; i < n_devs; ++i) {
+                 LLAMA_LOG_INFO("%s: - device %zu: %s\n", __func__, i, ggml_backend_dev_name(params.devices[i]));
+             }
+             const size_t n_group = llama_tensor_group_size(n_devs);
              if (n_group < n_devs) {
                  LLAMA_LOG_INFO("%s: grouping them into %zu Meta devices of %zu\n", __func__, n_devs/n_group, n_group);
              }
@@ -90,7 +124,17 @@ index da2ef8f2f..395e5b8dc 100644
                  });
              }
          } else {
-@@ -242,16 +247,21 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
+             for (ggml_backend_dev_t * dev = params.devices; *dev; ++dev) {
+                 model->devices.push_back({false, *dev});
+             }
+         }
+     } else {
+@@ -237,26 +242,31 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
+             }
+ 
+             LLAMA_LOG_INFO("%s: creating a Meta device for tensor parallelism from %zu devices:\n", __func__, devs.size());
+             for (size_t i = 0; i < devs.size(); ++i) {
+                 LLAMA_LOG_INFO("%s: - device %zu: %s (%s)\n", __func__, i, ggml_backend_dev_name(devs[i]), ggml_backend_dev_description(devs[i]));
              }
  
              GGML_ASSERT(!devs.empty());
@@ -115,3 +159,8 @@ index da2ef8f2f..395e5b8dc 100644
                  });
              }
          } else {
+             for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+                 ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                 switch (ggml_backend_dev_type(dev)) {
+                     case GGML_BACKEND_DEVICE_TYPE_CPU:
+                     case GGML_BACKEND_DEVICE_TYPE_ACCEL:

@@ -1,17 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Mon, 14 Sep 2026 10:55:37 -0400
-Subject: [PATCH] 0065-mgpu-tp2-fused-boundary
-
----
- ggml/src/ggml-metal/ggml-metal-context.m | 124 +++++++++++++++++++----
- 1 file changed, 107 insertions(+), 17 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 72b953b91..57dfaa7b9 100644
+index 45289079e..3622fe6cb 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -620,16 +620,17 @@ static bool ggml_metal_ctime(void) {
+@@ -619,16 +619,17 @@ static bool ggml_metal_ctime(void) {
  }
  
  static bool ggml_metal_ctime_barrier(void) {
@@ -29,7 +20,7 @@ index 72b953b91..57dfaa7b9 100644
      return us < 1 ? 0 : us < 5 ? 1 : us < 10 ? 2 : us < 20 ? 3 :
             us < 50 ? 4 : us < 100 ? 5 : us < 200 ? 6 : 7;
  }
-@@ -706,16 +707,30 @@ static bool ggml_metal_bp_satisfied(void) {
+@@ -705,16 +706,30 @@ static bool ggml_metal_bp_satisfied(void) {
          if (v) {
              fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_BP_SATISFIED=1, the collective does not "
                              "wait before reusing the staging block. Benchmark only.\n");
@@ -60,7 +51,7 @@ index 72b953b91..57dfaa7b9 100644
          if (v) {
              fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_WAIT_SATISFIED=1, the collective never "
                              "waits for the peer and the output is meaningless. Benchmark only.\n");
-@@ -811,16 +826,17 @@ static void tosh_mgpu_trace_report(void) {
+@@ -810,16 +825,17 @@ static void tosh_mgpu_trace_report(void) {
              _Atomic uint64_t * hh[3] = {g_ct_hp, g_ct_hw, g_ct_hr};
              for (int k = 0; k < 3; k++) {
                  fprintf(stderr, "    %s us ", rn[k]);
@@ -78,7 +69,7 @@ index 72b953b91..57dfaa7b9 100644
      fprintf(stderr, "  commit to GPU start   %.1f ms\n", atomic_load(&g_tr_sched_ns)/1e6);
      // decode-only, per card per token
      if (atomic_load(&g_snap_taken)) {
-@@ -2047,20 +2063,55 @@ static bool ggml_metal_add_inplace_into(ggml_metal_t ctx, id<MTLCommandBuffer> c
+@@ -2065,20 +2081,55 @@ static bool ggml_metal_add_inplace_into(ggml_metal_t ctx, id<MTLCommandBuffer> c
          }
      }
  
@@ -135,7 +126,7 @@ index 72b953b91..57dfaa7b9 100644
      struct ggml_metal_buffer_id bid_add = { .metal = add, .offs = add_offs };
  
      ggml_metal_kargs_bin args = {
-@@ -2084,18 +2130,19 @@ static bool ggml_metal_add_inplace_buffer(ggml_metal_t ctx, id<MTLCommandBuffer>
+@@ -2102,18 +2153,19 @@ static bool ggml_metal_add_inplace_buffer(ggml_metal_t ctx, id<MTLCommandBuffer>
          /*.ne1  =*/ (int32_t) acc->ne[1],
          /*.ne2  =*/ (int32_t) acc->ne[2],
          /*.ne3  =*/ (int32_t) acc->ne[3],
@@ -156,7 +147,7 @@ index 72b953b91..57dfaa7b9 100644
      }
  
      ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cmd_buf, false);
-@@ -2724,16 +2771,25 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+@@ -2742,16 +2794,25 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
      }
  
      if (!ggml_metal_add_inplace_supported(ctx_self, tmp_self, t_self)) {
@@ -182,7 +173,7 @@ index 72b953b91..57dfaa7b9 100644
      const uint64_t seq_out  = seq;
      const uint64_t seq_in   = seq;
      link_out->seq_x = seq;
-@@ -2752,41 +2808,76 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+@@ -2770,41 +2831,76 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
  
          id<MTLCounterSampleBuffer> cts = tosh_ct_buffer(ctx_self);
          uint64_t cbase = 0;

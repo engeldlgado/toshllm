@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index f17e81f5b..6385bf9cc 100644
+index 42be66833..cac1f7b79 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -15,16 +15,17 @@ static inline int tosh_moe_off_slot_for_id(int, int, int)  { return 0; }

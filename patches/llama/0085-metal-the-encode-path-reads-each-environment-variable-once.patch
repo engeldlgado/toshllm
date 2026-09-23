@@ -1,355 +1,589 @@
-diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
---- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -716,7 +716,7 @@
- static uint64_t g_opprof_n [GGML_OP_COUNT];
- static bool tosh_opprof_on(void) {
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 2245fbb49..fa6b501d0 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -55,17 +55,17 @@ static _Atomic uint64_t g_cbp_commit_ns; // the commit call itself
+ static _Atomic uint64_t g_cbp_create_ns; // creating and enqueuing the buffers of a graph
+ 
+ static struct tosh_cbp_bucket g_cbp[TOSH_CBP_MAX_BUCKETS];
+ static _Atomic int g_cbp_state = 0; // 0 unknown, 1 off, 2 on
+ 
+ static bool tosh_cbp_on(void) {
+     int st = atomic_load_explicit(&g_cbp_state, memory_order_relaxed);
+     if (st == 0) {
+-        const char * e = getenv("TOSH_CB_PROFILE");
++        const char * e = TOSH_ENV("TOSH_CB_PROFILE");
+         st = (e != NULL && strcmp(e, "0") != 0) ? 2 : 1;
+         atomic_store_explicit(&g_cbp_state, st, memory_order_relaxed);
+     }
+     return st == 2;
+ }
+ 
+ static struct tosh_cbp_bucket * tosh_cbp_bucket_for(int n_nodes) {
+     for (int i = 0; i < TOSH_CBP_MAX_BUCKETS; ++i) {
+@@ -372,17 +372,17 @@ struct ggml_metal {
+ };
+ 
+ // TOSH_MGPU_DEFER_WAITS folds a cross-device wait into the next command buffer this context
+ // submits instead of spending a whole one on it. Opt-in: on a single card both contexts share
+ // the device queue, so it measures slightly negative there and only 2 real GPUs can settle it.
+ static bool ggml_metal_defer_waits(void) {
+     static int val = -1;
+     if (val < 0) {
+-        const char * v = getenv("TOSH_MGPU_DEFER_WAITS");
++        const char * v = TOSH_ENV("TOSH_MGPU_DEFER_WAITS");
+         val = (v && v[0] == '1') ? 1 : 0;
+     }
+     return val;
+ }
+ 
+ static _Atomic uint64_t g_tr_cmd_all     = 0; // command buffers created through the tracked paths
+ static _Atomic uint64_t g_tr_graphs      = 0; // graph submissions, one per subgraph per card
+ static _Atomic uint64_t g_tr_merge_reuse = 0; // subgraphs that continued the collective's buffer
+@@ -404,17 +404,17 @@ static _Atomic uint64_t g_tr_rv_new      = 0; // remote views built
+ static _Atomic uint64_t g_tr_rv_hit      = 0; // remote views reused
+ static _Atomic uint64_t g_tr_encode_ns   = 0; // CPU time inside the collective
+ static _Atomic uint64_t g_tr_gpu_ns      = 0; // GPU execution of the collective's buffers
+ static _Atomic uint64_t g_tr_sched_ns    = 0; // committed to running: queueing plus event waits
+ 
+ static bool tosh_mgpu_trace(void) {
+     static int on = -1;
+     if (on < 0) {
+-        const char * v = getenv("TOSH_MGPU_TRACE");
++        const char * v = TOSH_ENV("TOSH_MGPU_TRACE");
+         on = (v && v[0] == '1') ? 1 : 0;
+     }
+     return on == 1;
+ }
+ 
+ static uint64_t tosh_now_ns(void) {
+     return clock_gettime_nsec_np(CLOCK_MONOTONIC);
+ }
+@@ -615,23 +615,23 @@ static void tosh_decode_snapshot(int64_t batch) {
+ // decode actually takes. Four samples, all from one device, so no cross-GPU clock correlation
+ // is involved: S0/S1 bracket the publish blit, S2/S3 the staging read. S1 to S2 is a
+ // WAIT-WINDOW, not a pure event wait: it spans the signal, the peer wait and the encoder switch.
+ #define TOSH_CT_SLOTS 4096
+ #define TOSH_CT_PER   4
+ 
+ static bool ggml_metal_ctime(void) {
      static int v = -1;
--    if (v < 0) { v = getenv("TOSH_OPPROF") != nullptr; }
-+    if (v < 0) { v = TOSH_ENV("TOSH_OPPROF") != nullptr; }
-     return v;
- }
- static void tosh_opprof_dump(void) {
-@@ -2200,7 +2200,7 @@
+-    if (v < 0) { const char * s = getenv("TOSH_MGPU_CTIME"); v = (s && s[0] == '1') ? 1 : 0; }
++    if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_CTIME"); v = (s && s[0] == '1') ? 1 : 0; }
+     return v == 1;
  }
  
- static bool ggml_metal_gdn_state_fusion_on(ggml_metal_op_t ctx) {
--    static const bool disabled = getenv("TOSH_GDN_STATE_FUSION_DISABLE") != nullptr;
-+    static const bool disabled = TOSH_ENV("TOSH_GDN_STATE_FUSION_DISABLE") != nullptr;
-     return ctx->use_fusion && !ctx->use_concurrency && !disabled;
+ static bool ggml_metal_ctime_barrier(void) {
+     static int v = -1;
+-    if (v < 0) { const char * s = getenv("TOSH_MGPU_CTIME_BARRIER"); v = (s && s[0] == '1') ? 1 : 0; }
++    if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_CTIME_BARRIER"); v = (s && s[0] == '1') ? 1 : 0; }
+     return v == 1;
  }
  
-@@ -2569,7 +2569,7 @@
+ static _Atomic uint64_t g_tr_fused_bnd;
+ static _Atomic uint64_t g_ct_n, g_ct_pub, g_ct_wait, g_ct_read, g_ct_fail;
+ static _Atomic uint64_t g_ct_hw[8], g_ct_hp[8], g_ct_hr[8];
+ static double g_ct_ns_per_tick = 0.0;
  
-     const bool contig = ggml_blck_size(op->src[0]->type) == 1 && ggml_blck_size(op->type) == 1 &&
-                         ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op) &&
--                        getenv("TOSH_CPY_CONTIG_DISABLE") == nullptr;
-+                        TOSH_ENV("TOSH_CPY_CONTIG_DISABLE") == nullptr;
- 
-     if (contig) {
-         const int64_t n = ggml_nelements(op);
-@@ -2776,7 +2776,7 @@
- // rms_norm -> mul by the norm weight -> the Hadamard transform of a folded weight's input, all
- // adjacent: one kernel writes the transform, and the norm too when other nodes read it
- static int ggml_metal_op_rms_norm_fwht(ggml_metal_op_t ctx, int idx) {
--    static const bool disabled = getenv("TOSH_NORM_FWHT_FUSION_DISABLE") != nullptr;
-+    static const bool disabled = TOSH_ENV("TOSH_NORM_FWHT_FUSION_DISABLE") != nullptr;
-     if (disabled || idx + 3 >= ctx->n_nodes()) {
-         return 0;
+@@ -702,44 +702,44 @@ static void tosh_ct_record(id<MTLCounterSampleBuffer> cs, uint64_t base) {
+ // read then observes whatever the partner left behind and the output is wrong by construction.
+ // Subtracting this run's central window from the normal one isolates the real peer stall
+ // without adding an encoder to the interval being measured.
+ // The same trick for the other wait in the path, the one guarding reuse of the shared host
+ // block. TOSH_MGPU_BP_SATISFIED=1, benchmark only, same warning applies.
+ static bool ggml_metal_bp_satisfied(void) {
+     static int v = -1;
+     if (v < 0) {
+-        const char * s = getenv("TOSH_MGPU_BP_SATISFIED");
++        const char * s = TOSH_ENV("TOSH_MGPU_BP_SATISFIED");
+         v = (s && s[0] == '1') ? 1 : 0;
+         if (v) {
+             fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_BP_SATISFIED=1, the collective does not "
+                             "wait before reusing the staging block. Benchmark only.\n");
+         }
      }
-@@ -3022,7 +3022,7 @@
+     return v == 1;
  }
  
- static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
--    static const bool disabled = getenv("TOSH_QKV_FUSION_DISABLE") != nullptr;
-+    static const bool disabled = TOSH_ENV("TOSH_QKV_FUSION_DISABLE") != nullptr;
+ static int64_t ggml_metal_peer_min_batch(void);
  
-     const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
-     const bool width_ok = props_dev->simd_width == 32 ||
-@@ -3094,7 +3094,7 @@
-     const ggml_type tv = v->src[0]->type;
-     const ggml_type tk = k->src[0]->type;
- 
--    const bool qvk_w64 = props_dev->simd_width == 64 && getenv("TOSH_QVK_W64_DISABLE") == nullptr;
-+    const bool qvk_w64 = props_dev->simd_width == 64 && TOSH_ENV("TOSH_QVK_W64_DISABLE") == nullptr;
- 
-     if (tq == GGML_TYPE_Q4_0 && tv == GGML_TYPE_Q4_0 && tk == GGML_TYPE_Q4_0) {
-         // the 64-lane twin carries the same decomposition as the standalone matvec, so the
-@@ -3185,7 +3185,7 @@
- // sequences each column paid its own full pass over the weights
- static int kquant_ext_floor() {
-     static const int v = []() {
--        const char * s = getenv("TOSH_EXT_KQ_FLOOR");
-+        const char * s = TOSH_ENV("TOSH_EXT_KQ_FLOOR");
-         return s ? atoi(s) : 2;
-     }();
-     return v;
-@@ -3201,7 +3201,7 @@
- // columns to thirty-two, so three column groups of the batched kernel are still cheaper
- static int ext_ceil(int simd_width, ggml_type tsrc0) {
-     static const int v = []() {
--        const char * s = getenv("TOSH_EXT_MAX");
-+        const char * s = TOSH_ENV("TOSH_EXT_MAX");
-         return s ? atoi(s) : 0;
-     }();
- 
-@@ -3226,7 +3226,7 @@
- // output. The three nodes are adjacent, so writing that output early only needs it apart from
- // the activation the kernel reads.
- static int ggml_metal_op_mul_mat_swiglu(ggml_metal_op_t ctx, int idx) {
--    static const bool disabled = getenv("TOSH_SWIGLU_FUSION_DISABLE") != nullptr;
-+    static const bool disabled = TOSH_ENV("TOSH_SWIGLU_FUSION_DISABLE") != nullptr;
-     if (disabled || !ctx->use_fusion || idx + 2 >= ctx->n_nodes()) {
-         return 0;
+ static bool ggml_metal_tp2_fused_boundary(int64_t batch) {
+     static int v = -2;
+     if (v == -2) {
+-        const char * s = getenv("TOSH_MGPU_TP2_FUSED_BOUNDARY");
++        const char * s = TOSH_ENV("TOSH_MGPU_TP2_FUSED_BOUNDARY");
+         v = s ? (s[0] == '1' ? 1 : 0) : -1;
      }
-@@ -3353,7 +3353,7 @@
-     // these should be efficient for BS [2, ~8]
-     // ext kernel derives its row split from the simdgroup width, so it runs on both
-     // wave32 and wave64. wave64 rides on wave64_decode (matches the mat-vec gating).
--    static const bool ext_disabled = getenv("TOSH_EXT_DISABLE") != nullptr;
-+    static const bool ext_disabled = TOSH_ENV("TOSH_EXT_DISABLE") != nullptr;
-     if (!ext_disabled &&
-         (props_dev->simd_width == 32 || (props_dev->simd_width == 64 && props_dev->wave64_decode)) &&
-         op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
-@@ -3399,7 +3399,7 @@
-         // the thresholds below split a 32-lane simdgroup; TOSH_EXT_NXPSG overrides them so the
-         // split can be swept on a 64-lane one, where the row/column balance is not the same
-         static const int nxpsg_env = []() {
--            const char * s = getenv("TOSH_EXT_NXPSG");
-+            const char * s = TOSH_ENV("TOSH_EXT_NXPSG");
-             return s ? atoi(s) : 0;
-         }();
+     if (v >= 0) {
+         return v == 1;
+     }
+     return batch < ggml_metal_peer_min_batch();
+ }
  
-@@ -3419,8 +3419,8 @@
-             // only where the contracted dimension is wide enough to keep four-wide loads per thread:
-             // at ne00 128 the doubled split leaves too few elements and the result goes wrong
-             if (ne00 % 256 == 0 &&
--                (props_dev->simd_width == 64 || getenv("TOSH_EXT_NXPSG_X2") != nullptr) &&
--                getenv("TOSH_EXT_NXPSG_X2_DISABLE") == nullptr) {
-+                (props_dev->simd_width == 64 || TOSH_ENV("TOSH_EXT_NXPSG_X2") != nullptr) &&
-+                TOSH_ENV("TOSH_EXT_NXPSG_X2_DISABLE") == nullptr) {
-                 nxpsg = std::min<int16_t>(16, nxpsg*2);
+ static bool ggml_metal_wait_satisfied(void) {
+     static int v = -1;
+     if (v < 0) {
+-        const char * s = getenv("TOSH_MGPU_WAIT_SATISFIED");
++        const char * s = TOSH_ENV("TOSH_MGPU_WAIT_SATISFIED");
+         v = (s && s[0] == '1') ? 1 : 0;
+         if (v) {
+             fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_WAIT_SATISFIED=1, the collective never "
+                             "waits for the peer and the output is meaningless. Benchmark only.\n");
+         }
+     }
+     return v == 1;
+ }
+@@ -983,17 +983,17 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+                               : ggml_metal_device_get_queue(dev);
+         if (res->queue == nil) {
+             GGML_LOG_ERROR("%s: error: failed to create command queue\n", __func__);
+             free(res);
+             return NULL;
+         }
+         res->is_prefetch = prefetch;
+         if (prefetch) {
+-            const char * val = getenv("GGML_METAL_PREFETCH_STAGE_COUNT");
++            const char * val = TOSH_ENV("GGML_METAL_PREFETCH_STAGE_COUNT");
+             const int requested = val ? atoi(val) : 1;
+             res->prefetch_stage_count = MAX(1, MIN(requested, GGML_METAL_MAX_PREFETCH_STAGES));
+         }
+ 
+         res->dev = dev;
+         res->lib = ggml_metal_device_get_library(dev);
+         if (res->lib == NULL) {
+             GGML_LOG_WARN("%s: the device does not have a precompiled Metal library - this is unexpected\n", __func__);
+@@ -1016,27 +1016,27 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+ 
+         snprintf(res->name, sizeof(res->name), "%s", props_dev->name);
+ 
+         res->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
+ 
+         // discrete GPUs (AMD) corrupt their output with a concurrent encoder: the driver does
+         // not honour the memory barrier. GGML_METAL_CONCURRENCY_ENABLE forces it back on to test.
+         res->use_concurrency = props_dev->has_unified_memory
+-            ? getenv("GGML_METAL_CONCURRENCY_DISABLE") == nil
+-            : getenv("GGML_METAL_CONCURRENCY_ENABLE")  != nil;
++            ? TOSH_ENV("GGML_METAL_CONCURRENCY_DISABLE") == nil
++            : TOSH_ENV("GGML_METAL_CONCURRENCY_ENABLE")  != nil;
+ 
+         {
+-            const char * val = getenv("GGML_METAL_GRAPH_DEBUG");
++            const char * val = TOSH_ENV("GGML_METAL_GRAPH_DEBUG");
+             res->debug_graph = val ? atoi(val) : 0;
+         }
+ 
+         res->use_graph_optimize = true;
+ 
+-        if (getenv("GGML_METAL_GRAPH_OPTIMIZE_DISABLE") != NULL) {
++        if (TOSH_ENV("GGML_METAL_GRAPH_OPTIMIZE_DISABLE") != NULL) {
+             res->use_graph_optimize = false;
+         }
+ 
+         res->finfo = ggml_metal_device_get_fusion_info(dev);
+         if (ggml_metal_fusion_info_stats(res->finfo)) {
+             ggml_metal_fusion_info_labels_init(res->finfo);
+             res->n_cb = 0;
+         }
+@@ -1045,17 +1045,17 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+         GGML_LOG_INFO("%s: use concurrency    = %s\n", __func__, res->use_concurrency    ? "true" : "false");
+         GGML_LOG_INFO("%s: use graph optimize = %s\n", __func__, res->use_graph_optimize ? "true" : "false");
+ 
+         res->capture_compute = 0;
+         res->capture_started = false;
+         res->capture_scope = nil;
+ 
+         {
+-            const char * val = getenv("GGML_METAL_CAPTURE_COMPUTE");
++            const char * val = TOSH_ENV("GGML_METAL_CAPTURE_COMPUTE");
+             if (val) {
+                 res->capture_compute = atoi(val);
              }
          }
-@@ -3453,7 +3453,7 @@
-                            op->src[0]->type == GGML_TYPE_Q3_K;
  
-         static const int nr0_env = []() {
--            const char * s = getenv("TOSH_EXT_NR0");
-+            const char * s = TOSH_ENV("TOSH_EXT_NR0");
-             return s ? atoi(s) : 0;
-         }();
+         res->has_error = false;
  
-@@ -3462,7 +3462,7 @@
-         // Four rows per thread doubles what a threadgroup covers, so a weight with few
-         // rows stops filling the grid. The threshold is per row count, not per quant type.
-         static const int64_t nr0_min_rows = []() {
--            const char * s = getenv("TOSH_EXT_NR0_MINROWS");
-+            const char * s = TOSH_ENV("TOSH_EXT_NR0_MINROWS");
-             // off by default: the win depends on the weight's shape and one measured model
-             // still regresses at four columns, so it stays opt-in until that is understood
-             return s ? (int64_t) atoll(s) : (int64_t) 0;
-@@ -3480,7 +3480,7 @@
+         res->gf = nil;
+@@ -1638,33 +1638,33 @@ static void tosh_trace_cmd_buf(id<MTLCommandBuffer> cmd_buf) {
  
-         // the wave64 q6_K variant keeps four rows per simdgroup, so the row split does not apply
-         // keep the gate in sync with the pipeline picker in ggml_metal_library_get_pipeline_mul_mv_ext
--        static const bool ext_w64_disable = getenv("TOSH_EXT_W64_DISABLE") != nullptr;
-+        static const bool ext_w64_disable = TOSH_ENV("TOSH_EXT_W64_DISABLE") != nullptr;
-         const bool ext_w64_q6k = !ext_w64_disable &&
-                                  props_dev->simd_width == 64 && op->src[0]->type == GGML_TYPE_Q6_K;
- 
-@@ -3720,7 +3720,7 @@
-     // Only banks of small rows gain: those are read scattered from host and the copy makes them
-     // contiguous. A bank of few, large rows already reads well and the copy is pure extra traffic.
-     static const size_t stage_row_max = []() {
--        const char * s = getenv("TOSH_MOE_STAGE_ROW_KIB");
-+        const char * s = TOSH_ENV("TOSH_MOE_STAGE_ROW_KIB");
-         return (size_t) (s ? atoi(s) : 1024) << 10;
-     }();
- 
-@@ -3771,7 +3771,7 @@
-         // A batch routes to a fraction of the bank, so rebuilding every row is most of the
-         // traffic of this path. Mark the routed ones and let the assemble skip the rest; a row
-         // nothing routes to is never read, so leaving it stale is safe.
--        static const bool compact = getenv("TOSH_MOE_COMPACT_ASSEMBLE_DISABLE") == nullptr;
-+        static const bool compact = TOSH_ENV("TOSH_MOE_COMPACT_ASSEMBLE_DISABLE") == nullptr;
-         ggml_metal_buffer_id ab = ggml_metal_get_buffer_id(state);
-         ab.offs += tosh_moe_off_active(n_expert, n_slots, max_fetch)*sizeof(int32_t);
-         if (compact) {
-@@ -3876,7 +3876,7 @@
- 
-         // a whole expert is megabytes: one threadgroup per row leaves the device idle
-         static const int n_chunks = []() {
--            const char * s = getenv("TOSH_MOE_FETCH_CHUNKS");
-+            const char * s = TOSH_ENV("TOSH_MOE_FETCH_CHUNKS");
-             const int v = s ? atoi(s) : 16;
-             return v > 0 ? v : 1;
-         }();
-@@ -3904,7 +3904,7 @@
- 
-         ggml_metal_op_concurrency_reset(ctx);
- 
--        static const bool raw_ids = getenv("TOSH_MOE_RAW_IDS") != nullptr;
-+        static const bool raw_ids = TOSH_ENV("TOSH_MOE_RAW_IDS") != nullptr;
-         if (!raw_ids) {
-             bid_src2 = bid_state;
-             bid_src2.offs = bid_state.offs + tosh_moe_off_ids(n_expert, n_slots, max_fetch)*i32;
-@@ -3913,7 +3913,7 @@
- 
-     // escape hatch: revert wave64 MoE prefill to the mat-vec route
-     const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
--        getenv("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
-+        TOSH_ENV("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
- 
-     if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok))) {
-         // some Metal matrix data types require aligned pointers
-@@ -4010,7 +4010,7 @@
-             // them on half the engines and a multiple of four on a single one (measured 1.8x and
-             // 3.4x). One inert tile restores the spread; it returns before reading anything.
-             if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
--                getenv("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
-+                TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
-                 ntg0 += 1;
-             }
- 
-@@ -4602,7 +4602,7 @@
-     const bool amd_sparse  = amd_n_kv_max > 0 && ne01 == 1;
-     const int amd_n_kv_pad = amd_sparse ? GGML_PAD(amd_n_kv_max, OP_FLASH_ATTN_EXT_VEC_NCPSG) : 0;
- 
--    if (getenv("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
-+    if (TOSH_ENV("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
-         !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
-         !has_bias && !has_scap) {
- 
-@@ -4645,9 +4645,9 @@
-         };
- 
-         // queries per threadgroup, matching the instantiation for this head size
--        static const bool pf512 = getenv("TOSH_FA_PF_DK512") != nullptr;
-+        static const bool pf512 = TOSH_ENV("TOSH_FA_PF_DK512") != nullptr;
-         // MLA keeps K wider than V; the tile kernel it used to fall back to measures ~26% slower
--        static const bool pfmla = getenv("TOSH_FA_PF_MLA_DISABLE") == nullptr;
-+        static const bool pfmla = TOSH_ENV("TOSH_FA_PF_MLA_DISABLE") == nullptr;
-         const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
-         const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
-                                op->src[2]->type == GGML_TYPE_F16;
-@@ -4662,13 +4662,13 @@
-         // PF always dispatches 256 threads and subdivides them into logical
-         // 16-lane query groups, so the same specialization works on wave32
-         // (8 physical simdgroups) and wave64 (4 physical simdgroups).
--        if (getenv("TOSH_FA_PF_DEBUG") != nullptr) {
-+        if (TOSH_ENV("TOSH_FA_PF_DEBUG") != nullptr) {
-             fprintf(stderr, "FA_PF gate dk=%d dv=%d ne01=%d head_ok=%d ktype=%s vtype=%s\n",
-                     (int) ne00, (int) ne20, (int) ne01, (int) fa_pf_head_ok,
-                     ggml_type_name(op->src[1]->type), ggml_type_name(op->src[2]->type));
+ // TOSH_MGPU_NOWAIT=1, benchmark only: the collective still publishes, still signals and still
+ // reduces, but never waits for the partner. The output is wrong by construction. Subtracting
+ // this from the normal run measures the stall at the wait inside the real collective, instead
+ // of inferring it from whole-command-buffer completion timestamps.
+ static bool ggml_metal_collective_nowait(void) {
+     static int v = -1;
+     if (v < 0) {
+-        const char * s = getenv("TOSH_MGPU_NOWAIT");
++        const char * s = TOSH_ENV("TOSH_MGPU_NOWAIT");
+         v = (s && s[0] == '1') ? 1 : 0;
+         if (v) {
+             fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_NOWAIT=1, the collective does not wait "
+                             "for the peer and the output is meaningless. Benchmark only.\n");
          }
-         if ((props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
--            ne01 >= 32 && fa_pf_head_ok && getenv("TOSH_FA_PF_DISABLE") == NULL) {
-+            ne01 >= 32 && fa_pf_head_ok && TOSH_ENV("TOSH_FA_PF_DISABLE") == NULL) {
-             char fa_pf_pipeline[80];
-             bool fa_pf_asym = false;
-             if (fa_pf_mla) {
-@@ -4691,24 +4691,24 @@
-                 static const int pf_lg = []() {
-                     // the cross sweep left the group at sixteen: wider only wins at depth 0,
-                     // where this kernel weighs least, and loses 3 to 37% deeper in
--                    const char * s = getenv("TOSH_FA_PF_LG");
-+                    const char * s = TOSH_ENV("TOSH_FA_PF_LG");
-                     return s ? atoi(s) : 16;
-                 }();
-                 // TOSH_FA_PF_BQ picks the query-block twin of that group, which is what keeps
-                 // the rows per thread fixed while the group widens
-                 static const int pf_bq = []() {
--                    const char * s = getenv("TOSH_FA_PF_BQ");
-+                    const char * s = TOSH_ENV("TOSH_FA_PF_BQ");
-                     return s ? atoi(s) : 0;
-                 }();
-                 // TOSH_FA_PF_BK picks the key-block twin: the counterpart of BQ on the other
-                 // side of the K/V reuse, so a bigger block pays the same traffic fewer times
-                 static const int pf_bk = []() {
--                    const char * s = getenv("TOSH_FA_PF_BK");
-+                    const char * s = TOSH_ENV("TOSH_FA_PF_BK");
-                     return s ? atoi(s) : 0;
-                 }();
-                 if (props_dev->simd_width == 64 && (pf_lg == 16 || pf_lg == 32 || pf_lg == 64) &&
-                     (ne00 == 64 || ne00 == 128 || ne00 == 256 || ne00 == 512) &&
--                    getenv("TOSH_FA_PF_W64_DISABLE") == nullptr) {
-+                    TOSH_ENV("TOSH_FA_PF_W64_DISABLE") == nullptr) {
-                     char w64_name[96];
-                     if (pf_bq > 0) {
-                         snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%dq%dk%d", fa_pf_pipeline, pf_lg, pf_bq,
-@@ -4730,11 +4730,11 @@
-             // the asymmetric heads compose their name in the branches above, so their twin is
-             // picked here instead. Same group of sixteen; the fallback is the 32-lane kernel.
-             if (fa_pf_asym && props_dev->simd_width == 64 &&
--                getenv("TOSH_FA_PF_W64_DISABLE") == nullptr) {
-+                TOSH_ENV("TOSH_FA_PF_W64_DISABLE") == nullptr) {
-                 char w64_name[96];
-                 // sixteen reproduces the 32-lane kernel exactly, so it is the control; the
-                 // sweep that closed the symmetric heads there never covered an asymmetric one
--                const char * slg = getenv("TOSH_FA_PF_LG");
-+                const char * slg = TOSH_ENV("TOSH_FA_PF_LG");
-                 snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%d", fa_pf_pipeline, slg ? atoi(slg) : 16);
-                 if (ggml_metal_library_get_pipeline(lib, w64_name).pipeline ||
-                     ggml_metal_library_compile_pipeline(lib, w64_name, w64_name, nullptr).pipeline) {
-@@ -4749,7 +4749,7 @@
- 
-             // Which twin a head actually lands on cannot be read from the timings: a switch that
-             // never reaches the kernel gives the same number on both sides.
--            if (getenv("TOSH_FA_PF_DEBUG") != nullptr) {
-+            if (TOSH_ENV("TOSH_FA_PF_DEBUG") != nullptr) {
-                 fprintf(stderr, "FA_PF dk=%d dv=%d bq=%d -> %s%s\n",
-                         (int) ne00, (int) ne20, fa_pf_bq, fa_pf_pipeline,
-                         pipeline.pipeline ? "" : "  (NO EXISTE, cae al tile)");
-@@ -4780,7 +4780,7 @@
- 
-         // prefill goes to the tile kernel (K/V shared across 16 queries);
-         // decode keeps the per-query vec kernel
--        if (ne01 >= 16 && getenv("TOSH_FA_TILE_DISABLE") == NULL) {
-+        if (ne01 >= 16 && TOSH_ENV("TOSH_FA_TILE_DISABLE") == NULL) {
-             char fa_tile_pipeline[80];
-             if (ne20 != ne00) {
-                 // MLA heads carry the value width in the name: 576/512 and 320/256
-@@ -4839,15 +4839,15 @@
-         // one value for every head size overruns the pipelines that cap lower, so the
-         // override is per head size: TOSH_FA_AMD_NSG_64, _128, _WIDE
-         static const int nsg_env_64 = []() {
--            const char * s = getenv("TOSH_FA_AMD_NSG_64");
-+            const char * s = TOSH_ENV("TOSH_FA_AMD_NSG_64");
-             return s ? atoi(s) : 0;
-         }();
-         static const int nsg_env_128 = []() {
--            const char * s = getenv("TOSH_FA_AMD_NSG_128");
-+            const char * s = TOSH_ENV("TOSH_FA_AMD_NSG_128");
-             return s ? atoi(s) : 0;
-         }();
-         static const int nsg_env_wide = []() {
--            const char * s = getenv("TOSH_FA_AMD_NSG_WIDE");
-+            const char * s = TOSH_ENV("TOSH_FA_AMD_NSG_WIDE");
-             return s ? atoi(s) : 0;
-         }();
-         const int nsg_env = ne00 == 64 ? nsg_env_64 : ne00 == 128 ? nsg_env_128 : nsg_env_wide;
-@@ -4861,7 +4861,7 @@
-         // for itself, so it carries its own threshold. The depth it turns at is not the same
-         // on both widths, so each keeps its own.
-         static const int64_t wg_dk128_env = []() {
--            const char * s = getenv("TOSH_FA_WG_DK128_MIN_KV");
-+            const char * s = TOSH_ENV("TOSH_FA_WG_DK128_MIN_KV");
-             return s ? (int64_t) atoll(s) : (int64_t) -1;
-         }();
-         const bool wg_wide_head =
-@@ -4872,7 +4872,7 @@
-         const bool wg_dk128_width_ok = props_dev->simd_width == 32 || props_dev->simd_width == 64;
-         // TOSH_FA_WG_DK64=<kv> sets the head-64 depth for every shape, 0 closes it
-         static const int64_t wg_dk64_env = []() {
--            const char * s = getenv("TOSH_FA_WG_DK64");
-+            const char * s = TOSH_ENV("TOSH_FA_WG_DK64");
-             return s ? (int64_t) atoll(s) : (int64_t) -1;
-         }();
-         const int64_t wg_dk64_min_kv = wg_dk64_env >= 0 ? wg_dk64_env
-@@ -4885,7 +4885,7 @@
-             (wg_wide_head || wg_dk128) && ne01 == 1 && !has_sinks &&
-             (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
-             (wg_dk128 || ne11 >= 1024) &&
--            getenv("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
-+            TOSH_ENV("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
- 
-         char fa_amd_wg_pipeline[96];
-         if (fa_amd_nwg > 1) {
-@@ -6968,7 +6968,7 @@
- static bool ggml_metal_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_topk_moe_plan & plan) {
-     // measured neutral on RDNA2 (pp512 +0.1%, tg128 -1%, both inside the noise), so the
-     // dispatch saving does not pay for itself here; opt-in until a device shows a gain
--    static const bool enabled = getenv("GGML_METAL_TOPK_MOE_ENABLE") != nullptr;
-+    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_ENABLE") != nullptr;
-     if (!enabled || !ctx->use_fusion) {
-         return false;
      }
-
+     return v == 1;
+ }
+ 
+ // TOSH_MGPU_PEER_SELF runs the peer hand-off between two logical devices backed by the
+ // same GPU (GGML_METAL_DEVICE_LIST=0,0), which needs no bridge: the queues are still
+ // separate, so the cross-device ordering is testable on a single card.
+ static bool ggml_metal_peer_self(void) {
+     static int val = -1;
+     if (val < 0) {
+-        const char * v = getenv("TOSH_MGPU_PEER_SELF");
++        const char * v = TOSH_ENV("TOSH_MGPU_PEER_SELF");
+         val = (v && v[0] == '1') ? 1 : 0;
+     }
+     return val;
+ }
+ 
+ // Direct copy between GPUs in the same Metal peer group.
+ static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+                                      const struct ggml_tensor * src, struct ggml_tensor * dst) {
+@@ -1870,40 +1870,40 @@ static bool ggml_metal_cpy_xdev_events(ggml_metal_t ctx_src, ggml_metal_t ctx_ds
+ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst) {
+     return ggml_metal_cpy_tensor_async_ex(ctx_src, ctx_dst, src, dst, /*prefer_events =*/ false, /*hold_dst =*/ false);
+ }
+ 
+ bool ggml_metal_cpy_tensor_async_ex(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst, bool prefer_events, bool hold_dst) {
+     // A Metal blit can't reach a buffer owned by another device, so a multi-GPU layer
+     // hand-off goes through host memory (GGML_METAL_CROSS_STAGING_DISABLE uses the generic copy).
+     if (ctx_src->dev != ctx_dst->dev) {
+-        if (getenv("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
++        if (TOSH_ENV("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
+             return false;
+         }
+ 
+         // both buffers must be private for the cross-device blits
+         static int use_events = -1;
+         if (use_events < 0) {
+-            const char * v = getenv("TOSH_MGPU_EVENTS");
++            const char * v = TOSH_ENV("TOSH_MGPU_EVENTS");
+             use_events = (v && v[0] == '1') ? 1 : 0;
+         }
+         // Infinity Fabric peer copy is opt-in until validated on bridged hardware:
+         // a success that silently returns wrong data has no fallback.
+         static int use_peer = -1;
+         if (use_peer < 0) {
+-            const char * v = getenv("TOSH_MGPU_PEER");
++            const char * v = TOSH_ENV("TOSH_MGPU_PEER");
+             use_peer = (v && v[0] == '1') ? 1 : 0;
+         }
+         ggml_backend_buffer_t ebsrc = src->view_src ? src->view_src->buffer : src->buffer;
+         ggml_backend_buffer_t ebdst = dst->view_src ? dst->view_src->buffer : dst->buffer;
+         // which of the three hand-offs actually runs is not visible otherwise, and the flag
+         // alone does not tell: TOSH_MGPU_XDEV_COUNT reports the tally at exit
+         static int count = -1;
+         if (count < 0) {
+-            count = getenv("TOSH_MGPU_XDEV_COUNT") != NULL;
++            count = TOSH_ENV("TOSH_MGPU_XDEV_COUNT") != NULL;
+             if (count) {
+                 atexit(tosh_xdev_report);
+             }
+         }
+ 
+         if (!ggml_metal_buffer_is_shared(ebsrc->context) &&
+             !ggml_metal_buffer_is_shared(ebdst->context)) {
+             if (prefer_events && use_events && ggml_metal_cpy_xdev_events(ctx_src, ctx_dst, src, dst, hold_dst)) {
+@@ -2105,17 +2105,17 @@ static bool ggml_metal_add_inplace_into(ggml_metal_t ctx, id<MTLCommandBuffer> c
+ 
+ // acc += a plain buffer laid out exactly like acc. The collective's partner publishes its
+ // partial that way, so the add can read it straight across the fabric with no tensor to wrap.
+ // TOSH_MGPU_FB_ADD_RB=0 keeps the generic add below. A single row goes through the row-broadcast
+ // float4 variant the graph already uses for the residual, since bin_one strides a few threads
+ // across the whole row and is several times slower on it.
+ static bool ggml_metal_fb_add_rb(void) {
+     static int v = -1;
+-    if (v < 0) { const char * s = getenv("TOSH_MGPU_FB_ADD_RB"); v = (s && s[0] == '0') ? 0 : 1; }
++    if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_FB_ADD_RB"); v = (s && s[0] == '0') ? 0 : 1; }
+     return v == 1;
+ }
+ 
+ static struct ggml_metal_pipeline_with_params ggml_metal_pipeline_add_rb4(ggml_metal_library_t lib) {
+     const char * base = "kernel_bin_fuse_f32_f32_f32_4";
+     const char * name = "kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1_cb=0";
+     struct ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+@@ -2380,33 +2380,33 @@ bool ggml_metal_add_inplace_f16_src(ggml_metal_t ctx, struct ggml_tensor * acc,
+ static int64_t tosh_batch_of(const struct ggml_tensor * t) {
+     if (t == NULL || t->ne[0] <= 0) { return 1; }
+     return ggml_nelements(t)/t->ne[0];
+ }
+ 
+ static int64_t ggml_metal_peer_min_batch(void) {
+     static int64_t v = -1;
+     if (v < 0) {
+-        const char * s = getenv("TOSH_MGPU_PEER_MIN_BATCH");
++        const char * s = TOSH_ENV("TOSH_MGPU_PEER_MIN_BATCH");
+         v = s ? atoll(s) : 32;
+     }
+     return v;
+ }
+ 
+ // Leaves the exchange's command buffer open so whatever the graph encodes next lands in it,
+ // one submission fewer. On its own this is neutral, which is what the first measurement said;
+ // it only pays together with the merge that makes the next subgraph continue the held buffer,
+ // and then only when the batch is small. A token of one row crosses 72 times and each crossing
+ // carries its own pair of command buffers, so halving them is worth ~3% of decode; a prompt
+ // amortises the submissions over the whole batch and loses ~2% instead, hence the batch gate.
+ // TOSH_MGPU_HOLD=1 forces it on, =0 off, unset follows the batch.
+ static bool ggml_metal_collective_hold_batch(int64_t batch) {
+     static int v = -2;
+     if (v == -2) {
+-        const char * s = getenv("TOSH_MGPU_HOLD");
++        const char * s = TOSH_ENV("TOSH_MGPU_HOLD");
+         v = s ? (s[0] == '1' ? 1 : 0) : -1;
+     }
+     if (v >= 0) {
+         return v == 1;
+     }
+     return batch < ggml_metal_peer_min_batch();
+ }
+ 
+@@ -2416,17 +2416,17 @@ static bool ggml_metal_tp2_peer_eligible(ggml_metal_t ctx_self, ggml_metal_t ctx
+                                          struct ggml_metal_xdev_link * link) {
+ #if TARGET_OS_OSX
+     if (link->peer_x_ok >= 0) {
+         return link->peer_x_ok == 1;
+     }
+ 
+     static int use_peer = -1;
+     if (use_peer < 0) {
+-        const char * v = getenv("TOSH_MGPU_PEER");
++        const char * v = TOSH_ENV("TOSH_MGPU_PEER");
+         use_peer = (v && v[0] == '1') ? 1 : 0;
+     }
+ 
+     link->peer_x_ok = 0;
+ 
+     if (use_peer && @available(macOS 10.15, *)) {
+         id<MTLDevice> dev_self = ggml_metal_device_get_obj(ctx_self->dev);
+         id<MTLDevice> dev_peer = ggml_metal_device_get_obj(ctx_peer->dev);
+@@ -2909,17 +2909,17 @@ static bool ggml_metal_exchange_reduce_peer(ggml_metal_t ctx_self, ggml_metal_t
+ // TOSH_MGPU_ONESHOT=1 engages the one-shot round for decode batches. Default off: at n=4 the
+ // measurements say the staged butterfly wins, 38.0 vs 35.8 t/s. The one-shot's publish is one
+ // round instead of two, but every card then waits on every partner in the same held command
+ // buffer, so each queue stalls on the slowest of the four every collective: NOWAIT decode is
+ // 45.7 against 35.8 with the waits in. The butterfly's pairwise rounds stall far less.
+ static bool ggml_metal_oneshot_enabled(void) {
+     static int v = -1;
+     if (v < 0) {
+-        const char * s = getenv("TOSH_MGPU_ONESHOT");
++        const char * s = TOSH_ENV("TOSH_MGPU_ONESHOT");
+         v = (s && s[0] == '1') ? 1 : 0;
+     }
+     return v == 1;
+ }
+ 
+ // The one-shot all-reduce: a single round for the whole group instead of the butterfly.
+ // Every card publishes its partial once into the host block it shares with each partner,
+ // then pulls every partner's partial once and sums locally:
+@@ -3252,17 +3252,17 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     }
+ 
+     // 0 the tensor-to-tensor peer path, 1 the add pulls the partner across the fabric,
+     // 2 a blit pulls it into a local temporary, 3 push into the partner and add locally.
+     // 1 is the default: on the Vega II Duo 3 ties it on prefill and is a shade behind on
+     // decode, and it costs a second kernel.
+     static int fused = -1;
+     if (fused < 0) {
+-        const char * v = getenv("TOSH_MGPU_PEER_FUSED");
++        const char * v = TOSH_ENV("TOSH_MGPU_PEER_FUSED");
+         fused = v == NULL ? 1 : atoi(v);
+     }
+ 
+     // One row per crossing is the shape the fabric is worst at: the crossing is latency, not
+     // bytes, and the shared host block wins. Same threshold the copy path uses. Below it the
+     // peer attempt is skipped, not failed: failing here would drop the whole allreduce to the
+     // meta layer's generic butterfly, which is far slower than the staged path below.
+     const int64_t batch = t_self->ne[0] > 0 ? ggml_nelements(t_self)/t_self->ne[0] : 1;
+@@ -3468,17 +3468,17 @@ static bool ggml_metal_moe_finish(id<MTLCommandBuffer> cmd_buf) {
+     return false;
+ }
+ 
+ // Correctness-first implementation of the bounded staging design. The small router IDs cross
+ // to the CPU once per layer; only the selected expert rows are then copied into shared staging
+ // and blitted into private K slots. No command ever receives a Metal view of the complete bank.
+ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+     int copy_workers = 4;
+-    const char * copy_workers_env = getenv("TOSH_MOE_BOUNDED_COPY_WORKERS");
++    const char * copy_workers_env = TOSH_ENV("TOSH_MOE_BOUNDED_COPY_WORKERS");
+     if (copy_workers_env != NULL) {
+         copy_workers = MAX(1, MIN(8, atoi(copy_workers_env)));
+     }
+     int first = -1;
+     for (int i = 0; i < gf->n_nodes; ++i) {
+         if (ggml_metal_op_cached_moe_layer(gf->nodes[i]) >= 0) {
+             first = i;
+             break;
+@@ -3497,17 +3497,17 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+     size_t stage_cap = ctx->bounded_moe_stage_cap;
+     size_t stage_alt_cap = ctx->bounded_moe_stage_alt_cap;
+     id<MTLCommandBuffer> full_pending[2] = { nil, nil };
+     int full_sequence = 0;
+     enum ggml_status result = GGML_STATUS_SUCCESS;
+ 
+     // TOSH_MOE_SLOT_STATS=1: per-pass census of expert placement, to tell a routing id that
+     // never reached a slot from one that reached a stale one
+-    const bool slot_stats = getenv("TOSH_MOE_SLOT_STATS") != NULL;
++    const bool slot_stats = TOSH_ENV("TOSH_MOE_SLOT_STATS") != NULL;
+     int st_layers = 0, st_wide = 0, st_narrow = 0;
+     long st_unique = 0, st_cold = 0, st_miss = 0, st_unplaced = 0, st_refs = 0, st_refs_unplaced = 0;
+     int st_unique_max = 0, st_slots = 0;
+     long st_src_slot = 0, st_src_cold = 0, st_bad_ring = 0, st_bad_stale = 0, st_bad_cold = 0;
+ 
+     // Run through the first router and bring back only its compact IDs.
+     const struct ggml_tensor * ids = gf->nodes[first]->src[2];
+     // Keep the two wide-prefill buffers warm across prompt warmup/repetitions, but drop them
+@@ -3647,17 +3647,17 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+                             slot_of[e] = -2;
+                             n_unique++;
+                             if (n_fixed > 0 && tosh_moe_cold_of(layer, e) >= 0) n_cold_unique++;
+                         }
+                     }
+                 }
+             }
+         }
+-        if (getenv("TOSH_MOE_WIDE_DEBUG") != NULL) {
++        if (TOSH_ENV("TOSH_MOE_WIDE_DEBUG") != NULL) {
+             GGML_LOG_WARN("%s: layer %d unique=%d cold=%d slots=%d fixed=%d experts=%d\n",
+                 __func__, layer, n_unique, n_cold_unique, n_slots, n_fixed, n_expert);
+         }
+         if (!ids_valid) {
+             free(slot_of); free(miss_expert); free(miss_slot);
+             result = GGML_STATUS_FAILED;
+             goto done;
+         }
+@@ -3699,19 +3699,19 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+         }
+         if (slot_stats && (wide_shape || (n_fixed > 0 && n_cold_unique > n_slots - n_fixed))) {
+             st_layers++; st_wide++; st_slots = n_slots;
+             st_unique += n_unique; st_cold += n_cold_unique;
+             if (n_unique > st_unique_max) st_unique_max = n_unique;
+         }
+         for (int e = 0; e < n_expert; ++e) slot_of[e] = -1;
+         if (n_fixed > 0 && (wide_shape || n_cold_unique > n_slots - n_fixed)) {
+-            const bool transient_map = getenv("TOSH_MOE_TRANSIENT_MAP") != NULL;
+-            const bool persistent_map = getenv("TOSH_MOE_PERSISTENT_MAP") != NULL;
+-            const bool double_buffer = getenv("TOSH_MOE_DOUBLE_BUFFER") != NULL &&
++            const bool transient_map = TOSH_ENV("TOSH_MOE_TRANSIENT_MAP") != NULL;
++            const bool persistent_map = TOSH_ENV("TOSH_MOE_PERSISTENT_MAP") != NULL;
++            const bool double_buffer = TOSH_ENV("TOSH_MOE_DOUBLE_BUFFER") != NULL &&
+                 !transient_map && !persistent_map && wide_shape;
+             const int parity = double_buffer ? full_sequence++ & 1 : 0;
+             if (full_pending[parity] != nil) {
+                 [full_pending[parity] waitUntilCompleted];
+                 if ([full_pending[parity] status] != MTLCommandBufferStatusCompleted) result = GGML_STATUS_FAILED;
+                 [full_pending[parity] release];
+                 full_pending[parity] = nil;
+                 if (result != GGML_STATUS_SUCCESS) {
+@@ -4071,17 +4071,17 @@ done:
+ 
+ // TOSH_MGPU_MERGE=1: a tensor split cuts the graph at every partial node, so a token costs one
+ // command buffer for each collective plus one for each subgraph that follows it. With this on,
+ // the collective leaves its buffer open and the next subgraph encodes into it instead of
+ // submitting its own, which halves the command buffers a split token creates.
+ static bool ggml_metal_merge_graph(void) {
+     static int v = -1;
+     if (v < 0) {
+-        const char * s = getenv("TOSH_MGPU_MERGE");
++        const char * s = TOSH_ENV("TOSH_MGPU_MERGE");
+         // on by default: it is inert unless a collective left a buffer held, which only the
+         // batch gate above does, so a prompt never sees it
+         v = s ? (s[0] == '1' ? 1 : 0) : 1;
+     }
+     return v == 1;
+ }
+ 
+ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+@@ -4093,19 +4093,19 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+ 
+     if (ctx->has_error) {
+         GGML_LOG_ERROR("%s: backend is in error state from a previous command buffer failure - recreate the backend to recover\n", __func__);
+         return GGML_STATUS_FAILED;
+     }
+ 
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+     bool staged_moe = false;
+-    const char * bounded_env = getenv("TOSH_MOE_BOUNDED_STAGE");
++    const char * bounded_env = TOSH_ENV("TOSH_MOE_BOUNDED_STAGE");
+     const bool bounded_requested = bounded_env != NULL && strcmp(bounded_env, "0") != 0;
+-    const char * force_env = getenv("TOSH_MOE_BOUNDED_STAGE_FORCE");
++    const char * force_env = TOSH_ENV("TOSH_MOE_BOUNDED_STAGE_FORCE");
+     const bool bounded_forced = force_env != NULL && strcmp(force_env, "0") != 0;
+     size_t bounded_bank_size = 0;
+     size_t bounded_threshold = 0;
+     if (bounded_requested || bounded_forced) {
+         for (int i = 0; i < gf->n_nodes; ++i) {
+             const struct ggml_tensor * host = ggml_metal_op_cached_moe_host(gf->nodes[i]);
+             if (host == NULL) {
+                 continue;
+@@ -4113,17 +4113,17 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+             ggml_backend_buffer_t buffer = host->view_src ? host->view_src->buffer : host->buffer;
+             bounded_bank_size = ggml_backend_buffer_get_size(buffer);
+ 
+             const struct ggml_metal_device_props * props = ggml_metal_device_get_props(ctx->dev);
+             // Leave headroom for the resident non-MoE weights, slots and graph scratch. On
+             // the RX 6700 XT this separates the 9.61 GiB Q2 bank from the 12.58/16.88 GiB
+             // Q4 banks which Metal cannot safely wrap as one host resource.
+             bounded_threshold = props->max_working_set_size*7/8;
+-            const char * threshold_mb = getenv("TOSH_MOE_BOUNDED_STAGE_THRESHOLD_MB");
++            const char * threshold_mb = TOSH_ENV("TOSH_MOE_BOUNDED_STAGE_THRESHOLD_MB");
+             if (threshold_mb != NULL) {
+                 const unsigned long long value = strtoull(threshold_mb, NULL, 10);
+                 if (value > 0 && value <= SIZE_MAX/(1024ULL*1024ULL)) {
+                     bounded_threshold = (size_t) value*1024ULL*1024ULL;
+                 }
+             }
+             staged_moe = bounded_forced || bounded_bank_size > bounded_threshold;
+             // A batch whose experts fit the ring is served entirely on the device, which is
+@@ -4157,17 +4157,17 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         }
+     }
+ #endif
+ 
+     // number of nodes encoded by the main thread (empirically determined)
+     // the split was tuned on unified memory; TOSH_N_MAIN overrides it to A/B the share here
+     static int n_main_env = -2;
+     if (n_main_env == -2) {
+-        const char * v = getenv("TOSH_N_MAIN");
++        const char * v = TOSH_ENV("TOSH_N_MAIN");
+         n_main_env = v ? atoi(v) : -1;
+     }
+     const int n_main = n_main_env >= 0 ? n_main_env : MAX(64, 0.1*gf->n_nodes);
+ 
+     // number of threads in addition to the main thread
+     const int n_cb = ctx->n_cb;
+ 
+     // keep the memory wired
+@@ -4429,17 +4429,17 @@ static bool ggml_metal_graph_is_moe_decode(const struct ggml_cgraph * gf, int ma
+ }
+ 
+ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
+     //const int64_t t_start = ggml_time_us();
+ 
+     if (ctx->use_graph_optimize) {
+         static int max_tokens = -1;
+         if (max_tokens < 0) {
+-            const char * s = getenv("GGML_METAL_GRAPH_OPTIMIZE_MIN_BATCH");
++            const char * s = TOSH_ENV("GGML_METAL_GRAPH_OPTIMIZE_MIN_BATCH");
+             max_tokens = s ? atoi(s) - 1 : 7;
+         }
+ 
+         if (max_tokens < 0 || !ggml_metal_graph_is_moe_decode(gf, max_tokens)) {
+             ggml_graph_optimize(gf);
+         }
+     }
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index a6b44005f..721449016 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -89,7 +89,7 @@
+@@ -84,17 +84,17 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_base(ggml
+ // bf16 read as raw bits and widened by hand. Cards without the Metal 3 family have no bfloat
+ // at all, and the ones that do have no arithmetic for it either, so the manual path is also
+ // the faster one wherever the simdgroup matrix unit is missing.
+ static bool ggml_metal_bf16_manual(ggml_metal_library_t lib) {
+     const struct ggml_metal_device_props * props =
          ggml_metal_device_get_props(ggml_metal_library_get_device(lib));
  
      // escape hatch for the A/B; a card with no bfloat has no other path
@@ -358,7 +592,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
      return !props->has_bfloat || (!props->has_simdgroup_mm && !off);
  }
-@@ -747,7 +747,7 @@
+ 
+ static const char * ggml_metal_tname(ggml_metal_library_t lib, ggml_type t) {
+     if (t == GGML_TYPE_BF16 && ggml_metal_bf16_manual(lib)) {
+         return "bf16e";
+     }
+@@ -774,17 +774,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net(
+     const int nsg = op->src[2]->ne[0]/32;
+ 
+     GGML_ASSERT(op->src[5]->type == GGML_TYPE_F32);
+     GGML_ASSERT(op->ne[0] == ne20 * ne21);
+     GGML_ASSERT(ne20 % 32 == 0);
  
      // rows of 128 split over 16 lanes instead of 32: the per-token reductions get shorter and each
      // lane reads q and k as whole vectors. TOSH_GDN_LPR picks another split, 0 the 32-lane kernel
@@ -367,7 +611,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      const int lpr = (ne20 == 128 && ggml_is_contiguous_rows(op->src[0]) && ggml_is_contiguous_rows(op->src[1])) ? lpr_env : 0;
  
      if (lpr) {
-@@ -841,7 +841,7 @@
+         snprintf(base, 256, "kernel_gated_delta_net_%s_lpr%d", ggml_type_name(op->src[0]->type), lpr);
+     } else {
+         snprintf(base, 256, "kernel_gated_delta_net_%s_%d", ggml_type_name(op->src[0]->type), nsg);
+     }
+     snprintf(name, 256, "%s_ne20=%d_ne30=%d_K=%d_rows=%d_fold=%d_raw=%d_l2=%d%d", base, ne20, ne30, K, rows, fold, raw, l2q, l2k);
+@@ -868,40 +868,40 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext(ggml_
+     const int       ne12  = op->src[1]->ne[2];
+     const int       r2    = ne12 / op->src[0]->ne[2];
+     const int       r3    = op->src[1]->ne[3] / op->src[0]->ne[3];
+ 
+     GGML_ASSERT(ne12 <= INT16_MAX && r2 <= INT16_MAX && r3 <= INT16_MAX);
  
      // q4_K keeps its quants raw and applies the scale once per chunk; the other K-quants
      // read the block header once per block via the _hdr kernels
@@ -376,7 +630,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
      char tname[64];
      // q6_K measured slower with the header cached (its dequant is register-heavy), so it stays generic
-@@ -851,8 +851,8 @@
+     const bool is_khdr = tsrc0 == GGML_TYPE_Q5_K || tsrc0 == GGML_TYPE_Q2_K || tsrc0 == GGML_TYPE_Q3_K;
+     // staging the activation chunk in shared memory pays from three columns up: with two, half the
+     // simdgroup idles in the staging loop. Measured on 64 lanes only, so it stays gated there;
      // TOSH_EXT_LDS asks for it on 32 lanes to A/B it
      const int simd_width_lds = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
      const bool use_lds =
@@ -387,7 +643,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
          nr0 > 1 && r1ptg >= 3;
  
      if (!no_raw && tsrc0 == GGML_TYPE_Q4_K) {
-@@ -864,7 +864,7 @@
+         snprintf(tname, sizeof(tname), use_lds ? "%s_raw_lds" : "%s_raw", ggml_type_name(tsrc0));
+     } else if (!no_raw && is_khdr) {
+         snprintf(tname, sizeof(tname), "%s_hdr", ggml_type_name(tsrc0));
+     } else {
+         snprintf(tname, sizeof(tname), "%s", ggml_metal_tname(lib, tsrc0));
      }
  
      // q6_K on 64 lanes uses the wave64-shaped variant; TOSH_EXT_W64_DISABLE falls back to the generic kernel
@@ -396,7 +656,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      const bool is_w64_q6k = !w64_disable && tsrc0 == GGML_TYPE_Q6_K && simd_width_lds == 64;
      // q8_0 reads its quads as halves on 64 lanes only: the same read is slower on 32
      const bool is_w64_q8  = !w64_disable && tsrc0 == GGML_TYPE_Q8_0 && simd_width_lds == 64 && nr0 == 1;
-@@ -910,7 +910,7 @@
+ 
+     if (is_w64_q6k || is_w64_q8) {
+         snprintf(base, 256, "kernel_mul_mv_ext_%s_%s_r1_%d_w64", ggml_type_name(tsrc0), ggml_type_name(tsrc1), r1ptg);
+     } else if (nr0 > 1) {
+         snprintf(base, 256, "kernel_mul_mv_ext_%s_%s_r1_%d_nr0_%d", tname, ggml_type_name(tsrc1), r1ptg, nr0);
+@@ -937,53 +937,53 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+ 
+     const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+ 
+     constexpr int NRA = SZ_SIMDGROUP * N_MM_BLOCK_Y * N_MM_SIMD_GROUP_Y;
+     constexpr int NRB = SZ_SIMDGROUP * N_MM_BLOCK_X * N_MM_SIMD_GROUP_X;
  
      const bool has_tensor    = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_tensor;
      const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
@@ -405,7 +675,14 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
      const bool bc_out = has_tensor
          ? (op->ne[0] % NRA != 0 || op->ne[1] % NRB != 0)
-@@ -925,7 +925,7 @@
+         : (op->ne[0] % 64  != 0 || op->ne[1] % 32  != 0);
+ 
+     GGML_ASSERT(op->src[1]->ne[2] <= INT16_MAX && op->src[1]->ne[3] <= INT16_MAX);
+     const int16_t ne12 = (int16_t) op->src[1]->ne[2];
+     const int16_t ne13 = (int16_t) op->src[1]->ne[3];
+     const int16_t r2   = (int16_t) (ne12 / op->src[0]->ne[2]);
+     const int16_t r3   = (int16_t) (ne13 / op->src[0]->ne[3]);
+ 
      // The 8x4 tile halves the simdgroups per threadgroup, so it needs enough tokens to keep
      // the GPU in threadgroups; below ~192 it loses (measured 8.7% at 64 tokens on q8_0).
      static const int wide_floor_env = []() {
@@ -414,7 +691,12 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
          return s ? atoi(s) : 0;
      }();
  
-@@ -938,7 +938,7 @@
+     // the 64-token tile rounds the batch up, so a tail of 32 or fewer pays for a half-empty
+     // group that this one covers exactly. Past 128 the padding is a smaller share and the
+     // grid-lookup quants lose more re-dequantizing than they save.
+     // the tail keeps its own bound: it beats the 8x4 tile on a 32-token remainder at any size,
+     // so it must not follow the wide floor down
+     // The 192 bound was measured on 32 lanes. On 64 the tail path stops paying earlier: 128 gains
      // 1.8 to 3.6% between 130 and 160 tokens and is neutral elsewhere, while raising it costs 8%.
      // TOSH_MM_TAIL_MAX overrides it on either width.
      static const int tail_max_env = []() {
@@ -423,7 +705,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
          return s ? atoi(s) : 0;
      }();
  
-@@ -946,7 +946,7 @@
+     const int simd_width_tail = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
      const int tail_max = tail_max_env ? tail_max_env : (simd_width_tail == 64 ? 128 : 192);
  
      bool tail_32 = op->ne[1] < tail_max && (op->ne[1] % 64) >= 1 && (op->ne[1] % 64) <= 32 &&
@@ -432,7 +714,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      if (tail_32 && op->ne[1] > 128) {
          switch (tsrc0) {
              case GGML_TYPE_IQ1_S:
-@@ -964,7 +964,7 @@
+             case GGML_TYPE_IQ1_M:
+             case GGML_TYPE_IQ2_XXS:
+             case GGML_TYPE_IQ2_XS:
+             case GGML_TYPE_IQ2_S:
+                 tail_32 = false; break;
+@@ -991,17 +991,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+         }
+     }
+     const bool narrow = use_mm_manual && !has_tensor && tsrc1 == GGML_TYPE_F32 &&
+                         (op->ne[1] <= 32 || tail_32);
+ 
      // wave64 wants a far higher floor: between 288 and 384 the tile loses on two models,
      // and from 448 up it wins 4 to 6%
      const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
@@ -441,7 +733,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      // Both floors were derived against the 32-lane tile. The 64-lane rewrite moved the
      // crossover, and it moved by a different amount per type, so each carries its own:
      // a single number would have to pick whom to hurt (q8_0 gains 3.7% where q4_K loses 3.1%).
-@@ -998,7 +998,7 @@
+     // Types with no measurement of their own keep the width default.
+     int wide_floor = wide_floor_env ? wide_floor_env : (simd_width == 64 ? 448 : 112);
+     // On 32 lanes q5_0 and q5_1 never earn the wide tile: it costs them 5 to 30% from 48 to
+     // 2048 tokens, while the same tile is worth 24% to them on 64 lanes.
+     if (!wide_floor_env && simd_width == 32 &&
+@@ -1025,40 +1025,40 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+             default: break;
+         }
+     }
+ 
+     // the tile also needs enough output rows, not just enough tokens. Halving the simdgroups per
      // threadgroup costs more where the rows run out: on 64 lanes 2560 rows lose 7 to 10% at 512
      // tokens while 4096 and up keep winning
      static const int ne0_floor_env = []() {
@@ -450,7 +752,15 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
          return s ? atoi(s) : 0;
      }();
  
-@@ -1014,14 +1014,14 @@
+     int ne0_floor = ne0_floor_env ? ne0_floor_env : (simd_width == 64 ? 4096 : 2048);
+     if (!ne0_floor_env && simd_width == 64) {
+         switch (tsrc0) {
+             // these two win with the shorter weights the 64-lane tile now handles; q4_K and
+             // q6_K measured worse there and keep the higher floor
+             case GGML_TYPE_Q8_0:
+             case GGML_TYPE_Q4_0: ne0_floor = 2048; break;
+             default: break;
+         }
      }
  
      static const int wide_ext_floor_env = []() {
@@ -468,7 +778,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      if (wide) {
          // it needs 64 accumulators, so only where the dequant leaves the registers
          switch (tsrc0) {
-@@ -1053,24 +1053,24 @@
+             case GGML_TYPE_F16:
+             case GGML_TYPE_Q8_0:
+             case GGML_TYPE_Q5_0:
+             case GGML_TYPE_Q5_1:
+             case GGML_TYPE_Q2_K:
+@@ -1080,48 +1080,48 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+             case GGML_TYPE_IQ2_S:
+             case GGML_TYPE_IQ1_S:
+             case GGML_TYPE_IQ1_M:
+             case GGML_TYPE_IQ2_XXS:
+             case GGML_TYPE_IQ2_XS:
              case GGML_TYPE_IQ3_XXS:
                  // third floor, for the types whose dequant leaves less room: it was picked
                  // against the 32-lane tile too, so TOSH_MM_WIDE_EXT_FLOOR opens it for sweeping
@@ -497,7 +817,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
          return s ? atoi(s) : 0;
      }();
      const int w64_floor = w64_floor_env ? w64_floor_env :
-@@ -1078,13 +1078,13 @@
+                           (tsrc0 == GGML_TYPE_IQ4_NL ? 384 : 0);
  
      const bool w64 = simd_width == 64 && use_mm_manual && !has_tensor &&
                       op->ne[1] >= w64_floor &&
@@ -513,7 +833,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
      snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d_us=%d",
               base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual + 2*narrow, use_mm_double_buffer, acc_f32, uniform_scale);
-@@ -1263,7 +1263,7 @@
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+@@ -1291,159 +1291,159 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nr1 = ne11 <= 4 ? ne11 : (ne11 + 1)/2;
+                     snprintf(sweep_sfx, sizeof(sweep_sfx), "_c%d", nr1);
+                     suffix = sweep_sfx;
+                 }
+             } break;
          case GGML_TYPE_Q4_0:
              {
                  // eight lanes per block with four rows each: +5.8% of generation
@@ -522,7 +852,12 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg    = 1;
                      nr0    = 4;
                      suffix = "_L8r4";
-@@ -1276,7 +1276,7 @@
+                     w64    = true;
+                 } else {
+                     nsg = N_SG_Q4_0;
+                     nr0 = N_R0_Q4_0;
+                 }
+             } break;
          case GGML_TYPE_Q4_1:
              {
                  // four lanes per block with four rows each: +6.2% of generation
@@ -531,7 +866,13 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg    = 1;
                      nr0    = 4;
                      suffix = "_L4r4";
-@@ -1290,7 +1290,7 @@
+                     w64    = true;
+                 } else {
+                     nsg = N_SG_Q4_1;
+                     nr0 = N_R0_Q4_1;
+                 }
+             } break;
+         case GGML_TYPE_Q5_0:
              {
                  // eight rows per thread measured worse on 64 lanes for this type, so the
                  // inherited pair stays; TOSH_MV_Q5_0_R8 opens it again for measuring
@@ -540,7 +881,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1299,7 +1299,7 @@
+                 } else {
+                     nsg = N_SG_Q5_0;
                      nr0 = N_R0_Q5_0;
                  }
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -549,7 +891,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1307,7 +1307,7 @@
+         case GGML_TYPE_Q5_1:
              {
                  // eight rows per thread measured worse on 64 lanes for this type, so the
                  // inherited pair stays; TOSH_MV_Q5_1_R8 opens it again for measuring
@@ -558,7 +900,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1316,7 +1316,7 @@
+                 } else {
+                     nsg = N_SG_Q5_1;
                      nr0 = N_R0_Q5_1;
                  }
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -567,7 +910,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1324,11 +1324,11 @@
+         case GGML_TYPE_Q8_0:
              {
                  // TOSH_MV_Q8_0_R8 asks for eight rows instead of the four this width takes,
                  // so the three values can be compared
@@ -581,7 +924,10 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 4;
                      suffix = "_r4";
-@@ -1339,7 +1339,7 @@
+                 } else {
+                     nsg = N_SG_Q8_0;
+                     nr0 = N_R0_Q8_0;
+                 }
                  // the reduction buffer scales with the rows, so it follows the effective nr0
                  smem = 32*sizeof(float)*nr0;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -590,7 +936,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1351,13 +1351,13 @@
+         case GGML_TYPE_MXFP4:
+             {
+                 // Fewer than four rows per simdgroup falls off a cliff here: two rows measured
+                 // 3904 us against 122 for four on the same matrix, so both widths take four.
+                 nsg = N_SG_MXFP4;
                  nr0 = N_R0_MXFP4;
                  smem = 32*sizeof(float);
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -606,7 +956,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1366,7 +1366,7 @@
+                 } else {
+                     nsg = N_SG_Q2_K;
                      nr0 = N_R0_Q2_K;
                  }
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -615,7 +966,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1374,14 +1374,14 @@
+         case GGML_TYPE_Q3_K:
              {
                  // A 64-lane variant with thirty-two lanes per block and the mask tables derived
                  // instead of held: measured 127.2 against 126.2, so it stays behind the switch.
@@ -632,7 +983,14 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1396,8 +1396,8 @@
+                 } else {
+                     nsg = N_SG_Q3_K;
+                     nr0 = N_R0_Q3_K;
+                 }
+             } break;
+         case GGML_TYPE_Q4_K:
+             {
+                 // small matrices: one simdgroup with 4 rows amortizes the
                  // per-threadgroup setup better than two with 2. Unlike q5_K and q6_K,
                  // 64 lanes do NOT want the four-row path at any size here, so the choice
                  // stays by shape; TOSH_MV_Q4K_R4 opens it again for measuring
@@ -643,7 +1001,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                  const bool q4k_small = ne00 <= 2048 || ne01 <= 2048 || q4k_r4_wide;
  
                  // 64 lanes have their own decomposition: sixteen cover a block instead of
-@@ -1405,7 +1405,7 @@
+                 // eight, which brings the kernel from 246 registers down to 184. It does not
                  // cover the small-matrix case, which still wants one group with four rows.
                  // Sixteen lanes with four rows each: +5.8% over eight lanes. Sixteen lanes
                  // with the inherited rows loses, so the win lives in the crossing of the two.
@@ -652,7 +1010,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg    = 1;
                      nr0    = 4;
                      suffix = "_L16r4";
-@@ -1425,7 +1425,7 @@
+                     w64    = true;
+                     break;
+                 }
+                 if (q4k_small) {
+                     nsg = 1;
+@@ -1453,161 +1453,161 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nsg = N_SG_Q4_K;
+                     nr0 = N_R0_Q4_K;
+                 }
+             } break;
+         case GGML_TYPE_Q5_K:
              {
                  // the shipped 2 rows per thread is a 32-lane number; 64 lanes want 8 (+15.9% tg).
                  // TOSH_MV_R8 forces it on 32 too, so that width can be A/B'd without a rebuild
@@ -661,7 +1029,12 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1438,7 +1438,7 @@
+                 } else {
+                     nsg = N_SG_Q5_K;
+                     nr0 = N_R0_Q5_K;
+                 }
+ 
+                 // Sixteen lanes per block with two rows each: measured +10.9% of generation
                  // over the inherited pair, five alternating pairs. Four lanes with eight rows
                  // loses, which is why the two fronts have to be walked as a grid and not one
                  // at a time.
@@ -670,7 +1043,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg    = 1;
                      nr0    = 2;
                      suffix = "_L16r2";
-@@ -1448,7 +1448,7 @@
+                     w64    = true;
+                 }
+             } break;
          case GGML_TYPE_Q6_K:
              {
                  // 64 lanes want four rows in one group (+16.3% tg); 32 keep the shipped pair
@@ -679,7 +1054,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 4;
                      suffix = "_r4";
-@@ -1457,7 +1457,7 @@
+                 } else {
+                     nsg = N_SG_Q6_K;
                      nr0 = N_R0_Q6_K;
                  }
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -688,7 +1064,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1467,7 +1467,7 @@
+         case GGML_TYPE_IQ2_XXS:
+             {
+                 nsg = N_SG_IQ2_XXS;
                  nr0 = N_R0_IQ2_XXS;
                  smem = 256*8+128;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -697,7 +1075,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1477,13 +1477,13 @@
+         case GGML_TYPE_IQ2_XS:
+             {
+                 nsg = N_SG_IQ2_XS;
                  nr0 = N_R0_IQ2_XS;
                  smem = 512*8+128;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -713,7 +1093,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1493,7 +1493,7 @@
+                 } else {
+                     nsg = N_SG_IQ3_XXS;
+                     nr0 = N_R0_IQ3_XXS;
                  }
                  smem = 256*4+128;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -722,7 +1104,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1503,7 +1503,7 @@
+         case GGML_TYPE_IQ3_S:
+             {
+                 nsg = N_SG_IQ3_S;
                  nr0 = N_R0_IQ3_S;
                  smem = 512*4;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -731,7 +1115,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1513,7 +1513,7 @@
+         case GGML_TYPE_IQ2_S:
+             {
+                 nsg = N_SG_IQ2_S;
                  nr0 = N_R0_IQ2_S;
                  smem = 1024*8;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -740,7 +1126,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1523,7 +1523,7 @@
+         case GGML_TYPE_IQ1_S:
+             {
+                 nsg = N_SG_IQ1_S;
                  nr0 = N_R0_IQ1_S;
                  smem = 2048*4;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -749,7 +1137,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1533,7 +1533,7 @@
+         case GGML_TYPE_IQ1_M:
+             {
+                 nsg = N_SG_IQ1_M;
                  nr0 = N_R0_IQ1_M;
                  smem = 2048*4;
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -758,7 +1148,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1541,7 +1541,7 @@
+         case GGML_TYPE_IQ4_NL:
              {
                  // eight rows per thread measured worse on 64 lanes for this type, so the
                  // inherited pair stays; TOSH_MV_IQ4_NL_R8 opens it again for measuring
@@ -767,7 +1157,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1551,7 +1551,7 @@
+                 } else {
+                     nsg = N_SG_IQ4_NL;
+                     nr0 = N_R0_IQ4_NL;
                  }
                  smem = 32*sizeof(float);
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -776,7 +1168,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1559,7 +1559,7 @@
+         case GGML_TYPE_IQ4_XS:
              {
                  // eight rows per thread measured worse on 64 lanes for this type, so the
                  // inherited pair stays; TOSH_MV_IQ4_XS_R8 opens it again for measuring
@@ -785,7 +1177,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1569,7 +1569,7 @@
+                 } else {
+                     nsg = N_SG_IQ4_XS;
+                     nr0 = N_R0_IQ4_XS;
                  }
                  smem = 32*sizeof(float);
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
@@ -794,7 +1188,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      w64 = true;
                  }
              } break;
-@@ -1623,14 +1623,14 @@
+         case GGML_TYPE_TQ2_0:
+             {
+                 nsg = N_SG_TQ2_0;
+                 nr0 = N_R0_TQ2_0;
+             } break;
+@@ -1651,40 +1651,40 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         if (lut) {
+             smem = (size_t) nw*sizeof(float);
+         }
+     }
+ 
      // q6_K's 210-byte block leaves the compiler assuming byte alignment, so it reads its quant
      // arrays a byte at a time; an even stride lets the kernel read them two bytes at a time
      const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
@@ -811,7 +1215,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
      // Cards that require natural alignment read the wrong bytes from the odd blocks of the
      // 22-, 34-, 98-, 110- and 210-byte types, so the wide read splits in two there.
-@@ -1640,13 +1640,13 @@
+     const bool align = props->needs_aligned_loads;
+ 
+     // Sweep hook: TOSH_SWEEP_TYPE names one ggml type and TOSH_SWEEP_NR0 / TOSH_SWEEP_NSG
      // force its rows per lane and simdgroups, so the register front can be measured without
      // rebuilding. The pipeline name carries both, so a run can be checked against what it asked.
      {
@@ -829,7 +1235,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
              if (snr != nullptr && sln != nullptr) {
                  // cross sweep: the 32-block family carries one entry point per (lanes, rows)
-@@ -1676,7 +1676,7 @@
+                 nr0 = atoi(snr);
+                 snprintf(sweep_sfx, sizeof(sweep_sfx), "_L%dr%d", atoi(sln), nr0);
+                 suffix = sweep_sfx;
+                 w64 = simd_width == 64;
+             } else if (snr != nullptr) {
+@@ -1704,17 +1704,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     if (w64) {
+         snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
+         suffix = sfx;
+     }
+ 
      snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
      snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d_al=%d", base, nsg, ne12, r2, r3, nw, row4, row8, align);
  
@@ -838,7 +1254,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
          fprintf(stderr, "SWEEP pipeline = %s (nsg=%d nr0=%d)\n", name, nsg, nr0);
      }
  
-@@ -1736,26 +1736,26 @@
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
+@@ -1798,36 +1798,36 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+     const ggml_type tsrc0 = op->src[0]->type;
+     const ggml_type tsrc1 = op->src[1]->type;
+ 
+     const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+ 
      const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
  
      const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
@@ -869,16 +1295,36 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      if (wide) {
          // it needs 64 accumulators, so only where the dequant leaves the registers
          switch (tsrc0) {
-@@ -1787,7 +1787,7 @@
-     // the 64-lane twin lives in mul_mm_w64.metal, beside the dense one
+             case GGML_TYPE_F16:
+             case GGML_TYPE_Q4_0:
+             case GGML_TYPE_Q4_1:
+             case GGML_TYPE_Q5_0:
+             case GGML_TYPE_Q5_1:
+@@ -1852,17 +1852,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+     }
+ 
+     // src1 prec [TAG_GGML_PREC]
+     const bool amax = ggml_get_op_params_i32(op, 3) == GGML_PREC_F32;
+ 
+     // the 64-lane twin lives in mul_mm_w64.metal, beside the dense one; it has no src1 rescale
      const int simd_width_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
-     const bool w64 = simd_width_id == 64 && use_mm_manual &&
+     const bool w64 = simd_width_id == 64 && use_mm_manual && !amax &&
 -                     getenv("TOSH_MMID_W64_DISABLE") == nullptr;
 +                     TOSH_ENV("TOSH_MMID_W64_DISABLE") == nullptr;
  
      snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
-     snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d", base, bc_inp, use_mm_manual, acc_f32);
-@@ -1915,7 +1915,7 @@
+     snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d_amax=%d", base, bc_inp, use_mm_manual, acc_f32, amax);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+@@ -1982,17 +1982,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+         case GGML_TYPE_Q4_K:
+             {
+                 nsg = N_SG_Q4_K;
+                 nr0 = N_R0_Q4_K;
+             } break;
          case GGML_TYPE_Q5_K:
              {
                  // the expert mat-vec was short too: 8 rows measure +12.1% of tg on a 64-wide card
@@ -887,7 +1333,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
                      nsg = 1;
                      nr0 = 8;
                      suffix = "_r8";
-@@ -1999,7 +1999,7 @@
+                 } else {
+                     nsg = N_SG_Q5_K;
+                     nr0 = N_R0_Q5_K;
+                 }
+             } break;
+@@ -2066,17 +2066,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                 GGML_ABORT("not implemented");
+             }
+     };
+ 
+     // the 64-lane expert matvec lives in mul_mv_w64.metal and carries the same lane
      // decomposition as the standalone one, so the expert path stops falling back to 32.
      // Types whose shared memory holds a lookup grid keep the rows and the buffer the
      // switch above computed: only the reduction-buffer ones move.
@@ -896,7 +1352,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
      if (id_w64) {
          switch (tsrc0) {
              case GGML_TYPE_Q4_0: nr0 = 4; break;
-@@ -2060,13 +2060,13 @@
+             case GGML_TYPE_Q4_1: nr0 = 4; break;
+             case GGML_TYPE_Q8_0: nr0 = 4; break;
+             case GGML_TYPE_Q2_K: nr0 = 8; break;
+             // q3_K keeps the 32-lane eight-row kernel: its 64-lane twin is opt-in in the
+             // dense path too, and forcing it here measured 4.3% below on a 60-expert model
+@@ -2127,23 +2127,23 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                              tsrc0 == GGML_TYPE_IQ1_M);
+         const bool lut = (tsrc0 == GGML_TYPE_MXFP4 || tsrc0 == GGML_TYPE_IQ4_NL || tsrc0 == GGML_TYPE_IQ4_XS);
+         if (helper) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float)*nr0; }
+         else if (sr) { nw = (int16_t) props_id->simd_width; }
+         else if (lut) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float); }
      }
  
      const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
@@ -912,11 +1378,21 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggm
  
      const bool align = props_id->needs_aligned_loads;
  
-
+     snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, id_w64 ? "_w64" : "");
+     snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d_al=%d", base, nsg, nw, row4, row8, align);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index ef39bbeea..0fc883648 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -1042,7 +1042,7 @@
+@@ -1041,17 +1041,17 @@ ggml_metal_rsets_t ggml_metal_rsets_init(ggml_metal_device_t dev) {
+     ggml_metal_rsets_t res = calloc(1, sizeof(struct ggml_metal_rsets));
+ 
+     res->lock = [[NSLock alloc] init];
+     res->data = [[NSMutableArray alloc] init];
+ 
      // by default keep the memory wired for 3 minutes
      res->keep_alive_s = 3*60;
  
@@ -925,7 +1401,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
      if (GGML_METAL_RESIDENCY_KEEP_ALIVE_S) {
          res->keep_alive_s = atoi(GGML_METAL_RESIDENCY_KEEP_ALIVE_S);
      }
-@@ -1177,7 +1177,7 @@
+ 
+     if (res->keep_alive_s <= 0) {
+         res->keep_alive_s = 3*60;
+     }
+ 
+@@ -1176,17 +1176,17 @@ static id<MTLDevice> ggml_metal_device_default_discrete(void) {
+         return best;
+     }
+     [all release];
+     return def;
+ }
  
  
  static id<MTLCommandQueue> ggml_metal_new_queue(id<MTLDevice> device) {
@@ -934,7 +1420,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
      const int depth = s ? atoi(s) : 0;
  
      if (depth > 0) {
-@@ -1228,9 +1228,9 @@
+         return [device newCommandQueueWithMaxCommandBufferCount:depth];
+     }
+ 
+     return [device newCommandQueue];
+ }
+@@ -1227,19 +1227,19 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+ 
+     @autoreleasepool {
+         if (dev->mtl_device == nil) {
+             // `device` is the logical slot and indexes buffer types downstream, so it must stay as
+             // given; the env vars below only choose which MTLCopyAllDevices() GPU each slot maps to.
              //   GGML_METAL_DEVICE_INDEX=N    pin the single device to physical GPU N
              //   GGML_METAL_DEVICES=K         register K devices, slot i -> physical i
              //   GGML_METAL_DEVICE_LIST=a,b   register the listed GPUs, slot i -> physical list[i]
@@ -947,7 +1443,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
              const int    num_dev = env_num ? atoi(env_num) : 1;
              if (env_idx != NULL || num_dev > 1 || env_list != NULL) {
                  const int base = env_idx ? atoi(env_idx) : 0;
-@@ -1330,7 +1330,7 @@
+                 int phys = base + device;
+                 if (env_list != NULL) {
+                     phys = -1;
+                     const char * p = env_list;
+                     for (int i = 0; ; ++i) {
+@@ -1329,28 +1329,28 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+                     char simd_width_env[16];
+                     snprintf(simd_width_env, sizeof(simd_width_env), "%d", dev->props.simd_width);
+                     setenv("TOSH_METAL_SIMD_WIDTH", simd_width_env, 1);
+                 }
+ 
                  dev->props.has_simdgroup_reduction  = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
                  dev->props.has_simdgroup_reduction |= [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
                  // simdgroup reduction kernels produce corrupted output on AMD RDNA 2 (e.g. RX 6700 XT)
@@ -956,7 +1462,10 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                      dev->props.has_simdgroup_reduction = false;
                  }
  
-@@ -1341,7 +1341,7 @@
+                 // wave64 GPUs (AMD GCN/Vega): the 32-wide simdgroup reduction and mat-vec
+                 // kernels corrupt output, so route them to the CPU; only the wave-agnostic
+                 // manual mul_mm below runs on the GPU. Gated off for wave32 (Apple/RDNA).
+                 // GGML_METAL_WAVE64_UNSAFE=1 keeps the GPU paths for debugging.
                  const bool is_wave64 =
                      dev->props.simd_width != 32 &&
                      ![dev->mtl_device supportsFamily:MTLGPUFamilyApple1] &&
@@ -965,7 +1474,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                  if (is_wave64) {
                      fprintf(stderr, "ggml_metal: wave64 mode (SIMD width %d): GPU prefill matmul, "
                                      "CPU decode/reductions for correct output\n",
-@@ -1387,7 +1387,7 @@
+                             dev->props.simd_width);
+                     dev->props.has_simdgroup_reduction = false;
+                 }
+ 
+                 // A dword read off a multiple of four is undefined in Metal, and the GCN cards
+@@ -1386,69 +1386,69 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+                              strstr(name, "WX 9100")       != NULL ||
+                              strstr(name, "Instinct MI25") != NULL ||
+                              strstr(name, "Instinct MI50") != NULL ||
+                              strstr(name, "Instinct MI60") != NULL);
+                         snprintf(how, sizeof(how), "name (no architecture before macOS 14)");
                      }
                      dev->props.needs_aligned_loads = is_wave64 && !tolerant;
  
@@ -974,7 +1493,14 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                      if (force != NULL) {
                          dev->props.needs_aligned_loads = atoi(force) != 0;
                          snprintf(how, sizeof(how), "TOSH_MV_ALIGN=%s", force);
-@@ -1402,8 +1402,8 @@
+                     }
+                     if (is_wave64 || force != NULL) {
+                         fprintf(stderr, "ggml_metal: aligned mat-vec reads %s by %s "
+                                         "(override with TOSH_MV_ALIGN=1 or =0)\n",
+                                 dev->props.needs_aligned_loads ? "ON" : "off", how);
+                     }
+                 }
+ 
                  // Auto-on for wave64: run the quantized/f16 mat-vec decode on the GPU
                  // (large tg win, validated on GCN); escape hatch forces it off.
                  // GGML_METAL_WAVE64_SAFEMODE is the user-facing alias the app documents.
@@ -985,7 +1511,13 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                  if (dev->props.wave64_decode) {
                      fprintf(stderr, "ggml_metal: wave64 decode ON: quantized/f16/bf16 mat-vec on GPU "
                                      "(see the allowlist in ggml_metal_library_get_pipeline_mul_mv)\n");
-@@ -1417,7 +1417,7 @@
+                 }
+ 
+                 dev->props.has_simdgroup_mm = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
+ 
+                 // Manual tiled mul_mm replaces the missing simdgroup-matrix path on AMD.
+                 // wave32 gates on simdgroup reduction; wave64 uses the same wave-agnostic kernel.
+                 dev->props.use_mm_manual =
                      !dev->props.has_simdgroup_mm &&
                      ![dev->mtl_device supportsFamily:MTLGPUFamilyApple1] &&
                      (dev->props.simd_width == 32 ? dev->props.has_simdgroup_reduction : is_wave64);
@@ -994,7 +1526,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                      dev->props.use_mm_manual = false;
                  }
  
-@@ -1425,12 +1425,12 @@
+                 dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
  
                  dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
                  dev->props.has_bfloat |= [dev->mtl_device supportsFamily:MTLGPUFamilyApple6];
@@ -1009,7 +1541,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                      dev->props.has_tensor = false;
                  }
  
-@@ -1439,7 +1439,7 @@
+                 // note: disable the tensor API by default for old chips because with the current implementation it is not useful
+                 // - M2 Ultra:   ~5% slower
                  // - M4, M4 Max: no significant difference
                  //
                  // TODO: try to update the tensor API kernels to at least match the simdgroup performance
@@ -1018,7 +1551,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                      ![[dev->mtl_device name] containsString:@"M5"] &&
                      ![[dev->mtl_device name] containsString:@"M6"] &&
                      ![[dev->mtl_device name] containsString:@"A19"] &&
-@@ -1550,7 +1550,7 @@
+                     ![[dev->mtl_device name] containsString:@"A20"]) {
+                     GGML_LOG_INFO("%s: tensor API disabled for pre-M5 and pre-A19 devices\n", __func__);
+                     dev->props.has_tensor = false;
+                 }
+ 
+@@ -1549,50 +1549,50 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+                         }
+ 
+                         ggml_metal_library_free(lib);
+                     }
+                 }
  
                  dev->props.use_residency_sets = true;
  #if defined(GGML_METAL_HAS_RESIDENCY_SETS)
@@ -1027,7 +1570,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
  #endif
  
                  dev->props.use_shared_buffers = dev->props.has_unified_memory;
-@@ -1558,10 +1558,10 @@
+ #if TARGET_OS_OSX && TARGET_CPU_X86_64
                  // In case of eGPU, shared memory may be preferable.
                  dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
  #endif
@@ -1040,7 +1583,11 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                      dev->props.use_shared_buffers = true;
                  }
  
-@@ -1573,7 +1573,7 @@
+                 // the expert cache keeps weights in host memory the GPU can read; without unified
+             // memory that is a different decision from making every buffer shared
+             dev->props.use_host_buffers = !dev->props.use_shared_buffers && tosh_moe_mode() != TOSH_MOE_OFF;
+ 
+             dev->props.supports_gpu_family_apple7 = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
  
                  dev->props.device_id = ggml_metal_device_id_parse([[dev->mtl_device name] UTF8String]);
  
@@ -1049,7 +1596,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
  
                  dev->props.max_buffer_size            = dev->mtl_device.maxBufferLength;
  
-@@ -1582,8 +1582,8 @@
+                 // a driver that advertises a large maxBufferLength can still refuse one allocation
+                 // of that size. Capping what we advertise makes ggml split the weights into several
                  // buffers itself, which is the one place that knows no tensor may straddle them.
                  // The 4 GiB failure that motivated this was reported by Slice on an RX 570:
                  // https://www.insanelymac.com/forum/profile/112217-slice/
@@ -1060,7 +1608,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                      if (cap > 0 && cap < dev->props.max_buffer_size) {
                          dev->props.max_buffer_size = cap;
                          fprintf(stderr, "ggml_metal: max single buffer capped to %zu MiB by TOSH_METAL_MAX_BUFFER_MB\n", cap / 1024 / 1024);
-@@ -1791,7 +1791,7 @@
+                     }
+                 }
+                 dev->props.max_theadgroup_memory_size = dev->mtl_device.maxThreadgroupMemoryLength;
+                 if (@available(macOS 10.12, iOS 16.0, *)) {
+                     dev->props.max_working_set_size   = dev->mtl_device.recommendedMaxWorkingSetSize;
+@@ -1801,17 +1801,17 @@ void * ggml_metal_device_wrap_host(ggml_metal_device_t dev, const void * data, s
+     }
+ 
+     // Left uncapped, a large MoE offload maps its whole host-resident expert set here and the
+     // device stops granting any new shared buffer: measured failing a 1.21 GiB allocation with
+     // 142.75 GiB wrapped against a 34.34 GiB working set. The cap costs no speed (measured
      // identical at 8 and 16 GiB) and sends the overflow to the bounded staging ring instead.
      // GGML_METAL_HOST_WRAP_LIMIT_MB overrides it; 0 restores the uncapped behaviour.
      size_t limit = (size_t) dev->props.max_working_set_size;
@@ -1069,7 +1627,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
      if (limit_mb != NULL) {
          limit = (size_t) strtoull(limit_mb, NULL, 10)*1024*1024;
      }
-@@ -2228,7 +2228,7 @@
+     if (limit > 0 && (len > limit || dev->host_wrap_bytes > limit - len)) {
+         [dev->wrap_lock unlock];
+         return NULL;
+     }
+ 
+@@ -2240,17 +2240,17 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                 return false;
+             }
+             // AMD dGPUs report no simdgroup_mm and miscompile the upstream vec kernel, so FA is
+             // allowed only for the KV pairs our own vec kernel instantiates. This sits before
+             // the K==V gate because that kernel takes K and V independently.
              const bool fa_amd_width_ok = dev->props.simd_width == 32
                  ? has_simdgroup_reduction
                  : wave64_decode;
@@ -1078,7 +1646,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                  !has_simdgroup_mm && fa_amd_width_ok &&
                  (op->src[0]->ne[0] % 32 == 0 || op->src[0]->ne[0] == 72 ||
                   op->src[0]->ne[0] == 40 || op->src[0]->ne[0] == 80 || op->src[0]->ne[0] == 160)) {
-@@ -2996,7 +2996,7 @@
+                 float max_bias = 0.0f;
+                 float softcap  = 0.0f;
+                 memcpy(&max_bias, ((const int32_t *) op->op_params) + 1, sizeof(float));
+                 memcpy(&softcap,  ((const int32_t *) op->op_params) + 2, sizeof(float));
+                 const enum ggml_type kt = op->src[1]->type;
+@@ -3023,17 +3023,17 @@ static struct {
+     _Atomic uint64_t t_last;
+     // big D2H reads (logits class) split into GPU-busy time vs the blit itself
+     _Atomic uint64_t big_calls, big_dep_ns, big_xfer_ns;
+ } g_tosh_prof;
+ 
  static bool tosh_prof_on(void) {
      int s = atomic_load_explicit(&g_tosh_prof.state, memory_order_relaxed);
      if (s == 0) {
@@ -1087,7 +1665,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
          s = (v && v[0] == '1') ? 2 : 1;
          atomic_store_explicit(&g_tosh_prof.state, s, memory_order_relaxed);
      }
-@@ -3157,7 +3157,7 @@
+     return s == 2;
+ }
+ 
+ // name-class buckets, filled by the callers that know the tensor
+ enum { TOSH_CLS_MOE, TOSH_CLS_LOGITS, TOSH_CLS_OTHER, TOSH_CLS_N };
+@@ -3184,17 +3184,17 @@ bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buff
+         [dev->stage_set_cmds[slot] release];
+         dev->stage_set_cmds[slot] = nil;
+     }
+ 
+     id<MTLBuffer> stage = dev->stage_set_bufs[slot];
      if (stage == nil || stage.length < size) {
          [stage release];
          static int wc_off = -1;
@@ -1096,7 +1684,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
          stage = [dev->mtl_device newBufferWithLength:MAX(size, (size_t) 256*1024)
                                               options:wc_off ? MTLResourceStorageModeShared
                                                              : (MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined)];
-@@ -3498,13 +3498,13 @@
+         dev->stage_set_bufs[slot] = stage;
+     }
+     if (stage == nil) {
+         [dev->stage_lock unlock];
+         return false;
+@@ -3525,31 +3525,31 @@ static void ggml_metal_buffer_set_tensor_impl(ggml_metal_buffer_t buf, struct gg
+                 return;
+             }
+ 
+             // A large transfer wrapped whole registers the caller's pages with the device for the
+             // whole blit; feeding it through the ring in slices keeps the copy pipelined instead.
              // Only measured with one device so far, so several cards keep the wrap until it is.
              static int stage_load = -1;
              if (stage_load < 0) {
@@ -1114,7 +1712,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                  }
              }
              if (stage_load) {
-@@ -3512,7 +3512,7 @@
+                 bool done_all = true;
                  for (size_t done = 0; done < size;) {
                      static size_t slice = 0;
                      if (slice == 0) {
@@ -1123,7 +1721,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
                          slice = v ? MIN((size_t) atoi(v)*1024*1024, GGML_METAL_STAGE_BUF_MAX) : GGML_METAL_STAGE_BUF_MAX;
                          if (slice == 0) { slice = GGML_METAL_STAGE_BUF_MAX; }
                      }
-@@ -3541,7 +3541,7 @@
+                     const size_t n = MIN(slice, size - done);
+ 
+                     struct ggml_metal_buffer_id bid = bid_dst;
+                     bid.offs += done;
+ 
+@@ -3568,17 +3568,17 @@ static void ggml_metal_buffer_set_tensor_impl(ggml_metal_buffer_t buf, struct gg
+ 
+         const uint64_t t0 = tosh_prof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+ 
+         // src
+         void * data_ptr = (void *)(uintptr_t) data; // "const cast" the src data
          // wrapping the caller's pointer registers the whole tensor as a Metal resource for the
          // blit; TOSH_NO_HOST_WRAP skips it so the chunked staging path below is used instead
          static int no_wrap = -1;
@@ -1132,7 +1740,17 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
          id<MTLBuffer> buf_src = no_wrap ? nil : [buf->dev->mtl_device newBufferWithBytesNoCopy:data_ptr
                                                                 length:size
                                                                options:MTLResourceStorageModeShared
-@@ -3645,7 +3645,7 @@
+                                                           deallocator:nil];
+         // dst
+         struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
+         bid_dst.offs += offset;
+ 
+@@ -3672,17 +3672,17 @@ static void ggml_metal_buffer_set_tensor_impl(ggml_metal_buffer_t buf, struct gg
+     }
+ }
+ 
+ // TOSH_CB_PROFILE: coste de las lecturas de vuelta (logits) y de las escrituras, que
+ // son lo que queda del hueco de decode una vez descartados commit, creacion y espera
  static bool tosh_xfer_on(void) {
      int st = atomic_load_explicit(&g_tosh_xfer_state, memory_order_relaxed);
      if (st == 0) {
@@ -1141,334 +1759,24 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
          st = (e != NULL && strcmp(e, "0") != 0) ? 2 : 1;
          atomic_store_explicit(&g_tosh_xfer_state, st, memory_order_relaxed);
      }
-
-diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
---- a/ggml/src/ggml-metal/ggml-metal-context.m
-+++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -59,7 +59,7 @@
- static bool tosh_cbp_on(void) {
-     int st = atomic_load_explicit(&g_cbp_state, memory_order_relaxed);
-     if (st == 0) {
--        const char * e = getenv("TOSH_CB_PROFILE");
-+        const char * e = TOSH_ENV("TOSH_CB_PROFILE");
-         st = (e != NULL && strcmp(e, "0") != 0) ? 2 : 1;
-         atomic_store_explicit(&g_cbp_state, st, memory_order_relaxed);
-     }
-@@ -378,7 +378,7 @@
- static bool ggml_metal_defer_waits(void) {
-     static int val = -1;
-     if (val < 0) {
--        const char * v = getenv("TOSH_MGPU_DEFER_WAITS");
-+        const char * v = TOSH_ENV("TOSH_MGPU_DEFER_WAITS");
-         val = (v && v[0] == '1') ? 1 : 0;
-     }
-     return val;
-@@ -410,7 +410,7 @@
- static bool tosh_mgpu_trace(void) {
-     static int on = -1;
-     if (on < 0) {
--        const char * v = getenv("TOSH_MGPU_TRACE");
-+        const char * v = TOSH_ENV("TOSH_MGPU_TRACE");
-         on = (v && v[0] == '1') ? 1 : 0;
-     }
-     return on == 1;
-@@ -621,13 +621,13 @@
- 
- static bool ggml_metal_ctime(void) {
-     static int v = -1;
--    if (v < 0) { const char * s = getenv("TOSH_MGPU_CTIME"); v = (s && s[0] == '1') ? 1 : 0; }
-+    if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_CTIME"); v = (s && s[0] == '1') ? 1 : 0; }
-     return v == 1;
+     return st == 2;
  }
  
- static bool ggml_metal_ctime_barrier(void) {
-     static int v = -1;
--    if (v < 0) { const char * s = getenv("TOSH_MGPU_CTIME_BARRIER"); v = (s && s[0] == '1') ? 1 : 0; }
-+    if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_CTIME_BARRIER"); v = (s && s[0] == '1') ? 1 : 0; }
-     return v == 1;
- }
- 
-@@ -708,7 +708,7 @@
- static bool ggml_metal_bp_satisfied(void) {
-     static int v = -1;
-     if (v < 0) {
--        const char * s = getenv("TOSH_MGPU_BP_SATISFIED");
-+        const char * s = TOSH_ENV("TOSH_MGPU_BP_SATISFIED");
-         v = (s && s[0] == '1') ? 1 : 0;
-         if (v) {
-             fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_BP_SATISFIED=1, the collective does not "
-@@ -723,7 +723,7 @@
- static bool ggml_metal_tp2_fused_boundary(int64_t batch) {
-     static int v = -2;
-     if (v == -2) {
--        const char * s = getenv("TOSH_MGPU_TP2_FUSED_BOUNDARY");
-+        const char * s = TOSH_ENV("TOSH_MGPU_TP2_FUSED_BOUNDARY");
-         v = s ? (s[0] == '1' ? 1 : 0) : -1;
-     }
-     if (v >= 0) {
-@@ -735,7 +735,7 @@
- static bool ggml_metal_wait_satisfied(void) {
-     static int v = -1;
-     if (v < 0) {
--        const char * s = getenv("TOSH_MGPU_WAIT_SATISFIED");
-+        const char * s = TOSH_ENV("TOSH_MGPU_WAIT_SATISFIED");
-         v = (s && s[0] == '1') ? 1 : 0;
-         if (v) {
-             fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_WAIT_SATISFIED=1, the collective never "
-@@ -989,7 +989,7 @@
-         }
-         res->is_prefetch = prefetch;
-         if (prefetch) {
--            const char * val = getenv("GGML_METAL_PREFETCH_STAGE_COUNT");
-+            const char * val = TOSH_ENV("GGML_METAL_PREFETCH_STAGE_COUNT");
-             const int requested = val ? atoi(val) : 1;
-             res->prefetch_stage_count = MAX(1, MIN(requested, GGML_METAL_MAX_PREFETCH_STAGES));
-         }
-@@ -1018,26 +1018,26 @@
- 
-         res->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
- 
--        res->use_fusion      = getenv("GGML_METAL_FUSION_DISABLE") == nil;
-+        res->use_fusion      = TOSH_ENV("GGML_METAL_FUSION_DISABLE") == nil;
-         // discrete GPUs (AMD) corrupt their output with a concurrent encoder: the driver does
-         // not honour the memory barrier. GGML_METAL_CONCURRENCY_ENABLE forces it back on to test.
-         res->use_concurrency = props_dev->has_unified_memory
--            ? getenv("GGML_METAL_CONCURRENCY_DISABLE") == nil
--            : getenv("GGML_METAL_CONCURRENCY_ENABLE")  != nil;
-+            ? TOSH_ENV("GGML_METAL_CONCURRENCY_DISABLE") == nil
-+            : TOSH_ENV("GGML_METAL_CONCURRENCY_ENABLE")  != nil;
- 
-         {
--            const char * val = getenv("GGML_METAL_GRAPH_DEBUG");
-+            const char * val = TOSH_ENV("GGML_METAL_GRAPH_DEBUG");
-             res->debug_graph = val ? atoi(val) : 0;
-         }
- 
-         {
--            const char * val = getenv("GGML_METAL_FUSION_DEBUG");
-+            const char * val = TOSH_ENV("GGML_METAL_FUSION_DEBUG");
-             res->debug_fusion = val ? atoi(val) : 0;
-         }
- 
-         res->use_graph_optimize = true;
- 
--        if (getenv("GGML_METAL_GRAPH_OPTIMIZE_DISABLE") != NULL) {
-+        if (TOSH_ENV("GGML_METAL_GRAPH_OPTIMIZE_DISABLE") != NULL) {
-             res->use_graph_optimize = false;
-         }
- 
-@@ -1052,7 +1052,7 @@
-         res->capture_scope = nil;
- 
-         {
--            const char * val = getenv("GGML_METAL_CAPTURE_COMPUTE");
-+            const char * val = TOSH_ENV("GGML_METAL_CAPTURE_COMPUTE");
-             if (val) {
-                 res->capture_compute = atoi(val);
-             }
-@@ -1641,7 +1641,7 @@
- static bool ggml_metal_collective_nowait(void) {
-     static int v = -1;
-     if (v < 0) {
--        const char * s = getenv("TOSH_MGPU_NOWAIT");
-+        const char * s = TOSH_ENV("TOSH_MGPU_NOWAIT");
-         v = (s && s[0] == '1') ? 1 : 0;
-         if (v) {
-             fprintf(stderr, "ggml_metal: WARNING TOSH_MGPU_NOWAIT=1, the collective does not wait "
-@@ -1657,7 +1657,7 @@
- static bool ggml_metal_peer_self(void) {
-     static int val = -1;
-     if (val < 0) {
--        const char * v = getenv("TOSH_MGPU_PEER_SELF");
-+        const char * v = TOSH_ENV("TOSH_MGPU_PEER_SELF");
-         val = (v && v[0] == '1') ? 1 : 0;
-     }
-     return val;
-@@ -1873,21 +1873,21 @@
-     // A Metal blit can't reach a buffer owned by another device, so a multi-GPU layer
-     // hand-off goes through host memory (GGML_METAL_CROSS_STAGING_DISABLE uses the generic copy).
-     if (ctx_src->dev != ctx_dst->dev) {
--        if (getenv("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
-+        if (TOSH_ENV("GGML_METAL_CROSS_STAGING_DISABLE") != NULL) {
-             return false;
-         }
- 
-         // both buffers must be private for the cross-device blits
-         static int use_events = -1;
-         if (use_events < 0) {
--            const char * v = getenv("TOSH_MGPU_EVENTS");
-+            const char * v = TOSH_ENV("TOSH_MGPU_EVENTS");
-             use_events = (v && v[0] == '1') ? 1 : 0;
-         }
-         // Infinity Fabric peer copy is opt-in until validated on bridged hardware:
-         // a success that silently returns wrong data has no fallback.
-         static int use_peer = -1;
-         if (use_peer < 0) {
--            const char * v = getenv("TOSH_MGPU_PEER");
-+            const char * v = TOSH_ENV("TOSH_MGPU_PEER");
-             use_peer = (v && v[0] == '1') ? 1 : 0;
-         }
-         ggml_backend_buffer_t ebsrc = src->view_src ? src->view_src->buffer : src->buffer;
-@@ -1896,7 +1896,7 @@
-         // alone does not tell: TOSH_MGPU_XDEV_COUNT reports the tally at exit
-         static int count = -1;
-         if (count < 0) {
--            count = getenv("TOSH_MGPU_XDEV_COUNT") != NULL;
-+            count = TOSH_ENV("TOSH_MGPU_XDEV_COUNT") != NULL;
-             if (count) {
-                 atexit(tosh_xdev_report);
-             }
-@@ -2095,7 +2095,7 @@
- // across the whole row and is several times slower on it.
- static bool ggml_metal_fb_add_rb(void) {
-     static int v = -1;
--    if (v < 0) { const char * s = getenv("TOSH_MGPU_FB_ADD_RB"); v = (s && s[0] == '0') ? 0 : 1; }
-+    if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_FB_ADD_RB"); v = (s && s[0] == '0') ? 0 : 1; }
-     return v == 1;
- }
- 
-@@ -2370,7 +2370,7 @@
- static int64_t ggml_metal_peer_min_batch(void) {
-     static int64_t v = -1;
-     if (v < 0) {
--        const char * s = getenv("TOSH_MGPU_PEER_MIN_BATCH");
-+        const char * s = TOSH_ENV("TOSH_MGPU_PEER_MIN_BATCH");
-         v = s ? atoll(s) : 32;
-     }
-     return v;
-@@ -2386,7 +2386,7 @@
- static bool ggml_metal_collective_hold_batch(int64_t batch) {
-     static int v = -2;
-     if (v == -2) {
--        const char * s = getenv("TOSH_MGPU_HOLD");
-+        const char * s = TOSH_ENV("TOSH_MGPU_HOLD");
-         v = s ? (s[0] == '1' ? 1 : 0) : -1;
-     }
-     if (v >= 0) {
-@@ -2406,7 +2406,7 @@
- 
-     static int use_peer = -1;
-     if (use_peer < 0) {
--        const char * v = getenv("TOSH_MGPU_PEER");
-+        const char * v = TOSH_ENV("TOSH_MGPU_PEER");
-         use_peer = (v && v[0] == '1') ? 1 : 0;
-     }
- 
-@@ -2899,7 +2899,7 @@
- static bool ggml_metal_oneshot_enabled(void) {
-     static int v = -1;
-     if (v < 0) {
--        const char * s = getenv("TOSH_MGPU_ONESHOT");
-+        const char * s = TOSH_ENV("TOSH_MGPU_ONESHOT");
-         v = (s && s[0] == '1') ? 1 : 0;
-     }
-     return v == 1;
-@@ -3242,7 +3242,7 @@
-     // decode, and it costs a second kernel.
-     static int fused = -1;
-     if (fused < 0) {
--        const char * v = getenv("TOSH_MGPU_PEER_FUSED");
-+        const char * v = TOSH_ENV("TOSH_MGPU_PEER_FUSED");
-         fused = v == NULL ? 1 : atoi(v);
-     }
- 
-@@ -3458,7 +3458,7 @@
- // and blitted into private K slots. No command ever receives a Metal view of the complete bank.
- static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, struct ggml_cgraph * gf) {
-     int copy_workers = 4;
--    const char * copy_workers_env = getenv("TOSH_MOE_BOUNDED_COPY_WORKERS");
-+    const char * copy_workers_env = TOSH_ENV("TOSH_MOE_BOUNDED_COPY_WORKERS");
-     if (copy_workers_env != NULL) {
-         copy_workers = MAX(1, MIN(8, atoi(copy_workers_env)));
-     }
-@@ -3487,7 +3487,7 @@
- 
-     // TOSH_MOE_SLOT_STATS=1: per-pass census of expert placement, to tell a routing id that
-     // never reached a slot from one that reached a stale one
--    const bool slot_stats = getenv("TOSH_MOE_SLOT_STATS") != NULL;
-+    const bool slot_stats = TOSH_ENV("TOSH_MOE_SLOT_STATS") != NULL;
-     int st_layers = 0, st_wide = 0, st_narrow = 0;
-     long st_unique = 0, st_cold = 0, st_miss = 0, st_unplaced = 0, st_refs = 0, st_refs_unplaced = 0;
-     int st_unique_max = 0, st_slots = 0;
-@@ -3637,7 +3637,7 @@
-                 }
-             }
-         }
--        if (getenv("TOSH_MOE_WIDE_DEBUG") != NULL) {
-+        if (TOSH_ENV("TOSH_MOE_WIDE_DEBUG") != NULL) {
-             GGML_LOG_WARN("%s: layer %d unique=%d cold=%d slots=%d fixed=%d experts=%d\n",
-                 __func__, layer, n_unique, n_cold_unique, n_slots, n_fixed, n_expert);
-         }
-@@ -3689,9 +3689,9 @@
-         }
-         for (int e = 0; e < n_expert; ++e) slot_of[e] = -1;
-         if (n_fixed > 0 && (wide_shape || n_cold_unique > n_slots - n_fixed)) {
--            const bool transient_map = getenv("TOSH_MOE_TRANSIENT_MAP") != NULL;
--            const bool persistent_map = getenv("TOSH_MOE_PERSISTENT_MAP") != NULL;
--            const bool double_buffer = getenv("TOSH_MOE_DOUBLE_BUFFER") != NULL &&
-+            const bool transient_map = TOSH_ENV("TOSH_MOE_TRANSIENT_MAP") != NULL;
-+            const bool persistent_map = TOSH_ENV("TOSH_MOE_PERSISTENT_MAP") != NULL;
-+            const bool double_buffer = TOSH_ENV("TOSH_MOE_DOUBLE_BUFFER") != NULL &&
-                 !transient_map && !persistent_map && wide_shape;
-             const int parity = double_buffer ? full_sequence++ & 1 : 0;
-             if (full_pending[parity] != nil) {
-@@ -4061,7 +4061,7 @@
- static bool ggml_metal_merge_graph(void) {
-     static int v = -1;
-     if (v < 0) {
--        const char * s = getenv("TOSH_MGPU_MERGE");
-+        const char * s = TOSH_ENV("TOSH_MGPU_MERGE");
-         // on by default: it is inert unless a collective left a buffer held, which only the
-         // batch gate above does, so a prompt never sees it
-         v = s ? (s[0] == '1' ? 1 : 0) : 1;
-@@ -4083,9 +4083,9 @@
- 
- #ifdef TOSH_ENABLE_DYNAMIC_MOE
-     bool staged_moe = false;
--    const char * bounded_env = getenv("TOSH_MOE_BOUNDED_STAGE");
-+    const char * bounded_env = TOSH_ENV("TOSH_MOE_BOUNDED_STAGE");
-     const bool bounded_requested = bounded_env != NULL && strcmp(bounded_env, "0") != 0;
--    const char * force_env = getenv("TOSH_MOE_BOUNDED_STAGE_FORCE");
-+    const char * force_env = TOSH_ENV("TOSH_MOE_BOUNDED_STAGE_FORCE");
-     const bool bounded_forced = force_env != NULL && strcmp(force_env, "0") != 0;
-     size_t bounded_bank_size = 0;
-     size_t bounded_threshold = 0;
-@@ -4103,7 +4103,7 @@
-             // the RX 6700 XT this separates the 9.61 GiB Q2 bank from the 12.58/16.88 GiB
-             // Q4 banks which Metal cannot safely wrap as one host resource.
-             bounded_threshold = props->max_working_set_size*7/8;
--            const char * threshold_mb = getenv("TOSH_MOE_BOUNDED_STAGE_THRESHOLD_MB");
-+            const char * threshold_mb = TOSH_ENV("TOSH_MOE_BOUNDED_STAGE_THRESHOLD_MB");
-             if (threshold_mb != NULL) {
-                 const unsigned long long value = strtoull(threshold_mb, NULL, 10);
-                 if (value > 0 && value <= SIZE_MAX/(1024ULL*1024ULL)) {
-@@ -4147,7 +4147,7 @@
-     // the split was tuned on unified memory; TOSH_N_MAIN overrides it to A/B the share here
-     static int n_main_env = -2;
-     if (n_main_env == -2) {
--        const char * v = getenv("TOSH_N_MAIN");
-+        const char * v = TOSH_ENV("TOSH_N_MAIN");
-         n_main_env = v ? atoi(v) : -1;
-     }
-     const int n_main = n_main_env >= 0 ? n_main_env : MAX(64, 0.1*gf->n_nodes);
-@@ -4412,7 +4412,7 @@
-     if (ctx->use_graph_optimize) {
-         static int max_tokens = -1;
-         if (max_tokens < 0) {
--            const char * s = getenv("GGML_METAL_GRAPH_OPTIMIZE_MIN_BATCH");
-+            const char * s = TOSH_ENV("GGML_METAL_GRAPH_OPTIMIZE_MIN_BATCH");
-             max_tokens = s ? atoi(s) - 1 : 7;
-         }
- 
-
+ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+     const bool xf = tosh_xfer_on();
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index a0666d25a..549db4449 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -1461,5 +1461,17 @@
+@@ -1494,9 +1494,21 @@ typedef struct {
+ typedef struct {
+     int64_t  np;
+ } ggml_metal_kargs_opt_step_sgd;
+ 
  typedef struct {
      int64_t ne;
  } ggml_metal_kargs_silu_back;
-+
+ 
 +#if !defined(__METAL_VERSION__)
 +#include <stdlib.h>
 +// getenv walks the whole environment under a lock, and the encode path asks the same names once
@@ -1480,6 +1788,672 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-me
 +    if (!tosh_env_i) { tosh_env_v = getenv(name); tosh_env_i = 1; } tosh_env_v; })
 +#endif
 +#endif
- 
++
  #endif // GGML_METAL_IMPL
-
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index a9871f1f4..d501092dd 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -456,24 +456,24 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+         }
+     }
+ 
+     if ((node->op == GGML_OP_GET_ROWS || node->op == GGML_OP_CPY) &&
+         ggml_metal_gdn_state_fusion_on(ctx) && ggml_metal_gdn_state_skip(ctx, idx)) {
+         return 1;
+     }
+ 
+-    if ((node->op == GGML_OP_RMS_NORM || node->op == GGML_OP_ADD) && ctx->use_fusion && !ctx->use_concurrency) {
++    if ((node->op == GGML_OP_RMS_NORM || node->op == GGML_OP_ADD) && ctx->use_fusion() && !ctx->use_concurrency) {
+         const int n = ggml_metal_op_rms_norm_fwht(ctx, idx);
+         if (n > 0) {
+             return n;
+         }
+     }
+ 
+-    const int n_fwht = ctx->use_fusion && (node->op == GGML_OP_MUL || node->op == GGML_OP_CONT) ?
++    const int n_fwht = ctx->use_fusion() && (node->op == GGML_OP_MUL || node->op == GGML_OP_CONT) ?
+         ggml_metal_op_fwht_fused(ctx, idx) : 0;
+ 
+     if (n_fwht > 0) {
+         n_fuse = n_fwht;
+     } else
+     switch (node->op) {
+         case GGML_OP_CONCAT:
+             {
+@@ -739,17 +739,17 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+ 
+ 
+ // TOSH_OPPROF=1: CPU time spent encoding each op kind, to compare dispatch cost across engines
+ #include <time.h>
+ static uint64_t g_opprof_ns[GGML_OP_COUNT];
+ static uint64_t g_opprof_n [GGML_OP_COUNT];
+ static bool tosh_opprof_on(void) {
+     static int v = -1;
+-    if (v < 0) { v = getenv("TOSH_OPPROF") != nullptr; }
++    if (v < 0) { v = TOSH_ENV("TOSH_OPPROF") != nullptr; }
+     return v;
+ }
+ static void tosh_opprof_dump(void) {
+     if (!tosh_opprof_on()) return;
+     for (int i = 0; i < GGML_OP_COUNT; i++) {
+         if (g_opprof_n[i] == 0) continue;
+         fprintf(stderr, "TOSH_OPPROF %-22s n=%-7llu total_us=%-10.1f us/op=%.3f\n",
+                 ggml_op_name((enum ggml_op) i),
+@@ -2237,18 +2237,18 @@ static const ggml_tensor * ggml_metal_gdn_fold_dst(ggml_metal_op_t ctx, int idx)
+             ggml_metal_use_count(ctx->graph(), a) == 1) {
+             return c;
+         }
+     }
+     return nullptr;
+ }
+ 
+ static bool ggml_metal_gdn_state_fusion_on(ggml_metal_op_t ctx) {
+-    static const bool disabled = getenv("TOSH_GDN_STATE_FUSION_DISABLE") != nullptr;
+-    return ctx->use_fusion && !ctx->use_concurrency && !disabled;
++    static const bool disabled = TOSH_ENV("TOSH_GDN_STATE_FUSION_DISABLE") != nullptr;
++    return ctx->use_fusion() && !ctx->use_concurrency && !disabled;
+ }
+ 
+ // true when node idx is a gather or a copy that a nearby gated_delta_net takes over
+ static bool ggml_metal_gdn_state_skip(ggml_metal_op_t ctx, int idx) {
+     const ggml_tensor * node = ctx->node(idx);
+     if (node->op == GGML_OP_GET_ROWS) {
+         for (int i = idx + 1; i < std::min(ctx->n_nodes(), idx + 32); ++i) {
+             const ggml_tensor * g = ctx->node(i);
+@@ -2608,17 +2608,17 @@ int ggml_metal_op_cpy(ggml_metal_op_t ctx, int idx) {
+ 
+     GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+     GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
+     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
+     GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
+ 
+     const bool contig = ggml_blck_size(op->src[0]->type) == 1 && ggml_blck_size(op->type) == 1 &&
+                         ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op) &&
+-                        getenv("TOSH_CPY_CONTIG_DISABLE") == nullptr;
++                        TOSH_ENV("TOSH_CPY_CONTIG_DISABLE") == nullptr;
+ 
+     if (contig) {
+         const int64_t n = ggml_nelements(op);
+ 
+         ggml_metal_kargs_cpy args = {
+             /*.nk0  =*/ n,
+             /*.ne00 =*/ ne00, /*.ne01 =*/ ne01, /*.ne02 =*/ ne02, /*.ne03 =*/ ne03,
+             /*.nb00 =*/ nb00, /*.nb01 =*/ nb01, /*.nb02 =*/ nb02, /*.nb03 =*/ nb03,
+@@ -2815,17 +2815,17 @@ static const ggml_tensor * ggml_metal_unwrap_reshape(const ggml_cgraph * gf, con
+         t = t->src[0];
+     }
+     return t;
+ }
+ 
+ // rms_norm -> mul by the norm weight -> the Hadamard transform of a folded weight's input, all
+ // adjacent: one kernel writes the transform, and the norm too when other nodes read it
+ static int ggml_metal_op_rms_norm_fwht(ggml_metal_op_t ctx, int idx) {
+-    static const bool disabled = getenv("TOSH_NORM_FWHT_FUSION_DISABLE") != nullptr;
++    static const bool disabled = TOSH_ENV("TOSH_NORM_FWHT_FUSION_DISABLE") != nullptr;
+     if (disabled || idx + 3 >= ctx->n_nodes()) {
+         return 0;
+     }
+     const ggml_cgraph * gf = ctx->graph();
+ 
+     // an add before the norm (the residual) is taken in as well
+     const ggml_tensor * add = ctx->node(idx)->op == GGML_OP_ADD ? ctx->node(idx) : nullptr;
+     const int i0 = add ? idx + 1 : idx;
+@@ -3061,17 +3061,17 @@ int ggml_metal_op_pool_2d(ggml_metal_op_t ctx, int idx) {
+     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
+ 
+     ggml_metal_encoder_dispatch_threadgroups(enc, ntg, 1, 1, nth, 1, 1);
+ 
+     return 1;
+ }
+ 
+ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+-    static const bool disabled = getenv("TOSH_QKV_FUSION_DISABLE") != nullptr;
++    static const bool disabled = TOSH_ENV("TOSH_QKV_FUSION_DISABLE") != nullptr;
+ 
+     const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
+     const bool width_ok = props_dev->simd_width == 32 ||
+                           (props_dev->simd_width == 64 && props_dev->wave64_decode);
+     if (disabled || !ctx->use_fusion() || !width_ok || !props_dev->use_mm_manual || idx + 2 >= ctx->n_nodes()) {
+         return 0;
+     }
+ 
+@@ -3133,17 +3133,17 @@ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+         uint32_t nr_v;
+         uint32_t nr_k;
+     } pattern = {};
+ 
+     const ggml_type tq = q->src[0]->type;
+     const ggml_type tv = v->src[0]->type;
+     const ggml_type tk = k->src[0]->type;
+ 
+-    const bool qvk_w64 = props_dev->simd_width == 64 && getenv("TOSH_QVK_W64_DISABLE") == nullptr;
++    const bool qvk_w64 = props_dev->simd_width == 64 && TOSH_ENV("TOSH_QVK_W64_DISABLE") == nullptr;
+ 
+     if (tq == GGML_TYPE_Q4_0 && tv == GGML_TYPE_Q4_0 && tk == GGML_TYPE_Q4_0) {
+         // the 64-lane twin carries the same decomposition as the standalone matvec, so the
+         // fusion keeps that win instead of trading it for the saved dispatches
+         pattern = qvk_w64 ? decltype(pattern){ "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32_w64", 1, 4, 4, 4 }
+                           : decltype(pattern){ "kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32",     1, 4, 4, 4 };
+     } else if (tq == GGML_TYPE_Q2_K && tv == GGML_TYPE_Q4_K && tk == GGML_TYPE_Q2_K) {
+         pattern = { "kernel_mul_mv_qvk_q2_K_q4_K_q2_K_f32", 2, 4, 2, 4 };
+@@ -3224,33 +3224,33 @@ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+ 
+     return 3;
+ }
+ 
+ // K-quants asked for four columns while every other type batches from two, so at two or three
+ // sequences each column paid its own full pass over the weights
+ static int kquant_ext_floor() {
+     static const int v = []() {
+-        const char * s = getenv("TOSH_EXT_KQ_FLOOR");
++        const char * s = TOSH_ENV("TOSH_EXT_KQ_FLOOR");
+         return s ? atoi(s) : 2;
+     }();
+     return v;
+ }
+ 
+ // nine and ten columns only beat the tile with five per group, which needs the two-row variant
+ // and a cheap dequant: q5_K measures flat there and q6_K loses
+ static bool ext_wide_group(ggml_type tsrc0) {
+     return tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q2_K || tsrc0 == GGML_TYPE_Q3_K;
+ }
+ 
+ // above eight columns the matmul tile takes over, but on 64 lanes it costs the same from nine
+ // columns to thirty-two, so three column groups of the batched kernel are still cheaper
+ static int ext_ceil(int simd_width, ggml_type tsrc0) {
+     static const int v = []() {
+-        const char * s = getenv("TOSH_EXT_MAX");
++        const char * s = TOSH_ENV("TOSH_EXT_MAX");
+         return s ? atoi(s) : 0;
+     }();
+ 
+     if (v) {
+         return v;
+     }
+ 
+     if (simd_width == 64) {
+@@ -3265,18 +3265,18 @@ static bool ggml_metal_ranges_overlap(const ggml_tensor * a, const ggml_tensor *
+     const char * b0 = (const char *) b->data;
+     return a0 < b0 + ggml_nbytes(b) && b0 < a0 + ggml_nbytes(a);
+ }
+ 
+ // PQ2_0 gate and up mat-vecs of one token followed by their swiglu: one kernel writes the swiglu
+ // output. The three nodes are adjacent, so writing that output early only needs it apart from
+ // the activation the kernel reads.
+ static int ggml_metal_op_mul_mat_swiglu(ggml_metal_op_t ctx, int idx) {
+-    static const bool disabled = getenv("TOSH_SWIGLU_FUSION_DISABLE") != nullptr;
+-    if (disabled || !ctx->use_fusion || idx + 2 >= ctx->n_nodes()) {
++    static const bool disabled = TOSH_ENV("TOSH_SWIGLU_FUSION_DISABLE") != nullptr;
++    if (disabled || !ctx->use_fusion() || idx + 2 >= ctx->n_nodes()) {
+         return 0;
+     }
+ 
+     const ggml_tensor * a   = ctx->node(idx);
+     const ggml_tensor * b   = ctx->node(idx + 1);
+     const ggml_tensor * glu = ctx->node(idx + 2);
+ 
+     if (a->op != GGML_OP_MUL_MAT || b->op != GGML_OP_MUL_MAT || glu->op != GGML_OP_GLU ||
+@@ -3383,17 +3383,17 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+ 
+     const int16_t r2 = ne12/ne02;
+     const int16_t r3 = ne13/ne03;
+ 
+     // first try to use small-batch mat-mv kernels
+     // these should be efficient for BS [2, ~8]
+     // ext kernel derives its row split from the simdgroup width, so it runs on both
+     // wave32 and wave64. wave64 rides on wave64_decode (matches the mat-vec gating).
+-    static const bool ext_disabled = getenv("TOSH_EXT_DISABLE") != nullptr;
++    static const bool ext_disabled = TOSH_ENV("TOSH_EXT_DISABLE") != nullptr;
+     if (!ext_disabled &&
+         (props_dev->simd_width == 32 || (props_dev->simd_width == 64 && props_dev->wave64_decode)) &&
+         op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
+         (
+          (
+           (
+            op->src[0]->type == GGML_TYPE_F32  || // TODO: helper function
+            op->src[0]->type == GGML_TYPE_F16  ||
+@@ -3429,17 +3429,17 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+         //       values and there can be some tail effects when nsg is high. need to confirm this
+         //
+         const int nsg    = 1;                 // num simdgroups per threadgroup
+ 
+         // num threads along row per simdgroup
+         // the thresholds below split a 32-lane simdgroup; TOSH_EXT_NXPSG overrides them so the
+         // split can be swept on a 64-lane one, where the row/column balance is not the same
+         static const int nxpsg_env = []() {
+-            const char * s = getenv("TOSH_EXT_NXPSG");
++            const char * s = TOSH_ENV("TOSH_EXT_NXPSG");
+             return s ? atoi(s) : 0;
+         }();
+ 
+         int16_t nxpsg = 0;
+         if (nxpsg_env) {
+             nxpsg = (int16_t) nxpsg_env;
+         } else {
+             if (ne00 % 256 == 0 && ne11 < 3) {
+@@ -3449,18 +3449,18 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+             } else {
+                 nxpsg = 4;
+             }
+             // a 64-lane simdgroup wants twice the reduction width: +9.0% with four requests.
+             // TOSH_EXT_NXPSG_X2 tries it on 32 lanes, so that width can be A/B'd before the gate goes
+             // only where the contracted dimension is wide enough to keep four-wide loads per thread:
+             // at ne00 128 the doubled split leaves too few elements and the result goes wrong
+             if (ne00 % 256 == 0 &&
+-                (props_dev->simd_width == 64 || getenv("TOSH_EXT_NXPSG_X2") != nullptr) &&
+-                getenv("TOSH_EXT_NXPSG_X2_DISABLE") == nullptr) {
++                (props_dev->simd_width == 64 || TOSH_ENV("TOSH_EXT_NXPSG_X2") != nullptr) &&
++                TOSH_ENV("TOSH_EXT_NXPSG_X2_DISABLE") == nullptr) {
+                 nxpsg = std::min<int16_t>(16, nxpsg*2);
+             }
+         }
+ 
+         const int16_t nypsg  = props_dev->simd_width/nxpsg;   // num threads along col per simdgroup (i.e. a simdgroup processes that many src0 rows at a time)
+               int16_t r1ptg  = 4;                 // num src1 rows per threadgroup
+ 
+         // note: not sure how optimal are those across all different hardware. there might be something cleverer
+@@ -3483,26 +3483,26 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+         // 2 rows per thread: the activation chunk is loaded once and reused across them
+         const bool nr0_2 = op->src[0]->type == GGML_TYPE_Q4_K ||
+                            op->src[0]->type == GGML_TYPE_Q5_K ||
+                            op->src[0]->type == GGML_TYPE_Q6_K ||
+                            op->src[0]->type == GGML_TYPE_Q2_K ||
+                            op->src[0]->type == GGML_TYPE_Q3_K;
+ 
+         static const int nr0_env = []() {
+-            const char * s = getenv("TOSH_EXT_NR0");
++            const char * s = TOSH_ENV("TOSH_EXT_NR0");
+             return s ? atoi(s) : 0;
+         }();
+ 
+         // only the K-quants have a two-row variant; forcing the override on the rest asks the
+         // library for a kernel that was never instantiated
+         // Four rows per thread doubles what a threadgroup covers, so a weight with few
+         // rows stops filling the grid. The threshold is per row count, not per quant type.
+         static const int64_t nr0_min_rows = []() {
+-            const char * s = getenv("TOSH_EXT_NR0_MINROWS");
++            const char * s = TOSH_ENV("TOSH_EXT_NR0_MINROWS");
+             // off by default: the win depends on the weight's shape and one measured model
+             // still regresses at four columns, so it stays opt-in until that is understood
+             return s ? (int64_t) atoll(s) : (int64_t) 0;
+         }();
+         const bool nr0_wide = nr0_min_rows > 0 && props_dev->simd_width == 32 &&
+                               op->src[0]->type == GGML_TYPE_Q4_K && ne01 >= nr0_min_rows;
+ 
+         const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : (nr0_wide ? 4 : 2)) : 1;
+@@ -3510,17 +3510,17 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+         // each group makes a full pass over the weights, so the cost is groups by group width:
+         // nine and ten columns fit in two groups of five instead of three of four
+         if (ext_wide_group(op->src[0]->type) && (ne11 == 9 || ne11 == 10)) {
+             r1ptg = 5;
+         }
+ 
+         // the wave64 q6_K variant keeps four rows per simdgroup, so the row split does not apply
+         // keep the gate in sync with the pipeline picker in ggml_metal_library_get_pipeline_mul_mv_ext
+-        static const bool ext_w64_disable = getenv("TOSH_EXT_W64_DISABLE") != nullptr;
++        static const bool ext_w64_disable = TOSH_ENV("TOSH_EXT_W64_DISABLE") != nullptr;
+         const bool ext_w64_q6k = !ext_w64_disable &&
+                                  props_dev->simd_width == 64 && op->src[0]->type == GGML_TYPE_Q6_K;
+ 
+         // from six src1 rows the eight-column variant reads the weights once instead of twice
+         if (ext_w64_q6k && ne11 >= 6) {
+             r1ptg = 8;
+         }
+ 
+@@ -3759,17 +3759,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+ 
+     // A cached bank: pick the experts and pull in what is missing before the matmul reads the
+     // slots. Both run on this encoder, so the routing never goes back to the host.
+     // A bank handed over whole, because the batch was too wide for the cache: copy it to the
+     // scratch first. Reading experts scattered from host memory is what makes prefill crawl.
+     // Only banks of small rows gain: those are read scattered from host and the copy makes them
+     // contiguous. A bank of few, large rows already reads well and the copy is pure extra traffic.
+     static const size_t stage_row_max = []() {
+-        const char * s = getenv("TOSH_MOE_STAGE_ROW_KIB");
++        const char * s = TOSH_ENV("TOSH_MOE_STAGE_ROW_KIB");
+         return (size_t) (s ? atoi(s) : 1024) << 10;
+     }();
+ 
+     if (const ggml_tensor * stage = (const ggml_tensor *) (tosh_moe_slots_of(op->src[0]) ? tosh_moe_stage() : nullptr)) {
+         if (ggml_nbytes(op->src[0]) <= ggml_nbytes(stage) && nb02 <= stage_row_max) {
+             const uint32_t n_u4 = (uint32_t) (ggml_nbytes(op->src[0])/16);
+ 
+             auto ps = ggml_metal_library_compile_pipeline(lib, "tosh_moe_stage", "tosh_moe_stage", nullptr);
+@@ -3810,17 +3810,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+         const int n_expert = tosh_moe_experts_of(op->src[0]);
+         const int n_slots = (int) ne02;
+         const int n_fixed = tosh_moe_fixed_of(op->src[0]);
+         const int max_fetch = n_slots - n_fixed;
+         GGML_ASSERT(stage && state && n_expert > n_slots && nb02 % 16 == 0);
+         // A batch routes to a fraction of the bank, so rebuilding every row is most of the
+         // traffic of this path. Mark the routed ones and let the assemble skip the rest; a row
+         // nothing routes to is never read, so leaving it stale is safe.
+-        static const bool compact = getenv("TOSH_MOE_COMPACT_ASSEMBLE_DISABLE") == nullptr;
++        static const bool compact = TOSH_ENV("TOSH_MOE_COMPACT_ASSEMBLE_DISABLE") == nullptr;
+         ggml_metal_buffer_id ab = ggml_metal_get_buffer_id(state);
+         ab.offs += tosh_moe_off_active(n_expert, n_slots, max_fetch)*sizeof(int32_t);
+         if (compact) {
+             struct { int32_t n_used; int32_t n_tokens; int32_t stride; int32_t n_expert; } ma = {
+                 (int32_t) ne20, (int32_t) ne21, (int32_t) (nb21/sizeof(int32_t)), n_expert
+             };
+             auto pm = ggml_metal_library_compile_pipeline(lib, "tosh_moe_mark_active", "tosh_moe_mark_active", nullptr);
+             ggml_metal_encoder_set_pipeline(enc, pm);
+@@ -3915,17 +3915,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+             ggml_metal_encoder_set_threadgroup_memory_size(enc, (2*n_expert + 512)*i32, 0);
+             ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, 256, 1, 1);
+ 
+             ggml_metal_op_concurrency_reset(ctx);
+         }
+ 
+         // a whole expert is megabytes: one threadgroup per row leaves the device idle
+         static const int n_chunks = []() {
+-            const char * s = getenv("TOSH_MOE_FETCH_CHUNKS");
++            const char * s = TOSH_ENV("TOSH_MOE_FETCH_CHUNKS");
+             const int v = s ? atoi(s) : 16;
+             return v > 0 ? v : 1;
+         }();
+ 
+         ggml_metal_kargs_moe_fetch fa = {
+             /*.row_u4    =*/ (uint32_t) (nb02/16),
+             /*.max_fetch =*/ max_fetch,
+             /*.n_chunks  =*/ n_chunks,
+@@ -3943,26 +3943,26 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+         b.offs = bid_state.offs + tosh_moe_off_src(n_expert, n_slots, max_fetch)*i32;
+         ggml_metal_encoder_set_buffer(enc, b, 4);
+         b.offs = bid_state.offs + tosh_moe_off_n_indices(n_expert, n_slots, max_fetch)*i32;
+         ggml_metal_encoder_set_buffer(enc, b, 5);
+         ggml_metal_encoder_dispatch_threadgroups(enc, max_fetch*n_chunks, 1, 1, 256, 1, 1);
+ 
+         ggml_metal_op_concurrency_reset(ctx);
+ 
+-        static const bool raw_ids = getenv("TOSH_MOE_RAW_IDS") != nullptr;
++        static const bool raw_ids = TOSH_ENV("TOSH_MOE_RAW_IDS") != nullptr;
+         if (!raw_ids) {
+             bid_src2 = bid_state;
+             bid_src2.offs = bid_state.offs + tosh_moe_off_ids(n_expert, n_slots, max_fetch)*i32;
+         }
+     }
+ 
+     // escape hatch: revert wave64 MoE prefill to the mat-vec route
+     const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
+-        getenv("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
++        TOSH_ENV("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
+ 
+     if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm || (props_dev->use_mm_manual && mm_id_manual_ok))) {
+         // some Metal matrix data types require aligned pointers
+         // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
+         //switch (op->src[0]->type) {
+         //    case GGML_TYPE_F32:  GGML_ASSERT(nb01 % 16 == 0); break;
+         //    case GGML_TYPE_F16:  GGML_ASSERT(nb01 % 8  == 0); break;
+         //    case GGML_TYPE_BF16: GGML_ASSERT(nb01 % 8  == 0); break;
+@@ -4094,17 +4094,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+             int ntg0 = (ne21 + nr1 - 1)/nr1;
+ 
+             // a 64-lane card hands consecutive threadgroups to its four shader engines in turn,
+             // and only the first token tile of an expert has work while the experts stay narrower
+             // than the tile, so the working threadgroups sit one every ntg0. An even ntg0 parks
+             // them on half the engines and a multiple of four on a single one (measured 1.8x and
+             // 3.4x). One inert tile restores the spread; it returns before reading anything.
+             if (props_dev->simd_width == 64 && ntg0 % 2 == 0 &&
+-                getenv("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
++                TOSH_ENV("TOSH_MMID_ODD_GRID_DISABLE") == nullptr) {
+                 ntg0 += 1;
+             }
+ 
+             ggml_metal_encoder_dispatch_threadgroups(enc, ntg0, (ne01 + 63)/64, ne02_run, 128, 1, 1);
+         }
+     } else {
+         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id(lib, op);
+ 
+@@ -4687,17 +4687,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         ? props_dev->has_simdgroup_reduction
+         : props_dev->wave64_decode;
+     // sparse attention (QSA / DeepSeek-V4): the mask already carries the selection, the
+     // index kernel compacts it and the vec kernel walks the list instead of the whole cache
+     const int amd_n_kv_max = ggml_metal_op_flash_attn_ext_n_kv_max_sparse(op);
+     const bool amd_sparse  = amd_n_kv_max > 0 && ne01 == 1;
+     const int amd_n_kv_pad = amd_sparse ? GGML_PAD(amd_n_kv_max, OP_FLASH_ATTN_EXT_VEC_NCPSG) : 0;
+ 
+-    if (getenv("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
++    if (TOSH_ENV("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
+         !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
+         !has_bias && !has_scap) {
+ 
+         ggml_metal_kargs_flash_attn_ext_amd args = {
+             /*.ne01          =*/ ne01,
+             /*.ne02          =*/ ne02,
+             /*.ne03          =*/ ne03,
+             /*.nb01          =*/ nb01,
+@@ -4730,40 +4730,40 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             /*.n_head_log2   =*/ n_head_log2,
+             /*.logit_softcap =*/ logit_softcap,
+             /*.has_sinks     =*/ has_sinks ? 1 : 0,
+             /*.has_mask      =*/ has_mask ? 1 : 0,
+             /*.n_kv_max_padded =*/ amd_n_kv_pad,
+         };
+ 
+         // queries per threadgroup, matching the instantiation for this head size
+-        static const bool pf512 = getenv("TOSH_FA_PF_DK512") != nullptr;
++        static const bool pf512 = TOSH_ENV("TOSH_FA_PF_DK512") != nullptr;
+         // MLA keeps K wider than V; the tile kernel it used to fall back to measures ~26% slower
+-        static const bool pfmla = getenv("TOSH_FA_PF_MLA_DISABLE") == nullptr;
++        static const bool pfmla = TOSH_ENV("TOSH_FA_PF_MLA_DISABLE") == nullptr;
+         const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
+         const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
+                                op->src[2]->type == GGML_TYPE_F16;
+         const bool fa_pf_mla320 = ne00 == 320 && ne20 == 256 && op->src[1]->type == op->src[2]->type;
+         // BQ must match the instantiation: dispatching in wider blocks than the kernel
+         // covers leaves most queries uncomputed
+         int fa_pf_bq = (ne00 == 256 || ne00 == 160) ? 32
+             : ((fa_pf_512 || fa_pf_mla || fa_pf_mla320) ? 16 : 64);
+         const bool fa_pf_head_ok =
+             ne00 == 64 || ne00 == 128 || ne00 == 256 || fa_amd_dk72 || fa_amd_unet || fa_pf_512 ||
+             fa_pf_mla || fa_pf_mla320;
+         // PF always dispatches 256 threads and subdivides them into logical
+         // 16-lane query groups, so the same specialization works on wave32
+         // (8 physical simdgroups) and wave64 (4 physical simdgroups).
+-        if (getenv("TOSH_FA_PF_DEBUG") != nullptr) {
++        if (TOSH_ENV("TOSH_FA_PF_DEBUG") != nullptr) {
+             fprintf(stderr, "FA_PF gate dk=%d dv=%d ne01=%d head_ok=%d ktype=%s vtype=%s\n",
+                     (int) ne00, (int) ne20, (int) ne01, (int) fa_pf_head_ok,
+                     ggml_type_name(op->src[1]->type), ggml_type_name(op->src[2]->type));
+         }
+         if ((props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+-            ne01 >= 32 && fa_pf_head_ok && getenv("TOSH_FA_PF_DISABLE") == NULL) {
++            ne01 >= 32 && fa_pf_head_ok && TOSH_ENV("TOSH_FA_PF_DISABLE") == NULL) {
+             char fa_pf_pipeline[80];
+             bool fa_pf_asym = false;
+             if (fa_pf_mla) {
+                 snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk576_dv512_k%s_vf16",
+                          ggml_metal_fa_amd_type_suffix(op->src[1]->type));
+                 fa_pf_asym = true;
+             } else if (ne20 != ne00) {
+                 snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk%d_dv%d_k%s_v%s",
+@@ -4776,34 +4776,34 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+ 
+                 // the 64-lane twin lives in fa_w64.metal, with the lane group as a parameter.
+                 // Only the symmetric heads have one; MLA and the asymmetric pairs stay above.
+                 // TOSH_FA_PF_LG picks the group so the three can be compared; 16 reproduces
+                 // the 32-lane kernel exactly and is the control.
+                 static const int pf_lg = []() {
+                     // the cross sweep left the group at sixteen: wider only wins at depth 0,
+                     // where this kernel weighs least, and loses 3 to 37% deeper in
+-                    const char * s = getenv("TOSH_FA_PF_LG");
++                    const char * s = TOSH_ENV("TOSH_FA_PF_LG");
+                     return s ? atoi(s) : 16;
+                 }();
+                 // TOSH_FA_PF_BQ picks the query-block twin of that group, which is what keeps
+                 // the rows per thread fixed while the group widens
+                 static const int pf_bq = []() {
+-                    const char * s = getenv("TOSH_FA_PF_BQ");
++                    const char * s = TOSH_ENV("TOSH_FA_PF_BQ");
+                     return s ? atoi(s) : 0;
+                 }();
+                 // TOSH_FA_PF_BK picks the key-block twin: the counterpart of BQ on the other
+                 // side of the K/V reuse, so a bigger block pays the same traffic fewer times
+                 static const int pf_bk = []() {
+-                    const char * s = getenv("TOSH_FA_PF_BK");
++                    const char * s = TOSH_ENV("TOSH_FA_PF_BK");
+                     return s ? atoi(s) : 0;
+                 }();
+                 if (props_dev->simd_width == 64 && (pf_lg == 16 || pf_lg == 32 || pf_lg == 64) &&
+                     (ne00 == 64 || ne00 == 128 || ne00 == 256 || ne00 == 512) &&
+-                    getenv("TOSH_FA_PF_W64_DISABLE") == nullptr) {
++                    TOSH_ENV("TOSH_FA_PF_W64_DISABLE") == nullptr) {
+                     char w64_name[96];
+                     if (pf_bq > 0) {
+                         snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%dq%dk%d", fa_pf_pipeline, pf_lg, pf_bq,
+                                  pf_bk > 0 ? pf_bk : 64);
+                     } else {
+                         snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%d", fa_pf_pipeline, pf_lg);
+                     }
+                     if (ggml_metal_library_get_pipeline(lib, w64_name).pipeline ||
+@@ -4815,36 +4815,36 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                         }
+                     }
+                 }
+             }
+ 
+             // the asymmetric heads compose their name in the branches above, so their twin is
+             // picked here instead. Same group of sixteen; the fallback is the 32-lane kernel.
+             if (fa_pf_asym && props_dev->simd_width == 64 &&
+-                getenv("TOSH_FA_PF_W64_DISABLE") == nullptr) {
++                TOSH_ENV("TOSH_FA_PF_W64_DISABLE") == nullptr) {
+                 char w64_name[96];
+                 // sixteen reproduces the 32-lane kernel exactly, so it is the control; the
+                 // sweep that closed the symmetric heads there never covered an asymmetric one
+-                const char * slg = getenv("TOSH_FA_PF_LG");
++                const char * slg = TOSH_ENV("TOSH_FA_PF_LG");
+                 snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%d", fa_pf_pipeline, slg ? atoi(slg) : 16);
+                 if (ggml_metal_library_get_pipeline(lib, w64_name).pipeline ||
+                     ggml_metal_library_compile_pipeline(lib, w64_name, w64_name, nullptr).pipeline) {
+                     snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "%s", w64_name);
+                 }
+             }
+ 
+             auto pipeline = ggml_metal_library_get_pipeline(lib, fa_pf_pipeline);
+             if (!pipeline.pipeline) {
+                 pipeline = ggml_metal_library_compile_pipeline(lib, fa_pf_pipeline, fa_pf_pipeline, nullptr);
+             }
+ 
+             // Which twin a head actually lands on cannot be read from the timings: a switch that
+             // never reaches the kernel gives the same number on both sides.
+-            if (getenv("TOSH_FA_PF_DEBUG") != nullptr) {
++            if (TOSH_ENV("TOSH_FA_PF_DEBUG") != nullptr) {
+                 fprintf(stderr, "FA_PF dk=%d dv=%d bq=%d -> %s%s\n",
+                         (int) ne00, (int) ne20, fa_pf_bq, fa_pf_pipeline,
+                         pipeline.pipeline ? "" : "  (NO EXISTE, cae al tile)");
+             }
+ 
+             // it fits in registers with nothing to spare; a compiler bump could
+             // push it under the 256 threads it dispatches. A driver that refused to build
+             // the kernel leaves the pipeline null, which the tile path below covers: older
+@@ -4865,17 +4865,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                                                          props_dev->simd_width, 256/props_dev->simd_width, 1);
+ 
+                 return 1;
+             }
+         }
+ 
+         // prefill goes to the tile kernel (K/V shared across 16 queries);
+         // decode keeps the per-query vec kernel
+-        if (ne01 >= 16 && getenv("TOSH_FA_TILE_DISABLE") == NULL) {
++        if (ne01 >= 16 && TOSH_ENV("TOSH_FA_TILE_DISABLE") == NULL) {
+             char fa_tile_pipeline[80];
+             if (ne20 != ne00) {
+                 // MLA heads carry the value width in the name: 576/512 and 320/256
+                 snprintf(fa_tile_pipeline, sizeof(fa_tile_pipeline), "kernel_flash_attn_ext_tile_amd_dk%d_dv%d_k%s_v%s%s",
+                          (int) ne00, (int) ne20,
+                          ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type),
+                          props_dev->simd_width == 64 ? "_w64" : "");
+             } else {
+@@ -4924,63 +4924,63 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         if (props_dev->simd_width == 64) {
+             fa_amd_nsg /= 2;
+         }
+         // the simdgroup count per head was never swept on either width; the pipeline caps it,
+         // so an override that overruns is dropped below rather than dispatched
+         // one value for every head size overruns the pipelines that cap lower, so the
+         // override is per head size: TOSH_FA_AMD_NSG_64, _128, _WIDE
+         static const int nsg_env_64 = []() {
+-            const char * s = getenv("TOSH_FA_AMD_NSG_64");
++            const char * s = TOSH_ENV("TOSH_FA_AMD_NSG_64");
+             return s ? atoi(s) : 0;
+         }();
+         static const int nsg_env_128 = []() {
+-            const char * s = getenv("TOSH_FA_AMD_NSG_128");
++            const char * s = TOSH_ENV("TOSH_FA_AMD_NSG_128");
+             return s ? atoi(s) : 0;
+         }();
+         static const int nsg_env_wide = []() {
+-            const char * s = getenv("TOSH_FA_AMD_NSG_WIDE");
++            const char * s = TOSH_ENV("TOSH_FA_AMD_NSG_WIDE");
+             return s ? atoi(s) : 0;
+         }();
+         const int nsg_env = ne00 == 64 ? nsg_env_64 : ne00 == 128 ? nsg_env_128 : nsg_env_wide;
+         if (nsg_env > 0) {
+             fa_amd_nsg = nsg_env;
+         }
+ 
+         // one threadgroup per query head leaves most of the GPU idle on models with
+         // few heads; split the cache across 32 and let upstream's reduce merge them
+         // Head 128 needs a deeper cache than the wide heads before the 32-way reduce pays
+         // for itself, so it carries its own threshold. The depth it turns at is not the same
+         // on both widths, so each keeps its own.
+         static const int64_t wg_dk128_env = []() {
+-            const char * s = getenv("TOSH_FA_WG_DK128_MIN_KV");
++            const char * s = TOSH_ENV("TOSH_FA_WG_DK128_MIN_KV");
+             return s ? (int64_t) atoll(s) : (int64_t) -1;
+         }();
+         const bool wg_wide_head =
+             ne00 == 256 || ne00 == 512 || (ne00 == 576 && ne20 == 512) ||
+             (ne00 == 320 && ne20 == 256);
+         const int64_t wg_dk128_min_kv = wg_dk128_env >= 0 ? wg_dk128_env
+                                       : (props_dev->simd_width == 64 ? ggml_metal_fa_wg_dk128_min_kv_w64(ne02, ne12) : 24576);
+         const bool wg_dk128_width_ok = props_dev->simd_width == 32 || props_dev->simd_width == 64;
+         // TOSH_FA_WG_DK64=<kv> sets the head-64 depth for every shape, 0 closes it
+         static const int64_t wg_dk64_env = []() {
+-            const char * s = getenv("TOSH_FA_WG_DK64");
++            const char * s = TOSH_ENV("TOSH_FA_WG_DK64");
+             return s ? (int64_t) atoll(s) : (int64_t) -1;
+         }();
+         const int64_t wg_dk64_min_kv = wg_dk64_env >= 0 ? wg_dk64_env
+                                      : (props_dev->simd_width == 64 ? ggml_metal_fa_wg_dk64_min_kv_w64(ne02, ne12) : 0);
+         const bool wg_dk64 = ne00 == 64 && ne20 == 64 && wg_dk128_width_ok &&
+                              wg_dk64_min_kv > 0 && ne11 >= wg_dk64_min_kv;
+         const bool wg_dk128 = (ne00 == 128 && ne20 == 128 && wg_dk128_width_ok &&
+                                wg_dk128_min_kv > 0 && ne11 >= wg_dk128_min_kv) || wg_dk64;
+         const int fa_amd_nwg =
+             (wg_wide_head || wg_dk128) && ne01 == 1 && !has_sinks &&
+             (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+             (wg_dk128 || ne11 >= 1024) &&
+-            getenv("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
++            TOSH_ENV("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
+ 
+         char fa_amd_wg_pipeline[96];
+         if (fa_amd_nwg > 1) {
+             snprintf(fa_amd_wg_pipeline, sizeof(fa_amd_wg_pipeline), "%s_wg32", fa_amd_pipeline);
+         }
+ 
+         // sparse: build the compacted index list first, on the same encoder
+         ggml_metal_buffer_id bid_amd_idx = bid_tmp;
+@@ -6980,17 +6980,17 @@ static ggml_tensor * ggml_metal_view_base(ggml_tensor * t) {
+ 
+ static bool ggml_metal_tosh_topk_moe_same(ggml_tensor * a, ggml_tensor * b) {
+     return a && b && ggml_metal_view_base(a) == ggml_metal_view_base(b);
+ }
+ 
+ static bool ggml_metal_tosh_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_tosh_topk_moe_plan & plan) {
+     // measured neutral on RDNA2 (pp512 +0.1%, tg128 -1%, both inside the noise), so the
+     // dispatch saving does not pay for itself here; opt-in until a device shows a gain
+-    static const bool enabled = getenv("GGML_METAL_TOPK_MOE_ENABLE") != nullptr;
++    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_ENABLE") != nullptr;
+     if (!enabled || !ctx->use_fusion()) {
+         return false;
+     }
+ 
+     if (idx + 2 >= ctx->n_nodes()) {
+         return false;
+     }
+ 

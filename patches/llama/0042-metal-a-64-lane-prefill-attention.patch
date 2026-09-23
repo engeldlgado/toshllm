@@ -1,21 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:17 -0400
-Subject: [PATCH] 0045-metal-a-64-lane-prefill-attention
-
----
- ggml/src/ggml-metal/CMakeLists.txt       |   1 +
- ggml/src/ggml-metal/ggml-metal-device.m  |   1 +
- ggml/src/ggml-metal/ggml-metal-ops.cpp   |  44 ++-
- ggml/src/ggml-metal/kernels/fa_w64.metal | 362 +++++++++++++++++++++++
- 4 files changed, 407 insertions(+), 1 deletion(-)
- create mode 100644 ggml/src/ggml-metal/kernels/fa_w64.metal
-
 diff --git a/ggml/src/ggml-metal/CMakeLists.txt b/ggml/src/ggml-metal/CMakeLists.txt
-index c914e19f2..969ba8c16 100644
+index d59adc6bd..cb04bfefb 100644
 --- a/ggml/src/ggml-metal/CMakeLists.txt
 +++ b/ggml/src/ggml-metal/CMakeLists.txt
-@@ -37,6 +37,7 @@ endif()
+@@ -33,16 +33,17 @@ set(METALLIB_KERNELS_QUANTIZE   "${CMAKE_CURRENT_SOURCE_DIR}/kernels/quantize.h"
+ # the expert cache kernels ride along as one more library when the dynamic MoE is on
+ if (TOSH_ENABLE_DYNAMIC_MOE)
+     configure_file(${CMAKE_SOURCE_DIR}/tosh-moe/tosh-moe-lru.metal
+                    ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tosh_moe.metal COPYONLY)
+ endif()
  
  set(METALLIB_KERNEL_SOURCES
      kernels/fa.metal
@@ -23,11 +15,21 @@ index c914e19f2..969ba8c16 100644
      kernels/mul_mv.metal
      kernels/mul_mv_w64.metal
      kernels/mul_mm.metal
+     kernels/mul_mm_w64.metal
+     kernels/quantize.metal
+     kernels/softmax.metal
+     kernels/norm.metal
+     kernels/unary.metal
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 8537056f1..4b1d5a44d 100644
+index 14d306094..d895cb10a 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -120,6 +120,7 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
+@@ -116,16 +116,17 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
+ 
+ // Single source of truth for the per-kind metal libraries. The order here
+ // defines the enum values and every per-kind table below, so adding a library
+ // is a one-line change here (plus adding its source to CMakeLists.txt).
+ //   X(suffix, name): name is both the kernels/<name>.metal basename and the
  //   ggml_metallib_<name>_{start,end} embed-symbol stem.
  #define GGML_METAL_LIBS \
      X(FA,              fa)             \
@@ -35,11 +37,21 @@ index 8537056f1..4b1d5a44d 100644
      X(MUL_MV,          mul_mv)         \
      X(MUL_MV_W64,      mul_mv_w64)     \
      X(MUL_MM,          mul_mm)         \
+     X(MUL_MM_W64,      mul_mm_w64)     \
+     X(QUANTIZE,        quantize)       \
+     X(SOFTMAX,         softmax)        \
+     X(NORM,            norm)           \
+     X(UNARY,           unary)          \
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 4b546f95d..43493ba7a 100644
+index 5cec2d64d..e79b4c680 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3868,7 +3868,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -3974,17 +3974,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         // MLA keeps K wider than V; the tile kernel it used to fall back to measures ~26% slower
+         static const bool pfmla = getenv("TOSH_FA_PF_MLA_DISABLE") == nullptr;
+         const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
+         const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
+                                op->src[2]->type == GGML_TYPE_F16;
          const bool fa_pf_mla320 = ne00 == 320 && ne20 == 256 && op->src[1]->type == op->src[2]->type;
          // BQ must match the instantiation: dispatching in wider blocks than the kernel
          // covers leaves most queries uncomputed
@@ -48,7 +60,17 @@ index 4b546f95d..43493ba7a 100644
              : ((fa_pf_512 || fa_pf_mla || fa_pf_mla320) ? 16 : 64);
          const bool fa_pf_head_ok =
              ne00 == 64 || ne00 == 128 || ne00 == 256 || fa_amd_dk72 || fa_amd_unet || fa_pf_512 ||
-@@ -3889,6 +3889,48 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             fa_pf_mla || fa_pf_mla320;
+         // PF always dispatches 256 threads and subdivides them into logical
+         // 16-lane query groups, so the same specialization works on wave32
+         // (8 physical simdgroups) and wave64 (4 physical simdgroups).
+         if ((props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+@@ -3995,16 +3995,58 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                          ggml_metal_fa_amd_type_suffix(op->src[1]->type));
+             } else if (ne20 != ne00) {
+                 snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk%d_dv%d_k%s_v%s",
+                          (int) ne00, (int) ne20,
+                          ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type));
              } else {
              snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk%d_k%s_v%s", (int) ne00,
                       ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type));
@@ -97,6 +119,11 @@ index 4b546f95d..43493ba7a 100644
              }
  
              auto pipeline = ggml_metal_library_get_pipeline(lib, fa_pf_pipeline);
+             if (!pipeline.pipeline) {
+                 pipeline = ggml_metal_library_compile_pipeline(lib, fa_pf_pipeline, fa_pf_pipeline, nullptr);
+             }
+ 
+             // it fits in registers with nothing to spare; a compiler bump could
 diff --git a/ggml/src/ggml-metal/kernels/fa_w64.metal b/ggml/src/ggml-metal/kernels/fa_w64.metal
 new file mode 100644
 index 000000000..1c6183349

@@ -1,27 +1,32 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:15 -0400
-Subject: [PATCH] 0040-metal-a-64-lane-matvec-for-every-quant-type
-
----
- ggml/src/ggml-metal/ggml-metal-device.cpp    |  224 +-
- ggml/src/ggml-metal/kernels/mul_mv_w64.metal | 7496 +++++++++++++++++-
- 2 files changed, 7703 insertions(+), 17 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 0bd714a46..3072f7bc6 100644
+index e0d2dd508..29cd531fa 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1054,6 +1054,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -1081,16 +1081,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     size_t smem = 0; // shared memory
+ 
+     const ggml_type tsrc0 = op->src[0]->type;
+     const ggml_type tsrc1 = op->src[1]->type;
+ 
      const int simd_width = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
  
      const char * suffix = "";
 +    bool w64 = false;
 +    char sweep_sfx[16] = {0};
  
+ 
      // use custom matrix x vector kernel
      switch (tsrc0) {
-@@ -1086,27 +1088,73 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         case GGML_TYPE_F32:
+         case GGML_TYPE_F16:
+         case GGML_TYPE_BF16:
+             {
+@@ -1114,83 +1116,167 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+             } break;
+         case GGML_TYPE_Q2_0:
+             {
+                 nsg = N_SG_Q2_0;
+                 nr0 = N_R0_Q2_0;
              } break;
          case GGML_TYPE_Q4_0:
              {
@@ -104,7 +109,9 @@ index 0bd714a46..3072f7bc6 100644
                      nsg = 1;
                      nr0 = 4;
                      suffix = "_r4";
-@@ -1116,6 +1164,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 } else {
+                     nsg = N_SG_Q8_0;
+                     nr0 = N_R0_Q8_0;
                  }
                  // the reduction buffer scales with the rows, so it follows the effective nr0
                  smem = 32*sizeof(float)*nr0;
@@ -115,7 +122,8 @@ index 0bd714a46..3072f7bc6 100644
              } break;
          case GGML_TYPE_MXFP4:
              {
-@@ -1124,6 +1176,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 // Fewer than four rows per simdgroup falls off a cliff here: two rows measured
+                 // 3904 us against 122 for four on the same matrix, so both widths take four.
                  nsg = N_SG_MXFP4;
                  nr0 = N_R0_MXFP4;
                  smem = 32*sizeof(float);
@@ -126,7 +134,11 @@ index 0bd714a46..3072f7bc6 100644
              } break;
          case GGML_TYPE_Q2_K:
              {
-@@ -1135,9 +1191,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+                     nr0 = 8;
+                     suffix = "_r8";
+                 } else {
                      nsg = N_SG_Q2_K;
                      nr0 = N_R0_Q2_K;
                  }
@@ -148,7 +160,13 @@ index 0bd714a46..3072f7bc6 100644
                  // 64 lanes want eight rows in one group (+7.2% tg); two groups there costs 30%
                  if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
                      nsg = 1;
-@@ -1151,8 +1219,26 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nr0 = 8;
+                     suffix = "_r8";
+                 } else {
+                     nsg = N_SG_Q3_K;
+                     nr0 = N_R0_Q3_K;
+                 }
+             } break;
          case GGML_TYPE_Q4_K:
              {
                  // small matrices: one simdgroup with 4 rows amortizes the
@@ -177,7 +195,17 @@ index 0bd714a46..3072f7bc6 100644
                      nsg = 1;
                      nr0 = 4;
                      suffix = "_r4";
-@@ -1173,6 +1259,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 } else {
+                     nsg = N_SG_Q4_K;
+                     nr0 = N_R0_Q4_K;
+                 }
+             } break;
+@@ -1201,88 +1287,155 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+                     nr0 = 8;
+                     suffix = "_r8";
+                 } else {
                      nsg = N_SG_Q5_K;
                      nr0 = N_R0_Q5_K;
                  }
@@ -195,7 +223,12 @@ index 0bd714a46..3072f7bc6 100644
              } break;
          case GGML_TYPE_Q6_K:
              {
-@@ -1185,18 +1282,30 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 // 64 lanes want four rows in one group (+16.3% tg); 32 keep the shipped pair
+                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+                     nr0 = 4;
+                     suffix = "_r4";
+                 } else {
                      nsg = N_SG_Q6_K;
                      nr0 = N_R0_Q6_K;
                  }
@@ -226,7 +259,12 @@ index 0bd714a46..3072f7bc6 100644
              } break;
          case GGML_TYPE_IQ3_XXS:
              {
-@@ -1209,42 +1318,86 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 if ((simd_width == 64 || getenv("TOSH_MV_R8") != nullptr) && getenv("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+                     nr0 = 8;
+                     suffix = "_r8";
+                 } else {
+                     nsg = N_SG_IQ3_XXS;
                      nr0 = N_R0_IQ3_XXS;
                  }
                  smem = 256*4+128;
@@ -317,7 +355,17 @@ index 0bd714a46..3072f7bc6 100644
              } break;
          case GGML_TYPE_TQ2_0:
              {
-@@ -1304,9 +1457,50 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                 nsg = N_SG_TQ2_0;
+                 nr0 = N_R0_TQ2_0;
+             } break;
+         default:
+             {
+@@ -1332,19 +1485,60 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+ 
+     // A stride that is a multiple of four lets the quant arrays be read a word at a time.
+     // The two widths are decided apart: 64 lanes have no last-level cache to hide the extra
+     // loads and every type gains, while 32 lanes only measured a gain on q8_0.
+     const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
      const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
      const bool row8 = row8_aligned && row8_width && getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
  
@@ -368,11 +416,21 @@ index 0bd714a46..3072f7bc6 100644
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
          ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, (int16_t) ne12, FC_MUL_MV + 2);
+         ggml_metal_cv_set_int16(cv, r2,             FC_MUL_MV + 3);
+         ggml_metal_cv_set_int16(cv, r3,             FC_MUL_MV + 4);
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 index 08bc2ecf3..195f978d5 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -13,11 +13,353 @@ constant short FC_mul_mv_nw   [[function_constant(FC_MUL_MV + 5)]];
+@@ -8,21 +8,363 @@
+ constant short FC_mul_mv_nsg  [[function_constant(FC_MUL_MV + 0)]];
+ constant short FC_mul_mv_ne12 [[function_constant(FC_MUL_MV + 2)]];
+ constant short FC_mul_mv_r2   [[function_constant(FC_MUL_MV + 3)]];
+ constant short FC_mul_mv_r3   [[function_constant(FC_MUL_MV + 4)]];
+ constant short FC_mul_mv_nw   [[function_constant(FC_MUL_MV + 5)]];
  constant bool  FC_mul_mv_row4 [[function_constant(FC_MUL_MV + 6)]];
  constant bool  FC_mul_mv_row8 [[function_constant(FC_MUL_MV + 7)]];
  
@@ -727,7 +785,17 @@ index 08bc2ecf3..195f978d5 100644
          args_t args,
          device const char * src0,
          device const char * src1,
-@@ -143,5 +485,7155 @@ kernel void kernel_mul_mv_q6_K_f32_w64_r4(
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
+         ushort tiisg,
+         ushort sgitg) {
+@@ -138,10 +480,7160 @@ kernel void kernel_mul_mv_q6_K_f32_w64_r4(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         uint3  tgpig[[threadgroup_position_in_grid]],
          ushort tiisg[[thread_index_in_simdgroup]],
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
  

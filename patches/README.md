@@ -15,7 +15,7 @@ moving a file.
 
 ## `llama/`
 
-`0001` to `0007` are the port to upstream `ca3d5a3e1`, split by the files they touch. They are a
+`0001` to `0007` are the port to upstream `9575389609d6`, split by the files they touch. They are a
 baseline, not somewhere to add things: **a new change gets its own numbered patch after them**,
 one patch per change, so each one can be read, measured and reverted on its own.
 

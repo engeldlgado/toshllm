@@ -1,7 +1,13 @@
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
+index dd451cc63..1b47f11d9 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
-@@ -85,6 +85,9 @@
+@@ -80,16 +80,19 @@ extern "C" {
+ 
+     GGML_API ggml_backend_buffer_type_t ggml_backend_get_default_buffer_type(ggml_backend_t backend);
+     GGML_API ggml_backend_buffer_t      ggml_backend_alloc_buffer(ggml_backend_t backend, size_t size);
+     GGML_API size_t                     ggml_backend_get_alignment(ggml_backend_t backend);
+     GGML_API size_t                     ggml_backend_get_max_size(ggml_backend_t backend);
  
      GGML_API void ggml_backend_tensor_set_async   (ggml_backend_t backend,       struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
      GGML_API void ggml_backend_tensor_get_async   (ggml_backend_t backend, const struct ggml_tensor * tensor,       void * data, size_t offset, size_t size);
@@ -11,16 +17,24 @@ diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
      GGML_API void ggml_backend_tensor_set_2d_async(ggml_backend_t backend,       struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
      GGML_API void ggml_backend_tensor_get_2d_async(ggml_backend_t backend, const struct ggml_tensor * tensor,       void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
  
+     // "offset" refers to the offset in tensor->data for setting/getting data
+     GGML_API void ggml_backend_tensor_set   (      struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
+     GGML_API void ggml_backend_tensor_get   (const struct ggml_tensor * tensor,       void * data, size_t offset, size_t size);
+     GGML_API void ggml_backend_tensor_set_2d(      struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
+     GGML_API void ggml_backend_tensor_get_2d(const struct ggml_tensor * tensor,       void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index 7b6069a66..6ab7cceec 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -273,6 +273,18 @@
+@@ -271,16 +271,28 @@ void ggml_backend_tensor_set_async(ggml_backend_t backend, struct ggml_tensor *
+     if (backend->iface.set_tensor_async == NULL) {
+         ggml_backend_synchronize(backend);
          ggml_backend_tensor_set(tensor, data, offset, size);
      } else {
          backend->iface.set_tensor_async(backend, tensor, data, offset, size);
-+    }
-+}
-+
+     }
+ }
+ 
 +void ggml_backend_read_batch_begin(ggml_backend_t backend) {
 +    if (backend && backend->iface.read_batch_begin) {
 +        backend->iface.read_batch_begin(backend);
@@ -30,13 +44,27 @@ diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
 +void ggml_backend_read_batch_end(ggml_backend_t backend) {
 +    if (backend && backend->iface.read_batch_end) {
 +        backend->iface.read_batch_end(backend);
-     }
- }
++    }
++}
++
+ void ggml_backend_tensor_get_async(ggml_backend_t backend, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+     GGML_ASSERT(backend);
+     GGML_ASSERT(tensor);
+     GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
+     GGML_ASSERT(offset + size <= ggml_nbytes(tensor) && "tensor read out of bounds");
  
+     if (backend->iface.get_tensor_async == NULL) {
+         ggml_backend_synchronize(backend);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index a66f9b6f4..ef39bbeea 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -971,6 +971,7 @@
+@@ -970,16 +970,17 @@ struct ggml_metal_device {
+     id<MTLBuffer>        stage_set_bufs[4];
+     id<MTLCommandBuffer> stage_set_cmds[4];
+     int                  stage_set_cur;
+     // open read batch: blits accumulate into one command buffer, one wait at end
+     id<MTLCommandBuffer>       stage_batch_cmd;
      id<MTLBlitCommandEncoder>  stage_batch_enc;
      size_t                     stage_batch_used;
      int                        stage_batch_n;
@@ -44,19 +72,39 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
      struct { void * dst; size_t off; size_t size; } stage_batch_items[16];
  
      // cached no-copy wraps of host memory regions used as blit sources, so
-@@ -3286,6 +3287,11 @@
+     // repeated uploads of the same weights don't churn kernel resources
+     struct {
+         const void *  base;
+         size_t        size;
+         id<MTLBuffer> buf;
+@@ -3314,16 +3315,21 @@ static void ggml_metal_device_stage_batch_flush(ggml_metal_device_t dev) {
+     [dev->stage_batch_enc endEncoding];
+     [dev->stage_batch_cmd commit];
+     [dev->stage_batch_cmd waitUntilCompleted];
+     for (int i = 0; i < dev->stage_batch_n; i++) {
          memcpy(dev->stage_batch_items[i].dst,
                 (char *) dev->stage_buf.contents + dev->stage_batch_items[i].off,
                 dev->stage_batch_items[i].size);
-+    }
+     }
 +    if (dev->stage_batch_owned) {
 +        [dev->stage_batch_enc release];
 +        [dev->stage_batch_cmd release];
 +        dev->stage_batch_owned = false;
-     }
++    }
      dev->stage_batch_n    = 0;
      dev->stage_batch_used = 0;
-@@ -3312,6 +3318,11 @@
+     dev->stage_batch_enc  = nil;
+     dev->stage_batch_cmd  = nil;
+ }
+ 
+ void ggml_metal_device_read_batch_begin(ggml_metal_device_t dev) {
+     // shared-buffer devices never take the stage path; skip the empty batch
+@@ -3339,41 +3345,62 @@ void ggml_metal_device_read_batch_end(ggml_metal_device_t dev) {
+     if (dev->props.use_shared_buffers) {
+         return;
+     }
+     if (dev->stage_batch_cmd != nil) {
+         if (dev->stage_batch_n > 0) {
              ggml_metal_device_stage_batch_flush(dev);
          } else {
              [dev->stage_batch_enc endEncoding];
@@ -68,7 +116,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
              dev->stage_batch_cmd = nil;
              dev->stage_batch_enc = nil;
          }
-@@ -3319,6 +3330,14 @@
+     }
      [dev->stage_lock unlock];
  }
  
@@ -83,7 +131,14 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
  bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buffer_id bid_src, void * data, size_t size) {
      if (size == 0) {
          return true;
-@@ -3333,11 +3352,19 @@
+     }
+     if (size > GGML_METAL_STAGE_BUF_MAX || bid_src.metal == nil) {
+         return false;
+     }
+ 
+     const uint64_t t0 = tosh_prof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+ 
+     [dev->stage_lock lock];
  
      // inside an open read batch: queue the blit, defer the wait to batch end
      if (dev->stage_batch_cmd != nil) {
@@ -93,7 +148,7 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
              [dev->stage_lock unlock];
 -            return false;   // full batch or no buffer: caller falls back to the direct path
 +            return false;   // no buffer: caller falls back to the direct path
-         }
++        }
 +        // a full batch drains and reopens, so a long run of reads still pays one wait per
 +        // staging buffer instead of one per read
 +        if (dev->stage_batch_n == 16 || dev->stage_batch_used + size > ggml_metal_stage_batch_cap()) {
@@ -102,14 +157,24 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-
 +            dev->stage_batch_cmd   = [[dev->mtl_queue commandBufferWithUnretainedReferences] retain];
 +            dev->stage_batch_enc   = [[dev->stage_batch_cmd blitCommandEncoder] retain];
 +            dev->stage_batch_owned = true;
-+        }
+         }
          [dev->stage_batch_enc copyFromBuffer:bid_src.metal
                                  sourceOffset:bid_src.offs
                                      toBuffer:dev->stage_buf
+                            destinationOffset:dev->stage_batch_used
+                                         size:size];
+         dev->stage_batch_items[dev->stage_batch_n++] =
+             (typeof(dev->stage_batch_items[0])) { data, dev->stage_batch_used, size };
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 380ff3c57..a3d966f95 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -2751,12 +2751,23 @@
+@@ -2841,23 +2841,34 @@ private:
+     const bool skip_tensors;
+ 
+     size_t size_written = 0;
+ };
+ 
  class llama_io_write_host : public llama_io_write_i {
  public:
      llama_io_write_host(
@@ -127,15 +192,26 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
 +        }
          for (const auto & winfo : winfos) {
              ggml_backend_tensor_get(winfo.tensor, winfo.ptr, winfo.offset, winfo.size);
-+        }
+         }
 +        if (backends) {
 +            for (const auto & b : *backends) {
 +                ggml_backend_read_batch_end(b.get());
 +            }
-         }
++        }
      }
  
-@@ -2799,6 +2810,7 @@
+     void write(const void * src, size_t size) override {
+         if (size > buf_size) {
+             throw std::runtime_error("unexpectedly reached end of buffer");
+         }
+         memcpy(ptr, src, size);
+         ptr += size;
+@@ -2889,16 +2900,17 @@ private:
+ 
+     struct write_info {
+         ggml_tensor * tensor;
+         uint8_t * ptr;
+         size_t size;
          size_t offset;
      };
      std::vector<write_info> winfos;
@@ -143,7 +219,17 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
  };
  
  class llama_io_read_host : public llama_io_read_i {
-@@ -3216,7 +3228,7 @@
+ public:
+     llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
+ 
+     ~llama_io_read_host() {
+         // flush the reads
+@@ -3306,17 +3318,17 @@ size_t llama_context::state_get_size() {
+         return state_write_data(io);
+     } catch (const std::exception & err) {
+         LLAMA_LOG_ERROR("%s: error getting state size: %s\n", __func__, err.what());
+         return 0;
+     }
  }
  
  size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
@@ -152,7 +238,17 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
      try {
          return state_write_data(io);
      } catch (const std::exception & err) {
-@@ -3255,7 +3267,7 @@
+         LLAMA_LOG_ERROR("%s: error saving state: %s\n", __func__, err.what());
+         return 0;
+     }
+ }
+ 
+@@ -3345,17 +3357,17 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
+     }
+ }
+ 
+ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, size_t size, llama_state_seq_flags flags) {
+     std::unique_ptr<llama_io_write_i> io;
      if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
          io = std::make_unique<llama_io_write_device>(dst, size, mem_storage[seq_id]);
      } else {
@@ -161,3 +257,8 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
      }
  
      try {
+         io->write(&io_magic, sizeof(io_magic));
+         io->write(&seq_id, sizeof(seq_id));
+ 
+         return state_seq_write_data(*io, seq_id, flags);
+     } catch (const std::exception & err) {

@@ -1,8 +1,13 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index a3d1798f7..1bebb115f 100644
+index a1a12bdf2..9a6f441fb 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4262,8 +4262,11 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4368,18 +4368,21 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             // never reaches the kernel gives the same number on both sides.
+             if (getenv("TOSH_FA_PF_DEBUG") != nullptr) {
+                 fprintf(stderr, "FA_PF dk=%d dv=%d bq=%d -> %s%s\n",
+                         (int) ne00, (int) ne20, fa_pf_bq, fa_pf_pipeline,
+                         pipeline.pipeline ? "" : "  (NO EXISTE, cae al tile)");
              }
  
              // it fits in registers with nothing to spare; a compiler bump could
@@ -16,3 +21,8 @@ index a3d1798f7..1bebb115f 100644
                  ggml_metal_encoder_set_pipeline(enc, pipeline);
                  ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
                  ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src3, 4);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src4, 5);
+                 ggml_metal_encoder_set_buffer  (enc, bid_pad,  6);

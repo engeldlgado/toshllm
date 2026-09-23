@@ -7,6 +7,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
+- **LLMs: mixture of experts models generate faster on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II gpt-oss-20B generates 92.7 tokens a second instead of 90.1, Qwen3.6-35B-A3B 69.7 instead of 67.9, and Qwen3.8 Flash Next split across four GPUs by layers 18.2 instead of 16.3 at a 33,000 token context.
+
+- **LLMs: batches of two tokens run faster on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II Qwen3-8B reads them 14 percent faster and Qwen3.8-27B 9 percent.
+
 - **LLMs: multi-token prediction (MTP) now speeds up Q4_0 models on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II Qwen3.8-27B Q4_0 generates 26.0 tokens a second with it against 25.6 without, where it used to lose 12 percent. The same model in Q4_K_S goes from 21.2 to 21.5 with MTP, and in IQ4_XS from 20.8 to 21.0.
 
 ## [0.87.8] - 2026-09-22

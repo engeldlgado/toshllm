@@ -1,14 +1,8 @@
-From: ToshLLM
-Subject: [PATCH] 0057-llms-keep-the-output-head-on-every-card-for-dflash
-
-A DFlash draft has no output head of its own: its selector runs a top-k over the target's
-logits. A tensor split cuts that head by vocabulary, so no card holds a whole row and the
-graph aborts on the per-row assert. TOSH_MIRROR_OUTPUT_HEAD keeps the head on every card
-for that pairing, the way upstream already does for DeepSeek V4.
-
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index da3ef5d22..4493680b3 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -583,17 +583,20 @@
+@@ -591,17 +591,20 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
              return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
          }
          if (std::regex_match(tensor_name, pattern_ffn_down_exps_bias)) {

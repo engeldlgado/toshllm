@@ -1,17 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Mon, 14 Sep 2026 23:31:51 -0400
-Subject: [PATCH] 0068-mgpu-tp2-wg32-dk64-measured-head-shapes
-
----
- ggml/src/ggml-metal/ggml-metal-ops.cpp | 22 ++++++++++++++++++----
- 1 file changed, 18 insertions(+), 4 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index ae3eb90a7..a3d1798f7 100644
+index 00ba810b0..a1a12bdf2 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3682,6 +3682,19 @@ static int64_t ggml_metal_fa_wg_dk128_min_kv_w64(int64_t n_head, int64_t n_head_
+@@ -3787,16 +3787,29 @@ static int64_t ggml_metal_fa_wg_dk128_min_kv_w64(int64_t n_head, int64_t n_head_
+     for (const auto & m : measured) {
+         if (m.n_head == n_head && m.n_head_kv == n_head_kv) {
+             return m.min_kv;
+         }
+     }
      return 16384;
  }
  
@@ -31,7 +27,17 @@ index ae3eb90a7..a3d1798f7 100644
  // Suffix for the AMD vec FA pipeline name, or nullptr for types we don't instantiate.
  static const char * ggml_metal_fa_amd_type_suffix(enum ggml_type t) {
      switch (t) {
-@@ -4360,12 +4373,13 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         case GGML_TYPE_F16:  return "f16";
+         case GGML_TYPE_Q8_0: return "q8_0";
+         case GGML_TYPE_Q4_0: return "q4_0";
+         case GGML_TYPE_TURBO2_0: return "turbo2";
+         case GGML_TYPE_TURBO3_0: return "turbo3";
+@@ -4466,22 +4479,23 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             return s ? (int64_t) atoll(s) : (int64_t) -1;
+         }();
+         const bool wg_wide_head =
+             ne00 == 256 || ne00 == 512 || (ne00 == 576 && ne20 == 512) ||
+             (ne00 == 320 && ne20 == 256);
          const int64_t wg_dk128_min_kv = wg_dk128_env >= 0 ? wg_dk128_env
                                        : (props_dev->simd_width == 64 ? ggml_metal_fa_wg_dk128_min_kv_w64(ne02, ne12) : 24576);
          const bool wg_dk128_width_ok = props_dev->simd_width == 32 || props_dev->simd_width == 64;
@@ -49,3 +55,8 @@ index ae3eb90a7..a3d1798f7 100644
          const bool wg_dk64 = ne00 == 64 && ne20 == 64 && wg_dk128_width_ok &&
                               wg_dk64_min_kv > 0 && ne11 >= wg_dk64_min_kv;
          const bool wg_dk128 = (ne00 == 128 && ne20 == 128 && wg_dk128_width_ok &&
+                                wg_dk128_min_kv > 0 && ne11 >= wg_dk128_min_kv) || wg_dk64;
+         const int fa_amd_nwg =
+             (wg_wide_head || wg_dk128) && ne01 == 1 && !has_sinks &&
+             (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+             (wg_dk128 || ne11 >= 1024) &&

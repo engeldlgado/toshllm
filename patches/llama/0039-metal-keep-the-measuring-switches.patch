@@ -1,20 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:16 -0400
-Subject: [PATCH] 0042-metal-keep-the-measuring-switches
-
----
- ggml/src/ggml-metal/ggml-metal-context.m | 261 ++++++++++++++++++++++-
- ggml/src/ggml-metal/ggml-metal-device.m  |  87 +++++++-
- ggml/src/ggml-metal/ggml-metal-ops.cpp   |  56 +++--
- ggml/src/ggml-metal/kernels/mul_mv.metal | 107 ++++++++++
- 4 files changed, 495 insertions(+), 16 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index e2f9e7bb1..8375625b4 100644
+index 78948dadb..bac07fb44 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -25,6 +25,203 @@
+@@ -21,16 +21,213 @@
+ #define MIN(a, b) ((a) < (b) ? (a) : (b))
+ #define MAX(a, b) ((a) > (b) ? (a) : (b))
+ 
+ // max number of MTLCommandBuffer used to submit a graph for processing
+ #define GGML_METAL_MAX_COMMAND_BUFFERS 8
  #define GGML_METAL_MAX_PENDING_WAITS   8
  #define GGML_METAL_MAX_PREFETCH_STAGES 8
  
@@ -218,7 +211,17 @@ index e2f9e7bb1..8375625b4 100644
  struct ggml_metal_command_buffer {
      id<MTLCommandBuffer> obj;
  };
-@@ -361,6 +558,8 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+ 
+ struct ggml_metal {
+     char name[128];
+ 
+     ggml_metal_device_t  dev;
+@@ -354,16 +551,18 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+ 
+         res->pipelines_ext = ggml_metal_pipelines_init();
+ 
+         return res;
+     }
  }
  
  void ggml_metal_free(ggml_metal_t ctx) {
@@ -227,7 +230,17 @@ index e2f9e7bb1..8375625b4 100644
      GGML_LOG_INFO("%s: deallocating\n", __func__);
  
      ggml_metal_cmd_buf_hold_flush(ctx);
-@@ -464,13 +663,25 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+ 
+     for (int i = 0; i < ctx->prefetch_stage_count; ++i) {
+         if (ctx->prefetch_stage_cmds[i]) {
+             [ctx->prefetch_stage_cmds[i] waitUntilCompleted];
+             [ctx->prefetch_stage_cmds[i] release];
+@@ -461,23 +660,35 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+         @autoreleasepool {
+             id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
+             ggml_metal_encode_pending_waits(ctx, cmd_buf);
+             ggml_metal_cmd_buf_submit(ctx, cmd_buf);
+         }
      }
  
      // wait for any backend operations to finish
@@ -253,7 +266,17 @@ index e2f9e7bb1..8375625b4 100644
  
      // check status of all command buffers
      {
-@@ -1637,7 +1848,13 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         const int n_cb = ctx->n_cb;
+ 
+         for (int cb_idx = 0; cb_idx <= n_cb; ++cb_idx) {
+             id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[cb_idx].obj;
+             if (!cmd_buf) {
+@@ -1647,31 +1858,52 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+                 __func__, bounded_bank_size/(1024.0*1024.0*1024.0),
+                 bounded_threshold/(1024.0*1024.0*1024.0));
+             logged_fast = true;
+         }
+     }
  #endif
  
      // number of nodes encoded by the main thread (empirically determined)
@@ -268,7 +291,14 @@ index e2f9e7bb1..8375625b4 100644
  
      // number of threads in addition to the main thread
      const int n_cb = ctx->n_cb;
-@@ -1652,6 +1869,21 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+ 
+     // keep the memory wired
+     ggml_metal_device_rsets_keep_alive(ctx->dev);
+ 
+     // submit the ggml compute graph to the GPU by creating command buffers and encoding the ops in them
+     // the first n_nodes_0 are encoded and submitted for processing directly by the calling thread
+     // while these nodes are processing, we start n_cb threads to enqueue the rest of the nodes
+     // each thread creates it's own command buffer and enqueues the ops in parallel
      //
      // tests on M1 Pro and M2 Ultra using LLaMA models, show that optimal values for n_cb are 1 or 2
  
@@ -290,7 +320,17 @@ index e2f9e7bb1..8375625b4 100644
      @autoreleasepool {
          ctx->gf = gf;
  
-@@ -1701,11 +1933,14 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         if (ctx->n_cb == 0) {
+             // single-threaded encoding: the whole graph is encoded by one command buffer
+             ctx->n_nodes_0      = gf->n_nodes;
+             ctx->n_nodes_1      = 0;
+             ctx->n_nodes_per_cb = 0;
+@@ -1718,21 +1950,24 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+                     ctx->capture_started = true;
+                 }
+             }
+         }
+ 
          // short-hand
          id<MTLCommandQueue> queue = ctx->queue;
  
@@ -305,7 +345,17 @@ index e2f9e7bb1..8375625b4 100644
              [cmd_buf retain];
  
              if (ctx->cmd_bufs[n_cb].obj) {
-@@ -1731,6 +1966,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+                 [ctx->cmd_bufs[n_cb].obj release];
+             }
+             ctx->cmd_bufs[n_cb].obj = cmd_buf;
+ 
+             [cmd_buf enqueue];
+@@ -1748,16 +1983,17 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         const bool encoded_by_main = ctx->n_nodes_1 == 0 && !use_capture;
+ 
+         if (!encoded_by_main) {
+         // prepare the rest of the command buffers asynchronously (optional)
+         // cmd_buf[0.. n_cb)
          for (int cb_idx = 0; cb_idx < n_cb; ++cb_idx) {
              id<MTLCommandBuffer> cmd_buf = [queue commandBufferWithUnretainedReferences];
              ggml_metal_encode_pending_waits(ctx, cmd_buf);
@@ -313,7 +363,17 @@ index e2f9e7bb1..8375625b4 100644
              [cmd_buf retain];
  
              if (ctx->cmd_bufs[cb_idx].obj) {
-@@ -1749,6 +1985,11 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+                 [ctx->cmd_bufs[cb_idx].obj release];
+             }
+             ctx->cmd_bufs[cb_idx].obj = cmd_buf;
+ 
+             // always enqueue the first two command buffers
+@@ -1766,16 +2002,21 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+                 [cmd_buf enqueue];
+ 
+                 // update the pointer to the last queued command buffer
+                 // this is needed to implement synchronize()
+                 ctx->cmd_buf_last = cmd_buf;
              }
          }
  
@@ -325,7 +385,17 @@ index e2f9e7bb1..8375625b4 100644
          dispatch_apply(n_cb, ctx->d_queue, ctx->encode_async);
          }
  
-@@ -1814,6 +2055,15 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         // for debugging: block until graph is computed
+         //[ctx->cmd_buf_last waitUntilCompleted];
+ 
+         // enter here only when capturing in order to wait for all computation to finish
+         // otherwise, we leave the graph to compute asynchronously
+@@ -1831,16 +2072,25 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+ 
+             [ctx->capture_scope endScope];
+             [[MTLCaptureManager sharedCaptureManager] stopCapture];
+ 
+             ctx->capture_started = false;
          }
      }
  
@@ -341,9 +411,19 @@ index e2f9e7bb1..8375625b4 100644
      return GGML_STATUS_SUCCESS;
  }
  
-@@ -1946,6 +2196,9 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
-             ctx->debug_graph,
-             ctx->debug_fusion);
+ // the reorder gains on dense decode but disturbs the expert chain on MoE, so this stays
+ // narrow on purpose
+ static bool ggml_metal_graph_is_moe_decode(const struct ggml_cgraph * gf, int max_tokens) {
+     bool has_experts = false;
+ 
+@@ -1968,30 +2218,39 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
+             ctx->gf,
+             ctx->finfo,
+             idx_start,
+             idx_end,
+             ctx->use_concurrency,
+             ctx->capture_compute,
+             ctx->debug_graph);
  
 +        const bool cbp_on = tosh_cbp_on();
 +        const uint64_t cbp_t0 = cbp_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
@@ -351,7 +431,11 @@ index e2f9e7bb1..8375625b4 100644
          for (int idx = 0; idx < ggml_metal_op_n_nodes(ctx_op); ++idx) {
              const int res = ggml_metal_op_encode(ctx_op, idx);
              if (res == 0) {
-@@ -1957,9 +2210,15 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
+                 break;
+             }
+ 
+             idx += res - 1;
+         }
  
          ggml_metal_op_free(ctx_op);
  
@@ -367,19 +451,35 @@ index e2f9e7bb1..8375625b4 100644
      });
  }
  
+ void ggml_metal_set_abort_callback(ggml_metal_t ctx, ggml_abort_callback abort_callback, void * user_data) {
+     ctx->abort_callback = abort_callback;
+     ctx->abort_callback_data = user_data;
+ }
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 6a46dae74..8537056f1 100644
+index 12ba16fd8..14d306094 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -1,5 +1,7 @@
+@@ -1,11 +1,13 @@
  #import "ggml-metal-device.h"
+ #import "ggml-metal-fusion.h"
  
 +#include <sys/resource.h>
 +
  #import "ggml-impl.h"
  #import "ggml-backend-impl.h"
  #import "ggml-metal-impl.h"
-@@ -1883,6 +1885,7 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
+ #import "ggml-metal-common.h"
+ 
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+ #import "tosh-moe.h"
+ #else
+@@ -1893,16 +1895,17 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
+     const bool res = [event waitUntilSignaledValue:atomic_load_explicit(&ev->value, memory_order_relaxed) timeoutMS:60000];
+     if (!res) {
+         GGML_ABORT("%s: failed to wait for event\n", __func__);
+     }
+ 
      GGML_UNUSED(dev);
  }
  
@@ -387,7 +487,17 @@ index 6a46dae74..8537056f1 100644
  void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t * total) {
      if (@available(macOS 10.12, iOS 16.0, *)) {
          *total     = dev->mtl_device.recommendedMaxWorkingSetSize;
-@@ -3015,8 +3018,11 @@ bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buff
+         size_t cur = dev->mtl_device.currentAllocatedSize;
+         // it's possible to allocate more than `recommendedMaxWorkingSetSize`
+         *free      = *total > cur ? *total - cur : 0;
+     } else {
+         *free = 0;
+@@ -3042,18 +3045,21 @@ bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buff
+         [dev->stage_set_cmds[slot] waitUntilCompleted];
+         [dev->stage_set_cmds[slot] release];
+         dev->stage_set_cmds[slot] = nil;
+     }
+ 
      id<MTLBuffer> stage = dev->stage_set_bufs[slot];
      if (stage == nil || stage.length < size) {
          [stage release];
@@ -400,7 +510,17 @@ index 6a46dae74..8537056f1 100644
          dev->stage_set_bufs[slot] = stage;
      }
      if (stage == nil) {
-@@ -3253,6 +3259,14 @@ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buff
+         [dev->stage_lock unlock];
+         return false;
+     }
+ 
+     memcpy(stage.contents, data, size);
+@@ -3280,16 +3286,24 @@ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buff
+ 
+     if (t0) {
+         tosh_prof_add(TOSH_PROF_D2H_STAGE, size, t0);
+     }
+ 
      return true;
  }
  
@@ -415,7 +535,17 @@ index 6a46dae74..8537056f1 100644
  void ggml_metal_buffer_set_tensor_2d(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size,
          size_t n_copies, size_t stride_tensor, size_t stride_data) {
      if (size == 0 || n_copies == 0) {
-@@ -3278,6 +3292,20 @@ void ggml_metal_buffer_set_tensor_2d(ggml_metal_buffer_t buf, struct ggml_tensor
+         return;
+     }
+ 
+     if (!buf->is_shared) {
+         @autoreleasepool {
+@@ -3305,16 +3319,30 @@ void ggml_metal_buffer_set_tensor_2d(ggml_metal_buffer_t buf, struct ggml_tensor
+     }
+ 
+     for (size_t i = 0; i < n_copies; i++) {
+         ggml_metal_buffer_set_tensor(buf, tensor, (const char *) data + i*stride_data, offset + i*stride_tensor, size);
+     }
  }
  
  void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -436,7 +566,17 @@ index 6a46dae74..8537056f1 100644
      if (size == 0) {
          return;
      }
-@@ -3315,18 +3343,45 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+ 
+     if (buf->is_shared) {
+         memcpy((char *) tensor->data + offset, data, size);
+         return;
+     }
+@@ -3342,28 +3370,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+                     stage_load = 0;
+                 } else if (getenv("TOSH_STAGE_LOAD") != NULL) {
+                     stage_load = 1;
+                 } else {
+                     const char * n = getenv("GGML_METAL_DEVICES");
                      stage_load = (n == NULL || atoi(n) <= 1) && getenv("GGML_METAL_DEVICE_LIST") == NULL;
                  }
              }
@@ -484,7 +624,17 @@ index 6a46dae74..8537056f1 100644
          // dst
          struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
          bid_dst.offs += offset;
-@@ -3421,7 +3476,33 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+ 
+         if (buf_src == nil) {
+             // newBufferWithBytesNoCopy requires page-aligned data, and some drivers cap the size of
+             // host-visible allocations; copy through a small staging buffer in chunks instead
+             size_t stage_size = MIN(size, (size_t) 8*1024*1024);
+@@ -3448,17 +3503,43 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+         //[cmd_buf waitUntilCompleted];
+ 
+         if (t0) {
+             tosh_prof_add(TOSH_PROF_H2D_DIRECT, size, t0);
+         }
      }
  }
  
@@ -518,11 +668,21 @@ index 6a46dae74..8537056f1 100644
      if (size == 0) {
          return;
      }
+ 
+     if (buf->is_shared) {
+         memcpy(data, (const char *) tensor->data + offset, size);
+         return;
+     }
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index f5cb47d65..ad53f0467 100644
+index f1c57487b..4920c9f23 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2944,7 +2944,18 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+@@ -2995,17 +2995,28 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+ 
+         static const int nr0_env = []() {
+             const char * s = getenv("TOSH_EXT_NR0");
+             return s ? atoi(s) : 0;
+         }();
  
          // only the K-quants have a two-row variant; forcing the override on the rest asks the
          // library for a kernel that was never instantiated
@@ -542,7 +702,17 @@ index f5cb47d65..ad53f0467 100644
  
          // each group makes a full pass over the weights, so the cost is groups by group width:
          // nine and ten columns fit in two groups of five instead of three of four
-@@ -3957,31 +3968,52 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         if (ext_wide_group(op->src[0]->type) && (ne11 == 9 || ne11 == 10)) {
+             r1ptg = 5;
+         }
+ 
+         const int16_t r0ptg = nypsg*nsg*nr0;       // num src0 rows per threadgroup
+@@ -4063,41 +4074,62 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             const bool turbo = is_turbo(op->src[1]->type) || is_turbo(op->src[2]->type);
+             if (!turbo && ((ne00 == 128 && k_q4) || (ne00 == 64 && (k_q4 || v_q4)))) {
+                 fa_amd_nsg = 24;
+             }
+         }
          if (props_dev->simd_width == 64) {
              fa_amd_nsg /= 2;
          }
@@ -606,11 +776,21 @@ index f5cb47d65..ad53f0467 100644
          const int fa_amd_nwg =
              (wg_wide_head || wg_dk128) && ne01 == 1 && !has_sinks &&
              (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+             (wg_dk128 || ne11 >= 1024) &&
+             getenv("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
+ 
+         char fa_amd_wg_pipeline[96];
+         if (fa_amd_nwg > 1) {
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 73cdefe8f..30152cd53 100644
+index a1092fb9d..f7a256bca 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -505,6 +505,19 @@ kernel void kernel_mul_mv_q5_0_f32(
+@@ -500,28 +500,54 @@ kernel void kernel_mul_mv_q5_0_f32(
+         device       char * dst,
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
      mul_vec_q_n_f32_impl<block_q5_0, N_R0_Q5_0, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
  
@@ -630,7 +810,12 @@ index 73cdefe8f..30152cd53 100644
  kernel void kernel_mul_mv_q5_1_f32(
          constant ggml_metal_kargs_mul_mv & args,
          device const char * src0,
-@@ -517,6 +530,19 @@ kernel void kernel_mul_mv_q5_1_f32(
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
      mul_vec_q_n_f32_impl<block_q5_1, N_R0_Q5_1, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
  
@@ -650,7 +835,17 @@ index 73cdefe8f..30152cd53 100644
  template<short NR0, typename args_t>
  void kernel_mul_mv_q8_0_f32_impl(
          args_t args,
-@@ -2846,6 +2872,20 @@ kernel void kernel_mul_mv_iq4_nl_f32(
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
+@@ -2841,16 +2867,30 @@ kernel void kernel_mul_mv_iq4_nl_f32(
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
      kernel_mul_mv_iq4_nl_f32_impl<N_R0_IQ4_NL, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
  
@@ -671,7 +866,17 @@ index 73cdefe8f..30152cd53 100644
  template<int NR0, typename args_t>
  void kernel_mul_mv_iq4_xs_f32_impl(
          args_t args,
-@@ -2957,6 +2997,20 @@ kernel void kernel_mul_mv_iq4_xs_f32(
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
+@@ -2952,16 +2992,30 @@ kernel void kernel_mul_mv_iq4_xs_f32(
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
      kernel_mul_mv_iq4_xs_f32_impl<N_R0_IQ4_XS, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
  
@@ -692,7 +897,17 @@ index 73cdefe8f..30152cd53 100644
  template<int NR0, typename args_t>
  void kernel_mul_mv_mxfp4_f32_impl(
          args_t args,
-@@ -3555,17 +3609,24 @@ kernel void kernel_mul_mv_ext_q4_K_raw_lds_f32_disp(
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
+@@ -3550,27 +3604,34 @@ kernel void kernel_mul_mv_ext_q4_K_raw_lds_f32_disp(
+         ushort  sgptg[[threads_per_simdgroup]]) {
+     // sized for the widest row split the host can pick
+     threadgroup float4x4 sh  [r1ptg*32];
+     threadgroup float    shsy[r1ptg*32];
+     kernel_mul_mv_ext_q4_K_raw_f32_impl<r1ptg, nr0, true>(args, src0, src1, dst, sh, shsy, tgpig, tiisg, sgitg, sgptg);
  }
  
  template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_3_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<3, 2>;
@@ -717,7 +932,17 @@ index 73cdefe8f..30152cd53 100644
  
  // ext matvec caching the block header once per block (nxpsg=8 does two chunks of the same
  // 256-block). q5_K's 176-byte block is 16-aligned so its scale window is cached in a uint4;
-@@ -3816,29 +3877,40 @@ kernel void kernel_mul_mv_ext_qK_hdr_f32_disp(
+ // q2_K/q3_K blocks are not, so only d/dmin is cached and scales are read per chunk.
+ 
+ static inline void ext_load_hdr(device const block_q5_K * xb, thread uint4 & hdr, thread half2 & dm) {
+     hdr = *(device const uint4 *) xb;      // dm in .x, scales[12] in .yzw
+     dm  = as_type<half2>(hdr.x);
+@@ -3811,55 +3872,80 @@ kernel void kernel_mul_mv_ext_qK_hdr_f32_disp(
+         ushort  tiisg[[thread_index_in_simdgroup]],
+         ushort  sgitg[[simdgroup_index_in_threadgroup]],
+         ushort  sgptg[[threads_per_simdgroup]]) {
+     kernel_mul_mv_ext_qK_hdr_f32_impl<r1ptg, nr0, q_t>(args, src0, src1, dst, tgpig, tiisg, sgitg, sgptg);
+ }
  
  template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_2")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 1, block_q5_K>;
  template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 2, block_q5_K>;
@@ -758,7 +983,16 @@ index 73cdefe8f..30152cd53 100644
  template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_5")]]       kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 1, block_q3_K>;
  
  [[host_name("kernel_mul_mv_q8_0_f32_r4")]]
-@@ -3855,6 +3927,20 @@ kernel void kernel_mul_mv_q8_0_f32_r4(
+ kernel void kernel_mul_mv_q8_0_f32_r4(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
      kernel_mul_mv_q8_0_f32_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
  
@@ -779,7 +1013,17 @@ index 73cdefe8f..30152cd53 100644
  [[host_name("kernel_mul_mv_q2_K_f32_r8")]]
  kernel void kernel_mul_mv_q2_K_f32_r8(
          constant ggml_metal_kargs_mul_mv & args,
-@@ -4076,44 +4162,64 @@ template [[host_name("kernel_mul_mv_ext_iq4_nl_f32_r1_4")]] kernel mul_mv_ext_q4
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+@@ -4071,54 +4157,74 @@ template [[host_name("kernel_mul_mv_ext_mxfp4_f32_r1_3")]]  kernel mul_mv_ext_q4
+ template [[host_name("kernel_mul_mv_ext_mxfp4_f32_r1_4")]]  kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, block_mxfp4,  32, dequantize_mxfp4_t4>;
+ template [[host_name("kernel_mul_mv_ext_mxfp4_f32_r1_5")]]  kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_mxfp4,  32, dequantize_mxfp4_t4>;
+ template [[host_name("kernel_mul_mv_ext_iq4_nl_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, block_iq4_nl, 32, dequantize_iq4_nl_t4>;
+ template [[host_name("kernel_mul_mv_ext_iq4_nl_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, block_iq4_nl, 32, dequantize_iq4_nl_t4>;
+ template [[host_name("kernel_mul_mv_ext_iq4_nl_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, block_iq4_nl, 32, dequantize_iq4_nl_t4>;
  template [[host_name("kernel_mul_mv_ext_iq4_nl_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_iq4_nl, 32, dequantize_iq4_nl_t4>;
  template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 1, block_q4_K, 256, dequantize_q4_K>;
  template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 2, block_q4_K, 256, dequantize_q4_K>;
@@ -844,7 +1088,17 @@ index 73cdefe8f..30152cd53 100644
  template [[host_name("kernel_mul_mv_f32_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<float, float>;
  template [[host_name("kernel_mul_mv_f16_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  float>;
  template [[host_name("kernel_mul_mv_f16_f16")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  half>;
-@@ -4165,3 +4271,4 @@ template [[host_name("kernel_mul_mv_id_iq4_nl_f32")]]  kernel kernel_mul_mv_id_t
+ template [[host_name("kernel_mul_mv_bf16_f32")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, float>;
+ template [[host_name("kernel_mul_mv_bf16_bf16")]] kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, bfloat>;
+ template [[host_name("kernel_mul_mv_bf16e_f32")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<bf16e, float>;
+ template [[host_name("kernel_mul_mv_f32_bf16")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<float,  bfloat>;
+ template [[host_name("kernel_mul_mv_f32_f32_4")]]   kernel mul_mv_t_t_4 kernel_mul_mv_t_t_4<float, float4, float, float4>;
+@@ -4163,8 +4269,9 @@ template [[host_name("kernel_mul_mv_id_iq2_xxs_f32")]] kernel kernel_mul_mv_id_t
+ template [[host_name("kernel_mul_mv_id_iq2_xs_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq2_xs_f32_impl <N_R0_IQ2_XS>>>;
+ template [[host_name("kernel_mul_mv_id_iq3_xxs_f32")]] kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq3_xxs_f32_impl<N_R0_IQ3_XXS>>>;
+ template [[host_name("kernel_mul_mv_id_iq3_s_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq3_s_f32_impl  <N_R0_IQ3_S>>>;
+ template [[host_name("kernel_mul_mv_id_iq2_s_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq2_s_f32_impl  <N_R0_IQ2_S>>>;
+ template [[host_name("kernel_mul_mv_id_iq4_nl_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_nl_f32_impl <N_R0_IQ4_NL>>>;
  template [[host_name("kernel_mul_mv_id_iq4_xs_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_xs_f32_impl <N_R0_IQ4_XS>>>;
  template [[host_name("kernel_mul_mv_id_tq2_0_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_tq2_0_f32_impl  <N_R0_TQ2_0>>>;
  template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 2, block_q3_K>;

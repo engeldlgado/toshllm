@@ -1,17 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:09 -0400
-Subject: [PATCH] 0013-meta-direct-copies-and-read-batch
-
----
- ggml/src/ggml-backend-meta.cpp | 110 ++++++++++++++++++++++++++++++++-
- 1 file changed, 108 insertions(+), 2 deletions(-)
-
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index 4e8f1a7d2..449bfad71 100644
+index d431742ae..76cbdfbde 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -1701,6 +1701,44 @@ static void ggml_backend_meta_buffer_get_tensor(ggml_backend_buffer_t buffer, co
+@@ -1704,16 +1704,54 @@ static void ggml_backend_meta_buffer_get_tensor(ggml_backend_buffer_t buffer, co
+             ggml_backend_tensor_get(simple_tensor, data, offset, size);
+         } break;
+         default: {
+             GGML_ABORT("fatal error");
+         }
      }
  }
  
@@ -56,7 +52,17 @@ index 4e8f1a7d2..449bfad71 100644
  static void ggml_backend_meta_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
      const size_t n_buffers = ggml_backend_meta_buffer_n_bufs(buffer);
      for (size_t i = 0; i < n_buffers; i++) {
-@@ -1725,7 +1763,7 @@ static const ggml_backend_buffer_i ggml_backend_meta_buffer_iface = {
+         ggml_backend_buffer_clear(ggml_backend_meta_buffer_simple_buffer(buffer, i), value);
+     }
+ }
+ 
+ static void ggml_backend_meta_buffer_reset(ggml_backend_buffer_t buffer) {
+@@ -1728,17 +1766,17 @@ static const ggml_backend_buffer_i ggml_backend_meta_buffer_iface = {
+     /* .free_buffer     = */ ggml_backend_meta_buffer_free_buffer,
+     /* .get_base        = */ ggml_backend_meta_buffer_get_base,
+     /* .init_tensor     = */ ggml_backend_meta_buffer_init_tensor,
+     /* .memset_tensor   = */ ggml_backend_meta_buffer_memset_tensor,
+     /* .set_tensor      = */ ggml_backend_meta_buffer_set_tensor,
      /* .get_tensor      = */ ggml_backend_meta_buffer_get_tensor,
      /* .set_tensor_2d   = */ nullptr,
      /* .get_tensor_2d   = */ nullptr,
@@ -65,7 +71,17 @@ index 4e8f1a7d2..449bfad71 100644
      /* .clear           = */ ggml_backend_meta_buffer_clear,
      /* .reset           = */ ggml_backend_meta_buffer_reset,
  };
-@@ -2541,6 +2579,72 @@ static void ggml_backend_meta_event_wait(ggml_backend_t backend, ggml_backend_ev
+ 
+ bool ggml_backend_buffer_is_meta(ggml_backend_buffer_t buf) {
+     return buf != nullptr && buf->iface.free_buffer == ggml_backend_meta_buffer_iface.free_buffer;
+ }
+ 
+@@ -2544,33 +2582,101 @@ static void ggml_backend_meta_event_record(ggml_backend_t backend, ggml_backend_
+ static void ggml_backend_meta_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
+     auto * backend_ctx = (ggml_backend_meta_context *) backend->context;
+     auto * ev_ctx = (ggml_backend_meta_event_context *) event->context;
+     for (size_t j = 0; j < backend_ctx->backend_configs.size(); j++) {
+         ggml_backend_event_wait(backend_ctx->backend_configs[j].backend, ev_ctx->events[j]);
      }
  }
  
@@ -138,7 +154,7 @@ index 4e8f1a7d2..449bfad71 100644
  static const ggml_backend_i ggml_backend_meta_i = {
      /* .get_name                = */ ggml_backend_meta_get_name,
      /* .free                    = */ ggml_backend_meta_free,
-@@ -2548,7 +2652,7 @@ static const ggml_backend_i ggml_backend_meta_i = {
+     /* .set_tensor_async        = */ ggml_backend_meta_set_tensor_async,
      /* .get_tensor_async        = */ ggml_backend_meta_get_tensor_async,
      /* .set_tensor_2d_async     = */ nullptr,
      /* .get_tensor_2d_async     = */ nullptr,
@@ -147,7 +163,9 @@ index 4e8f1a7d2..449bfad71 100644
      /* .synchronize             = */ ggml_backend_meta_synchronize,
      /* .graph_plan_create       = */ nullptr,
      /* .graph_plan_free         = */ nullptr,
-@@ -2558,6 +2662,8 @@ static const ggml_backend_i ggml_backend_meta_i = {
+     /* .graph_plan_update       = */ nullptr,
+     /* .graph_plan_compute      = */ nullptr,
+     /* .graph_compute           = */ ggml_backend_meta_graph_compute,
      /* .event_record            = */ ggml_backend_meta_event_record,
      /* .event_wait              = */ ggml_backend_meta_event_wait,
      /* .graph_optimize          = */ nullptr,
@@ -156,3 +174,8 @@ index 4e8f1a7d2..449bfad71 100644
  };
  
  bool ggml_backend_is_meta(ggml_backend_t backend) {
+     return backend != nullptr && backend->iface.get_name == ggml_backend_meta_i.get_name;
+ }
+ 
+ static ggml_backend_t ggml_backend_meta_device_init_backend(ggml_backend_dev_t dev, const char * params) {
+     ggml_backend_meta_context * backend_ctx = new ggml_backend_meta_context(dev, params);

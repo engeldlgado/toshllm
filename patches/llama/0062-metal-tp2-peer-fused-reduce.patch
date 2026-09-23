@@ -1,18 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Sat, 12 Sep 2026 21:57:27 -0400
-Subject: [PATCH] 0062-metal-tp2-peer-fused-reduce
-
----
-  ggml/src/ggml-metal/ggml-metal-context.m | 452 ++++++++++++++++++++++++++++++-
-  ggml/src/ggml-metal/ggml-metal.cpp       |  10 +-
-  2 files changed, 453 insertions(+), 9 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 29566b6dc..8b4a6ff2c 100644
+index 182caa063..a2728d31d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -277,6 +277,13 @@ struct ggml_metal {
+@@ -274,16 +274,23 @@ struct ggml_metal {
+         void *               host;
+         size_t               cap;
+         id<MTLBuffer>        wrap_src, wrap_dst;
+         // Retaining the source keeps its cached remote view valid.
+         id<MTLBuffer>        peer_src, peer_view;
          // The collective caches its own view: it orders on seq_x, and an invalidation that
          // waited on the copy path's seq would let go of a view a queued exchange still reads.
          id<MTLBuffer>        peer_x_src, peer_x_view;
@@ -26,7 +21,17 @@ index 29566b6dc..8b4a6ff2c 100644
          int                  peer_x_ok; // -1 unknown, 0 ineligible, 1 eligible
          id<MTLSharedEvent>   ev_ready, ev_done;
          id<MTLSharedEvent>   ev_x_ready, ev_x_done;
-@@ -611,6 +618,10 @@ void ggml_metal_free(ggml_metal_t ctx) {
+         uint64_t             seq;
+         uint64_t             seq_x;
+         bool                 peer_logged;
+         bool                 peer_x_logged;
+     } xlinks[4];
+@@ -604,16 +611,20 @@ void ggml_metal_free(ggml_metal_t ctx) {
+             [ctx->xlinks[i].ev_x_done waitUntilSignaledValue:ctx->xlinks[i].seq_x timeoutMS:10000];
+         }
+         [ctx->xlinks[i].wrap_src release];
+         [ctx->xlinks[i].wrap_dst release];
+         [ctx->xlinks[i].peer_view release];
          [ctx->xlinks[i].peer_src release];
          [ctx->xlinks[i].peer_x_view release];
          [ctx->xlinks[i].peer_x_src release];
@@ -37,7 +42,17 @@ index 29566b6dc..8b4a6ff2c 100644
          [ctx->xlinks[i].ev_ready release];
          [ctx->xlinks[i].ev_done release];
          [ctx->xlinks[i].ev_x_ready release];
-@@ -1591,10 +1602,109 @@ static bool ggml_metal_add_inplace_into(ggml_metal_t ctx, id<MTLCommandBuffer> c
+         [ctx->xlinks[i].ev_x_done release];
+         free(ctx->xlinks[i].host);
+     }
+ 
+     for (int i = 0; i < GGML_METAL_MAX_COMMAND_BUFFERS; ++i) {
+@@ -1604,20 +1615,119 @@ static bool ggml_metal_add_inplace_into(ggml_metal_t ctx, id<MTLCommandBuffer> c
+         if (cmd_buf_in == nil) {
+             ggml_metal_cmd_buf_end(ctx, cmd_buf, false);
+         }
+     }
+ 
      return true;
  }
  
@@ -147,7 +162,17 @@ index 29566b6dc..8b4a6ff2c 100644
  // Two cards of one Metal peer group can read each other's VRAM, so the collective has no
  // reason to bounce its partials through a host block. Decided once per link.
  static bool ggml_metal_tp2_peer_eligible(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
-@@ -1675,6 +1785,308 @@ static id<MTLBuffer> ggml_metal_tp2_peer_view(struct ggml_metal_xdev_link * link
+                                          struct ggml_metal_xdev_link * link) {
+ #if TARGET_OS_OSX
+     if (link->peer_x_ok >= 0) {
+         return link->peer_x_ok == 1;
+     }
+@@ -1688,16 +1798,318 @@ static id<MTLBuffer> ggml_metal_tp2_peer_view(struct ggml_metal_xdev_link * link
+ 
+     return link->peer_x_view;
+ #else
+     GGML_UNUSED(link); GGML_UNUSED(metal_peer); GGML_UNUSED(dev_self); GGML_UNUSED(same_dev);
+     return nil;
  #endif
  }
  
@@ -456,7 +481,17 @@ index 29566b6dc..8b4a6ff2c 100644
  // The peer-direct half of the exchange. Nothing is encoded until every check has passed, so a
  // refusal here costs the caller only the staged path it would have taken anyway.
  //
-@@ -1755,7 +2167,7 @@ static bool ggml_metal_exchange_reduce_peer(ggml_metal_t ctx_self, ggml_metal_t
+ //   signal ready(out)          my partial is final, the peer may read it
+ //   wait   ready(in)           the peer's partial is final
+ //   blit   remote(t_peer) -> tmp        one crossing, GPU to GPU
+ //   signal done(in)            I have read the peer
+ //   wait   done(out)           the peer has read me, so the add may overwrite my partial
+@@ -1768,17 +2180,17 @@ static bool ggml_metal_exchange_reduce_peer(ggml_metal_t ctx_self, ggml_metal_t
+         [enc endEncoding];
+ 
+         [cmd_buf encodeSignalEvent:link_in->ev_x_done value:seq];
+         [cmd_buf encodeWaitForEvent:link_out->ev_x_done value:seq];
+ 
          ggml_metal_add_inplace_into(ctx_self, cmd_buf, t_self, tmp_self);
  
          tosh_trace_cmd_buf(cmd_buf);
@@ -465,7 +500,17 @@ index 29566b6dc..8b4a6ff2c 100644
      }
  
      if (tosh_mgpu_trace()) {
-@@ -1782,9 +2194,39 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+         atomic_fetch_add(&g_tr_reduce, 1);
+         atomic_fetch_add(&g_tr_bytes_peer, size);
+     }
+ 
+     return true;
+@@ -1795,19 +2207,49 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+                                 struct ggml_tensor * t_self, struct ggml_tensor * t_peer,
+                                 struct ggml_tensor * tmp_self, uint64_t seq) {
+     struct ggml_metal_xdev_link * link_out = ggml_metal_xdev_link_get(ctx_self, ctx_peer);
+     struct ggml_metal_xdev_link * link_in  = ggml_metal_xdev_link_get(ctx_peer, ctx_self);
+     if (link_out == NULL || link_in == NULL) {
          return false;
      }
  
@@ -508,7 +553,17 @@ index 29566b6dc..8b4a6ff2c 100644
      }
  
      struct ggml_metal_buffer_id bid_self = ggml_metal_get_buffer_id(t_self);
-@@ -1837,7 +2279,7 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     struct ggml_metal_buffer_id bid_tmp  = ggml_metal_get_buffer_id(tmp_self);
+     if (bid_self.metal == nil || bid_tmp.metal == nil) {
+         return false;
+     }
+ 
+@@ -1850,17 +2292,17 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+         [enc_in copyFromBuffer:link_in->wrap_dst sourceOffset:0
+                       toBuffer:bid_tmp.metal destinationOffset:bid_tmp.offs size:size];
+         [enc_in endEncoding];
+         [cmd_buf encodeSignalEvent:link_in->ev_x_done value:seq_in];
+ 
          ggml_metal_add_inplace_into(ctx_self, cmd_buf, t_self, tmp_self);
  
          tosh_trace_cmd_buf(cmd_buf);
@@ -517,11 +572,21 @@ index 29566b6dc..8b4a6ff2c 100644
      }
  
      if (tosh_mgpu_trace()) {
+         atomic_fetch_add(&g_tr_reduce, 1);
+         // out through the shared block and back in: this card touches it twice
+         atomic_fetch_add(&g_tr_bytes_host, 2*size);
+         atomic_fetch_add(&g_tr_encode_ns, tosh_now_ns() - t_enter);
+     }
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index 6db63c8b6..e362e935a 100644
+index b4f32af98..ddad25afd 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -1185,10 +1185,12 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+@@ -1210,20 +1210,22 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     for (size_t offset = offset_max; offset >= 1; offset /= 2) {
+         if (fused && prefer_events) {
+             static uint64_t seq_round = 0;
+             seq_round++;
+             bool ok = true;
              for (size_t j = 0; j < 2*offset_max; j++) {
                  view_tmp(j, step);
              }
@@ -538,3 +603,8 @@ index 6db63c8b6..e362e935a 100644
              const bool pair = 2*offset_max == 2;
              for (size_t j = 0; j < 2*offset_max && ok; j++) {
                  ok = ggml_backend_metal_exchange_reduce(comm_ctx->backends[j], comm_ctx->backends[j ^ offset],
+                                                         tensors[j], pair ? tensors[j ^ offset] : nullptr,
+                                                         &tmp[j], seq_round);
+             }
+             if (ok) {
+                 reduced = true;

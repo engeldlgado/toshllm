@@ -1,7 +1,13 @@
-diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-context.h llama/ggml/src/ggml-metal/ggml-metal-context.h
---- a/ggml/src/ggml-metal/ggml-metal-context.h	2026-09-17 08:20:04
-+++ b/ggml/src/ggml-metal/ggml-metal-context.h	2026-09-17 09:12:03
-@@ -40,6 +40,12 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.h b/ggml/src/ggml-metal/ggml-metal-context.h
+index 119e8b65b..8fb157e36 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.h
++++ b/ggml/src/ggml-metal/ggml-metal-context.h
+@@ -35,16 +35,22 @@ void ggml_metal_read_batch_end  (ggml_metal_t ctx);
+ bool ggml_metal_cpy_tensor_async_ex(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst, bool prefer_events, bool hold_dst);
+ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst);
+ 
+ // acc += add, both f32 and contiguous. Encodes the kernel directly so a tensor-split
+ // allreduce does not pay a full graph submission per step.
  bool ggml_metal_add_inplace_supported(ggml_metal_t ctx, const struct ggml_tensor * acc, const struct ggml_tensor * add);
  bool ggml_metal_add_inplace_async    (ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add);
  
@@ -14,10 +20,21 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
  // One command buffer per card per butterfly step: both copies and the add together.
  // t_peer lets a peer-connected pair read the partner's partial straight out of its VRAM;
  // pass NULL and the exchange always stages through the shared host block.
-diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-context.m llama/ggml/src/ggml-metal/ggml-metal-context.m
---- a/ggml/src/ggml-metal/ggml-metal-context.m	2026-09-17 08:20:04
-+++ b/ggml/src/ggml-metal/ggml-metal-context.m	2026-09-17 09:37:28
-@@ -2183,6 +2183,162 @@
+ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+                                 struct ggml_tensor * t_self, struct ggml_tensor * t_peer,
+                                 struct ggml_tensor * tmp_self, uint64_t seq);
+ 
+ // Create and reserve both directed links of a pair, so exchange_reduce calls running on
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index cd9dfa040..b083e0c70 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -2201,16 +2201,172 @@ static bool ggml_metal_add_inplace_buffer(ggml_metal_t ctx, id<MTLCommandBuffer>
+ 
+     return true;
+ }
+ 
+ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add) {
      return ggml_metal_add_inplace_into(ctx, nil, acc, add);
  }
  
@@ -180,10 +197,21 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
  // TOSH_MGPU_PEER_MIN_BATCH, the same knob the copy path reads: below it a crossing is all
  // latency and the shared host block is faster.
  // rows in the exchanged tensor: one for a generated token, the whole prompt for a prefill
-diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-device.cpp llama/ggml/src/ggml-metal/ggml-metal-device.cpp
---- a/ggml/src/ggml-metal/ggml-metal-device.cpp	2026-09-17 08:20:03
-+++ b/ggml/src/ggml-metal/ggml-metal-device.cpp	2026-09-17 09:12:06
-@@ -2536,6 +2536,44 @@
+ static int64_t tosh_batch_of(const struct ggml_tensor * t) {
+     if (t == NULL || t->ne[0] <= 0) { return 1; }
+     return ggml_nelements(t)/t->ne[0];
+ }
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index eb6b40984..0cc644c9d 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -2646,16 +2646,54 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one(ggml_met
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+         ggml_metal_cv_free(cv);
+     }
+ 
      return res;
  }
  
@@ -228,22 +256,44 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
  ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_l2_norm(ggml_metal_library_t lib, const ggml_tensor * op) {
      assert(op->op == GGML_OP_L2_NORM);
  
-diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal-device.h llama/ggml/src/ggml-metal/ggml-metal-device.h
---- a/ggml/src/ggml-metal/ggml-metal-device.h	2026-09-17 08:20:03
-+++ b/ggml/src/ggml-metal/ggml-metal-device.h	2026-09-17 09:38:06
-@@ -155,6 +155,8 @@
+     char base[256];
+     char name[256];
+ 
+     const bool is_c4 = op->src[0]->ne[0] % 4 == 0;
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index c2d5fe086..3a6877e75 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -155,16 +155,18 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_fwht
+ 
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k             (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_radix       (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_merge       (ggml_metal_library_t lib, const struct ggml_tensor * op);
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin               (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t n_fuse );
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_topk_moe          (ggml_metal_library_t lib, int32_t n_expert, int32_t top_k, bool with_norm);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_moe_reduce        (ggml_metal_library_t lib, int32_t n_expert_used);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin               (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t n_fuse);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one           (ggml_metal_library_t lib, enum ggml_op op);
 +// scalar f32-accumulator bin pipeline with an explicit src1 type (f16 allreduce transport):
 +struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one_src1      (ggml_metal_library_t lib, enum ggml_op op, enum ggml_type tsrc1);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_l2_norm           (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_group_norm        (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_norm              (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t n_fuse);
-diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-metal.cpp llama/ggml/src/ggml-metal/ggml-metal.cpp
---- a/ggml/src/ggml-metal/ggml-metal.cpp	2026-09-17 08:20:04
-+++ b/ggml/src/ggml-metal/ggml-metal.cpp	2026-09-17 09:36:20
-@@ -993,6 +993,9 @@
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_norm_scale        (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rope              (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_transpose_1d (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_transpose_2d (ggml_metal_library_t lib, const struct ggml_tensor * op);
+diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
+index 348a24c1e..42fbfa927 100644
+--- a/ggml/src/ggml-metal/ggml-metal.cpp
++++ b/ggml/src/ggml-metal/ggml-metal.cpp
+@@ -1018,16 +1018,19 @@ static void ggml_backend_metal_fusion_set_enabled(ggml_backend_fusion_t finfo, b
+ // graph submission per device on each of those adds; here the copy and the add are issued
+ // directly, which is what the CUDA and SYCL backends already do for themselves.
+ struct ggml_backend_metal_comm_context {
+     std::vector<ggml_backend_t>         backends;
+     // scratch per device and reduction step: reusing one per device would let a step
      // overwrite what the previous one is still reducing
      std::vector<ggml_backend_buffer_t>  tmp;
      std::vector<size_t>                 tmp_size;
@@ -253,7 +303,17 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
      size_t                              n_steps = 0;
  };
  
-@@ -1044,6 +1047,11 @@ static void ggml_backend_metal_comm_free(void * comm_ctx_v) {
+ // Butterfly reduction over the largest power of two that fits, same schedule as the generic
+ // path: fold the devices past it, exchange, then copy the result back to them.
+ static size_t ggml_backend_metal_comm_offset_max(size_t n_backends) {
+     size_t offset = n_backends/2;
+     while ((offset & (offset - 1)) != 0) {
+@@ -1073,16 +1076,21 @@ static void * ggml_backend_metal_comm_init(ggml_backend_t * backends, size_t n_b
+ 
+ static void ggml_backend_metal_comm_free(void * comm_ctx_v) {
+     auto * comm_ctx = (ggml_backend_metal_comm_context *) comm_ctx_v;
+     for (auto & buf : comm_ctx->tmp) {
+         if (buf != nullptr) {
              ggml_backend_buffer_free(buf);
          }
      }
@@ -265,7 +325,17 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
      delete comm_ctx;
  }
  
-@@ -1160,6 +1163,76 @@
+ // TOSH_MGPU_ALLREDUCE_NOOP=1 keeps the split graph and every subgraph submission but performs
+ // no reduction and no cross-device synchronisation at all. The output is wrong by construction.
+ // It exists for one measurement: what tensor-split decode would cost if communication were free.
+ static bool ggml_backend_metal_comm_allreduce_noop(void) {
+     static int v = -1;
+@@ -1185,16 +1193,86 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+             return false;
+         }
+     }
+ 
+     // The peer copy has the higher bandwidth and the event hand-off the lower fixed cost, so
      // the batch decides: peer wins the prefill, events the decode.
      const bool prefer_events = ne / tensors[0]->ne[0] < ggml_metal_peer_min_batch();
  
@@ -342,7 +412,17 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
      // the add goes into the command buffer the copy already opened; kill switch because that
      // buffer stays open between the two calls
      static int fuse = -1;
-@@ -1199,8 +1272,18 @@
+     if (fuse < 0) {
+         fuse = getenv("TOSH_MGPU_FUSE_ADD_DISABLE") == NULL ? 1 : 0;
+     }
+     const bool hold_dst = fuse == 1;
+ 
+@@ -1224,28 +1302,41 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+         }
+     }
+ 
+     // Bailing out is only safe while no device has reduced anything: past that the generic
+     // path would add the partial sums a second time.
      bool reduced = false;
      auto push = [&](size_t j_src, size_t j_dst, size_t step, bool hold) {
          view_tmp(j_dst, step);
@@ -363,7 +443,9 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
          if (!ok && reduced) {
              // the partial sums are already folded in, so the fallback would add them a
              // second time - a failed butterfly has no safe way out
-@@ -1210,7 +1293,10 @@
+             GGML_ABORT("%s: allreduce push failed after partial reduction\n", __func__);
+         }
+         return ok;
      };
      auto reduce = [&](size_t j_dst) {
          ggml_metal_t ctx = (ggml_metal_t) comm_ctx->backends[j_dst]->context;
@@ -375,10 +457,21 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/ggml-meta
              if (reduced) {
                  GGML_ABORT("%s: allreduce add failed after partial reduction\n", __func__);
              }
-diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/kernels/binbcast.metal llama/ggml/src/ggml-metal/kernels/binbcast.metal
---- a/ggml/src/ggml-metal/kernels/binbcast.metal	2026-09-17 08:19:59
-+++ b/ggml/src/ggml-metal/kernels/binbcast.metal	2026-09-17 09:06:06
-@@ -165,6 +165,10 @@
+             return false;
+         }
+         reduced = true;
+         return true;
+     };
+diff --git a/ggml/src/ggml-metal/kernels/binbcast.metal b/ggml/src/ggml-metal/kernels/binbcast.metal
+index 7c7ab9b5e..6738b5f3b 100644
+--- a/ggml/src/ggml-metal/kernels/binbcast.metal
++++ b/ggml/src/ggml-metal/kernels/binbcast.metal
+@@ -160,16 +160,20 @@ kernel void kernel_bin_fuse_impl(
+ }
+ 
+ typedef decltype(kernel_bin_fuse_impl<float, float, float>) kernel_bin_fuse_t;
+ 
+ template [[host_name("kernel_bin_fuse_f32_f32_f32")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float,  float,  float>;
  template [[host_name("kernel_bin_fuse_f32_f32_f32_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float4, float4, float4>;
  template [[host_name("kernel_bin_fuse_f16_f16_f16")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<half,   half,   half>;
  template [[host_name("kernel_bin_fuse_f16_f16_f16_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<half4,  half4,  half4>;
@@ -389,3 +482,8 @@ diff -ruN --exclude=build* --exclude=.git ref-0072/ggml/src/ggml-metal/kernels/b
  
  kernel void kernel_add_id(
          constant ggml_metal_kargs_add_id & args,
+         device const char * src0,
+         device const char * src1,
+         device const char * src2,
+         device       char * dst,
+         uint3   tgpig[[threadgroup_position_in_grid]],

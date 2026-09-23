@@ -1,17 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Mon, 14 Sep 2026 10:53:26 -0400
-Subject: [PATCH] 0064-mgpu-hold-the-collective-buffer-for-decode-batches
-
----
- ggml/src/ggml-metal/ggml-metal-context.m | 42 ++++++++++++++++--------
- 1 file changed, 28 insertions(+), 14 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 2d2bcc517..72b953b91 100644
+index 8dacceed9..45289079e 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -2126,36 +2126,48 @@ static bool ggml_metal_add_inplace_buffer(ggml_metal_t ctx, id<MTLCommandBuffer>
+@@ -2144,36 +2144,48 @@ static bool ggml_metal_add_inplace_buffer(ggml_metal_t ctx, id<MTLCommandBuffer>
  }
  
  bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add) {
@@ -69,7 +60,7 @@ index 2d2bcc517..72b953b91 100644
                                           struct ggml_metal_xdev_link * link) {
  #if TARGET_OS_OSX
      if (link->peer_x_ok >= 0) {
-@@ -2385,17 +2397,17 @@ static bool ggml_metal_exchange_reduce_peer_fused(ggml_metal_t ctx_self, ggml_me
+@@ -2403,17 +2415,17 @@ static bool ggml_metal_exchange_reduce_peer_fused(ggml_metal_t ctx_self, ggml_me
              return false;
          }
  
@@ -88,7 +79,7 @@ index 2d2bcc517..72b953b91 100644
      }
  
      return true;
-@@ -2527,17 +2539,17 @@ static bool ggml_metal_exchange_reduce_peer_push(ggml_metal_t ctx_self, ggml_met
+@@ -2545,17 +2557,17 @@ static bool ggml_metal_exchange_reduce_peer_push(ggml_metal_t ctx_self, ggml_met
          [cmd_buf encodeWaitForEvent:link_in->ev_x_ready value:seq];
  
          ggml_metal_add_inplace_buffer(ctx_self, cmd_buf, t_self, link_in->shadow[slot], 0);
@@ -107,7 +98,7 @@ index 2d2bcc517..72b953b91 100644
      }
  
      return true;
-@@ -2628,17 +2640,17 @@ static bool ggml_metal_exchange_reduce_peer(ggml_metal_t ctx_self, ggml_metal_t
+@@ -2646,17 +2658,17 @@ static bool ggml_metal_exchange_reduce_peer(ggml_metal_t ctx_self, ggml_metal_t
          [cmd_buf encodeSignalEvent:link_in->ev_x_done value:seq];
          if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_waits, 1);
          [cmd_buf encodeWaitForEvent:link_out->ev_x_done value:seq];
@@ -126,7 +117,7 @@ index 2d2bcc517..72b953b91 100644
      }
  
      return true;
-@@ -2774,17 +2786,17 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+@@ -2792,17 +2804,17 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
          if (cts != nil) {
              id<MTLCounterSampleBuffer> csr = cts;
              const uint64_t cb2 = cbase;
@@ -145,7 +136,7 @@ index 2d2bcc517..72b953b91 100644
          atomic_fetch_add(&g_tr_bytes_host, 2*size);
          atomic_fetch_add(&g_tr_encode_ns, tosh_now_ns() - t_enter);
      }
-@@ -3437,17 +3449,19 @@ done:
+@@ -3455,17 +3467,19 @@ done:
  // TOSH_MGPU_MERGE=1: a tensor split cuts the graph at every partial node, so a token costs one
  // command buffer for each collective plus one for each subgraph that follows it. With this on,
  // the collective leaves its buffer open and the next subgraph encodes into it instead of

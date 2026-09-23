@@ -1,8 +1,13 @@
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 0763e65da..2f4922f49 100644
+index c14bf7192..4f5578ba5 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -1971,7 +1971,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1972,17 +1972,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+     }
+ 
+     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+             return;
          }
  
          if ((int) acc_ewma.size() == (int) n_seq && n_last_draft[seq_id] > 0) {
@@ -13,3 +18,8 @@ index 0763e65da..2f4922f49 100644
              const float acc = std::min(1.0f, (float) n_accepted / (float) n_last_draft[seq_id]);
              const float a = acc > acc_ewma[seq_id] ? 0.2f : alpha;  // rise fast, fall at alpha
              acc_ewma[seq_id] = a * acc_ewma[seq_id] + (1.0f - a) * acc;
+             n_last_draft[seq_id] = 0;
+         }
+ 
+         const int32_t n_rows = verify_h_rows[seq_id];
+         if (n_rows <= 0) {

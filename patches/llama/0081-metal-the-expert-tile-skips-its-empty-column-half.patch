@@ -1,12 +1,23 @@
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+index fb8977466..ee46c2b8c 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
-@@ -698,7 +698,7 @@ kernel void kernel_mul_mm_id(
-
+@@ -783,17 +783,17 @@ kernel void kernel_mul_mm_id(
+ 
+ #ifndef GGML_METAL_HAS_TENSOR
+     // Manual tiled path for GPUs without simdgroup matrix; simdgroup path otherwise.
+     const short lr = lane % 8; // row within an 8-row block of sa
+     const short lc = lane / 8; // low 2 bits of the output column
+ 
      // an expert narrower than the tile leaves whole simdgroups on padding columns; they still
      // load and hit the barriers, they just skip the products
 -    const bool sg_live = NLR != 8 || 16*vsg < nr1;
 +    const bool sg_live = 16*(NLR == 8 ? vsg : vsg/2) < nr1;
-
+ 
      // manual path: NLRx4 register tile per lane, rows 8*rr + lr, cols lc + 4*cc
      // of the simdgroup's output subtile
+     float acc[NLR][4];
+     S0_8x8 ma[4];
+     S1_8x8 mb[2];
+ 
+     simdgroup_float8x8 mc[8];

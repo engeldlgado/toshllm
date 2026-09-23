@@ -1,25 +1,22 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:10 -0400
-Subject: [PATCH] 0018-moe-cache-maps-thread-safe
-
----
- ggml/src/ggml-metal/ggml-metal-ops.cpp | 8 ++++++++
- 1 file changed, 8 insertions(+)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 8b38bdc77..a606583cf 100644
+index 59970fbb5..d10b22598 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -31,6 +31,7 @@ static inline int tosh_moe_off_ids(int, int, int)          { return 0; }
+@@ -27,24 +27,28 @@ static inline int tosh_moe_off_ids(int, int, int)          { return 0; }
+ #include "ggml-backend-impl.h"
+ 
+ #include "ggml-metal-impl.h"
+ #include "ggml-metal-common.h"
  #include "ggml-metal-device.h"
+ #include "ggml-metal-fusion.h"
  #include "ggml-metal-tuning.h"
  
 +#include <mutex>
  #include <cassert>
  #include <algorithm>
  #include <cstdlib>
-@@ -39,6 +40,9 @@ static inline int tosh_moe_off_ids(int, int, int)          { return 0; }
+ #include <cstring>
+ #include <limits>
  #include <cmath>
  #include <unordered_map>
  
@@ -29,7 +26,17 @@ index 8b38bdc77..a606583cf 100644
  static std::unordered_map<const ggml_tensor *, ggml_metal_buffer_id> g_tosh_moe_staged_ids;
  
  static std::unordered_map<const ggml_tensor *, ggml_metal_buffer_id> g_tosh_moe_full_cold;
-@@ -118,18 +122,22 @@ const ggml_tensor * ggml_metal_op_cached_moe_host(const ggml_tensor * op) {
+ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
+     if (!t) {
+         return { nullptr, 0 };
+     }
+ 
+@@ -114,28 +118,32 @@ const ggml_tensor * ggml_metal_op_cached_moe_host(const ggml_tensor * op) {
+     }
+ #else
+     (void) op;
+ #endif
+     return nullptr;
  }
  
  void ggml_metal_op_cached_moe_ids_set(const ggml_tensor * slots, ggml_metal_buffer_id ids) {
@@ -52,3 +59,8 @@ index 8b38bdc77..a606583cf 100644
      g_tosh_moe_full_cold.clear();
  }
  
+ struct ggml_metal_op {
+     ggml_metal_op(
+         ggml_metal_device_t dev,
+         ggml_metal_cmd_buf_t cmd_buf,
+         ggml_cgraph * gf,

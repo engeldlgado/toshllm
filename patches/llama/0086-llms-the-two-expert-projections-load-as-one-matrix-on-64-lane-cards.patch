@@ -1,35 +1,13 @@
-diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
---- a/src/llama-model-loader.h
-+++ b/src/llama-model-loader.h
-@@ -77,6 +77,7 @@
-     static const int TENSOR_SKIP_IF_VIRTUAL = 1 << 3;
-     static const int TENSOR_ALLOW_RESHAPE   = 1 << 4;
-     static const int TENSOR_READ_LAZY       = 1 << 5; // read rows on demand instead of loading whole tensor; requires mmap for now
-+    static const int TENSOR_FUSE_GATE_UP    = 1 << 6; // build one tensor out of the file's gate and up experts
- 
-     int n_kv      = 0;
-     int n_tensors = 0;
-@@ -131,6 +132,16 @@
-     llama_mmaps mappings;
- 
-     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
-+
-+    // a tensor the file does not have, built by interleaving two of its tensors per expert
-+    struct llama_tensor_fused {
-+        uint16_t idx;      // source file
-+        size_t   offs_a;   // first source (gate), start of its data
-+        size_t   offs_b;   // second source (up)
-+        size_t   stride;   // bytes of one expert in a source
-+        int64_t  n_expert;
-+    };
-+    std::map<std::string, llama_tensor_fused> fused_map;
-     std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
-     const llama_model_tensor_buft_override * tensor_buft_overrides;
- 
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index 0cffb299b..e9b2b378a 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -1359,6 +1359,58 @@
+@@ -1361,16 +1361,68 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+         GGML_ASSERT(buft != nullptr);
+         ggml_context * ctx = ctx_for_buft(buft);
+         ggml_tensor * ret = ggml_dup_tensor(ctx, &t_meta);
+         ggml_set_name(ret, tn.str().c_str());
+         return ret;
      }
  
      LLAMA_LOG_DEBUG("%s: loading tensor %s\n", __func__, tn.str().c_str());
@@ -88,7 +66,17 @@ diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
      const struct ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags & TENSOR_NOT_REQUIRED), flags & TENSOR_ALLOW_RESHAPE);
      if (cur == NULL) {
          return NULL;
-@@ -1758,6 +1810,32 @@
+     }
+ 
+     if (flags & TENSOR_READ_LAZY) {
+         // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
+         is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+@@ -1760,16 +1812,42 @@ bool llama_model_loader::load_all_data(
+             }
+             return staged_a && ggml_nbytes(a) > ggml_nbytes(b);
+         });
+     }
+ 
      for (struct ggml_tensor * cur : tensors) {
          const auto * weight = get_weight(ggml_get_name(cur));
          if (weight == nullptr) {
@@ -121,21 +109,70 @@ diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
              // this can happen with split experts models
              continue;
          }
-diff --git a/src/llama-model.h b/src/llama-model.h
---- a/src/llama-model.h
-+++ b/src/llama-model.h
-@@ -812,6 +812,7 @@
-     const int TENSOR_SKIP_IF_VIRTUAL;
-     const int TENSOR_ALLOW_RESHAPE;
-     const int TENSOR_READ_LAZY;
-+    const int TENSOR_FUSE_GATE_UP;
  
-     explicit llama_model_base(const llama_model_params & params);
-     virtual ~llama_model_base() = default;
+         if (progress_callback) {
+             if (!progress_callback((float) size_done / size_data, progress_callback_user_data)) {
+                 return false;
+             }
+diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
+index b7dc551a7..4f1e225a2 100644
+--- a/src/llama-model-loader.h
++++ b/src/llama-model-loader.h
+@@ -72,16 +72,17 @@ struct llama_model_loader {
+     };
+ 
+     static const int TENSOR_NOT_REQUIRED    = 1 << 0;
+     static const int TENSOR_DUPLICATED      = 1 << 1;
+     static const int TENSOR_SKIP            = 1 << 2;
+     static const int TENSOR_SKIP_IF_VIRTUAL = 1 << 3;
+     static const int TENSOR_ALLOW_RESHAPE   = 1 << 4;
+     static const int TENSOR_READ_LAZY       = 1 << 5; // read rows on demand instead of loading whole tensor; requires mmap for now
++    static const int TENSOR_FUSE_GATE_UP    = 1 << 6; // build one tensor out of the file's gate and up experts
+ 
+     int n_kv      = 0;
+     int n_tensors = 0;
+     int n_created = 0;
+ 
+     uint64_t n_elements = 0;
+     size_t   n_bytes    = 0;
+ 
+@@ -126,16 +127,26 @@ struct llama_model_loader {
+ 
+     llama_files files;
+     llama_ftype ftype;
+     llama_fver  fver;
+ 
+     llama_mmaps mappings;
+ 
+     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
++
++    // a tensor the file does not have, built by interleaving two of its tensors per expert
++    struct llama_tensor_fused {
++        uint16_t idx;      // source file
++        size_t   offs_a;   // first source (gate), start of its data
++        size_t   offs_b;   // second source (up)
++        size_t   stride;   // bytes of one expert in a source
++        int64_t  n_expert;
++    };
++    std::map<std::string, llama_tensor_fused> fused_map;
+     std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
+     const llama_model_tensor_buft_override * tensor_buft_overrides;
+ 
+     gguf_context_ptr metadata_ptr;
+     struct gguf_context * metadata; // either metadata_ptr.get() or externally set
+     llama_model_set_tensor_data_t set_tensor_data;
+     void * set_tensor_data_ud;
+     std::vector<ggml_context_ptr> contexts;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index f470781f1..3a04dcd4f 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -3523,7 +3523,8 @@
+@@ -3562,17 +3562,18 @@ ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int
+ //
+ 
+ llama_model_base::llama_model_base(const struct llama_model_params & params) : llama_model(params), model(this), tn(model->arch),
+     TENSOR_DUPLICATED     (llama_model_loader::TENSOR_DUPLICATED),
+     TENSOR_NOT_REQUIRED   (llama_model_loader::TENSOR_NOT_REQUIRED),
      TENSOR_SKIP           (llama_model_loader::TENSOR_SKIP),
      TENSOR_SKIP_IF_VIRTUAL(llama_model_loader::TENSOR_SKIP_IF_VIRTUAL),
      TENSOR_ALLOW_RESHAPE  (llama_model_loader::TENSOR_ALLOW_RESHAPE),
@@ -145,9 +182,19 @@ diff --git a/src/llama-model.cpp b/src/llama-model.cpp
  
  ggml_tensor * llama_model_base::create_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
      GGML_ASSERT(ml != nullptr);
-@@ -3532,6 +3533,17 @@
+     return create_tensor(*ml, tn, ne, flags);
+ }
  
  void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {
+     if (flags & TENSOR_SKIP) {
+@@ -3580,16 +3581,27 @@ void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid,
+ 
+         create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS, "weight", bid), {n_embd_, n_ff_ * 2, n_expert_}, skip | TENSOR_SKIP_IF_VIRTUAL);
+         create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS,    "weight", bid), {n_embd_, n_ff_,     n_expert_}, skip);
+         create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,      "weight", bid), {n_embd_, n_ff_,     n_expert_}, skip);
+         return;
+     }
+ 
      layer.ffn_gate_up_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS, "weight", bid), {n_embd_, n_ff_ * 2, n_expert_}, TENSOR_NOT_REQUIRED);
 +
 +    // a file with the two projections apart still runs them as one on a 64-lane card, where the
@@ -163,3 +210,30 @@ diff --git a/src/llama-model.cpp b/src/llama-model.cpp
      if (layer.ffn_gate_up_exps == nullptr) {
          layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", bid), {n_embd_, n_ff_, n_expert_}, flags);
          layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", bid), {n_embd_, n_ff_, n_expert_}, flags);
+     }
+ }
+ 
+ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
+         int64_t n_embd_, int64_t n_embd_q_, int64_t n_embd_k_, int64_t n_embd_v_,
+diff --git a/src/llama-model.h b/src/llama-model.h
+index cf7f5637b..6e9d93ed6 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -813,16 +813,17 @@ struct llama_model_base : public llama_model {
+ 
+     // llama_model_loader is not yet defined at this point, so we will set it after construction
+     const int TENSOR_DUPLICATED;
+     const int TENSOR_NOT_REQUIRED;
+     const int TENSOR_SKIP;
+     const int TENSOR_SKIP_IF_VIRTUAL;
+     const int TENSOR_ALLOW_RESHAPE;
+     const int TENSOR_READ_LAZY;
++    const int TENSOR_FUSE_GATE_UP;
+ 
+     explicit llama_model_base(const llama_model_params & params);
+     virtual ~llama_model_base() = default;
+ 
+     ggml_tensor * create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
+ 
+     // convenience overload of create_tensor that doesn't require llama_model_loader
+     ggml_tensor * create_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);

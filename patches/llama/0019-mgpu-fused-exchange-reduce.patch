@@ -1,19 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:10 -0400
-Subject: [PATCH] 0019-mgpu-fused-exchange-reduce
-
----
- ggml/src/ggml-metal/ggml-metal-context.h |  5 ++
- ggml/src/ggml-metal/ggml-metal-context.m | 77 +++++++++++++++++++++++-
- ggml/src/ggml-metal/ggml-metal.cpp       | 33 ++++++++++
- 3 files changed, 112 insertions(+), 3 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.h b/ggml/src/ggml-metal/ggml-metal-context.h
-index 6e8ad6cf9..90de0b859 100644
+index cf42cf7e0..8ab795f0d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.h
 +++ b/ggml/src/ggml-metal/ggml-metal-context.h
-@@ -40,6 +40,11 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
+@@ -35,16 +35,21 @@ void ggml_metal_read_batch_end  (ggml_metal_t ctx);
+ bool ggml_metal_cpy_tensor_async_ex(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst, bool prefer_events, bool hold_dst);
+ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst);
+ 
+ // acc += add, both f32 and contiguous. Encodes the kernel directly so a tensor-split
+ // allreduce does not pay a full graph submission per step.
  bool ggml_metal_add_inplace_supported(ggml_metal_t ctx, const struct ggml_tensor * acc, const struct ggml_tensor * add);
  bool ggml_metal_add_inplace_async    (ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add);
  
@@ -25,11 +19,21 @@ index 6e8ad6cf9..90de0b859 100644
  enum ggml_status ggml_metal_graph_compute (ggml_metal_t ctx, struct ggml_cgraph * gf);
  void             ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf);
  
+ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev);
+ void ggml_metal_event_wait  (ggml_metal_t ctx, ggml_metal_event_t ev);
+ 
+ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx);
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 225482845..5aa979e4a 100644
+index 2ecd8a91a..3a77125fd 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -183,6 +183,7 @@ static void ggml_metal_cmd_buf_submit(ggml_metal_t ctx, id<MTLCommandBuffer> cmd
+@@ -177,16 +177,17 @@ static void ggml_metal_encode_pending_waits(ggml_metal_t ctx, id<MTLCommandBuffe
+ 
+ static void ggml_metal_cmd_buf_submit(ggml_metal_t ctx, id<MTLCommandBuffer> cmd_buf) {
+     [cmd_buf commit];
+     [ctx->cmd_bufs_ext addObject:cmd_buf];
+     ctx->cmd_buf_last = cmd_buf;
      [cmd_buf retain];
  }
  
@@ -37,7 +41,17 @@ index 225482845..5aa979e4a 100644
  static void ggml_metal_cmd_buf_hold_flush(ggml_metal_t ctx) {
      if (ctx->cmd_buf_hold == nil) {
          return;
-@@ -774,7 +775,7 @@ bool ggml_metal_add_inplace_supported(ggml_metal_t ctx, const struct ggml_tensor
+     }
+ 
+     id<MTLCommandBuffer> cmd_buf = ctx->cmd_buf_hold;
+     ctx->cmd_buf_hold = nil;
+     ggml_metal_cmd_buf_submit(ctx, cmd_buf);
+@@ -784,17 +785,17 @@ bool ggml_metal_add_inplace_supported(ggml_metal_t ctx, const struct ggml_tensor
+ 
+     if (ggml_metal_get_buffer_id(acc).metal == nil || ggml_metal_get_buffer_id(add).metal == nil) {
+         return false;
+     }
+ 
      return ggml_metal_library_get_pipeline_bin_one(ctx->lib, GGML_OP_ADD).pipeline != NULL;
  }
  
@@ -46,7 +60,17 @@ index 225482845..5aa979e4a 100644
      if (!ggml_metal_add_inplace_supported(ctx, acc, add)) {
          // a copy may be holding its buffer open for this add, and nothing else would submit it
          ggml_metal_cmd_buf_hold_flush(ctx);
-@@ -825,7 +826,7 @@ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, co
+         return false;
+     }
+ 
+     struct ggml_metal_buffer_id bid_acc = ggml_metal_get_buffer_id(acc);
+     struct ggml_metal_buffer_id bid_add = ggml_metal_get_buffer_id(add);
+@@ -835,17 +836,17 @@ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, co
+ 
+     if (pipeline.c4) {
+         args.ne00 /= 4;
+         args.ne10 /= 4;
+         args.ne0  /= 4;
      }
  
      @autoreleasepool {
@@ -55,7 +79,17 @@ index 225482845..5aa979e4a 100644
  
          ggml_metal_encoder_t enc = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cmd_buf, false);
  
-@@ -851,12 +852,82 @@ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, co
+         ggml_metal_encoder_set_pipeline(enc, pipeline);
+         ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+         ggml_metal_encoder_set_buffer  (enc, bid_acc, 1);
+         ggml_metal_encoder_set_buffer  (enc, bid_add, 2);
+         ggml_metal_encoder_set_buffer  (enc, bid_acc, 3);
+@@ -861,22 +862,92 @@ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, co
+             }
+ 
+             ggml_metal_encoder_dispatch_threadgroups(enc, args.ne01, args.ne02, args.ne03, nth, 1, 1);
+         }
+ 
          ggml_metal_encoder_end_encoding(enc);
          ggml_metal_encoder_free(enc);
  
@@ -139,11 +173,21 @@ index 225482845..5aa979e4a 100644
  #ifdef TOSH_ENABLE_DYNAMIC_MOE
  static bool ggml_metal_moe_encode_range(
          ggml_metal_t ctx, struct ggml_cgraph * gf, id<MTLCommandBuffer> cmd_buf, int start, int end) {
+     if (start >= end) {
+         return true;
+     }
+ 
+     ggml_metal_op_t ctx_op = ggml_metal_op_init(
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index ee28b63f7..19c0def02 100644
+index 59cb7b03e..dd7c11237 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -555,6 +555,14 @@ static void ggml_backend_metal_read_batch_end(ggml_backend_t backend) {
+@@ -552,16 +552,24 @@ static void ggml_backend_metal_read_batch_begin(ggml_backend_t backend) {
+     ggml_metal_read_batch_begin((ggml_metal_t) backend->context);
+ }
+ 
+ static void ggml_backend_metal_read_batch_end(ggml_backend_t backend) {
+     ggml_metal_read_batch_end((ggml_metal_t) backend->context);
  }
  #endif
  
@@ -158,7 +202,17 @@ index ee28b63f7..19c0def02 100644
  static bool ggml_backend_metal_cpy_tensor_async_ex(ggml_backend_t backend_src, ggml_backend_t backend_dst, const ggml_tensor * src, ggml_tensor * dst, bool prefer_events, bool hold_dst) {
      if (!ggml_backend_is_metal(backend_src) || !ggml_backend_is_metal(backend_dst)) {
          return false;
-@@ -1163,7 +1171,32 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     }
+ 
+     if (!ggml_backend_buffer_is_metal(src->buffer) || !ggml_backend_buffer_is_metal(dst->buffer)) {
+         return false;
+     }
+@@ -1188,17 +1196,42 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+                 return false;
+             }
+         }
+         step++;
+     }
  
      // Every exchange of a step must read the partner's tensor before its own add rewrites it,
      // so the copies all go out before any of the adds.
@@ -190,4 +244,9 @@ index ee28b63f7..19c0def02 100644
 +        }
          for (size_t j = 0; j < 2*offset_max; j++) {
              if (!push(j, j ^ offset, step, hold_dst)) {
+                 return false;
+             }
+         }
+         for (size_t j = 0; j < 2*offset_max; j++) {
+             if (!reduce(j)) {
                  return false;

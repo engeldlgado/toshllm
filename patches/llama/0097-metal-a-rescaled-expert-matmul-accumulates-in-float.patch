@@ -1,0 +1,47 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index f27e6f95f..6088ac849 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1867,17 +1867,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+ 
+     const ggml_type tsrc0 = op->src[0]->type;
+     const ggml_type tsrc1 = op->src[1]->type;
+ 
+     const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+ 
+     const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
+ 
+-    const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
++    // src1 prec [TAG_GGML_PREC]
++    const bool amax = ggml_get_op_params_i32(op, 3) == GGML_PREC_F32;
++
++    // a rescaled src1 still overflows the half partial sums, so those ops accumulate in float
++    const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16 || amax) &&
+                          TOSH_ENV("TOSH_MM_ACC_F32_DISABLE") == nullptr;
+ 
+     // one grid per expert already keeps the GPU in threadgroups, so the 8x4 tile does not need
+     // the dense token floor. What it needs is an average expert that fills the narrow tile:
+     // below that its 64 columns are mostly padding and it loses (measured -5% at 14 tokens
+     // per expert, +2.3% at 45)
+     static const int wide_floor = []() {
+         const char * s = TOSH_ENV("TOSH_MMID_WIDE_FLOOR");
+@@ -1916,19 +1920,16 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+             case GGML_TYPE_IQ1_M:
+             case GGML_TYPE_IQ2_XXS:
+             case GGML_TYPE_IQ2_XS:
+             case GGML_TYPE_IQ3_XXS: break;
+             default: wide = false; break;
+         }
+     }
+ 
+-    // src1 prec [TAG_GGML_PREC]
+-    const bool amax = ggml_get_op_params_i32(op, 3) == GGML_PREC_F32;
+-
+     // the 64-lane twin lives in mul_mm_w64.metal, beside the dense one; it has no src1 rescale
+     const int simd_width_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
+     const bool w64 = simd_width_id == 64 && use_mm_manual && !amax &&
+                      TOSH_ENV("TOSH_MMID_W64_DISABLE") == nullptr;
+ 
+     snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
+     snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d_amax=%d", base, bc_inp, use_mm_manual, acc_f32, amax);
+ 

@@ -1,51 +1,84 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index d501092dd..6db894c8b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -638,7 +638,10 @@
+@@ -661,17 +661,20 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+                 n_fuse = ggml_metal_op_arange(ctx, idx);
+             } break;
+         case GGML_OP_TIMESTEP_EMBEDDING:
+             {
+                 n_fuse = ggml_metal_op_timestep_embedding(ctx, idx);
              } break;
          case GGML_OP_ARGSORT:
              {
 -                n_fuse = ggml_metal_op_argsort(ctx, idx);
-+                n_fuse = ggml_metal_op_topk_moe(ctx, idx);
++                n_fuse = ggml_metal_op_tosh_topk_moe(ctx, idx);
 +                if (n_fuse == 0) {
 +                    n_fuse = ggml_metal_op_argsort(ctx, idx);
 +                }
              } break;
          case GGML_OP_TOP_K:
              {
-@@ -6948,6 +6951,7 @@
- struct ggml_metal_topk_moe_plan {
+                 n_fuse = ggml_metal_op_top_k(ctx, idx);
+             } break;
+         case GGML_OP_TRI:
+             {
+                 n_fuse = ggml_metal_op_tri(ctx, idx);
+@@ -6960,16 +6963,17 @@ int ggml_metal_op_argmax(ggml_metal_op_t ctx, int idx) {
+ 
+ 
+ // the MoE router emits softmax -> argsort -> get_rows [-> sum_rows -> clamp -> div].
+ // ggml_can_fuse_ext cannot express it: the argsort output is also read by the later
+ // mul_mat_id, so it has two uses. Match it by hand like the CUDA backend does.
+ struct ggml_metal_tosh_topk_moe_plan {
      int n_fuse = 0;
      bool with_norm = false;
 +    bool delayed = false;
      float clamp = 0.0f;
      ggml_tensor * logits = nullptr;
      ggml_tensor * ids = nullptr;
-@@ -6966,9 +6970,9 @@
+     ggml_tensor * weights = nullptr;
+ };
+ 
+ static ggml_tensor * ggml_metal_view_base(ggml_tensor * t) {
+     while (t && t->view_src) {
+@@ -6978,19 +6982,19 @@ static ggml_tensor * ggml_metal_view_base(ggml_tensor * t) {
+     return t;
  }
  
- static bool ggml_metal_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_topk_moe_plan & plan) {
+ static bool ggml_metal_tosh_topk_moe_same(ggml_tensor * a, ggml_tensor * b) {
+     return a && b && ggml_metal_view_base(a) == ggml_metal_view_base(b);
+ }
+ 
+ static bool ggml_metal_tosh_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_tosh_topk_moe_plan & plan) {
 -    // measured neutral on RDNA2 (pp512 +0.1%, tg128 -1%, both inside the noise), so the
 -    // dispatch saving does not pay for itself here; opt-in until a device shows a gain
 -    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_ENABLE") != nullptr;
 +    // decode on these cards is bound by the host, and the router chain is five small dispatches
 +    // per MoE layer; where the experts run on the CPU instead it measures neutral
 +    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_DISABLE") == nullptr;
-     if (!enabled || !ctx->use_fusion) {
+     if (!enabled || !ctx->use_fusion()) {
          return false;
      }
-@@ -7058,12 +7062,72 @@
+ 
+     if (idx + 2 >= ctx->n_nodes()) {
+         return false;
+     }
+ 
+@@ -7073,49 +7077,109 @@ static bool ggml_metal_tosh_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_m
+         return false;
+     }
  
      plan.logits = softmax->src[0];
      plan.ids    = argsort;
-+    return true;
-+}
-+
+     return true;
+ }
+ 
 +// the router that picks on the raw logits and takes the softmax over the picked ones only
 +// (gpt-oss): argsort, get_rows, softmax
-+static bool ggml_metal_topk_moe_delayed_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_topk_moe_plan & plan) {
++static bool ggml_metal_tosh_topk_moe_delayed_fusion(ggml_metal_op_t ctx, int idx, ggml_metal_tosh_topk_moe_plan & plan) {
 +    static const bool enabled = TOSH_ENV("GGML_METAL_TOPK_MOE_DISABLE") == nullptr;
-+    if (!enabled || !ctx->use_fusion || idx + 2 >= ctx->n_nodes()) {
++    if (!enabled || !ctx->use_fusion() || idx + 2 >= ctx->n_nodes()) {
 +        return false;
 +    }
 +
@@ -73,9 +106,9 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +    }
 +
 +    ggml_tensor * logits = argsort->src[0];
-+    if (!ggml_metal_topk_moe_same(getrows->src[0], logits) ||
-+        !ggml_metal_topk_moe_same(getrows->src[1], argsort) ||
-+        !ggml_metal_topk_moe_same(softmax->src[0], getrows)) {
++    if (!ggml_metal_tosh_topk_moe_same(getrows->src[0], logits) ||
++        !ggml_metal_tosh_topk_moe_same(getrows->src[1], argsort) ||
++        !ggml_metal_tosh_topk_moe_same(softmax->src[0], getrows)) {
 +        return false;
 +    }
 +    if (!ggml_is_contiguous(logits) || !ggml_is_contiguous(argsort) ||
@@ -95,20 +128,25 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
 +    plan.logits    = logits;
 +    plan.ids       = argsort;
 +    plan.weights   = softmax;
-     return true;
- }
- 
- int ggml_metal_op_topk_moe(ggml_metal_op_t ctx, int idx) {
-     ggml_metal_topk_moe_plan plan;
--    if (!ggml_metal_topk_moe_fusion(ctx, idx, plan)) {
++    return true;
++}
++
+ int ggml_metal_op_tosh_topk_moe(ggml_metal_op_t ctx, int idx) {
+     ggml_metal_tosh_topk_moe_plan plan;
+-    if (!ggml_metal_tosh_topk_moe_fusion(ctx, idx, plan)) {
 +    const bool matched = ctx->node(idx)->op == GGML_OP_ARGSORT ?
-+        ggml_metal_topk_moe_delayed_fusion(ctx, idx, plan) :
-+        ggml_metal_topk_moe_fusion(ctx, idx, plan);
++        ggml_metal_tosh_topk_moe_delayed_fusion(ctx, idx, plan) :
++        ggml_metal_tosh_topk_moe_fusion(ctx, idx, plan);
 +    if (!matched) {
          return 0;
      }
  
-@@ -7076,7 +7140,7 @@
+     ggml_metal_library_t lib = ctx->lib;
+     ggml_metal_encoder_t enc = ctx->enc;
+ 
+     auto pipeline = ggml_metal_library_get_pipeline_tosh_topk_moe(lib);
+     if (!pipeline.pipeline) {
+         return 0;
      }
  
      const int32_t n_expert      = plan.logits->ne[0];
@@ -117,7 +155,14 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
      const int32_t nrows         = ggml_nrows(plan.logits);
  
      int nth = 32;
-@@ -7091,9 +7155,9 @@
+     while (2*nth <= n_expert && 2*nth <= (int) ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {
+         nth *= 2;
+     }
+ 
+     const size_t smem_f = GGML_PAD((2*n_expert + nth)*sizeof(float), 16);
+     const size_t smem_i = GGML_PAD(nth*sizeof(int32_t), 16);
+ 
+     ggml_metal_kargs_tosh_topk_moe args = {
          /*.n_expert        =*/ n_expert,
          /*.n_expert_used   =*/ n_expert_used,
          /*.nrows           =*/ nrows,
@@ -129,3 +174,8 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-m
          /*.has_bias        =*/ 0,
          /*.clamp           =*/ plan.clamp,
          /*.scale           =*/ 1.0f,
+     };
+ 
+     ggml_metal_encoder_set_pipeline(enc, pipeline);
+     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(plan.logits),  1);

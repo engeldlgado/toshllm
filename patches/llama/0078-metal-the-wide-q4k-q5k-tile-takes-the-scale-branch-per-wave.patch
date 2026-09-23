@@ -1,8 +1,11 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 7a979d90c..b0c4d5d1d 100644
+index 0cc644c9d..32477974b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1061,12 +1061,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+@@ -1090,33 +1090,39 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     const int w64_floor = w64_floor_env ? w64_floor_env :
+                           (tsrc0 == GGML_TYPE_IQ4_NL ? 384 : 0);
+ 
      const bool w64 = simd_width == 64 && use_mm_manual && !has_tensor &&
                       op->ne[1] >= w64_floor &&
                       getenv("TOSH_MM_W64_DISABLE") == nullptr;
@@ -22,7 +25,11 @@ index 7a979d90c..b0c4d5d1d 100644
      if (!res.pipeline) {
          ggml_metal_cv_t cv = ggml_metal_cv_init();
  
-@@ -1078,10 +1083,11 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+         ggml_metal_cv_set_bool(cv, narrow, FC_MUL_MM + 7);
+         ggml_metal_cv_set_bool(cv, bc_inp, FC_MUL_MM + 0);
+         ggml_metal_cv_set_bool(cv, bc_out, FC_MUL_MM + 1);
+         ggml_metal_cv_set_int16(cv, ne12,  FC_MUL_MM + 2);
+         ggml_metal_cv_set_int16(cv, ne13,  FC_MUL_MM + 3);
          ggml_metal_cv_set_int16(cv, r2,    FC_MUL_MM + 4);
          ggml_metal_cv_set_int16(cv, r3,    FC_MUL_MM + 5);
          ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
@@ -34,11 +41,36 @@ index 7a979d90c..b0c4d5d1d 100644
  
          ggml_metal_cv_free(cv);
      }
+ 
+     if (has_tensor) {
+         res.nr0 = NRA;
+@@ -1764,17 +1770,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_bool(cv, bc_inp,        FC_MUL_MM + 0);
+         ggml_metal_cv_set_bool(cv, use_mm_manual, FC_MUL_MM + 6);
+         ggml_metal_cv_set_bool(cv, acc_f32,       FC_MUL_MM + 9);
+-        ggml_metal_cv_set_bool(cv, amax,          FC_MUL_MM + 10);
++        ggml_metal_cv_set_bool(cv, amax,          FC_MUL_MM + 11);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+         ggml_metal_cv_free(cv);
+     }
+ 
+     res.smem = 8192;
+     res.nr0  = 64;
 diff --git a/ggml/src/ggml-metal/kernels/dequantize.h b/ggml/src/ggml-metal/kernels/dequantize.h
 index 45d09c38e..0367ea031 100644
 --- a/ggml/src/ggml-metal/kernels/dequantize.h
 +++ b/ggml/src/ggml-metal/kernels/dequantize.h
-@@ -474,32 +474,35 @@ void dequantize_q3_K(device const block_q3_K *xb, short il, thread type4x4 & reg
+@@ -471,52 +471,55 @@ void dequantize_q3_K(device const block_q3_K *xb, short il, thread type4x4 & reg
+         const ushort hi = hv[i];
+         reg_f[i/2][2*(i%2) + 0] = dl  * (qv[i] & mask)  - (hi & m0 ? 0.f : ml);
+         reg_f[i/2][2*(i%2) + 1] = dl2 * (qv[i] & mask1) - (hi & m1 ? 0.f : ml);
      }
  
      reg = (type4x4) reg_f;
@@ -80,7 +112,9 @@ index 45d09c38e..0367ea031 100644
      // 128-bit load: the block is 144 bytes (9*16) so the window lands 16-byte aligned
      const int qoff = (int) (il/4) * 32 + 16 * ((int) il & 1);
      const uint4 qsv = *(device const uint4 *)(xb->qs + qoff);
-@@ -509,11 +512,11 @@ void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & re
+ 
+     // d, dmin and the 12 scale bytes are the block's first 16 bytes, and the block is 16-byte
+     // aligned, so one load replaces the two halves and the three separate scale bytes
      const uint4 hdr = *(device const uint4 *) xb;
      const half2 dm  = as_type<half2>(hdr.x);
  
@@ -93,7 +127,13 @@ index 45d09c38e..0367ea031 100644
      const float dl = d * sc[0];
      const float ml = min * sc[1];
  
-@@ -528,22 +531,27 @@ void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & re
+     const ushort mask0 = il < 2 ? 0x000F : 0x00F0;
+     const ushort mask1 = mask0 << 8;
+     const float dl2 = dl / 256.f;
+@@ -525,28 +528,33 @@ void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & re
+     for (int i = 0; i < 8; ++i) {
+         const ushort qsi = (i & 1) ? (ushort)(qsv[i/2] >> 16) : (ushort)(qsv[i/2] & 0xFFFF);
+         reg[i/2][2*(i%2) + 0] = dl  * (qsi & mask0) - ml;
          reg[i/2][2*(i%2) + 1] = dl2 * (qsi & mask1) - ml;
      }
  }
@@ -123,7 +163,13 @@ index 45d09c38e..0367ea031 100644
      const float dl = d * sc[0];
      const float ml = min * sc[1];
  
-@@ -562,10 +570,29 @@ void dequantize_q5_K(device const block_q5_K *xb, short il, thread type4x4 & reg
+     const ushort mask0 = il < 2 ? 0x000F : 0x00F0;
+     const ushort mask1 = mask0 << 8;
+     const float dl2 = dl / 256.f;
+@@ -559,16 +567,35 @@ void dequantize_q5_K(device const block_q5_K *xb, short il, thread type4x4 & reg
+         const ushort qhi = (i & 1) ? (ushort)(qhv[i/2] >> 16) : (ushort)(qhv[i/2] & 0xFFFF);
+         reg_f[i/2][2*(i%2) + 0] = dl  * (qsi & mask0) + (qhi & ul0 ? dqh : 0.f) - ml;
+         reg_f[i/2][2*(i%2) + 1] = dl2 * (qsi & mask1) + (qhi & ul1 ? dqh : 0.f) - ml;
      }
  
      reg = (type4x4) reg_f;
@@ -153,23 +199,37 @@ index 45d09c38e..0367ea031 100644
      const half d_all = xb->d;
      device const uint16_t * ql = (device const uint16_t *)xb->ql;
      device const uint16_t * qh = (device const uint16_t *)xb->qh;
+     device const int8_t * scales = (device const int8_t *)xb->scales;
+ 
+     ql = ql + 32*(il/8) + 16*((il/2)&1) + 8*(il&1);
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
-index daa1e301c..9bd37ef3f 100644
+index 1702418d7..bf8873bc6 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
-@@ -9,10 +9,11 @@ constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
+@@ -6,17 +6,18 @@ constant bool FC_mul_mm_bc_out [[function_constant(FC_MUL_MM + 1)]];
+ constant short FC_mul_mm_ne12  [[function_constant(FC_MUL_MM + 2)]];
+ constant short FC_mul_mm_ne13  [[function_constant(FC_MUL_MM + 3)]];
+ constant short FC_mul_mm_r2    [[function_constant(FC_MUL_MM + 4)]];
  constant short FC_mul_mm_r3    [[function_constant(FC_MUL_MM + 5)]];
  constant bool  FC_mul_mm_manual [[function_constant(FC_MUL_MM + 6)]];
  constant bool  FC_mul_mm_narrow [[function_constant(FC_MUL_MM + 7)]];
  constant bool  FC_mul_mm_double_buffer [[function_constant(FC_MUL_MM + 8)]];
  constant bool  FC_mul_mm_acc_f32 [[function_constant(FC_MUL_MM + 9)]];
+-constant bool  FC_mul_mm_id_amax [[function_constant(FC_MUL_MM + 10)]];
 +constant bool  FC_mul_mm_uniform_scale [[function_constant(FC_MUL_MM + 10)]];
++constant bool  FC_mul_mm_id_amax [[function_constant(FC_MUL_MM + 11)]];
  
  // each block_q contains 16*nl weights
  #ifdef GGML_METAL_HAS_TENSOR
  template<
      typename SA, typename SA_4x4, typename SA_8x8,
-@@ -267,11 +268,18 @@ kernel void kernel_mul_mm(
+     typename SB, typename SB_2x4, typename SB_8x8,
+     typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread SA_4x4 &),
+     typename T0, typename T0_4x4, typename T1, typename T1_2x4, short NLR = 4>
+@@ -265,17 +266,24 @@ kernel void kernel_mul_mm(
+                 // simdgroup path keeps the layout simdgroup_load expects
+                 const short el = FC_mul_mm_manual ? (8*lx + ly) : (8*ly + lx);
+ 
                  *(sa + 64*ib + el) = loop_k + 16*il + i < args.ne00 ? *((device T0 *) x + i) : 0;
              }
          } else {
@@ -189,3 +249,6 @@ index daa1e301c..9bd37ef3f 100644
              if (!FC_mul_mm_double_buffer) {
                  threadgroup_barrier(mem_flags::mem_threadgroup);
              }
+ 
+             const short sy = (tiitg/NL0)/8;
+             const short lx = (tiitg/NL0)%8;

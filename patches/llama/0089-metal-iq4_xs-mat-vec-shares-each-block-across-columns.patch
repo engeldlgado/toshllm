@@ -1,8 +1,11 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 6c3f68bcb..731115f99 100644
+index 721449016..59909db0d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1570,10 +1570,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -1600,16 +1600,27 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     nsg = N_SG_IQ4_XS;
+                     nr0 = N_R0_IQ4_XS;
+                 }
                  smem = 32*sizeof(float);
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
                  if (simd_width == 64 && TOSH_ENV("TOSH_MV_W64_DISABLE") == nullptr) {
@@ -24,11 +27,17 @@ index 6c3f68bcb..731115f99 100644
              {
                  nsg = N_SG_TQ2_0;
                  nr0 = N_R0_TQ2_0;
+             } break;
+         default:
+             {
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index 2491dabe3..cb2c2610b 100644
+index 549db4449..712c5310d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -94,10 +94,11 @@
+@@ -100,16 +100,17 @@
+ #define N_R0_IQ3_S 4
+ #define N_SG_IQ3_S 2
+ #define N_R0_IQ3_S_SPLIT 8
  
  #define N_R0_IQ4_NL 2
  #define N_SG_IQ4_NL 2
@@ -40,11 +49,17 @@ index 2491dabe3..cb2c2610b 100644
  #define N_R0_TQ2_0 4
  #define N_SG_TQ2_0 2
  
+ // function constants offsets
+ #define FC_FLASH_ATTN_EXT_PAD          100
+ #define FC_FLASH_ATTN_EXT_BLK          200
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index bfdddbf3a..351e74b6a 100644
+index 78fc1c7f4..c5c546002 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -3789,10 +3789,133 @@ kernel void kernel_mul_mv_iq4_nl_f32_r8(
+@@ -3786,16 +3786,139 @@ kernel void kernel_mul_mv_iq4_nl_f32_r8(
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
  
      kernel_mul_mv_iq4_nl_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
@@ -178,11 +193,17 @@ index bfdddbf3a..351e74b6a 100644
          args_t args,
          device const char * src0,
          device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 index ab342c912..474a7ea23 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -3187,10 +3187,125 @@ void kernel_mul_mv_iq4_xs_f32_w64_impl(
+@@ -3184,16 +3184,131 @@ void kernel_mul_mv_iq4_xs_f32_w64_impl(
+         float sum_all = simd_sum(sumf[row]);
+         if (tiisg == 0) {
+             dst_f32[first_row + row] = sum_all;
          }
      }
  }
@@ -308,3 +329,6 @@ index ab342c912..474a7ea23 100644
          constant ggml_metal_kargs_mul_mv & args,
          device const char * src0,
          device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],

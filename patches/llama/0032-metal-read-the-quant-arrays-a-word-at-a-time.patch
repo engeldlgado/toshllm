@@ -1,18 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:14 -0400
-Subject: [PATCH] 0035-metal-read-the-quant-arrays-a-word-at-a-time
-
----
- ggml/src/ggml-metal/ggml-metal-device.cpp | 10 ++-
- ggml/src/ggml-metal/kernels/mul_mv.metal  | 82 +++++++++++++++++------
- 2 files changed, 71 insertions(+), 21 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 640a1f040..fa0b07a49 100644
+index 0bf7c4195..b5f738e20 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1302,8 +1302,15 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -1330,29 +1330,37 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         }
+     }
+ 
+     // q6_K's 210-byte block leaves the compiler assuming byte alignment, so it reads its quant
+     // arrays a byte at a time; an even stride lets the kernel read them two bytes at a time
      const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
                        getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
  
@@ -29,7 +24,11 @@ index 640a1f040..fa0b07a49 100644
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
-@@ -1315,6 +1322,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, (int16_t) ne12, FC_MUL_MV + 2);
+         ggml_metal_cv_set_int16(cv, r2,             FC_MUL_MV + 3);
          ggml_metal_cv_set_int16(cv, r3,             FC_MUL_MV + 4);
          ggml_metal_cv_set_int16(cv, nw,             FC_MUL_MV + 5);
          ggml_metal_cv_set_bool (cv, row4,           FC_MUL_MV + 6);
@@ -37,11 +36,21 @@ index 640a1f040..fa0b07a49 100644
  
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
+         ggml_metal_cv_free(cv);
+     }
+ 
+     res.nr0  = nr0;
+     res.nr1  = nr1;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 27a464347..3ca7eb879 100644
+index 3cef1dcf3..94846e280 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -216,6 +216,7 @@ constant short FC_mul_mv_ne12  [[function_constant(FC_MUL_MV + 2)]];
+@@ -211,16 +211,17 @@ static inline void helper_mv_reduce_and_write(
+ }
+ 
+ constant short FC_mul_mv_nsg   [[function_constant(FC_MUL_MV + 0)]];
+ constant short FC_mul_mv_nxpsg [[function_constant(FC_MUL_MV + 1)]];
+ constant short FC_mul_mv_ne12  [[function_constant(FC_MUL_MV + 2)]];
  constant short FC_mul_mv_r2    [[function_constant(FC_MUL_MV + 3)]];
  constant short FC_mul_mv_r3    [[function_constant(FC_MUL_MV + 4)]];
  constant bool  FC_mul_mv_row4  [[function_constant(FC_MUL_MV + 6)]];
@@ -49,7 +58,17 @@ index 27a464347..3ca7eb879 100644
  
  template<typename block_q_type, short NR0, typename args_t>
  void mul_vec_q_n_f32_impl(
-@@ -578,8 +579,19 @@ void kernel_mul_mv_q8_0_f32_impl(
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+@@ -573,18 +574,29 @@ void kernel_mul_mv_q8_0_f32_impl(
+         for (short i = 0; i < NQ; ++i) {
+             yl[i] = yb[i];
+         }
+ 
+         for (short row = 0; row < NR0; row++) {
              device const int8_t * qs = ax[row][ib].qs + il*NQ;
  
              float sumq = 0.f;
@@ -71,7 +90,17 @@ index 27a464347..3ca7eb879 100644
              }
  
              sumf[row] += sumq*ax[row][ib].d;
-@@ -1253,15 +1265,25 @@ void kernel_mul_mv_q2_K_f32_impl(
+         }
+ 
+         yb += NSG*NBI*QK8_0;
+     }
+ 
+@@ -1248,25 +1260,35 @@ void kernel_mul_mv_q2_K_f32_impl(
+         // widen to int before the pointer math: short offsets into a device base miscompile on AMD
+         device const uint8_t  * sc = (device const uint8_t  *)x[ib].scales + (8 * (int) iq + (int) is);
+         device const uint16_t * qs = (device const uint16_t *)x[ib].qs + (16 * (int) iq + 4 * (int) ir);
+         device const half     * dh = &x[ib].d;
+ 
          for (short row = 0; row < nr0; row++) {
              float4 acc1 = {0.f, 0.f, 0.f, 0.f};
              float4 acc2 = {0.f, 0.f, 0.f, 0.f};
@@ -105,7 +134,17 @@ index 27a464347..3ca7eb879 100644
              }
              float dall = dh[0];
              float dmin = dh[1] * 1.f/16.f;
-@@ -1398,15 +1420,31 @@ void kernel_mul_mv_q3_K_f32_impl(
+             sumf[row] += dall * ((acc1[0] + 1.f/256.f * acc2[0]) * (sc[0] & 0xF) * 1.f/ 1.f +
+                                  (acc1[1] + 1.f/256.f * acc2[1]) * (sc[2] & 0xF) * 1.f/ 4.f +
+                                  (acc1[2] + 1.f/256.f * acc2[2]) * (sc[4] & 0xF) * 1.f/16.f +
+                                  (acc1[3] + 1.f/256.f * acc2[3]) * (sc[6] & 0xF) * 1.f/64.f) -
+                          dmin * (sumy[0] * (sc[0] & 0xF0) + sumy[1] * (sc[2] & 0xF0) + sumy[2] * (sc[4] & 0xF0) + sumy[3] * (sc[6] & 0xF0));
+@@ -1393,40 +1415,56 @@ void kernel_mul_mv_q3_K_f32_impl(
+ 
+             scales16[0] = a[4];
+             scales16[1] = a[5];
+             aux32 = ((scales32 >> s_shift2) << 4) & 0x30303030;
+             scales16[0] = a[il+0];
              scales16[1] = a[il+1];
              scales32 = ((scales32 >> s_shift1) & 0x0f0f0f0f) | aux32;
  
@@ -140,7 +179,8 @@ index 27a464347..3ca7eb879 100644
              }
              float d1 = d_all * (s1 + 1.f/256.f * s2 - s3*v1);
              float d2 = d_all * (s4 + 1.f/256.f * s5 - s6*v2);
-@@ -1415,13 +1453,13 @@ void kernel_mul_mv_q3_K_f32_impl(
+             sumf1[row] += d1 * (scales[0] - 32);
+             sumf2[row] += d2 * (scales[2] - 32);
  
              s1 = s2 = s3 = s4 = s5 = s6 = 0;
              for (short l = 0; l < 8; l += 2) {
@@ -157,7 +197,17 @@ index 27a464347..3ca7eb879 100644
              }
              d1 = d_all * (s1 + 1.f/256.f * s2 - s3*v1);
              d2 = d_all * (s4 + 1.f/256.f * s5 - s6*v2);
-@@ -1823,7 +1861,11 @@ void kernel_mul_mv_q6_K_f32_impl(
+             sumf1[row] += d1 * (scales[1] - 32);
+             sumf2[row] += d2 * (scales[3] - 32);
+ 
+             q  += args.nb01/2;
+             h  += args.nb01/2;
+@@ -1818,30 +1856,34 @@ void kernel_mul_mv_q6_K_f32_impl(
+ 
+         for (short row = 0; row < nr0; ++row) {
+             float4 sums = {0.f, 0.f, 0.f, 0.f};
+ 
+             // the three arrays are read four consecutive bytes at a time. The block is 210 bytes,
              // so every other one sits two bytes off a word and a card that requires natural
              // alignment reads the wrong bytes there; two shorts land right on every block
              uint w1 = 0, w2 = 0, wh = 0;
@@ -170,7 +220,10 @@ index 27a464347..3ca7eb879 100644
                  device const ushort * s1 = (device const ushort *) q1;
                  device const ushort * s2 = (device const ushort *) q2;
                  device const ushort * sh = (device const ushort *) qh;
-@@ -1834,9 +1876,9 @@ void kernel_mul_mv_q6_K_f32_impl(
+ 
+                 w1 = (uint) s1[0] | ((uint) s1[1] << 16);
+                 w2 = (uint) s2[0] | ((uint) s2[1] << 16);
+                 wh = (uint) sh[0] | ((uint) sh[1] << 16);
              }
  
              FOR_UNROLL (short l = 0; l < 4; ++l) {
@@ -183,3 +236,8 @@ index 27a464347..3ca7eb879 100644
  
                  sums[0] += yl[4*l + 0] * ((int8_t)((b1 & 0xF) | ((bh & kmask1) << 4)) - 32);
                  sums[1] += yl[4*l + 1] * ((int8_t)((b2 & 0xF) | ((bh & kmask2) << 2)) - 32);
+                 sums[2] += yl[4*l + 2] * ((int8_t)((b1  >> 4) | ((bh & kmask3) << 0)) - 32);
+                 sums[3] += yl[4*l + 3] * ((int8_t)((b2  >> 4) | ((bh & kmask4) >> 2)) - 32);
+             }
+ 
+             sumf[row] += dh[0] * (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);

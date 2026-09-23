@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 6bd4de46e..f17e81f5b 100644
+index 6fe035ae2..42be66833 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3000,17 +3000,22 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+@@ -3056,17 +3056,22 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
          }
  
          // the wave64 q6_K variant keeps four rows per simdgroup, so the row split does not apply
@@ -27,7 +27,7 @@ index 6bd4de46e..f17e81f5b 100644
              /*.ne02  =*/ ne02,
              /*.nb00  =*/ nb00,
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 68d4ae1f5..086eefbb6 100644
+index f80d6cdb4..dbd28b4fa 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
 @@ -4560,16 +4560,164 @@ kernel void kernel_mul_mv_ext_q6_K_f32_w64_disp(

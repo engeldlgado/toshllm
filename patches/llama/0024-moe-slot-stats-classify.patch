@@ -1,17 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:13 -0400
-Subject: [PATCH] 0025-moe-slot-stats-classify
-
----
- ggml/src/ggml-metal/ggml-metal-context.m | 7 ++++---
- 1 file changed, 4 insertions(+), 3 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 539753b5b..e2f9e7bb1 100644
+index 71516638e..78948dadb 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -1150,7 +1150,6 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+@@ -1160,17 +1160,16 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+                             slot_of[e] = -2;
+                             n_unique++;
+                             if (n_fixed > 0 && tosh_moe_cold_of(layer, e) >= 0) n_cold_unique++;
+                         }
+                     }
                  }
              }
          }
@@ -19,7 +15,17 @@ index 539753b5b..e2f9e7bb1 100644
          if (getenv("TOSH_MOE_WIDE_DEBUG") != NULL) {
              GGML_LOG_WARN("%s: layer %d unique=%d cold=%d slots=%d fixed=%d experts=%d\n",
                  __func__, layer, n_unique, n_cold_unique, n_slots, n_fixed, n_expert);
-@@ -1183,8 +1182,9 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+         }
+         if (!ids_valid) {
+             free(slot_of); free(miss_expert); free(miss_slot);
+             result = GGML_STATUS_FAILED;
+             goto done;
+@@ -1193,33 +1192,35 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+                 const int32_t * cfi = sv + tosh_moe_off_cold_for_id(n_expert, n_slots, max_fetch);
+                 const int32_t * ios = sv + tosh_moe_off_id_of_slot (n_expert, n_slots, max_fetch);
+                 const int n_cold = n_expert - n_fixed;
+                 int bad_ring = 0, bad_stale = 0, bad_cold = 0, from_slot = 0, from_cold = 0;
+                 for (int e = 0; e < n_expert; ++e) {
                      if (slot_of[e] != -2 && slot_of[e] != -1) continue;   // only experts routed this pass
                      if (sfi[e] >= 0) {
                          from_slot++;
@@ -31,7 +37,15 @@ index 539753b5b..e2f9e7bb1 100644
                      } else {
                          from_cold++;
                          if (cfi[e] < 0 || cfi[e] >= n_cold) bad_cold++;
-@@ -1200,6 +1200,7 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+                     }
+                 }
+                 st_src_slot += from_slot; st_src_cold += from_cold;
+                 st_bad_ring += bad_ring; st_bad_stale += bad_stale; st_bad_cold += bad_cold;
+             }
+             free(sv);
+         }
+         if (slot_stats && (wide_shape || (n_fixed > 0 && n_cold_unique > n_slots - n_fixed))) {
+             st_layers++; st_wide++; st_slots = n_slots;
              st_unique += n_unique; st_cold += n_cold_unique;
              if (n_unique > st_unique_max) st_unique_max = n_unique;
          }
@@ -39,3 +53,8 @@ index 539753b5b..e2f9e7bb1 100644
          if (n_fixed > 0 && (wide_shape || n_cold_unique > n_slots - n_fixed)) {
              const bool transient_map = getenv("TOSH_MOE_TRANSIENT_MAP") != NULL;
              const bool persistent_map = getenv("TOSH_MOE_PERSISTENT_MAP") != NULL;
+             const bool double_buffer = getenv("TOSH_MOE_DOUBLE_BUFFER") != NULL &&
+                 !transient_map && !persistent_map && wide_shape;
+             const int parity = double_buffer ? full_sequence++ & 1 : 0;
+             if (full_pending[parity] != nil) {
+                 [full_pending[parity] waitUntilCompleted];

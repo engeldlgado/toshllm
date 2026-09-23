@@ -1,11 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:57 -0400
-Subject: [PATCH] metal: sparse attention for the AMD kernels
-
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index ed84f2843..4de2df086 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -459,18 +459,18 @@
+@@ -472,18 +472,18 @@ typedef struct {
      float    m1;
      int32_t  n_head_log2;
      float    logit_softcap;
@@ -26,7 +23,7 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
      uint64_t nb02;
      uint64_t nb03;
      int32_t  ne11;
-@@ -496,16 +496,17 @@
+@@ -509,16 +509,17 @@ typedef struct {
      float    scale;
      float    max_bias;
      float    m0;
@@ -44,9 +41,11 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
      int32_t  ne32;
      int32_t  ne33;
      uint64_t nb31;
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index d059614b1..1e82cb185 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4065,16 +4065,22 @@
+@@ -4158,16 +4158,22 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
                       (int) ne00, (int) ne20, ks, vs, props_dev->simd_width == 64 ? "_w64" : "");
          }
      }
@@ -69,7 +68,7 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
              /*.ne01          =*/ ne01,
              /*.ne02          =*/ ne02,
              /*.ne03          =*/ ne03,
-@@ -4104,16 +4110,17 @@
+@@ -4197,16 +4203,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              /*.scale         =*/ scale,
              /*.max_bias      =*/ max_bias,
              /*.m0            =*/ m0,
@@ -87,17 +86,15 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
          static const bool pfmla = getenv("TOSH_FA_PF_MLA_DISABLE") == nullptr;
          const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
          const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
-@@ -4348,16 +4355,48 @@
-             (wg_wide_head || wg_dk128) && ne01 == 1 && !has_sinks &&
-             (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
+@@ -4444,16 +4451,48 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              (wg_dk128 || ne11 >= 1024) &&
              getenv("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
  
          char fa_amd_wg_pipeline[96];
          if (fa_amd_nwg > 1) {
              snprintf(fa_amd_wg_pipeline, sizeof(fa_amd_wg_pipeline), "%s_wg32", fa_amd_pipeline);
-+        }
-+
+         }
+ 
 +        // sparse: build the compacted index list first, on the same encoder
 +        ggml_metal_buffer_id bid_amd_idx = bid_tmp;
 +        if (amd_sparse) {
@@ -128,15 +125,17 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
 +
 +            ggml_metal_encoder_dispatch_threadgroups(enc, ne31, ne32, ne33, nthi, 1, 1);
 +            ggml_metal_op_concurrency_reset(ctx);
-         }
- 
++        }
++
          auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
          if (!pipeline.pipeline) {
              const char * nm = fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline;
              pipeline = ggml_metal_library_compile_pipeline(lib, nm, nm, nullptr);
          }
  
-@@ -4377,16 +4416,17 @@
+         // dispatching more threads than the pipeline admits hangs the GPU, and how many
+         // it admits depends on the K type's dequant; fall through rather than risk it
+@@ -4467,16 +4506,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
          ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
          ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
          ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
@@ -154,9 +153,11 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
  
              ggml_metal_kargs_flash_attn_ext_vec_reduce args0 = { (int32_t) (ne1*ne2*ne3) };
  
+diff --git a/ggml/src/ggml-metal/kernels/fa.metal b/ggml/src/ggml-metal/kernels/fa.metal
+index 79eca9a75..def0751bc 100644
 --- a/ggml/src/ggml-metal/kernels/fa.metal
 +++ b/ggml/src/ggml-metal/kernels/fa.metal
-@@ -2449,30 +2449,32 @@
+@@ -2480,30 +2480,32 @@ template [[host_name("kernel_lightning_indexer_q4_0")]] kernel kernel_lightning_
  template [[host_name("kernel_lightning_indexer_q4_1")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer<block_q4_1, 2, dequantize_q4_1>;
  template [[host_name("kernel_lightning_indexer_q5_0")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer<block_q5_0, 2, dequantize_q5_0>;
  template [[host_name("kernel_lightning_indexer_q5_1")]] kernel kernel_lightning_indexer_t kernel_lightning_indexer<block_q5_1, 2, dequantize_q5_1>;
@@ -189,7 +190,7 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
      constexpr short DV4 = DV/4;   // float4 per head row (32 for DV=128, 64 for DV=256)
      // chunks per lane scale with the simd width; on wave64 with DK=128 the upper
      // lanes own no chunk (guarded below) but still join the simd_sum reductions.
-@@ -2512,16 +2514,27 @@
+@@ -2543,16 +2545,27 @@ kernel void kernel_flash_attn_ext_vec_amd(
      device const char * vp = v + ikv2*args.nb22 + ikv3*args.nb23;
  
      // Without a mask ne32/ne33 are 0, so the index math would divide by zero.
@@ -217,7 +218,7 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
      for (short c = 0; c < NCK; ++c) {
          const short ch = lch + c*SUBW;
          myq[c] = ch < DK4 ? q4[ch] : float4(0.0f);
-@@ -2529,26 +2542,36 @@
+@@ -2560,26 +2573,36 @@ kernel void kernel_flash_attn_ext_vec_amd(
  
      float4 acc[NCV];  // this lane's slice(s) of the output
      for (short c = 0; c < NCV; ++c) {
@@ -257,7 +258,7 @@ Subject: [PATCH] metal: sparse attention for the AMD kernels
                  deq_k(kb + ch/NKK, ch%NKK, kreg);
                  pl += dot(myq[c], kreg);
              }
-@@ -2562,17 +2585,17 @@
+@@ -2593,17 +2616,17 @@ kernel void kernel_flash_attn_ext_vec_amd(
          }
          const float p = pl; // full DK-dim Q.K
  

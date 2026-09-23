@@ -1,17 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:08 -0400
-Subject: [PATCH] 0009-metal-sync-flush-pending-waits
-
----
- ggml/src/ggml-metal/ggml-metal-context.m | 9 +++++++++
- 1 file changed, 9 insertions(+)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index f00111563..225482845 100644
+index 4c346dc9b..2ecd8a91a 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -453,6 +453,15 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -450,16 +450,25 @@ void ggml_metal_free(ggml_metal_t ctx) {
+ const char * ggml_metal_get_name(ggml_metal_t ctx) {
+     return ctx->name;
+ }
+ 
+ void ggml_metal_synchronize(ggml_metal_t ctx) {
      // nothing completes while a command buffer is still held open
      ggml_metal_cmd_buf_hold_flush(ctx);
  
@@ -27,3 +23,8 @@ index f00111563..225482845 100644
      // wait for any backend operations to finish
      if (ctx->cmd_buf_last) {
          [ctx->cmd_buf_last waitUntilCompleted];
+         ctx->cmd_buf_last = nil;
+     }
+ 
+     // in-flight staged uploads count as pending backend operations
+     ggml_metal_device_upload_drain(ctx->dev);

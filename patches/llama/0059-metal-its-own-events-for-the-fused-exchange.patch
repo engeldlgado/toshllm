@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index af5c767..542985d 100644
+index 3648d2643..d410f00a4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -270,17 +270,19 @@ struct ggml_metal {
+@@ -272,17 +272,19 @@ struct ggml_metal {
      struct ggml_metal_xdev_link {
          ggml_metal_device_t  src_dev;
          void *               host;
@@ -22,7 +22,7 @@ index af5c767..542985d 100644
  
      // additional, inference-time compiled pipelines
      ggml_metal_pipelines_t pipelines_ext;
-@@ -590,22 +592,27 @@ void ggml_metal_free(ggml_metal_t ctx) {
+@@ -588,22 +590,27 @@ void ggml_metal_free(ggml_metal_t ctx) {
          [ctx->bounded_moe_mapped_buffers[i] release];
      }
  #endif
@@ -50,7 +50,7 @@ index af5c767..542985d 100644
              [ctx->cmd_bufs[i].obj release];
          }
      }
-@@ -1006,16 +1013,21 @@ static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
+@@ -1008,39 +1015,48 @@ static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
              return NULL;
          }
          link = &ctx_dst->xlinks[ctx_dst->n_xlinks++];
@@ -59,9 +59,9 @@ index af5c767..542985d 100644
          id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
          link->ev_ready = [dev_src newSharedEvent];
          link->ev_done  = [dev_dst newSharedEvent];
+-        if (link->ev_ready == nil || link->ev_done == nil) {
 +        link->ev_x_ready = [dev_src newSharedEvent];
 +        link->ev_x_done  = [dev_dst newSharedEvent];
--        if (link->ev_ready == nil || link->ev_done == nil) {
 +        if (link->ev_ready == nil || link->ev_done == nil ||
 +            link->ev_x_ready == nil || link->ev_x_done == nil) {
              [link->ev_ready release];
@@ -73,7 +73,9 @@ index af5c767..542985d 100644
              return NULL;
          }
      }
-@@ -1025,20 +1034,24 @@ static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
+ 
+     return link;
+ }
  
  static bool ggml_metal_xdev_link_reserve(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
                                          struct ggml_metal_xdev_link * link, size_t size) {
@@ -99,7 +101,7 @@ index af5c767..542985d 100644
              link->host = NULL;
              link->cap  = 0;
              return false;
-@@ -1498,40 +1511,42 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+@@ -1513,40 +1529,42 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
      }
  
      if (!ggml_metal_add_inplace_supported(ctx_self, tmp_self, t_self)) {

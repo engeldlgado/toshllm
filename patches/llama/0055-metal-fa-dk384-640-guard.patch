@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index ac20cd3cc..2ca50fc22 100644
+index c277008a1..bedc1c92f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -2262,17 +2262,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -2213,17 +2213,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  const bool turbo_dk_ok = (!k_turbo && !v_turbo) ||
                      dk == 128 || dk == 256 || dk == 384 || dk == 512 || dk == 640;
                  // A NULL mask is bidirectional attention (vision towers); the kernels
@@ -23,7 +23,7 @@ index ac20cd3cc..2ca50fc22 100644
                      op->src[2]->ne[0] == dk &&
                      k_std && v_std && turbo_dk_ok &&
                      max_bias == 0.0f && softcap == 0.0f;
-@@ -2285,16 +2287,20 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -2236,16 +2238,20 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  const bool mla_amd =
                      ((dk == 576 && dv == 512) || (dk == 320 && dv == 256)) &&
                      (kt == GGML_TYPE_F16 || kt == GGML_TYPE_Q8_0) && kt == vt &&
@@ -36,19 +36,19 @@ index ac20cd3cc..2ca50fc22 100644
 +            if (op->src[0]->ne[0] == 384 || op->src[0]->ne[0] == 640) {
 +                return false;
 +            }
-             if (op->src[1]->type != op->src[2]->type) {
+             if (op->src[1]->ne[0] == 72 && op->src[1]->ne[0] != op->src[2]->ne[0]) {
                  return false;
              }
-             switch (op->src[1]->type) {
-                 case GGML_TYPE_F32:
-                 case GGML_TYPE_F16:
-                 case GGML_TYPE_Q8_0:
-                 case GGML_TYPE_Q4_0:
+             if (op->src[1]->ne[0] < op->src[2]->ne[0]) {
+                 return false;
+             }
+             if (op->src[1]->type != op->src[2]->type) {
+                 return false;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 6385bf9cc..a7ddf1a64 100644
+index cac1f7b79..28811cc23 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4036,18 +4036,24 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4147,18 +4147,24 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
      char fa_amd_pipeline[80] = {0};
      // dk 72 is instantiated for f16 K/V only (vision towers); see the .metal side.
      const bool fa_amd_f16_kv =
@@ -74,7 +74,7 @@ index 6385bf9cc..a7ddf1a64 100644
                       props_dev->simd_width == 64 ? "_w64" : "");
          }
      } else if (((ne00 == 576 && ne20 == 512) || (ne00 == 320 && ne20 == 256)) &&
-@@ -4259,46 +4265,45 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4370,46 +4376,45 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
                           props_dev->simd_width == 64 ? "_w64" : "");
              }
  
@@ -138,7 +138,7 @@ index 6385bf9cc..a7ddf1a64 100644
          }
          // the simdgroup count per head was never swept on either width; the pipeline caps it,
          // so an override that overruns is dropped below rather than dispatched
-@@ -4392,17 +4397,21 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4503,17 +4508,21 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
          auto pipeline = ggml_metal_library_get_pipeline(lib, fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
          if (!pipeline.pipeline) {
              const char * nm = fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline;

@@ -1,17 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Sat, 12 Sep 2026 14:06:19 -0400
-Subject: [PATCH] 0060-mgpu-collective-tracing
-
----
-  ggml/src/ggml-metal/ggml-metal-context.m | 110 +++++++++++++++++++++++++++++++
-  1 file changed, 110 insertions(+)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 542985dc8..3f9875702 100644
+index d410f00a4..38dff9f84 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -1078,6 +1078,84 @@ static bool ggml_metal_xdev_link_reserve(ggml_metal_t ctx_src, ggml_metal_t ctx_
+@@ -1078,16 +1078,94 @@ static bool ggml_metal_xdev_link_reserve(ggml_metal_t ctx_src, ggml_metal_t ctx_
+             link->cap  = 0;
+             return false;
+         }
+     }
+     return true;
  }
  
  
@@ -96,7 +92,17 @@ index 542985dc8..3f9875702 100644
  // TOSH_MGPU_PEER_SELF runs the peer hand-off between two logical devices backed by the
  // same GPU (GGML_METAL_DEVICE_LIST=0,0), which needs no bridge: the queues are still
  // separate, so the cross-device ordering is testable on a single card.
-@@ -1122,6 +1200,12 @@ static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+ static bool ggml_metal_peer_self(void) {
+     static int val = -1;
+     if (val < 0) {
+         const char * v = getenv("TOSH_MGPU_PEER_SELF");
+         val = (v && v[0] == '1') ? 1 : 0;
+@@ -1122,44 +1200,60 @@ static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+             return false;
+         }
+ 
+         struct ggml_metal_xdev_link * link = ggml_metal_xdev_link_get(ctx_src, ctx_dst);
+         if (link == NULL) {
              return false;
          }
  
@@ -109,7 +115,15 @@ index 542985dc8..3f9875702 100644
          if (link->peer_src != metal_src) {
              // Wait before replacing a remote view still used by the last blit.
              if (link->peer_view != nil && link->seq > 0 &&
-@@ -1137,11 +1221,20 @@ static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+                 ![link->ev_done waitUntilSignaledValue:link->seq timeoutMS:10000]) {
+                 return false;
+             }
+ 
+             [link->peer_view release];
+             [link->peer_src release];
+             link->peer_view = same_dev ? [metal_src retain]
+                                        : [metal_src newRemoteBufferViewForDevice:dev_dst];
+             link->peer_src  = link->peer_view != nil ? [metal_src retain] : nil;
              if (link->peer_view == nil) {
                  return false;
              }
@@ -130,7 +144,8 @@ index 542985dc8..3f9875702 100644
              ggml_metal_encode_pending_waits(ctx_src, cmd_src);
              [cmd_src encodeSignalEvent:link->ev_ready value:seq];
              [cmd_src commit];
-@@ -1150,6 +1243,7 @@ static bool ggml_metal_cpy_xdev_peer(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+             [ctx_src->cmd_bufs_ext addObject:cmd_src];
+             ctx_src->cmd_buf_last = cmd_src;
              [cmd_src retain];
  
              id<MTLCommandBuffer> cmd_dst = [ctx_dst->queue commandBuffer];
@@ -138,7 +153,17 @@ index 542985dc8..3f9875702 100644
              ggml_metal_encode_pending_waits(ctx_dst, cmd_dst);
              [cmd_dst encodeWaitForEvent:link->ev_ready value:seq];
              id<MTLBlitCommandEncoder> encoder = [cmd_dst blitCommandEncoder];
-@@ -1231,6 +1325,12 @@ static bool ggml_metal_cpy_xdev_events(ggml_metal_t ctx_src, ggml_metal_t ctx_ds
+             [encoder copyFromBuffer:link->peer_view sourceOffset:bid_src.offs
+                            toBuffer:metal_dst destinationOffset:bid_dst.offs size:size];
+             [encoder endEncoding];
+             [cmd_dst encodeSignalEvent:link->ev_done value:seq];
+             [cmd_dst commit];
+@@ -1231,16 +1325,22 @@ static bool ggml_metal_cpy_xdev_events(ggml_metal_t ctx_src, ggml_metal_t ctx_ds
+     struct ggml_metal_xdev_link * link = ggml_metal_xdev_link_get(ctx_src, ctx_dst);
+     if (link == NULL) {
+         return false;
+     }
+     if (!ggml_metal_xdev_link_reserve(ctx_src, ctx_dst, link, size)) {
          return false;
      }
  
@@ -151,7 +176,17 @@ index 542985dc8..3f9875702 100644
      const uint64_t seq = ++link->seq;
  
      @autoreleasepool {
-@@ -1514,6 +1614,8 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+         // reuse the host block only after the destination consumed the last hand-off
+         id<MTLCommandBuffer> cmd_src = ggml_metal_cmd_buf_continue(ctx_src);
+         if (seq > 1) {
+             [cmd_src encodeWaitForEvent:link->ev_done value:seq - 1];
+         }
+@@ -1527,16 +1627,18 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+         !ggml_metal_xdev_link_reserve(ctx_peer, ctx_self, link_in,  size)) {
+         return false;
+     }
+ 
+     if (!ggml_metal_add_inplace_supported(ctx_self, tmp_self, t_self)) {
          return false;
      }
  
@@ -160,7 +195,17 @@ index 542985dc8..3f9875702 100644
      // Both sides are handed the same number: reading it off the link races with whichever
      // card the loop reached first. Links skip values, so the back-pressure wait names its own.
      // its own events and counter: the copies number per link and this path numbers by round,
-@@ -1545,9 +1647,17 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     // and one event cannot carry both without a value landing below the last one signalled
+     const uint64_t seq_prev = link_out->seq_x;
+     const uint64_t seq_out  = seq;
+     const uint64_t seq_in   = seq;
+     link_out->seq_x = seq;
+@@ -1558,19 +1660,27 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+         id<MTLBlitCommandEncoder> enc_in = [cmd_buf blitCommandEncoder];
+         [enc_in copyFromBuffer:link_in->wrap_dst sourceOffset:0
+                       toBuffer:bid_tmp.metal destinationOffset:bid_tmp.offs size:size];
+         [enc_in endEncoding];
+         [cmd_buf encodeSignalEvent:link_in->ev_x_done value:seq_in];
  
          ggml_metal_add_inplace_into(ctx_self, cmd_buf, t_self, tmp_self);
  
@@ -178,3 +223,8 @@ index 542985dc8..3f9875702 100644
      return true;
  }
  
+ 
+ 
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+ static bool ggml_metal_moe_encode_range(
+         ggml_metal_t ctx, struct ggml_cgraph * gf, id<MTLCommandBuffer> cmd_buf, int start, int end) {

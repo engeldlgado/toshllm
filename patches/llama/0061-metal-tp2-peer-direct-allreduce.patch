@@ -1,19 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Sat, 12 Sep 2026 13:10:50 -0400
-Subject: [PATCH] 0061-metal-tp2-peer-direct-allreduce
-
----
-  ggml/src/ggml-metal/ggml-metal-context.h |   6 +-
-  ggml/src/ggml-metal/ggml-metal-context.m | 195 ++++++++++++++++++++++++++++++-
-  ggml/src/ggml-metal/ggml-metal.cpp       |  13 ++-
-  3 files changed, 206 insertions(+), 8 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.h b/ggml/src/ggml-metal/ggml-metal-context.h
-index 90de0b859..10f5d0163 100644
+index 8ab795f0d..fef606412 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.h
 +++ b/ggml/src/ggml-metal/ggml-metal-context.h
-@@ -41,9 +41,11 @@ bool ggml_metal_add_inplace_supported(ggml_metal_t ctx, const struct ggml_tensor
+@@ -36,19 +36,21 @@ bool ggml_metal_cpy_tensor_async_ex(ggml_metal_t ctx_src, ggml_metal_t ctx_dst,
+ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, const struct ggml_tensor * src, struct ggml_tensor * dst);
+ 
+ // acc += add, both f32 and contiguous. Encodes the kernel directly so a tensor-split
+ // allreduce does not pay a full graph submission per step.
+ bool ggml_metal_add_inplace_supported(ggml_metal_t ctx, const struct ggml_tensor * acc, const struct ggml_tensor * add);
  bool ggml_metal_add_inplace_async    (ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add);
  
  // One command buffer per card per butterfly step: both copies and the add together.
@@ -27,11 +21,21 @@ index 90de0b859..10f5d0163 100644
  
  enum ggml_status ggml_metal_graph_compute (ggml_metal_t ctx, struct ggml_cgraph * gf);
  void             ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf);
+ 
+ void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev);
+ void ggml_metal_event_wait  (ggml_metal_t ctx, ggml_metal_event_t ev);
+ 
+ ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx);
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 44ff859c7..c819ab88f 100644
+index 38dff9f84..182caa063 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -274,11 +274,16 @@ struct ggml_metal {
+@@ -271,21 +271,26 @@ struct ggml_metal {
+     // Synchronization and resources shared by both cross-device copy paths.
+     struct ggml_metal_xdev_link {
+         ggml_metal_device_t  src_dev;
+         void *               host;
+         size_t               cap;
          id<MTLBuffer>        wrap_src, wrap_dst;
          // Retaining the source keeps its cached remote view valid.
          id<MTLBuffer>        peer_src, peer_view;
@@ -48,7 +52,17 @@ index 44ff859c7..c819ab88f 100644
      } xlinks[4];
      int n_xlinks;
  
-@@ -604,6 +609,8 @@ void ggml_metal_free(ggml_metal_t ctx) {
+     dispatch_queue_t d_queue;
+ 
+     // additional, inference-time compiled pipelines
+     ggml_metal_pipelines_t pipelines_ext;
+ 
+@@ -597,16 +602,18 @@ void ggml_metal_free(ggml_metal_t ctx) {
+         }
+         if (ctx->xlinks[i].seq_x > 0) {
+             [ctx->xlinks[i].ev_x_done waitUntilSignaledValue:ctx->xlinks[i].seq_x timeoutMS:10000];
+         }
+         [ctx->xlinks[i].wrap_src release];
          [ctx->xlinks[i].wrap_dst release];
          [ctx->xlinks[i].peer_view release];
          [ctx->xlinks[i].peer_src release];
@@ -57,7 +71,17 @@ index 44ff859c7..c819ab88f 100644
          [ctx->xlinks[i].ev_ready release];
          [ctx->xlinks[i].ev_done release];
          [ctx->xlinks[i].ev_x_ready release];
-@@ -1013,7 +1020,8 @@ static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
+         [ctx->xlinks[i].ev_x_done release];
+         free(ctx->xlinks[i].host);
+     }
+ 
+     for (int i = 0; i < GGML_METAL_MAX_COMMAND_BUFFERS; ++i) {
+@@ -1010,17 +1017,18 @@ static struct ggml_metal_xdev_link * ggml_metal_xdev_link_get(
+             break;
+         }
+     }
+     if (link == NULL) {
+         if (ctx_dst->n_xlinks == 4) {
              return NULL;
          }
          link = &ctx_dst->xlinks[ctx_dst->n_xlinks++];
@@ -67,7 +91,17 @@ index 44ff859c7..c819ab88f 100644
          id<MTLDevice> dev_src = ggml_metal_device_get_obj(ctx_src->dev);
          id<MTLDevice> dev_dst = ggml_metal_device_get_obj(ctx_dst->dev);
          link->ev_ready = [dev_src newSharedEvent];
-@@ -1587,17 +1595,198 @@ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, co
+         link->ev_done  = [dev_dst newSharedEvent];
+         link->ev_x_ready = [dev_src newSharedEvent];
+         link->ev_x_done  = [dev_dst newSharedEvent];
+         if (link->ev_ready == nil || link->ev_done == nil ||
+             link->ev_x_ready == nil || link->ev_x_done == nil) {
+@@ -1600,27 +1608,208 @@ static bool ggml_metal_add_inplace_into(ggml_metal_t ctx, id<MTLCommandBuffer> c
+ 
+     return true;
+ }
+ 
+ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add) {
      return ggml_metal_add_inplace_into(ctx, nil, acc, add);
  }
  
@@ -268,11 +302,21 @@ index 44ff859c7..c819ab88f 100644
      struct ggml_metal_buffer_id bid_self = ggml_metal_get_buffer_id(t_self);
      struct ggml_metal_buffer_id bid_tmp  = ggml_metal_get_buffer_id(tmp_self);
      if (bid_self.metal == nil || bid_tmp.metal == nil) {
+         return false;
+     }
+ 
+     const size_t size = ggml_nbytes(t_self);
+     if (!ggml_metal_xdev_link_reserve(ctx_self, ctx_peer, link_out, size) ||
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index 19c0def02..6db63c8b6 100644
+index dd7c11237..b4f32af98 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
-@@ -556,11 +556,12 @@ static void ggml_backend_metal_read_batch_end(ggml_backend_t backend) {
+@@ -553,21 +553,22 @@ static void ggml_backend_metal_read_batch_begin(ggml_backend_t backend) {
+ }
+ 
+ static void ggml_backend_metal_read_batch_end(ggml_backend_t backend) {
+     ggml_metal_read_batch_end((ggml_metal_t) backend->context);
+ }
  #endif
  
  static bool ggml_backend_metal_exchange_reduce(ggml_backend_t backend_self, ggml_backend_t backend_peer,
@@ -287,7 +331,17 @@ index 19c0def02..6db63c8b6 100644
  }
  
  static bool ggml_backend_metal_cpy_tensor_async_ex(ggml_backend_t backend_src, ggml_backend_t backend_dst, const ggml_tensor * src, ggml_tensor * dst, bool prefer_events, bool hold_dst) {
-@@ -1184,9 +1185,15 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     if (!ggml_backend_is_metal(backend_src) || !ggml_backend_is_metal(backend_dst)) {
+         return false;
+     }
+ 
+     if (!ggml_backend_buffer_is_metal(src->buffer) || !ggml_backend_buffer_is_metal(dst->buffer)) {
+@@ -1209,19 +1210,25 @@ static bool ggml_backend_metal_comm_allreduce_tensor(void * comm_ctx_v, ggml_ten
+     for (size_t offset = offset_max; offset >= 1; offset /= 2) {
+         if (fused && prefer_events) {
+             static uint64_t seq_round = 0;
+             seq_round++;
+             bool ok = true;
              for (size_t j = 0; j < 2*offset_max; j++) {
                  view_tmp(j, step);
              }
@@ -304,3 +358,8 @@ index 19c0def02..6db63c8b6 100644
              }
              if (ok) {
                  reduced = true;
+                 step++;
+                 continue;
+             }
+             if (!ok) {
+                 return false;

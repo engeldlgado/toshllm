@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 1e0d16d50..ee8ccc1ed 100644
+index c6ba245e6..b56d88bd0 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -844,17 +844,23 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext(ggml_
+@@ -876,17 +876,23 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext(ggml_
      if (!no_raw && tsrc0 == GGML_TYPE_Q4_K) {
          snprintf(tname, sizeof(tname), use_lds ? "%s_raw_lds" : "%s_raw", ggml_type_name(tsrc0));
      } else if (!no_raw && is_khdr) {
@@ -28,10 +28,10 @@ index 1e0d16d50..ee8ccc1ed 100644
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 88140592a..6bd4de46e 100644
+index 1e82cb185..6fe035ae2 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2994,17 +2994,23 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+@@ -3050,17 +3050,23 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
          const int16_t nr0   = nr0_2 ? (nr0_env ? nr0_env : (nr0_wide ? 4 : 2)) : 1;
  
          // each group makes a full pass over the weights, so the cost is groups by group width:
@@ -57,7 +57,7 @@ index 88140592a..6bd4de46e 100644
              /*.ne02  =*/ ne02,
              /*.nb00  =*/ nb00,
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index a1e3e9d15..68d4ae1f5 100644
+index 994f5db21..f80d6cdb4 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
 @@ -4354,16 +4354,223 @@ template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2_nr0_4")]] kernel mul_mv_ex

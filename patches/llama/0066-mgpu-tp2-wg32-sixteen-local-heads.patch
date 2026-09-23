@@ -1,17 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <engeldlgado@gmail.com>
-Date: Mon, 14 Sep 2026 21:42:41 -0400
-Subject: [PATCH] 0066-mgpu-tp2-wg32-sixteen-local-heads
-
----
- ggml/src/ggml-metal/ggml-metal-ops.cpp | 3 ++-
- 1 file changed, 2 insertions(+), 1 deletion(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 7faf20135..f0b10881e 100644
+index 3716a66f6..ef93c0e7c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4338,8 +4338,9 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4444,18 +4444,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         // on both widths, so each keeps its own.
+         static const int64_t wg_dk128_env = []() {
+             const char * s = getenv("TOSH_FA_WG_DK128_MIN_KV");
+             return s ? (int64_t) atoll(s) : (int64_t) -1;
+         }();
          const bool wg_wide_head =
              ne00 == 256 || ne00 == 512 || (ne00 == 576 && ne20 == 512) ||
              (ne00 == 320 && ne20 == 256);
@@ -22,3 +18,8 @@ index 7faf20135..f0b10881e 100644
          const bool wg_dk128_width_ok = props_dev->simd_width == 32 || props_dev->simd_width == 64;
          // head 64 has the instantiations but no measured depth of its own yet;
          // TOSH_FA_WG_DK64=<kv> opens it so that one can be swept
+         static const int64_t wg_dk64_min_kv = []() {
+             const char * s = getenv("TOSH_FA_WG_DK64");
+             return s ? (int64_t) atoll(s) : (int64_t) 0;
+         }();
+         const bool wg_dk64 = ne00 == 64 && ne20 == 64 && wg_dk128_width_ok &&

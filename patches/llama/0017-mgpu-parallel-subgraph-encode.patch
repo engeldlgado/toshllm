@@ -1,17 +1,12 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:09 -0400
-Subject: [PATCH] 0017-mgpu-parallel-subgraph-encode
-
----
- ggml/src/ggml-backend-meta.cpp | 25 +++++++++++++++++++++++++
- 1 file changed, 25 insertions(+)
-
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index 30ad13c8d..66e107d6b 100644
+index 4e4c57289..910ca4d26 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -5,6 +5,8 @@
+@@ -1,15 +1,17 @@
+ #include "ggml.h"
+ #include "ggml-impl.h"
+ #include "ggml-backend.h"
+ #include "ggml-backend-impl.h"
  #include "ggml-alloc.h"
  #include "ggml-cpp.h"
  
@@ -20,7 +15,17 @@ index 30ad13c8d..66e107d6b 100644
  #include <algorithm>
  #include <cassert>
  #include <cmath>
-@@ -2574,7 +2576,30 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
+ #include <map>
+ #include <memory>
+@@ -2577,17 +2579,40 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+             ggml_tensor * node_dst = bcj_dst.cgraphs[i].cgraph_main->nodes[bcj_dst.cgraphs[i].cgraph_main->n_nodes - 1];
+             ggml_backend_tensor_copy_async(bcj_src.backend, bcj_dst.backend, node_src, node_dst);
+         }
+ 
+         return GGML_STATUS_SUCCESS;
      };
  
  
@@ -51,3 +56,8 @@ index 30ad13c8d..66e107d6b 100644
          for (size_t j = 0; j < n_backends; j++) {
              auto & bcj = backend_ctx->backend_configs[j];
              const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, bcj.cgraphs[i].cgraph_main);
+             if (status != GGML_STATUS_SUCCESS) {
+                 return status;
+             }
+         }
+ 

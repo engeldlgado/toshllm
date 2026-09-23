@@ -1,17 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:10 -0400
-Subject: [PATCH] 0021-moe-slot-stats
-
----
- ggml/src/ggml-metal/ggml-metal-context.m | 64 ++++++++++++++++++++++++
- 1 file changed, 64 insertions(+)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 5aa979e4a..6dfbaa356 100644
+index 3a77125fd..92846d11c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -999,6 +999,14 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+@@ -1009,16 +1009,24 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+     id<MTLBuffer> expert_stage_alt = ctx->bounded_moe_expert_stage_alt;
+     size_t ids_cap = ctx->bounded_moe_ids_cap;
+     size_t stage_cap = ctx->bounded_moe_stage_cap;
+     size_t stage_alt_cap = ctx->bounded_moe_stage_alt_cap;
+     id<MTLCommandBuffer> full_pending[2] = { nil, nil };
      int full_sequence = 0;
      enum ggml_status result = GGML_STATUS_SUCCESS;
  
@@ -26,7 +22,17 @@ index 5aa979e4a..6dfbaa356 100644
      // Run through the first router and bring back only its compact IDs.
      const struct ggml_tensor * ids = gf->nodes[first]->src[2];
      // Keep the two wide-prefill buffers warm across prompt warmup/repetitions, but drop them
-@@ -1157,6 +1165,41 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+     // before the first single-token graph so generation returns to the small-ring footprint.
+     if (ids->ne[1] <= 1 && expert_stage_alt != nil) {
+         [expert_stage release];
+         [expert_stage_alt release];
+         expert_stage = expert_stage_alt = nil;
+@@ -1167,16 +1175,51 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+             result = GGML_STATUS_FAILED;
+             goto done;
+         }
+ 
+         // A wide prefill can touch more experts than the small cache has slots. Assemble one
          // full logical bank at a time from private hot slots plus the packed cold CPU bank.
          // The shared allocation contains only cold rows and is reused after each layer.
          const bool wide_shape = n_fixed > 0 && ids->ne[0]*ids->ne[1] > n_slots - n_fixed;
@@ -68,7 +74,17 @@ index 5aa979e4a..6dfbaa356 100644
          if (n_fixed > 0 && (wide_shape || n_cold_unique > n_slots - n_fixed)) {
              const bool transient_map = getenv("TOSH_MOE_TRANSIENT_MAP") != NULL;
              const bool persistent_map = getenv("TOSH_MOE_PERSISTENT_MAP") != NULL;
-@@ -1361,11 +1404,21 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+             const bool double_buffer = getenv("TOSH_MOE_DOUBLE_BUFFER") != NULL &&
+                 !transient_map && !persistent_map && wide_shape;
+             const int parity = double_buffer ? full_sequence++ & 1 : 0;
+             if (full_pending[parity] != nil) {
+                 [full_pending[parity] waitUntilCompleted];
+@@ -1371,21 +1414,31 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+                             }
+                             if (slot < 0) {
+                                 ids_ok = false;
+                                 continue;
+                             }
                              slot_of[e] = slot;
                              n_selected++;
                          }
@@ -90,7 +106,17 @@ index 5aa979e4a..6dfbaa356 100644
          if (!ids_ok) {
              GGML_LOG_ERROR("%s: layer %d could not map %d unique experts into %d slots (fixed=%d)\n",
                  __func__, layer, n_unique, n_slots, n_fixed);
-@@ -1479,6 +1532,17 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+             free(slot_of);
+             free(miss_expert);
+             free(miss_slot);
+             result = GGML_STATUS_FAILED;
+             goto done;
+@@ -1489,16 +1542,27 @@ static enum ggml_status ggml_metal_graph_compute_moe_staged(ggml_metal_t ctx, st
+ 
+         if (ctx->abort_callback && ctx->abort_callback(ctx->abort_callback_data)) {
+             result = GGML_STATUS_ABORTED;
+             goto done;
+         }
          first = next_first >= 0 ? next_first : gf->n_nodes;
      }
  
@@ -108,3 +134,8 @@ index 5aa979e4a..6dfbaa356 100644
  done:
      for (int i = 0; i < 2; ++i) {
          if (full_pending[i] != nil) {
+             [full_pending[i] waitUntilCompleted];
+             if ([full_pending[i] status] != MTLCommandBufferStatusCompleted && result == GGML_STATUS_SUCCESS) {
+                 result = GGML_STATUS_FAILED;
+             }
+             [full_pending[i] release];

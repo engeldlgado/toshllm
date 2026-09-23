@@ -1,19 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:17 -0400
-Subject: [PATCH] 0044-metal-64-lanes-for-the-expert-and-fused-matvec
-
----
- ggml/src/ggml-metal/ggml-metal-device.cpp    |  43 +++++-
- ggml/src/ggml-metal/ggml-metal-ops.cpp       |   7 +-
- ggml/src/ggml-metal/kernels/mul_mv_w64.metal | 130 ++++++++++++++++++-
- 3 files changed, 175 insertions(+), 5 deletions(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index a3a9238fb..83a0ec15f 100644
+index 8120d0a51..cb0ef215c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1815,6 +1815,47 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -1882,16 +1882,57 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+             } break;
+         default:
+             {
+                 GGML_LOG_ERROR("Asserting on type %d\n", (int)op->src[2]->type);
+                 GGML_ABORT("not implemented");
              }
      };
  
@@ -61,7 +55,17 @@ index a3a9238fb..83a0ec15f 100644
      // wave64 decode: MoE experts reuse the same width-parameterized mat-vec impls,
      // so run them on a 64-wide simdgroup (nw) like the dense mul_mv path.
      auto * props_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib));
-@@ -1846,7 +1887,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+     int16_t nw = 32;
+     if (props_id->wave64_decode) {
+         const bool helper = (tsrc0 == GGML_TYPE_F16 || tsrc0 == GGML_TYPE_F32 ||
+                              tsrc0 == GGML_TYPE_BF16 || tsrc0 == GGML_TYPE_Q8_0);
+         const bool sr     = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K || tsrc0 == GGML_TYPE_Q6_K ||
+@@ -1913,17 +1954,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                       getenv("TOSH_MV_ROW4_DISABLE") == nullptr;
+ 
+     // The expert kernels share the implementations of the dense path, so they can read the
+     // quant arrays a word at a time under the same conditions.
+     const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
                        (nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0)) &&
                        getenv("TOSH_MV_ROW8_DISABLE") == nullptr;
  
@@ -70,11 +74,21 @@ index a3a9238fb..83a0ec15f 100644
      snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d", base, nsg, nw, row4, row8);
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg, FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 2);
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index ad53f0467..4b546f95d 100644
+index 4920c9f23..5cec2d64d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2678,8 +2678,13 @@ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+@@ -2738,18 +2738,23 @@ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+         uint32_t nr_v;
+         uint32_t nr_k;
+     } pattern = {};
+ 
+     const ggml_type tq = q->src[0]->type;
      const ggml_type tv = v->src[0]->type;
      const ggml_type tk = k->src[0]->type;
  
@@ -89,11 +103,21 @@ index ad53f0467..4b546f95d 100644
      } else if (tq == GGML_TYPE_Q2_K && tv == GGML_TYPE_Q4_K && tk == GGML_TYPE_Q2_K) {
          pattern = { "kernel_mul_mv_qvk_q2_K_q4_K_q2_K_f32", 2, 4, 2, 4 };
      } else if (tq == GGML_TYPE_Q4_K && tv == GGML_TYPE_Q6_K && tk == GGML_TYPE_Q4_K) {
+         pattern = { "kernel_mul_mv_qvk_q4_K_q6_K_q4_K_f32", 2, 2, 2, 4 };
+     } else {
+         return 0;
+     }
+ 
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 index 195f978d5..9def02e1e 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -4044,23 +4044,25 @@ kernel void kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32_w64(
+@@ -4039,33 +4039,35 @@ kernel void kernel_mul_mv_qvk_q4_0_q4_0_q4_0_f32_w64(
+         device const char * wk,
+         device const char * src,
+         device       char * dst_q,
+         device       char * dst_v,
+         device       char * dst_k,
          uint3  tgpig[[threadgroup_position_in_grid]],
          ushort tiisg[[thread_index_in_simdgroup]],
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
@@ -122,7 +146,17 @@ index 195f978d5..9def02e1e 100644
          args.k, wk, src, dst_k, nullptr, local, tiisg, sgitg);
  }
  
-@@ -7637,3 +7639,125 @@ kernel void kernel_mul_mv_q5_K_f32_L16r8_w64(
+ [[host_name("kernel_mul_mv_iq3_xxs_f32_r8_w64")]]
+ kernel void kernel_mul_mv_iq3_xxs_f32_r8_w64(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0,
+         device const char * src1,
+@@ -7632,8 +7634,130 @@ kernel void kernel_mul_mv_q5_K_f32_L16r8_w64(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0, device const char * src1, device char * dst,
+         threadgroup char * shmem [[threadgroup(0)]],
+         uint3 tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
      kernel_mul_mv_q5_K_f32_L16_w64_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }

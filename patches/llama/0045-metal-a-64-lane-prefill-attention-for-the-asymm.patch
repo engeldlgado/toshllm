@@ -1,19 +1,13 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Engelbert <direccion@marketingweb.com.mx>
-Date: Mon, 7 Sep 2026 02:14:18 -0400
-Subject: [PATCH] 
- 0048-metal-a-64-lane-prefill-attention-for-the-asymmetric-and-512-heads
-
----
- ggml/src/ggml-metal/ggml-metal-ops.cpp   | 33 +++++++++++++++++++++++-
- ggml/src/ggml-metal/kernels/fa_w64.metal | 25 ++++++++++++++++++
- 2 files changed, 57 insertions(+), 1 deletion(-)
-
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 43493ba7a..84f0aeee0 100644
+index e79b4c680..8f5c9f96e 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3876,16 +3876,24 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -3982,26 +3982,34 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         int fa_pf_bq = (ne00 == 256 || ne00 == 160) ? 32
+             : ((fa_pf_512 || fa_pf_mla || fa_pf_mla320) ? 16 : 64);
+         const bool fa_pf_head_ok =
+             ne00 == 64 || ne00 == 128 || ne00 == 256 || fa_amd_dk72 || fa_amd_unet || fa_pf_512 ||
+             fa_pf_mla || fa_pf_mla320;
          // PF always dispatches 256 threads and subdivides them into logical
          // 16-lane query groups, so the same specialization works on wave32
          // (8 physical simdgroups) and wave64 (4 physical simdgroups).
@@ -38,7 +32,17 @@ index 43493ba7a..84f0aeee0 100644
              } else {
              snprintf(fa_pf_pipeline, sizeof(fa_pf_pipeline), "kernel_flash_attn_ext_pf_amd_dk%d_k%s_v%s", (int) ne00,
                       ggml_metal_fa_amd_type_suffix(op->src[1]->type), ggml_metal_fa_amd_type_suffix(op->src[2]->type));
-@@ -3913,7 +3921,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+ 
+                 // the 64-lane twin lives in fa_w64.metal, with the lane group as a parameter.
+                 // Only the symmetric heads have one; MLA and the asymmetric pairs stay above.
+                 // TOSH_FA_PF_LG picks the group so the three can be compared; 16 reproduces
+                 // the 32-lane kernel exactly and is the control.
+@@ -4019,17 +4027,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                 }();
+                 // TOSH_FA_PF_BK picks the key-block twin: the counterpart of BQ on the other
+                 // side of the K/V reuse, so a bigger block pays the same traffic fewer times
+                 static const int pf_bk = []() {
+                     const char * s = getenv("TOSH_FA_PF_BK");
                      return s ? atoi(s) : 0;
                  }();
                  if (props_dev->simd_width == 64 && (pf_lg == 16 || pf_lg == 32 || pf_lg == 64) &&
@@ -47,7 +51,17 @@ index 43493ba7a..84f0aeee0 100644
                      getenv("TOSH_FA_PF_W64_DISABLE") == nullptr) {
                      char w64_name[96];
                      if (pf_bq > 0) {
-@@ -3933,11 +3941,34 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                         snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%dq%dk%d", fa_pf_pipeline, pf_lg, pf_bq,
+                                  pf_bk > 0 ? pf_bk : 64);
+                     } else {
+                         snprintf(w64_name, sizeof(w64_name), "%s_w64_lg%d", fa_pf_pipeline, pf_lg);
+                     }
+@@ -4039,21 +4047,44 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+                         // the grid steps in query blocks, so it has to follow the twin
+                         if (pf_bq > 0) {
+                             fa_pf_bq = pf_bq;
+                         }
+                     }
                  }
              }
  
@@ -82,11 +96,21 @@ index 43493ba7a..84f0aeee0 100644
              // it fits in registers with nothing to spare; a compiler bump could
              // push it under the 256 threads it dispatches
              if (ggml_metal_pipeline_max_theads_per_threadgroup(pipeline) >= 256) {
+                 ggml_metal_encoder_set_pipeline(enc, pipeline);
+                 ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
+                 ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);
 diff --git a/ggml/src/ggml-metal/kernels/fa_w64.metal b/ggml/src/ggml-metal/kernels/fa_w64.metal
 index 1c6183349..a7bc5d29a 100644
 --- a/ggml/src/ggml-metal/kernels/fa_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/fa_w64.metal
-@@ -27,6 +27,9 @@ kernel void kernel_flash_attn_ext_pf_amd_w64(
+@@ -22,16 +22,19 @@ kernel void kernel_flash_attn_ext_pf_amd_w64(
+         device const char * pad   [[buffer(6)]],
+         device       char * dst   [[buffer(7)]],
+         uint3  tgpig [[threadgroup_position_in_grid]],
+         ushort tiitg [[thread_index_in_threadgroup]]) {
+     constexpr short DK4 = DK/4;
      constexpr short DV4 = DV/4;
      constexpr short NQG = NT/LG;
      constexpr short NQR = BQ/NQG;
@@ -96,7 +120,17 @@ index 1c6183349..a7bc5d29a 100644
      constexpr short NKC = BK/LG;
      constexpr short NDC = (DV + LG - 1)/LG;  // DK 72 (vision) leaves the top lanes idle
      // half2 run before flushing to float; it has to divide DK, and 576 (MLA) is not a multiple of 128
-@@ -360,3 +363,25 @@ FA_AMD_PF_W64_TURBO("kq4_0_vturbo4", block_q4_0, 8, dequantize_q4_0_t4, block_tu
+     constexpr short DKF = DK % 128 == 0 ? 128 : (DK % 64 == 0 ? 64 : DK);
+     constexpr short SQS = DK + 4;
+     constexpr short SVS = BK + 4;
+     // int, not short: a 128-key block overflows it (BK*SQS passes 32767) and the array
+     constexpr int   SKV = BK*SQS > DV*SVS ? BK*SQS : DV*SVS;
+@@ -355,8 +358,30 @@ FA_AMD_PF_W64_TURBO("kturbo4_vturbo2", block_turbo4_0, 32, dequantize_turbo4_0_t
+ FA_AMD_PF_W64_TURBO("kturbo4_vturbo3", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
+ FA_AMD_PF_W64_TURBO("kturbo4_vturbo4", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
+ FA_AMD_PF_W64_TURBO("kq4_0_vturbo2", block_q4_0, 8, dequantize_q4_0_t4, block_turbo2_0, 32, dequantize_turbo2_0_t4)
+ FA_AMD_PF_W64_TURBO("kq4_0_vturbo3", block_q4_0, 8, dequantize_q4_0_t4, block_turbo3_0, 32, dequantize_turbo3_0_t4)
+ FA_AMD_PF_W64_TURBO("kq4_0_vturbo4", block_q4_0, 8, dequantize_q4_0_t4, block_turbo4_0, 32, dequantize_turbo4_0_t4)
  FA_AMD_PF_W64_TURBO("kturbo2_vq4_0", block_turbo2_0, 32, dequantize_turbo2_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
  FA_AMD_PF_W64_TURBO("kturbo3_vq4_0", block_turbo3_0, 32, dequantize_turbo3_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
  FA_AMD_PF_W64_TURBO("kturbo4_vq4_0", block_turbo4_0, 32, dequantize_turbo4_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
