@@ -163,6 +163,17 @@ private struct LocalModelSettingsPopover: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if traits.hasMTP {
+                    Section {
+                        MTPControl(modelPath: model.url.path, layout: .settings)
+                    } header: {
+                        Text("MTP")
+                    } footer: {
+                        Text(loc.t("El modelo adelanta varios tokens por paso con su propio cabezal. Con textos que acepta poco puede ir más lento que sin él.",
+                                   "The model drafts several tokens per step with its own head. On text it accepts rarely it can run slower than without it."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if traits.hasDflash {
                     Section {
                         DflashControl(modelPath: model.url.path, layout: .settings)
