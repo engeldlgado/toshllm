@@ -13,6 +13,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: Qwen3.8 split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3.8-27B Q4_0 generates 30.4 tokens a second instead of 29.9.
 
+- **LLMs: multi-token prediction (MTP) is faster on a model split by tensors across two GPUs.** On a Radeon Pro Vega II Duo Qwen3.8-27B Q4_0 generates 32.6 tokens a second with MTP instead of 30.5.
+
 ## [0.87.9] - 2026-09-24
 
 ### Added

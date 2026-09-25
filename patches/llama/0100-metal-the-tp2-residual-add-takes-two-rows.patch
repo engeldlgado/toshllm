@@ -1,0 +1,55 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 622c1c76f..8f31e45d0 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -2213,15 +2213,15 @@ static bool ggml_metal_add_inplace_buffer(ggml_metal_t ctx, id<MTLCommandBuffer>
+ 
+     ggml_metal_encoder_end_encoding(enc);
+     ggml_metal_encoder_free(enc);
+ 
+     return true;
+ }
+ 
+-// A one-row TP2 boundary leaves the partner's partial in its slot of the host block and the
++// A TP2 boundary of one or two rows leaves the partner's partial in its slot of the host block and the
+ // residual add that consumes the reduced tensor folds it in as a third addend, which saves the
+ // boundary's own add and encoder. The slot is released at the end of that subgraph, so the
+ // staged exchange alternates two slots and back-pressure waits on the round that used the slot.
+ // TOSH_MGPU_FB_RESIDUAL=0 keeps the add inside the boundary.
+ static bool ggml_metal_fb_residual(void) {
+     static int v = -1;
+     if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_FB_RESIDUAL"); v = (s && s[0] == '0') ? 0 : 1; }
+@@ -2268,15 +2268,15 @@ bool ggml_metal_fb_residual_take(ggml_metal_device_t dev, const struct ggml_tens
+     peer->metal = st->buf;
+     peer->offs  = st->off;
+     st->state = 3;
+     if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_res_fold, 1);
+     return true;
+ }
+ 
+-// before a subgraph: arm the pending partial when its first user here is a one-row residual add
++// before a subgraph: arm the pending partial when its first user here is a residual add
+ // with the reduced tensor as src0 and encoded by this command buffer, otherwise fold it the
+ // usual way and release the slot
+ static void ggml_metal_fb_residual_before(ggml_metal_t ctx, id<MTLCommandBuffer> cmd_buf,
+                                           struct ggml_cgraph * gf, int n_main) {
+     struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual() ? ggml_metal_fb_residual_get(ctx->dev) : NULL;
+     if (st == NULL || st->state != 1) {
+         return;
+@@ -3442,15 +3442,15 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     // and one event cannot carry both without a value landing below the last one signalled
+     const uint64_t seq_prev = link_out->seq_x;
+     const uint64_t seq_out  = seq;
+     const uint64_t seq_in   = seq;
+     link_out->seq_x = seq;
+     // the staged exchange writes offset 0, which is the one-shot's even slot, and a prefill
+     // payload can span the odd one too. both slot trackers have to know a publish landed here
+-    const bool fb_res = fused_bnd && ggml_metal_fb_residual() && ggml_nrows(t_self) == 1 &&
++    const bool fb_res = fused_bnd && ggml_metal_fb_residual() && ggml_nrows(t_self) <= 2 &&
+                         2*size <= [link_out->wrap_src length] && 2*size <= [link_in->wrap_dst length];
+     const int    res_slot = (int) (seq & 1);
+     const size_t res_off  = fb_res && res_slot ? [link_out->wrap_src length]/2 : 0;
+     const uint64_t bp_seq = fb_res ? link_out->x_slot[res_slot] : seq_prev;
+     if (fb_res) {
+         link_out->x_slot[res_slot] = seq;
+     } else {
