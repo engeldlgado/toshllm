@@ -659,6 +659,9 @@ struct ServerSettings {
         // smaller than the split itself and divide it evenly.
         if effectiveSplitMode == "tensor", let g = effectiveSplitGroupSize {
             env["TOSH_MGPU_TENSOR_GROUP"] = String(g)
+            // The default queue cap blocks the scheduler on one full group and stops the
+            // prompt from pipelining into the next; a single GPU loses a little with it.
+            env["TOSH_MTL_QUEUE_DEPTH"] = "256"
         }
         // A DFlash draft runs its selector over the target's logits, so a head split by
         // vocabulary leaves no card holding a whole row and the engine aborts. Keep the head

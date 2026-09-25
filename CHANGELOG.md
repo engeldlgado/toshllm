@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **LLMs: long prompts read faster with a model split into groups of GPUs.** On two Radeon Pro Vega II Duo cards a 2048 token prompt reads 32 percent faster with Qwen3-14B, 41 percent with Qwen3.8-27B and 29 percent with Qwen3.6-35B-A3B; generation is unchanged.
+
 ## [0.87.9] - 2026-09-24
 
 ### Added

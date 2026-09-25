@@ -1406,6 +1406,31 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.benchmarkArguments[s.benchmarkArguments.firstIndex(of: "--split-mode")! + 1], "layer")
     }
 
+    func testQueueDepthOnlyForSeveralTensorGroups() {
+        func depth(gpus: [Int], mode: String, group: Int) -> String? {
+            var s = makeSettings()
+            s.gpuList = gpus
+            s.splitMode = mode
+            s.splitGroupSize = group
+            return s.environment["TOSH_MTL_QUEUE_DEPTH"]
+        }
+        XCTAssertEqual(depth(gpus: [0, 1, 2, 3], mode: "tensor", group: 2), "256", "dos grupos TP2")
+        XCTAssertNil(depth(gpus: [0, 1], mode: "tensor", group: 2), "un solo grupo TP2")
+        XCTAssertNil(depth(gpus: [0, 1, 2, 3], mode: "tensor", group: 4), "TP4 plano")
+        XCTAssertNil(depth(gpus: [0, 1, 2, 3], mode: "tensor", group: 0), "TP4 plano sin grupo")
+        XCTAssertNil(depth(gpus: [0, 1, 2, 3], mode: "layer", group: 2), "reparto por capas")
+        XCTAssertNil(depth(gpus: [], mode: "tensor", group: 2), "una sola GPU")
+
+        var s = makeSettings()
+        s.gpuList = [0, 1, 2, 3]
+        s.splitMode = "tensor"
+        s.splitGroupSize = 2
+        XCTAssertEqual(s.environment["TOSH_MTL_QUEUE_DEPTH"], "256")
+        s.gpuList = []
+        s.gpuIndex = 0
+        XCTAssertNil(s.environment["TOSH_MTL_QUEUE_DEPTH"], "volver a una GPU no hereda la cola")
+    }
+
     func testTensorSplitModeReachesServerAndBenchmark() {
         var s = makeSettings()
         s.multiGPU = true
