@@ -1,0 +1,388 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index fa6b501d0..1ff194052 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -1,7 +1,8 @@
++#include <os/lock.h>
+ #import "ggml-metal-context.h"
+ 
+ #import "ggml-impl.h"
+ #import "ggml-backend-impl.h"
+ 
+ #import "ggml-metal-impl.h"
+ #import "ggml-metal-common.h"
+@@ -2210,14 +2211,121 @@ static bool ggml_metal_add_inplace_buffer(ggml_metal_t ctx, id<MTLCommandBuffer>
+ 
+     ggml_metal_encoder_end_encoding(enc);
+     ggml_metal_encoder_free(enc);
+ 
+     return true;
+ }
+ 
++// A one-row TP2 boundary leaves the partner's partial in its slot of the host block and the
++// residual add that consumes the reduced tensor folds it in as a third addend, which saves the
++// boundary's own add and encoder. The slot is released at the end of that subgraph, so the
++// staged exchange alternates two slots and back-pressure waits on the round that used the slot.
++// TOSH_MGPU_FB_RESIDUAL=0 keeps the add inside the boundary.
++static bool ggml_metal_fb_residual(void) {
++    static int v = -1;
++    if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_FB_RESIDUAL"); v = (s && s[0] == '0') ? 0 : 1; }
++    return v == 1;
++}
++
++struct ggml_metal_fb_residual_state {
++    ggml_metal_device_t        dev;
++    const struct ggml_tensor * t;       // reduced tensor still missing the partner's partial
++    id<MTLBuffer>              buf;
++    size_t                     off;
++    id<MTLSharedEvent>         ev_done;
++    uint64_t                   seq;
++    int                        state;   // 0 idle, 1 pending, 2 armed for the residual add, 3 folded
++};
++
++static struct ggml_metal_fb_residual_state g_fb_res[8];
++static os_unfair_lock g_fb_res_lock = OS_UNFAIR_LOCK_INIT;
++
++// one entry per device, and only that device's encoding thread touches it after lookup
++static struct ggml_metal_fb_residual_state * ggml_metal_fb_residual_get(ggml_metal_device_t dev) {
++    struct ggml_metal_fb_residual_state * res = NULL;
++    os_unfair_lock_lock(&g_fb_res_lock);
++    for (int i = 0; i < 8; i++) {
++        if (g_fb_res[i].dev == dev || g_fb_res[i].dev == NULL) {
++            g_fb_res[i].dev = dev;
++            res = &g_fb_res[i];
++            break;
++        }
++    }
++    os_unfair_lock_unlock(&g_fb_res_lock);
++    return res;
++}
++
++bool ggml_metal_fb_residual_take(ggml_metal_device_t dev, const struct ggml_tensor * t, struct ggml_metal_buffer_id * peer) {
++    if (!ggml_metal_fb_residual()) {
++        return false;
++    }
++    struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual_get(dev);
++    if (st == NULL || st->state != 2 || st->t != t) {
++        return false;
++    }
++    peer->metal = st->buf;
++    peer->offs  = st->off;
++    st->state = 3;
++    return true;
++}
++
++// before a subgraph: arm the pending partial when its first user here is a one-row residual add
++// with the reduced tensor as src0 and encoded by this command buffer, otherwise fold it the
++// usual way and release the slot
++static void ggml_metal_fb_residual_before(ggml_metal_t ctx, id<MTLCommandBuffer> cmd_buf,
++                                          struct ggml_cgraph * gf, int n_main) {
++    struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual() ? ggml_metal_fb_residual_get(ctx->dev) : NULL;
++    if (st == NULL || st->state != 1) {
++        return;
++    }
++    const struct ggml_tensor * t = st->t;
++    bool arm = false;
++    for (int i = 0; i < gf->n_nodes; i++) {
++        const struct ggml_tensor * node = gf->nodes[i];
++        bool uses = node->view_src == t;
++        for (int k = 0; k < GGML_MAX_SRC && !uses; k++) {
++            for (const struct ggml_tensor * src = node->src[k]; src != NULL; src = src->view_src) {
++                if (src == t) { uses = true; break; }
++            }
++        }
++        if (!uses) {
++            continue;
++        }
++        arm = i < n_main && node->op == GGML_OP_ADD && node->src[0] == t && node->src[1] != NULL &&
++              node->type == GGML_TYPE_F32 && node->src[1]->type == GGML_TYPE_F32 &&
++              ggml_is_contiguous(node) && ggml_is_contiguous(node->src[1]) &&
++              ggml_are_same_shape(node, t) && ggml_are_same_shape(node->src[1], t) &&
++              ggml_metal_device_pipeline_add3(ctx->dev).pipeline != NULL;
++        break;
++    }
++    if (arm) {
++        st->state = 2;
++        return;
++    }
++    const bool added = ggml_metal_add_inplace_buffer(ctx, cmd_buf, (struct ggml_tensor *) t, st->buf, st->off);
++    GGML_ASSERT(added);
++    if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_signals, 1);
++    [cmd_buf encodeSignalEvent:st->ev_done value:st->seq];
++    st->state = 0;
++}
++
++// after the subgraph's encoder closed: the folded slot has been read
++static void ggml_metal_fb_residual_after(ggml_metal_t ctx, id<MTLCommandBuffer> cmd_buf) {
++    struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual() ? ggml_metal_fb_residual_get(ctx->dev) : NULL;
++    if (st == NULL) {
++        return;
++    }
++    GGML_ASSERT(st->state != 2 && "an armed TP2 partial was not folded");
++    if (st->state == 3) {
++        if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_signals, 1);
++        [cmd_buf encodeSignalEvent:st->ev_done value:st->seq];
++        st->state = 0;
++    }
++}
++
+ bool ggml_metal_add_inplace_async(ggml_metal_t ctx, struct ggml_tensor * acc, const struct ggml_tensor * add) {
+     return ggml_metal_add_inplace_into(ctx, nil, acc, add);
+ }
+ 
+ // --- f16 transport for the prefill allreduce -------------------------------------------------
+ // The copy butterfly moves f32 partials across the peer bridge and at prefill payloads the
+ // fabric, not the wait, is the limit. Convert locally to f16 (half the bytes in flight), move
+@@ -3319,26 +3427,35 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+     // and one event cannot carry both without a value landing below the last one signalled
+     const uint64_t seq_prev = link_out->seq_x;
+     const uint64_t seq_out  = seq;
+     const uint64_t seq_in   = seq;
+     link_out->seq_x = seq;
+     // the staged exchange writes offset 0, which is the one-shot's even slot, and a prefill
+     // payload can span the odd one too. both slot trackers have to know a publish landed here
+-    link_out->x_slot[0] = seq;
+-    link_out->x_slot[1] = seq;
++    const bool fb_res = fused_bnd && ggml_metal_fb_residual() && ggml_nrows(t_self) == 1 &&
++                        2*size <= [link_out->wrap_src length] && 2*size <= [link_in->wrap_dst length];
++    const int    res_slot = (int) (seq & 1);
++    const size_t res_off  = fb_res && res_slot ? [link_out->wrap_src length]/2 : 0;
++    const uint64_t bp_seq = fb_res ? link_out->x_slot[res_slot] : seq_prev;
++    if (fb_res) {
++        link_out->x_slot[res_slot] = seq;
++    } else {
++        link_out->x_slot[0] = seq;
++        link_out->x_slot[1] = seq;
++    }
+ 
+     @autoreleasepool {
+         id<MTLCommandBuffer> cmd_buf = ggml_metal_cmd_buf_continue(ctx_self);
+ 
+-        if (seq_prev > 0) {
++        if (bp_seq > 0) {
+             if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_waits, 1);
+             if (ggml_metal_bp_satisfied()) {
+                 [cmd_buf encodeWaitForEvent:tosh_wait_dummy(ctx_self) value:1];
+             } else {
+-                [cmd_buf encodeWaitForEvent:link_out->ev_x_done value:seq_prev];
++                [cmd_buf encodeWaitForEvent:link_out->ev_x_done value:bp_seq];
+             }
+         }
+ 
+         id<MTLCounterSampleBuffer> cts = tosh_ct_buffer(ctx_self);
+         uint64_t cbase = 0;
+         const bool cbar = ggml_metal_ctime_barrier();
+         if (cts != nil) {
+@@ -3355,15 +3472,15 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+                 /*.nk0  =*/ n,
+                 /*.ne00 =*/ t_self->ne[0], /*.ne01 =*/ t_self->ne[1], /*.ne02 =*/ t_self->ne[2], /*.ne03 =*/ t_self->ne[3],
+                 /*.nb00 =*/ t_self->nb[0], /*.nb01 =*/ t_self->nb[1], /*.nb02 =*/ t_self->nb[2], /*.nb03 =*/ t_self->nb[3],
+                 /*.ne0  =*/ t_self->ne[0], /*.ne1  =*/ t_self->ne[1], /*.ne2  =*/ t_self->ne[2], /*.ne3  =*/ t_self->ne[3],
+                 /*.nb0  =*/ t_self->nb[0], /*.nb1  =*/ t_self->nb[1], /*.nb2  =*/ t_self->nb[2], /*.nb3  =*/ t_self->nb[3],
+             };
+             const int nth = MIN(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipe_cpy));
+-            struct ggml_metal_buffer_id bid_blk = { .metal = link_out->wrap_src, .offs = 0 };
++            struct ggml_metal_buffer_id bid_blk = { .metal = link_out->wrap_src, .offs = res_off };
+             ggml_metal_encoder_t ec = ggml_metal_encoder_init((ggml_metal_cmd_buf_t) cmd_buf, false);
+             ggml_metal_encoder_set_pipeline(ec, pipe_cpy);
+             ggml_metal_encoder_set_bytes   (ec, &args, sizeof(args), 0);
+             ggml_metal_encoder_set_buffer  (ec, bid_self, 1);
+             ggml_metal_encoder_set_buffer  (ec, bid_blk,  2);
+             ggml_metal_encoder_dispatch_threadgroups(ec, (n + nth - 1)/nth, 1, 1, nth, 1, 1);
+             ggml_metal_encoder_end_encoding(ec);
+@@ -3385,18 +3502,29 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+             [cmd_buf encodeWaitForEvent:tosh_wait_dummy(ctx_self) value:1];
+         } else {
+             [cmd_buf encodeWaitForEvent:link_in->ev_x_ready value:seq_in];
+         }
+         if (fused_bnd) {
+             // the partner may reuse the block the moment done is signalled, so it goes after
+             // the add that reads the block
+-            const bool added = ggml_metal_add_inplace_buffer(ctx_self, cmd_buf, t_self, link_in->wrap_dst, 0);
+-            GGML_ASSERT(added);
+-            if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_signals, 1);
+-            [cmd_buf encodeSignalEvent:link_in->ev_x_done value:seq_in];
++            if (fb_res) {
++                struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual_get(ctx_self->dev);
++                GGML_ASSERT(st != NULL && st->state == 0);
++                st->t       = t_self;
++                st->buf     = link_in->wrap_dst;
++                st->off     = res_off;
++                st->ev_done = link_in->ev_x_done;
++                st->seq     = seq_in;
++                st->state   = 1;
++            } else {
++                const bool added = ggml_metal_add_inplace_buffer(ctx_self, cmd_buf, t_self, link_in->wrap_dst, 0);
++                GGML_ASSERT(added);
++                if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_signals, 1);
++                [cmd_buf encodeSignalEvent:link_in->ev_x_done value:seq_in];
++            }
+         } else {
+             id<MTLBlitCommandEncoder> enc_in = [cmd_buf blitCommandEncoder];
+             if (cts != nil) { [enc_in sampleCountersInBuffer:cts atSampleIndex:cbase + 2 withBarrier:cbar]; }
+             [enc_in copyFromBuffer:link_in->wrap_dst sourceOffset:0
+                           toBuffer:bid_tmp.metal destinationOffset:bid_tmp.offs size:size];
+             if (cts != nil) { [enc_in sampleCountersInBuffer:cts atSampleIndex:cbase + 3 withBarrier:cbar]; }
+             [enc_in endEncoding];
+@@ -4282,14 +4410,15 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+             }
+             ctx->cmd_bufs[n_cb].obj = cmd_buf;
+ 
+             tosh_trace_graph_end(cmd_buf, (int) (([(id<MTLDevice>) ggml_metal_device_get_obj(ctx->dev) peerIndex]) & 1));
+ 
+             [cmd_buf enqueue];
+ 
++            ggml_metal_fb_residual_before(ctx, cmd_buf, ctx->gf, ctx->n_nodes_0);
+             ctx->encode_async(n_cb);
+         }
+ 
+         // remember the command buffer for the next iteration
+         ctx->cmd_buf_last = ctx->cmd_bufs[n_cb].obj;
+ 
+         // the main thread already encoded every node: the remaining command buffers would be
+@@ -4549,14 +4678,17 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
+                 break;
+             }
+ 
+             idx += res - 1;
+         }
+ 
+         ggml_metal_op_free(ctx_op);
++        if (cb_idx == n_cb_l) {
++            ggml_metal_fb_residual_after(ctx, cmd_buf);
++        }
+ 
+         const uint64_t cbp_t1 = cbp_on ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+         if (cb_idx < 2 || ctx->abort_callback == NULL) {
+             [cmd_buf commit];
+         }
+         if (cbp_on) {
+             const uint64_t cbp_t2 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index 3e7651433..3d17ed9a6 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -79,14 +79,19 @@ ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, b
+ void ggml_metal_encoder_free(ggml_metal_encoder_t encoder);
+ 
+ void ggml_metal_encoder_debug_group_push(ggml_metal_encoder_t encoder, const char * name);
+ void ggml_metal_encoder_debug_group_pop (ggml_metal_encoder_t encoder);
+ 
+ void ggml_metal_encoder_set_pipeline(ggml_metal_encoder_t encoder, struct ggml_metal_pipeline_with_params pipeline);
+ 
++// (a + b) + c over float4, compiled at runtime; the TP2 boundary's residual add
++struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3(ggml_metal_device_t dev);
++// true when t still lacks the peer partial of a TP2 boundary and the caller is its residual add
++bool ggml_metal_fb_residual_take(ggml_metal_device_t dev, const struct ggml_tensor * t, struct ggml_metal_buffer_id * peer);
++
+ void ggml_metal_encoder_set_bytes (ggml_metal_encoder_t encoder, void * data, size_t size, int idx);
+ void ggml_metal_encoder_set_buffer(ggml_metal_encoder_t encoder, struct ggml_metal_buffer_id buffer, int idx);
+ 
+ void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder, size_t size, int idx);
+ 
+ void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int tg0, int tg1, int tg2, int tptg0, int tptg1, int tptg2);
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 0fc883648..65a627060 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1,7 +1,8 @@
++#include <os/lock.h>
+ #import "ggml-metal-device.h"
+ #import "ggml-metal-fusion.h"
+ 
+ #include <sys/resource.h>
+ 
+ #import "ggml-impl.h"
+ #import "ggml-backend-impl.h"
+@@ -876,14 +877,55 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+ // MTLComputeCommandEncoder wrapper
+ //
+ 
+ struct ggml_metal_encoder {
+     id<MTLComputeCommandEncoder> obj;
+ };
+ 
++struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3(ggml_metal_device_t dev) {
++    static ggml_metal_device_t     devs[8];
++    static struct ggml_metal_pipeline pls[8];
++    static dispatch_once_t         once[8];
++
++    static os_unfair_lock          lock = OS_UNFAIR_LOCK_INIT;
++
++    struct ggml_metal_pipeline_with_params res = { 0 };
++    os_unfair_lock_lock(&lock);
++    int i = 0;
++    for (; i < 8 && devs[i] != NULL && devs[i] != dev; i++) {}
++    if (i < 8) {
++        devs[i] = dev;
++    }
++    os_unfair_lock_unlock(&lock);
++    if (i == 8) {
++        return res;
++    }
++    dispatch_once(&once[i], ^{
++        static const char * src =
++            "#include <metal_stdlib>\n"
++            "using namespace metal;\n"
++            "kernel void kernel_add3_f32_4(device const float4 * a [[buffer(0)]], device const float4 * b [[buffer(1)]],\n"
++            "                              device const float4 * c [[buffer(2)]], device float4 * d [[buffer(3)]],\n"
++            "                              constant uint & n [[buffer(4)]], uint i [[thread_position_in_grid]]) {\n"
++            "    if (i < n) { d[i] = (a[i] + b[i]) + c[i]; }\n"
++            "}\n";
++        id<MTLDevice> mtl = (id<MTLDevice>) ggml_metal_device_get_obj(dev);
++        NSError * err = nil;
++        id<MTLLibrary> lib = [mtl newLibraryWithSource:[NSString stringWithUTF8String:src] options:nil error:&err];
++        id<MTLFunction> fn = [lib newFunctionWithName:@"kernel_add3_f32_4"];
++        pls[i].obj = fn != nil ? [mtl newComputePipelineStateWithFunction:fn error:&err] : nil;
++        [fn release];
++        [lib release];
++    });
++    if (pls[i].obj != nil) {
++        res.pipeline = &pls[i];
++    }
++    return res;
++}
++
+ ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent) {
+     ggml_metal_encoder_t res = calloc(1, sizeof(struct ggml_metal_encoder));
+ 
+     id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
+ 
+     if (concurrent) {
+         res->obj = [cmd_buf computeCommandEncoderWithDispatchType: MTLDispatchTypeConcurrent];
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 0e30dd320..e70f7dcb5 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -5646,14 +5646,30 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+ #undef FATTN_SMEM
+     }
+ 
+     return 1;
+ }
+ 
+ int ggml_metal_op_bin(ggml_metal_op_t ctx, int idx) {
++    {
++        ggml_tensor * op = ctx->node(idx);
++        ggml_metal_buffer_id bid_peer;
++        if (op->op == GGML_OP_ADD && ggml_metal_fb_residual_take(ctx->dev, op->src[0], &bid_peer)) {
++            const uint32_t n4 = (uint32_t) (ggml_nelements(op)/4);
++            ggml_metal_encoder_set_pipeline(ctx->enc, ggml_metal_device_pipeline_add3(ctx->dev));
++            ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op->src[0]), 0);
++            ggml_metal_encoder_set_buffer  (ctx->enc, bid_peer, 1);
++            ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op->src[1]), 2);
++            ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op), 3);
++            ggml_metal_encoder_set_bytes   (ctx->enc, (void *) &n4, sizeof(n4), 4);
++            ggml_metal_encoder_dispatch_threadgroups(ctx->enc, (n4 + 255)/256, 1, 1, 256, 1, 1);
++            return 1;
++        }
++    }
++
+     int n_fuse = 1;
+     const ggml_metal_fusion * fusion = nullptr;
+ 
+     if (ctx->use_fusion()) {
+         int n = 1;
+         fusion = ctx->can_fuse(idx, GGML_METAL_FUSION_FULL, &n);
+         n_fuse = n;
