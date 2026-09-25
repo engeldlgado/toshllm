@@ -9,7 +9,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: long prompts read faster with a model split into groups of GPUs.** On two Radeon Pro Vega II Duo cards a 2048 token prompt reads 32 percent faster with Qwen3-14B, 41 percent with Qwen3.8-27B and 29 percent with Qwen3.6-35B-A3B; generation is unchanged.
 
-- **LLMs: a model split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3-14B generates 48.6 tokens a second instead of 47.2, and the same holds with groups of two across four GPUs.
+- **LLMs: a model split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3-14B generates 49.4 tokens a second instead of 47.2, and the same holds with groups of two across four GPUs.
 
 - **LLMs: Qwen3.8 split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3.8-27B Q4_0 generates 30.4 tokens a second instead of 29.9.
 

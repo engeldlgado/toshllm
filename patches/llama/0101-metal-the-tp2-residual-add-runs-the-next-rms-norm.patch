@@ -1,0 +1,169 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index 3d17ed9a6..a48b8cc10 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -81,14 +81,16 @@ void ggml_metal_encoder_free(ggml_metal_encoder_t encoder);
+ void ggml_metal_encoder_debug_group_push(ggml_metal_encoder_t encoder, const char * name);
+ void ggml_metal_encoder_debug_group_pop (ggml_metal_encoder_t encoder);
+ 
+ void ggml_metal_encoder_set_pipeline(ggml_metal_encoder_t encoder, struct ggml_metal_pipeline_with_params pipeline);
+ 
+ // (a + b) + c over float4, compiled at runtime; the TP2 boundary's residual add
+ struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3(ggml_metal_device_t dev);
++// the same sum followed by an RMS norm and its weight, one threadgroup per row
++struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3_rms_mul(ggml_metal_device_t dev);
+ // true when t still lacks the peer partial of a TP2 boundary and the caller is its residual add
+ bool ggml_metal_fb_residual_take(ggml_metal_device_t dev, const struct ggml_tensor * t, struct ggml_metal_buffer_id * peer);
+ 
+ void ggml_metal_encoder_set_bytes (ggml_metal_encoder_t encoder, void * data, size_t size, int idx);
+ void ggml_metal_encoder_set_buffer(ggml_metal_encoder_t encoder, struct ggml_metal_buffer_id buffer, int idx);
+ 
+ void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder, size_t size, int idx);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 65a627060..7be8f38d0 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -918,14 +918,77 @@ struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3(ggml_meta
+     });
+     if (pls[i].obj != nil) {
+         res.pipeline = &pls[i];
+     }
+     return res;
+ }
+ 
++struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3_rms_mul(ggml_metal_device_t dev) {
++    static ggml_metal_device_t        devs[8];
++    static struct ggml_metal_pipeline pls[8];
++    static dispatch_once_t            once[8];
++    static os_unfair_lock             lock = OS_UNFAIR_LOCK_INIT;
++
++    struct ggml_metal_pipeline_with_params res = { 0 };
++    os_unfair_lock_lock(&lock);
++    int i = 0;
++    for (; i < 8 && devs[i] != NULL && devs[i] != dev; i++) {}
++    if (i < 8) {
++        devs[i] = dev;
++    }
++    os_unfair_lock_unlock(&lock);
++    if (i == 8) {
++        return res;
++    }
++    dispatch_once(&once[i], ^{
++        // the reduction mirrors kernel_rms_norm_fuse_impl so the norm matches it bit for bit
++        static const char * src =
++            "#include <metal_stdlib>\n"
++            "using namespace metal;\n"
++            "kernel void kernel_add3_rms_mul_f32_4(device const float4 * a [[buffer(0)]], device const float4 * b [[buffer(1)]],\n"
++            "        device const float4 * c [[buffer(2)]], device float4 * x [[buffer(3)]], device const float4 * w [[buffer(4)]],\n"
++            "        device float4 * y [[buffer(5)]], constant uint & n4 [[buffer(6)]], constant float & eps [[buffer(7)]],\n"
++            "        constant uint & ne00 [[buffer(8)]], threadgroup float * shmem [[threadgroup(0)]],\n"
++            "        uint row [[threadgroup_position_in_grid]], ushort tp [[thread_position_in_threadgroup]],\n"
++            "        ushort sg [[simdgroup_index_in_threadgroup]], ushort ti [[thread_index_in_simdgroup]],\n"
++            "        ushort ntg [[threads_per_threadgroup]]) {\n"
++            "    if (sg == 0) { shmem[ti] = 0.0f; }\n"
++            "    const uint r = row*n4;\n"
++            "    float sumf = 0.0f;\n"
++            "    for (uint i = tp; i < n4; i += ntg) {\n"
++            "        const float4 v = (a[r + i] + b[r + i]) + c[r + i];\n"
++            "        x[r + i] = v;\n"
++            "        sumf += dot(v, v);\n"
++            "    }\n"
++            "    sumf = simd_sum(sumf);\n"
++            "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
++            "    if (ti == 0) { shmem[sg] = sumf; }\n"
++            "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
++            "    sumf = shmem[ti];\n"
++            "    sumf = simd_sum(sumf);\n"
++            "    const float mean  = sumf/ne00;\n"
++            "    const float scale = 1.0f/sqrt(mean + eps);\n"
++            "    for (uint i = tp; i < n4; i += ntg) {\n"
++            "        y[r + i] = (x[r + i]*scale)*w[i];\n"
++            "    }\n"
++            "}\n";
++        id<MTLDevice> mtl = (id<MTLDevice>) ggml_metal_device_get_obj(dev);
++        NSError * err = nil;
++        id<MTLLibrary> lib = [mtl newLibraryWithSource:[NSString stringWithUTF8String:src] options:nil error:&err];
++        id<MTLFunction> fn = [lib newFunctionWithName:@"kernel_add3_rms_mul_f32_4"];
++        pls[i].obj = fn != nil ? [mtl newComputePipelineStateWithFunction:fn error:&err] : nil;
++        [fn release];
++        [lib release];
++    });
++    if (pls[i].obj != nil) {
++        res.pipeline = &pls[i];
++    }
++    return res;
++}
++
+ ggml_metal_encoder_t ggml_metal_encoder_init(ggml_metal_cmd_buf_t cmd_buf_raw, bool concurrent) {
+     ggml_metal_encoder_t res = calloc(1, sizeof(struct ggml_metal_encoder));
+ 
+     id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
+ 
+     if (concurrent) {
+         res->obj = [cmd_buf computeCommandEncoderWithDispatchType: MTLDispatchTypeConcurrent];
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index e70f7dcb5..2b7eed353 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -5650,14 +5650,61 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+ }
+ 
+ int ggml_metal_op_bin(ggml_metal_op_t ctx, int idx) {
+     {
+         ggml_tensor * op = ctx->node(idx);
+         ggml_metal_buffer_id bid_peer;
+         if (op->op == GGML_OP_ADD && ggml_metal_fb_residual_take(ctx->dev, op->src[0], &bid_peer)) {
++            // the norm that reads the sum and its weight can run in the same kernel when nothing
++            // else reads the unweighted norm
++            static int fuse_rms = -1;
++            if (fuse_rms < 0) { const char * e = getenv("TOSH_MGPU_FB_RMS"); fuse_rms = (e && e[0] == '0') ? 0 : 1; }
++            ggml_tensor * rms = idx + 2 < ctx->n_nodes() ? ctx->node(idx + 1) : nullptr;
++            ggml_tensor * mul = idx + 2 < ctx->n_nodes() ? ctx->node(idx + 2) : nullptr;
++            bool fuse = fuse_rms && rms != nullptr && mul != nullptr &&
++                        rms->op == GGML_OP_RMS_NORM && rms->src[0] == op && ggml_is_contiguous(rms) &&
++                        mul->op == GGML_OP_MUL && mul->src[0] == rms && ggml_is_contiguous(mul) &&
++                        mul->type == GGML_TYPE_F32 && mul->src[1]->type == GGML_TYPE_F32 &&
++                        ggml_is_contiguous(mul->src[1]) && mul->src[1]->ne[0] == op->ne[0] && ggml_nrows(mul->src[1]) == 1 &&
++                        ggml_are_same_shape(mul, op) && op->ne[0] % 4 == 0;
++            for (int j = idx + 3; fuse && j < ctx->n_nodes(); j++) {
++                const ggml_tensor * nd = ctx->node(j);
++                for (int k = 0; k < GGML_MAX_SRC && fuse; k++) {
++                    for (const ggml_tensor * sx = nd->src[k]; sx != nullptr; sx = sx->view_src) {
++                        if (sx == rms) { fuse = false; break; }
++                    }
++                }
++            }
++            auto prms = fuse ? ggml_metal_device_pipeline_add3_rms_mul(ctx->dev) : ggml_metal_pipeline_with_params{};
++            if (prms.pipeline != nullptr) {
++                const uint32_t n4   = (uint32_t) (op->ne[0]/4);
++                const uint32_t ne00 = (uint32_t) op->ne[0];
++                float eps;
++                memcpy(&eps, rms->op_params, sizeof(float));
++                const int nmax = ggml_metal_pipeline_max_theads_per_threadgroup(prms);
++                int nth = 32;
++                while (nth < (int) n4 && nth < nmax) {
++                    nth *= 2;
++                }
++                nth = std::min(nth, nmax);
++                nth = std::min(nth, ((int) n4 + 31)/32*32);
++                ggml_metal_encoder_set_pipeline(ctx->enc, prms);
++                ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op->src[0]), 0);
++                ggml_metal_encoder_set_buffer  (ctx->enc, bid_peer, 1);
++                ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op->src[1]), 2);
++                ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op), 3);
++                ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(mul->src[1]), 4);
++                ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(mul), 5);
++                ggml_metal_encoder_set_bytes   (ctx->enc, (void *) &n4,   sizeof(n4),   6);
++                ggml_metal_encoder_set_bytes   (ctx->enc, (void *) &eps,  sizeof(eps),  7);
++                ggml_metal_encoder_set_bytes   (ctx->enc, (void *) &ne00, sizeof(ne00), 8);
++                ggml_metal_encoder_set_threadgroup_memory_size(ctx->enc, 64*sizeof(float), 0);
++                ggml_metal_encoder_dispatch_threadgroups(ctx->enc, (int) ggml_nrows(op), 1, 1, nth, 1, 1);
++                return 3;
++            }
+             const uint32_t n4 = (uint32_t) (ggml_nelements(op)/4);
+             ggml_metal_encoder_set_pipeline(ctx->enc, ggml_metal_device_pipeline_add3(ctx->dev));
+             ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op->src[0]), 0);
+             ggml_metal_encoder_set_buffer  (ctx->enc, bid_peer, 1);
+             ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op->src[1]), 2);
+             ggml_metal_encoder_set_buffer  (ctx->enc, ggml_metal_get_buffer_id(op), 3);
+             ggml_metal_encoder_set_bytes   (ctx->enc, (void *) &n4, sizeof(n4), 4);
