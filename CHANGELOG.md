@@ -3,17 +3,19 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.87.10] - 2026-09-25
 
 ### Improved
 
-- **LLMs: long prompts read faster with a model split into groups of GPUs.** On two Radeon Pro Vega II Duo cards a 2048 token prompt reads 32 percent faster with Qwen3-14B, 41 percent with Qwen3.8-27B and 29 percent with Qwen3.6-35B-A3B; generation is unchanged.
+- **LLMs: long prompts read much faster with a model split into groups of GPUs.** On two Radeon Pro Vega II Duo cards a 2048 token prompt reads 32% faster with Qwen3-14B, 41% with Qwen3.8-27B and 29% with Qwen3.6-35B-A3B; short prompts read as before.
 
-- **LLMs: a model split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3-14B generates 49.4 tokens a second instead of 47.2, and the same holds with groups of two across four GPUs.
+- **LLMs: a model split by tensors across GPUs generates faster, also with multi-token prediction (MTP).** On a Radeon Pro Vega II Duo Qwen3-14B generates 49.4 tokens a second instead of 47.2 and Qwen3.8-27B Q4_0 30.7 instead of 29.3, also in groups of two across four GPUs; with MTP the 27B goes from 31.1 to 33.3.
 
-- **LLMs: Qwen3.8 split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3.8-27B Q4_0 generates 30.4 tokens a second instead of 29.9.
+### Known issues
 
-- **LLMs: multi-token prediction (MTP) is faster on a model split by tensors across two GPUs.** On a Radeon Pro Vega II Duo Qwen3.8-27B Q4_0 generates 32.6 tokens a second with MTP instead of 30.5.
+- **LLMs: Qwen3.8 Flash Next can still answer with a run of zeros after a long prompt on Radeon Pro Vega and Radeon VII.** Prompts of a few thousand tokens work; past roughly 20,000 tokens they may not. It is not solved in this version.
+
+- **LLMs: Qwen3.8 Flash Next split by tensors can still stop in the middle of a long answer on Radeon PRO W6800X Duo cards.** Generation stalls with a GPU timeout.
 
 ## [0.87.9] - 2026-09-24
 
