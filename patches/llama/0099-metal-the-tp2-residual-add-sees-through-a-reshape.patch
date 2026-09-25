@@ -1,0 +1,120 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index 1ff194052..622c1c76f 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -628,14 +628,15 @@ static bool ggml_metal_ctime(void) {
+ static bool ggml_metal_ctime_barrier(void) {
+     static int v = -1;
+     if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_CTIME_BARRIER"); v = (s && s[0] == '1') ? 1 : 0; }
+     return v == 1;
+ }
+ 
+ static _Atomic uint64_t g_tr_fused_bnd;
++static _Atomic uint64_t g_tr_res_fold;
+ static _Atomic uint64_t g_ct_n, g_ct_pub, g_ct_wait, g_ct_read, g_ct_fail;
+ static _Atomic uint64_t g_ct_hw[8], g_ct_hp[8], g_ct_hr[8];
+ static double g_ct_ns_per_tick = 0.0;
+ 
+ static int tosh_ct_bucket(double us) {
+     return us < 1 ? 0 : us < 5 ? 1 : us < 10 ? 2 : us < 20 ? 3 :
+            us < 50 ? 4 : us < 100 ? 5 : us < 200 ? 6 : 7;
+@@ -834,14 +835,15 @@ static void tosh_mgpu_trace_report(void) {
+                 fprintf(stderr, "    %s us ", rn[k]);
+                 for (int i = 0; i < 8; i++) { fprintf(stderr, "%s %.1f%%  ", lbl[i], 100.0*atomic_load(&hh[k][i])/nn); }
+                 fprintf(stderr, "\n");
+             }
+         }
+     }
+     fprintf(stderr, "  fused boundaries      %llu\n", (unsigned long long) atomic_load(&g_tr_fused_bnd));
++    fprintf(stderr, "  residual folds        %llu\n", (unsigned long long) atomic_load(&g_tr_res_fold));
+     fprintf(stderr, "  oneshot collectives   %llu\n", (unsigned long long) atomic_load(&g_tr_oneshot));
+     fprintf(stderr, "  remote views new/hit  %llu/%llu\n",
+             (unsigned long long) atomic_load(&g_tr_rv_new),
+             (unsigned long long) atomic_load(&g_tr_rv_hit));
+     fprintf(stderr, "  encode CPU            %.1f ms\n", atomic_load(&g_tr_encode_ns)/1e6);
+     fprintf(stderr, "  collective GPU        %.1f ms\n", atomic_load(&g_tr_gpu_ns)/1e6);
+     fprintf(stderr, "  commit to GPU start   %.1f ms\n", atomic_load(&g_tr_sched_ns)/1e6);
+@@ -2225,14 +2227,15 @@ static bool ggml_metal_fb_residual(void) {
+     if (v < 0) { const char * s = TOSH_ENV("TOSH_MGPU_FB_RESIDUAL"); v = (s && s[0] == '0') ? 0 : 1; }
+     return v == 1;
+ }
+ 
+ struct ggml_metal_fb_residual_state {
+     ggml_metal_device_t        dev;
+     const struct ggml_tensor * t;       // reduced tensor still missing the partner's partial
++    const struct ggml_tensor * alias;   // a same-storage reshape of t that the residual add reads
+     id<MTLBuffer>              buf;
+     size_t                     off;
+     id<MTLSharedEvent>         ev_done;
+     uint64_t                   seq;
+     int                        state;   // 0 idle, 1 pending, 2 armed for the residual add, 3 folded
+ };
+ 
+@@ -2255,52 +2258,64 @@ static struct ggml_metal_fb_residual_state * ggml_metal_fb_residual_get(ggml_met
+ }
+ 
+ bool ggml_metal_fb_residual_take(ggml_metal_device_t dev, const struct ggml_tensor * t, struct ggml_metal_buffer_id * peer) {
+     if (!ggml_metal_fb_residual()) {
+         return false;
+     }
+     struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual_get(dev);
+-    if (st == NULL || st->state != 2 || st->t != t) {
++    if (st == NULL || st->state != 2 || (st->t != t && st->alias != t)) {
+         return false;
+     }
+     peer->metal = st->buf;
+     peer->offs  = st->off;
+     st->state = 3;
++    if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_res_fold, 1);
+     return true;
+ }
+ 
+ // before a subgraph: arm the pending partial when its first user here is a one-row residual add
+ // with the reduced tensor as src0 and encoded by this command buffer, otherwise fold it the
+ // usual way and release the slot
+ static void ggml_metal_fb_residual_before(ggml_metal_t ctx, id<MTLCommandBuffer> cmd_buf,
+                                           struct ggml_cgraph * gf, int n_main) {
+     struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual() ? ggml_metal_fb_residual_get(ctx->dev) : NULL;
+     if (st == NULL || st->state != 1) {
+         return;
+     }
+     const struct ggml_tensor * t = st->t;
++    const struct ggml_tensor * alias = NULL;
+     bool arm = false;
+     for (int i = 0; i < gf->n_nodes; i++) {
+         const struct ggml_tensor * node = gf->nodes[i];
+         bool uses = node->view_src == t;
+         for (int k = 0; k < GGML_MAX_SRC && !uses; k++) {
+             for (const struct ggml_tensor * src = node->src[k]; src != NULL; src = src->view_src) {
+                 if (src == t) { uses = true; break; }
+             }
+         }
+         if (!uses) {
+             continue;
+         }
+-        arm = i < n_main && node->op == GGML_OP_ADD && node->src[0] == t && node->src[1] != NULL &&
++        // a reshape or view of the whole tensor at offset 0 moves no data: follow it once
++        if (alias == NULL && (node->op == GGML_OP_RESHAPE || node->op == GGML_OP_VIEW) &&
++            node->view_src == t && node->view_offs == 0 && ggml_is_contiguous(node) &&
++            ggml_nelements(node) == ggml_nelements(t)) {
++            alias = node;
++            continue;
++        }
++        const struct ggml_tensor * src0 = node->src[0];
++        arm = i < n_main && node->op == GGML_OP_ADD && (src0 == t || (alias != NULL && src0 == alias)) &&
++              node->src[1] != NULL &&
+               node->type == GGML_TYPE_F32 && node->src[1]->type == GGML_TYPE_F32 &&
+               ggml_is_contiguous(node) && ggml_is_contiguous(node->src[1]) &&
+-              ggml_are_same_shape(node, t) && ggml_are_same_shape(node->src[1], t) &&
++              ggml_are_same_shape(node, src0) && ggml_are_same_shape(node->src[1], src0) &&
+               ggml_metal_device_pipeline_add3(ctx->dev).pipeline != NULL;
+         break;
+     }
++    st->alias = arm ? alias : NULL;
+     if (arm) {
+         st->state = 2;
+         return;
+     }
+     const bool added = ggml_metal_add_inplace_buffer(ctx, cmd_buf, (struct ggml_tensor *) t, st->buf, st->off);
+     GGML_ASSERT(added);
+     if (tosh_mgpu_trace()) atomic_fetch_add(&g_tr_signals, 1);

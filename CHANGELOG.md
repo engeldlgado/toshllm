@@ -11,6 +11,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: a model split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3-14B generates 48.6 tokens a second instead of 47.2, and the same holds with groups of two across four GPUs.
 
+- **LLMs: Qwen3.8 split by tensors across two GPUs generates faster.** On a Radeon Pro Vega II Duo Qwen3.8-27B Q4_0 generates 30.4 tokens a second instead of 29.9.
+
 ## [0.87.9] - 2026-09-24
 
 ### Added
