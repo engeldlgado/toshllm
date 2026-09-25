@@ -3,15 +3,27 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.87.9] - 2026-09-24
+
+### Added
+
+- **LLMs: multi-token prediction (MTP) can be switched off per model, like DFlash.** The switch is in the model's settings, on the dashboard and in the server details. MTP stays on by default; with text the model predicts poorly it can generate slower than without it, and off it generates one token per step.
+
+- **LLMs: the engine moves to a newer upstream.** It brings the fixes and the model support added there since the last one, among them router mode no longer hanging when several requests ask for the same model, DFM Mimir 1B, and the Ling 3.0 and DeepSeek V3.2 and V4 chat formats. Speed is unchanged apart from the improvements below.
 
 ### Improved
 
-- **LLMs: mixture of experts models generate faster on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II gpt-oss-20B generates 92.7 tokens a second instead of 90.1, Qwen3.6-35B-A3B 69.7 instead of 67.9, and Qwen3.8 Flash Next split across four GPUs by layers 18.2 instead of 16.3 at a 33,000 token context.
+- **LLMs: mixture of experts models generate faster on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II gpt-oss-20B generates 92.7 tokens a second instead of 90.8 and Qwen3.6-35B-A3B 70.0 instead of 68.3.
 
-- **LLMs: batches of two tokens run faster on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II Qwen3-8B reads them 14 percent faster and Qwen3.8-27B 9 percent.
+- **LLMs: batches of two tokens run faster on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II Qwen3.8-27B Q4_0 reads them 18 percent faster and Qwen3.6-35B-A3B 12 percent.
 
-- **LLMs: multi-token prediction (MTP) now speeds up Q4_0 models on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II Qwen3.8-27B Q4_0 generates 26.0 tokens a second with it against 25.6 without, where it used to lose 12 percent. The same model in Q4_K_S goes from 21.2 to 21.5 with MTP, and in IQ4_XS from 20.8 to 21.0.
+- **LLMs: multi-token prediction (MTP) costs less on Q4_0 models on Radeon Pro Vega and Radeon VII.** On a Radeon Pro Vega II Qwen3.8-27B Q4_0 generates 21.4 tokens a second with it instead of 18.7 on a technical answer where it accepts about half of its guesses. That is still below the 25.7 it reaches without MTP, so on text like this the new switch is worth turning off.
+
+### Known issues
+
+- **LLMs: Qwen3.8 Flash Next can still answer with a run of zeros after a long prompt on Radeon Pro Vega and Radeon VII.** Prompts of a few thousand tokens work; past roughly 20,000 tokens they may not. It is not solved in this version.
+
+- **LLMs: Qwen3.8 Flash Next split by tensors can still stop in the middle of a long answer on Radeon PRO W6800X Duo cards.** Generation stalls with a GPU timeout.
 
 ## [0.87.8] - 2026-09-22
 
