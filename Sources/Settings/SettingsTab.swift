@@ -30,7 +30,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
     @AppStorage(SettingsKeys.ctx) private var ctx = 16384
-    @AppStorage(SettingsKeys.threads) private var threads = 6
+    @AppStorage(SettingsKeys.threads) private var threads = 0 // 0 = physical cores, resolved at launch
     @AppStorage(SettingsKeys.flashAttn) private var flashAttn = "auto"
     @AppStorage(SettingsKeys.noMmap) private var noMmap = true
     @AppStorage(SettingsKeys.jinja) private var jinja = true
@@ -908,12 +908,12 @@ struct SettingsView: View {
                     .infoTip(loc.t("Cuando reescribes/editas el prompt (asistentes de código) o se recorta el razonamiento entre turnos, reutiliza la caché desplazándola en vez de reprocesar — mucho más rápido. Es una aproximación: la salida sigue coherente pero puede variar levemente frente a un cálculo exacto. Desactívalo si quieres resultados idénticos y reproducibles.",
                                 "When the prompt is rewritten/edited (coding assistants) or the reasoning is trimmed between turns, it reuses the cache by shifting it instead of reprocessing — much faster. It's an approximation: output stays coherent but can differ slightly from an exact recompute. Turn it off for identical, reproducible results."))
                 Stepper(loc.t("Hilos de CPU: %@", "CPU threads: %@", "\(threads)"),
-                        value: $threads, in: 1...max(1, hardware.logicalCores))
+                        value: $threads, in: 0...max(0, hardware.physicalCores))
                     .settingsGlyph("cpu")
                     .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Tu equipo tiene %@ hilos; los núcleos físicos (%@) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
                                 "Threads for the CPU side (MoE experts, tokenization). Your machine has %@ threads; physical cores (%@) are usually optimal; more threads won't help if RAM bandwidth is the limit.",
                                 String(hardware.logicalCores), String(hardware.physicalCores)))
-                    .onAppear { if threads > hardware.logicalCores { threads = max(1, hardware.logicalCores) } }
+                    .onAppear { if threads > hardware.physicalCores { threads = max(0, hardware.physicalCores) } }
                 LabeledContent(loc.t("Flash Attention estándar (CPU)", "Standard Flash Attention (CPU)")) {
                     ToshDropdown(selection: $flashAttn, options: ["auto", "on", "off"].map { .init(value: $0, title: $0) }, width: 120)
                 }

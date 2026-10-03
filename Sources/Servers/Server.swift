@@ -807,6 +807,12 @@ struct ServerSettings {
         (csv ?? "").split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
 
+    static func resolvedThreads(_ d: UserDefaults) -> Int {
+        // 0 or unset = physical cores; SMT threads collapse decode (docs/thread-sweep-2026-09-30.md).
+        let raw = d.object(forKey: SettingsKeys.threads) == nil ? 0 : d.integer(forKey: SettingsKeys.threads)
+        let phys = max(1, HardwareInfo.detect().physicalCores)
+        return raw <= 0 ? phys : min(raw, phys)
+    }
     /// Reads persisted settings (same keys as the views' @AppStorage).
     static func fromDefaults() -> ServerSettings {
         let d = UserDefaults.standard
@@ -820,7 +826,7 @@ struct ServerSettings {
             ncmoe: int(SettingsKeys.ncmoe, 0),
             ctx: int(SettingsKeys.ctx, 16384),
             contextAutomatic: bool(SettingsKeys.contextAutomatic, false),
-            threads: int(SettingsKeys.threads, 6),
+            threads: resolvedThreads(d),
             flashAttn: d.string(forKey: SettingsKeys.flashAttn) ?? "auto",
             noMmap: bool(SettingsKeys.noMmap, true),
             jinja: bool(SettingsKeys.jinja, true),
