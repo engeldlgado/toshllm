@@ -1216,7 +1216,7 @@ struct ImageInstanceForm: View {
                         "Paint the mask over the init image instead of preparing a separate PNG."))
             .sheet(isPresented: $paintingMask) {
                 MaskEditorView(initImagePath: cfg.initImagePath,
-                               outputDirectory: models.imagenDirectory,
+                               outputDirectory: URL(fileURLWithPath: cfg.initImagePath).deletingLastPathComponent(),
                                maskPath: $cfg.maskPath)
                     .environmentObject(loc)
             }

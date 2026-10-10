@@ -777,13 +777,14 @@ final class ImageGenerator: ObservableObject {
             return
         }
         lastPrompt = prompt; lastSeed = seed; lastWidth = width; lastHeight = height
-        let dir = models.imagenDirectory
+        let outputDir = URL(fileURLWithPath: initImagePath).deletingLastPathComponent()
+
         // Timestamp plus a short token: a batch fired in the same second (one run
         // per instance) would otherwise share a name and overwrite a single file.
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd_HH.mm.ss"
         let token = String(UUID().uuidString.prefix(4)).lowercased()
-        let out = dir.appendingPathComponent("toshllm_\(fmt.string(from: Date()))_\(token).\(format.ext)")
+        let out = outputDir.appendingPathComponent("toshllm_\(fmt.string(from: Date()))_\(token).\(format.ext)")
 
         // Each component maps to its own sd-cli flag (a full checkpoint via --model,
         // or a diffusion model plus its VAE and text encoders).
