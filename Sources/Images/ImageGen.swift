@@ -20,6 +20,8 @@ struct ImageGenComponent: Identifiable {
     let urlString: String
     let fileName: String
     let sizeGB: Double
+    /// Names the catalog downloaded this file under before; a copy already on disk still counts.
+    var formerFileNames: [String] = []
     var id: String { fileName }
 
     /// The sd-cli argument this file is passed as.
@@ -357,14 +359,14 @@ enum ImageGenCatalog {
     /// reference images; Turbo shares its VAE and the Qwen3-VL-8B encoder, which runs off the card.
     static func qwenImage21(_ name: String, detailES: String, detailEN: String,
                             repo: String = "leejet/Qwen-Image-2.1-GGUF", revision: String = "main",
-                            file: String, sizeGB: Double, minVRAMGB: Double,
+                            file: String, formerFile: String? = nil, sizeGB: Double, minVRAMGB: Double,
                             recommendable: Bool, turbo: Bool = false) -> ImageGenModel {
         ImageGenModel(
             name: name, detailES: detailES, detailEN: detailEN,
             components: [
                 ImageGenComponent(kind: .diffusion,
                     urlString: "https://huggingface.co/\(repo)/resolve/\(revision)/\(file)",
-                    fileName: file, sizeGB: sizeGB),
+                    fileName: file, sizeGB: sizeGB, formerFileNames: formerFile.map { [$0] } ?? []),
                 ImageGenComponent(kind: .vae,
                     urlString: "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
                     fileName: "qwen_image_2.1_vae_bf16.safetensors", sizeGB: 0.68),
@@ -413,37 +415,42 @@ enum ImageGenCatalog {
         detailEN: "7B at near-lossless precision, for 16 GB cards and up. Non-commercial license.",
         file: "qwen_image_2.1-Q8_0.gguf", sizeGB: 7.69, minVRAMGB: 16, recommendable: false)
 
-    /// Files checked against the official weights at this commit, so the URL stays on them.
-    private static let qwenImage21TurboRepo = "AtomicChat/Qwen-Image-2.1-Turbo-GGUF"
-    private static let qwenImage21TurboRevision = "bb25d06bc74119c12207243d68917951e6d9c232"
+    /// Pinned to the commit that was measured, so the URL keeps serving those files. The AtomicChat
+    /// builds offered before still run when they are already on disk.
+    private static let qwenImage21TurboRepo = "unsloth/Qwen-Image-2.1-Turbo-GGUF"
+    private static let qwenImage21TurboRevision = "5d1f9f759ea877ae556cda88dbec958b62ad3809"
 
     static let qwenImage21TurboQ3 = qwenImage21(
         "Qwen-Image 2.1 Turbo (Q3)",
         detailES: "7B en 8 pasos en vez de 25. Texto legible y edición desde referencias. Versión ligera para 8 GB. Licencia no comercial.",
         detailEN: "7B in 8 steps instead of 25. Legible text and edits from references. Light build for 8 GB cards. Non-commercial license.",
         repo: qwenImage21TurboRepo, revision: qwenImage21TurboRevision,
-        file: "Qwen-Image-2.1-Turbo-AD-Q3_K.gguf", sizeGB: 3.60, minVRAMGB: 8, recommendable: false, turbo: true)
+        file: "qwen-image-2.1-turbo-Q3_K_XL.gguf", formerFile: "Qwen-Image-2.1-Turbo-AD-Q3_K.gguf",
+        sizeGB: 3.61, minVRAMGB: 8, recommendable: false, turbo: true)
 
     static let qwenImage21TurboQ4 = qwenImage21(
         "Qwen-Image 2.1 Turbo",
         detailES: "7B en 8 pasos en vez de 25. Escribe texto legible y edita desde imágenes de referencia. Licencia no comercial.",
         detailEN: "7B in 8 steps instead of 25. Writes legible text and edits from reference images. Non-commercial license.",
         repo: qwenImage21TurboRepo, revision: qwenImage21TurboRevision,
-        file: "Qwen-Image-2.1-Turbo-AD-Q4_K.gguf", sizeGB: 4.20, minVRAMGB: 12, recommendable: false, turbo: true)
+        file: "qwen-image-2.1-turbo-Q4_K_M.gguf", formerFile: "Qwen-Image-2.1-Turbo-AD-Q4_K.gguf",
+        sizeGB: 4.20, minVRAMGB: 12, recommendable: false, turbo: true)
 
     static let qwenImage21TurboQ6 = qwenImage21(
         "Qwen-Image 2.1 Turbo (Q6)",
         detailES: "7B en 8 pasos, con más precisión. Licencia no comercial.",
         detailEN: "7B in 8 steps, at higher precision. Non-commercial license.",
         repo: qwenImage21TurboRepo, revision: qwenImage21TurboRevision,
-        file: "Qwen-Image-2.1-Turbo-AD-Q6_K.gguf", sizeGB: 6.71, minVRAMGB: 12, recommendable: false, turbo: true)
+        file: "qwen-image-2.1-turbo-Q6_K_XL.gguf", formerFile: "Qwen-Image-2.1-Turbo-AD-Q6_K.gguf",
+        sizeGB: 6.72, minVRAMGB: 12, recommendable: false, turbo: true)
 
     static let qwenImage21TurboQ8 = qwenImage21(
         "Qwen-Image 2.1 Turbo (Q8)",
         detailES: "7B en 8 pasos, casi sin pérdida, para tarjetas de 16 GB en adelante. Licencia no comercial.",
         detailEN: "7B in 8 steps at near-lossless precision, for 16 GB cards and up. Non-commercial license.",
         repo: qwenImage21TurboRepo, revision: qwenImage21TurboRevision,
-        file: "Qwen-Image-2.1-Turbo-Q8_0.gguf", sizeGB: 7.59, minVRAMGB: 16, recommendable: false, turbo: true)
+        file: "qwen-image-2.1-turbo-Q8_0.gguf", formerFile: "Qwen-Image-2.1-Turbo-Q8_0.gguf",
+        sizeGB: 7.64, minVRAMGB: 16, recommendable: false, turbo: true)
 
     /// Curated order (small to large). Z-Image sits before SDXL so it wins the
     /// 8-12 GB tie as the recommended pick (validated for photorealism on AMD);
@@ -561,7 +568,7 @@ enum ImageGenLimits {
                           attnVRAMSq: Double = 0, maxLongEdge: Int = .max,
                           streamedAttention: Bool = true) -> [Int] {
         let candidates = [512, 640, 768, 896, 1024, 1152, 1280, 1440,
-                          1600, 1792, 2048, 2304, 2560, 3072]
+                          1600, 1792, 1920, 2048, 2304, 2560, 3072]
         return candidates.filter { base in
             guard base <= maxLongEdge else { return false }
             let short = max(256, Int((Double(base) * 9 / 16 / 64).rounded()) * 64)

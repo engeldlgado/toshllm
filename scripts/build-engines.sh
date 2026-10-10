@@ -366,8 +366,9 @@ build_image_engine() {
     # Flash attention reads Qwen-Image 2.1's F16 values through a permuted view instead of a copy.
     git apply -p1 "$ROOT/patches/image/0063-image-qwen21-v-view.patch"
     # 2D im2col runs one threadgroup per output pixel, like im2col_3d, instead of a few threads
-    # per channel; TOSH_IM2COL_PX_DISABLE restores the old dispatch.
-    git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/image/0064-image-metal-im2col-per-pixel.patch"
+    # per channel, and 3x3 kernels stage their input rows to write each pixel in wide stores;
+    # TOSH_IM2COL_PX_DISABLE and TOSH_IM2COL_TILE_DISABLE restore the older dispatches.
+    git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/image/0064-image-metal-im2col.patch"
     # A copy that swaps two contiguous blocks of dims (the Wan VAE's channel-first norm) goes
     # through 32x32 tiles; TOSH_CPY_TRANSPOSE_DISABLE restores the generic copy.
     git apply --include='ggml/src/ggml-metal/*' -p1 "$ROOT/patches/image/0065-image-metal-cpy-transpose.patch"

@@ -253,6 +253,20 @@ final class ModelDetectionTests: XCTestCase {
                        original.path)
     }
 
+    func testRecursiveFileIndexFindsAComponentUnderItsFormerName() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let managed = dir.appendingPathComponent("imagen", isDirectory: true)
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        let former = managed.appendingPathComponent("Qwen-Image-2.1-Turbo-AD-Q4_K.gguf")
+        try Data([1]).write(to: former)
+
+        let component = ImageGenCatalog.qwenImage21TurboQ4.components[0]
+        let index = ModelFileIndex.scan(in: dir)
+        XCTAssertNil(index.file(named: component.fileName))
+        XCTAssertEqual(index.file(namedAny: [component.fileName] + component.formerFileNames)?.path, former.path)
+    }
+
     func testRecursiveFileIndexPrefersManagedMediaCopyWhenNamesCollide() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
