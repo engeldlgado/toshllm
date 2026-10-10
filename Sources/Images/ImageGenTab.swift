@@ -53,7 +53,7 @@ struct ImageControls: View {
     /// especially with a batch.
     private func pickImages() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
+        panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = true
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
         upscaler.queued = panel.urls
@@ -789,7 +789,8 @@ struct QueueFeedView: View {
 
     private func pickDraftImage() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["png", "jpg", "jpeg", "webp"].compactMap { UTType(filenameExtension: $0) }
+    //    panel.allowedContentTypes = ["png", "jpg", "jpeg", "webp"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url { draftInitImage = url.path }
     }
