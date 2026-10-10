@@ -9,6 +9,63 @@ import ImageIO
 
 enum ImageStudioMode: String, CaseIterable { case create, upscale }
 
+/// Поддерживаемые форматы сохранения через sips
+enum ExportFormat: String, CaseIterable, Identifiable {
+    case png, jpeg, tiff, jp2, tga, heic
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .png: return "PNG"
+        case .jpeg: return "JPEG"
+        case .tiff: return "TIFF"
+        case .jp2: return "JPEG 2000"
+        case .tga: return "TGA"
+        case .heic: return "HEIC"
+        }
+    }
+
+    var sipsFormat: String {
+        switch self {
+        case .png: return "png"
+        case .jpeg: return "jpeg"
+        case .tiff: return "tiff"
+        case .jp2: return "jp2"
+        case .tga: return "tga"
+        case .heic: return "heic"
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .png: return "png"
+        case .jpeg: return "jpg"
+        case .tiff: return "tiff"
+        case .jp2: return "jp2"
+        case .tga: return "tga"
+        case .heic: return "heic"
+        }
+    }
+
+    /// Форматы, поддерживающие настройку качества
+    var supportsQuality: Bool {
+        self == .jpeg || self == .jp2
+    }
+
+    var utType: UTType {
+        switch self {
+        case .png: return .png
+        case .jpeg: return .jpeg
+        case .tiff: return .tiff
+        case .jp2: return UTType(filenameExtension: "jp2") ?? .png
+        case .tga: return UTType(filenameExtension: "tga") ?? .png
+        case .heic: return UTType.heic
+        }
+    }
+}
+
+
 struct ImageControls: View {
     @ObservedObject var pool: ImageGenPool
     @ObservedObject var upscaler: ImageUpscaler
@@ -410,11 +467,19 @@ struct ImageControls: View {
                         prompt: pool.effectivePrompt(for: c),
                         negativePrompt: pool.effectiveNegativePrompt(for: c),
                         width: w, height: h, steps: c.steps,
-                        seed: c.seed, format: c.formatValue, offloadToCPU: c.offloadCPU,
+                        seed: c.seed, format: .png, offloadToCPU: c.offloadCPU,
                         gpuIndex: c.gpuIndex,
                         auxGPUIndex: c.auxGPU(gpuCount: hardware.gpus.count) ?? -1,
                         initImagePath: c.initImagePath, maskPath: c.maskPath,
-                        strength: c.strength, referenceImagePaths: c.referenceImagePaths,
+
+                        strength: c.strength,
+                        inpaintEngine: c.inpaintEngine,
+                        textEncoderPath: c.textEncoderPath,
+                        t5EncoderPath: c.t5EncoderPath,
+                        controlImagePath: c.controlImagePath,  // <-- ДОБАВЛЕНО
+                        controlStrength: c.controlStrength,  // <-- ДОБАВЛЕНО
+
+                        referenceImagePaths: c.referenceImagePaths,
                         fastMode: c.fastModeValue)
                 }
             } label: {
@@ -1097,25 +1162,74 @@ struct ImageInstanceForm: View {
 
     private var customSetup: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker(loc.t("Tipo", "Kind"), selection: $cfg.customIsDiffusion) {
-                Text(loc.t("Checkpoint completo", "Full checkpoint")).tag(false)
-                Text(loc.t("Modelo de difusión", "Diffusion model")).tag(true)
+            // Переключатель движка для Custom моделей
+            HStack(spacing: 8) {
+                Text(loc.t("Motor", "Engine")).font(.caption)
+                Spacer(minLength: 8)
+                Picker("", selection: $cfg.inpaintEngine) {
+                    ForEach(InpaintEngine.allCases, id: \.self) { engine in
+                        Text(engine.label).tag(engine)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: 200)
+                .help(
+                    loc.t(
+                        "sd-cli (Checkpoint): modelo completo. sd-cli (Diffusion): solo difusión. iopaint (LaMa): restauración rápida. Flex.2 (Control): con ControlNet.",
+                        "sd-cli (Checkpoint): full model. sd-cli (Diffusion): diffusion only. iopaint (LaMa): fast restoration. Flex.2 (Control): with ControlNet."
+                    ))
             }
-            .pickerStyle(.segmented).labelsHidden()
-            .help(loc.t("Un checkpoint (SD, SDXL) lleva dentro el VAE y el codificador. Un modelo de difusión suelto (Z-Image, Flux 2, Qwen-Image) necesita además su VAE y su codificador de texto.",
-                        "A checkpoint (SD, SDXL) bundles its VAE and encoder. A bare diffusion model (Z-Image, Flux 2, Qwen-Image) also needs its VAE and text encoder."))
-            filePickRow(loc.t("Archivo del modelo", "Model file"), path: $cfg.customModelPath,
-                        types: ["safetensors", "gguf", "ckpt"])
-            filePickRow(cfg.customIsDiffusion ? "VAE" : loc.t("VAE (opcional)", "VAE (optional)"),
-                        path: $cfg.customVAEPath, types: ["safetensors", "gguf"])
-            if cfg.customIsDiffusion {
-                filePickRow(loc.t("Codificador de texto", "Text encoder"),
-                            path: $cfg.customTextEncoderPath, types: ["safetensors", "gguf"])
-                if cfg.customVAEPath.isEmpty || cfg.customTextEncoderPath.isEmpty {
-                    Label(loc.t("Un modelo de difusión no genera nada sin su VAE y su codificador de texto.",
-                                "A diffusion model renders nothing without its VAE and text encoder."),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(Color(red: 0.5, green: 0.7, blue: 1.0))
+
+            filePickRow(
+                loc.t("Archivo del modelo", "Model file"), path: $cfg.customModelPath,
+                types: ["safetensors", "gguf", "ckpt"])
+            filePickRow(
+                loc.t("VAE (opcional)", "VAE (optional)"),
+                path: $cfg.customVAEPath, types: ["safetensors", "gguf"])
+
+            // Условные поля для энкодеров в зависимости от выбранного движка
+            if cfg.inpaintEngine.requiresEncoders {
+                if cfg.inpaintEngine.requiresT5 {
+                    // Flex.2 или SD 3.x/Flux: два энкодера (CLIP_L + T5-XXL)
+                    filePickRow(
+                        loc.t("CLIP_L encoder", "CLIP_L encoder"),
+                        path: $cfg.textEncoderPath, types: ["safetensors", "gguf"]
+                    )
+                    .help(
+                        loc.t(
+                            "Modelo CLIP_L para Flex.2 o SD 3.x/Flux.",
+                            "CLIP_L model for Flex.2 or SD 3.x/Flux."))
+
+                    filePickRow(
+                        loc.t("T5-XXL encoder", "T5-XXL encoder"),
+                        path: $cfg.t5EncoderPath, types: ["safetensors", "gguf"]
+                    )
+                    .help(
+                        loc.t(
+                            "Modelo T5-XXL para Flex.2 o SD 3.x/Flux. Proporciona comprensión semántica avanzada.",
+                            "T5-XXL model for Flex.2 or SD 3.x/Flux. Provides advanced semantic understanding."
+                        ))
+
+                    if cfg.t5EncoderPath.isEmpty {
+                        InfoLabel(
+                            text: loc.t(
+                                "Para modelos SD 3.x/Flux se requiere T5-XXL. Sin él, la generación puede fallar o dar resultados pobres.",
+                                "SD 3.x/Flux models require T5-XXL. Without it, generation may fail or produce poor results."
+                            ),
+                            systemImage: "exclamationmark.triangle",
+                            color: .orange)
+                    }
+                } else {
+                    // Обычный sd-cli: один энкодер
+                    filePickRow(
+                        loc.t("Codificador de texto (CLIP)", "Text encoder (CLIP)"),
+                        path: $cfg.textEncoderPath, types: ["safetensors", "gguf"]
+                    )
+                    .help(
+                        loc.t(
+                            "Modelo CLIP para guiar la generación. Requerido para todos los modelos sd-cli.",
+                            "CLIP model to guide generation. Required for all sd-cli models."))
                 }
             }
             HStack(spacing: 6) {
@@ -1266,41 +1380,119 @@ struct ImageInstanceForm: View {
                     )
                 }
                 maskRow
+                // Поля для Control image (только для Flex.2)
+                if cfg.inpaintEngine.supportsControl {
+                    controlImageRow
+                }
+            
             }
         }
     }
 
-    private var maskRow: some View {
-        let tip = loc.t("Retoca solo una zona (inpainting). Blanco = repinta, negro = conserva. Del tamaño de la imagen inicial. Sin máscara se repinta todo.",
-                        "Repaints one area only (inpainting). White = repaint, black = keep. Same size as the init image. Without one, everything is repainted.")
+    private var controlImageRow: some View {
+        let tip = loc.t(
+            "Изображение-условие Flex.2. Используется для управления структурой сцены: линиями, позой или глубиной.",
+            "Flex.2 control image. Used to guide scene structure with lines, pose, or depth."
+        )
+
         return VStack(alignment: .leading, spacing: 4) {
-            filePickRow(loc.t("Máscara (inpainting, opcional)", "Mask (inpainting, optional)"),
-                        path: $cfg.maskPath, types: ["png", "jpg", "jpeg", "webp"])
-                .help(tip)
-            Button { paintingMask = true } label: {
-                Label(cfg.maskPath.isEmpty
-                      ? loc.t("Pintar la zona", "Paint the area")
-                      : loc.t("Volver a pintarla", "Paint it again"),
-                      systemImage: "paintbrush.pointed")
+            Divider().padding(.vertical, 2)
+            filePickRow(
+                loc.t("Control image (опционально)", "Control image (optional)"),
+                path: $cfg.controlImagePath,
+                types: ["png", "jpg", "jpeg", "webp"]
+            )
+            .help(tip)
+
+            if !cfg.controlImagePath.isEmpty {
+                HStack(spacing: 6) {
+                    Text(loc.t("Control strength", "Control strength"))
+                        .font(.caption)
+                    Spacer(minLength: 8)
+                    Slider(
+                        value: $cfg.controlStrength,
+                        in: 0.0...1.0
+                    )
+                    .help(
+                        loc.t(
+                            "0.0 = игнорировать контроль, 1.0 = строгое следование.",
+                            "0.0 = ignore control, 1.0 = strict adherence."))
+
+                    Text(String(format: "%.2f", cfg.controlStrength))
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 34)
+                }
+            }
+            // Предупреждение о ресурсах для Flex.2
+            InfoLabel(
+                text: loc.t(
+                    "Flex.2 требует значительных ресурсов (T5 + CLIP + диффузия). Убедитесь, что хватает VRAM.",
+                    "Flex.2 requires significant resources (T5 + CLIP + diffusion). Ensure sufficient VRAM."
+                ),
+                systemImage: "memorychip",
+                color: Color(red: 0.5, green: 0.7, blue: 1.0))
+        }
+    }
+
+
+    private var maskRow: some View {
+        let tip = loc.t(
+            "Retoca solo una zona (inpainting). Blanco = repinta, negro = conserva. Del tamaño de la imagen inicial. Sin máscara se repinta todo.",
+            "Repaints one area only (inpainting). White = repaint, black = keep. Same size as the init image. Without one, everything is repainted."
+        )
+        return VStack(alignment: .leading, spacing: 6) {
+
+            // 1. Выбор файла маски
+            filePickRow(
+                loc.t("Máscara (inpainting, opcional)", "Mask (inpainting, optional)"),
+                path: $cfg.maskPath, types: ["png", "jpg", "jpeg", "webp"]
+            )
+            .help(tip)
+
+            // 2. Кнопка рисования (расположена сразу после выбора, как вы просили)
+            if !cfg.initImagePath.isEmpty {
+                Button {
+                    paintingMask = true
+                } label: {
+                    Label(
+                        cfg.maskPath.isEmpty
+                            ? loc.t("Pintar la zona", "Paint the area")
+                            : loc.t("Volver a pintarla", "Paint it again"),
+                        systemImage: "paintbrush.pointed"
+                    )
                     .frame(maxWidth: .infinity)
-            }
-            .glassButton().controlSize(.small)
-            .disabled(cfg.initImagePath.isEmpty)
-            .help(loc.t("Pinta la máscara sobre la imagen inicial en vez de preparar un PNG aparte.",
-                        "Paint the mask over the init image instead of preparing a separate PNG."))
-            .sheet(isPresented: $paintingMask) {
-                MaskEditorView(initImagePath: cfg.initImagePath,
-                               outputDirectory: URL(fileURLWithPath: cfg.initImagePath).deletingLastPathComponent(),
-                               maskPath: $cfg.maskPath)
+                }
+                // ИСПРАВЛЕНО: заменен несуществующий .glassButton() на стандартный .buttonStyle(.bordered)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(
+                    loc.t(
+                        "Pinta la máscara sobre la imagen inicial en vez de preparar un PNG aparte.",
+                        "Paint the mask over the init image instead of preparing a separate PNG.")
+                )
+                .sheet(isPresented: $paintingMask) {
+                    MaskEditorView(
+                        initImagePath: cfg.initImagePath,
+                        outputDirectory: URL(fileURLWithPath: cfg.initImagePath)
+                            .deletingLastPathComponent(),
+                        maskPath: $cfg.maskPath
+                    )
                     .environmentObject(loc)
+                }
             }
+
+            // 4. Подсказки и предупреждения о размере
             if !cfg.maskPath.isEmpty {
                 Text(tip).font(.caption2).foregroundStyle(.secondary)
                 if maskSizeMismatch {
-                    Label(loc.t("La máscara no tiene el mismo tamaño en píxeles que la imagen inicial; la zona retocada saldrá desplazada.",
-                                "The mask is not the same pixel size as the init image; the repainted area will land off-target."),
-                          systemImage: "exclamationmark.triangle")
-                        .font(.caption2).foregroundStyle(.pink)
+                    InfoLabel(
+                        text: loc.t(
+                            "La máscara no tiene el mismo tamaño en píxeles que la imagen inicial; la zona retocada saldrá desplazada.",
+                            "The mask is not the same pixel size as the init image; the repainted area will land off-target."
+                        ),
+                        systemImage: "exclamationmark.triangle",
+                        color: Color(red: 0.5, green: 0.7, blue: 1.0)
+                    )
                 }
             }
         }
@@ -1401,14 +1593,9 @@ struct ImageInstanceForm: View {
                 }
             }
             row(loc.t("Pasos", "Steps"),
-                model.sigmas.isEmpty
-                    ? loc.t("Iteraciones de muestreo. Los modelos turbo/distilled están afinados para pocos pasos.",
-                            "Sampling iterations. Turbo/distilled models are tuned for few steps.")
-                    : loc.t("Este modelo va a %@ pasos fijos: trae su propio calendario de ruido y con otro la imagen sale mal.",
-                            "This model runs a fixed %@ steps: it ships its own noise schedule, and any other one spoils the image.",
-                            "\(model.steps(cfg.steps))")) {
-                Stepper(value: $cfg.steps, in: 4...30) { Text("\(model.steps(cfg.steps))").monospacedDigit() }.frame(width: 96)
-                    .disabled(!model.sigmas.isEmpty)
+                loc.t("Iteraciones de muestreo. Los modelos turbo/distilled están afinados para pocos pasos.",
+                      "Sampling iterations. Turbo/distilled models are tuned for few steps.")) {
+                Stepper(value: $cfg.steps, in: 4...30) { Text("\(cfg.steps)").monospacedDigit() }.frame(width: 96)
             }
             row(loc.t("Semilla", "Seed"),
                 loc.t("-1 = aleatoria. Fija un número para reproducir la misma imagen; distinta semilla = variación.",
@@ -1635,28 +1822,33 @@ class FormatPickerObserver: NSObject {
     weak var qualitySlider: NSSlider?
     weak var qualityLabel: NSTextField?
     weak var qualityStack: NSStackView?
+    weak var formatPopup: NSPopUpButton?
     let baseName: String
 
     init(
         panel: NSSavePanel, baseName: String,
         qualitySlider: NSSlider? = nil, qualityLabel: NSTextField? = nil,
-        qualityStack: NSStackView? = nil
+        qualityStack: NSStackView? = nil, formatPopup: NSPopUpButton? = nil
     ) {
         self.panel = panel
         self.baseName = baseName
         self.qualitySlider = qualitySlider
         self.qualityLabel = qualityLabel
         self.qualityStack = qualityStack
+        self.formatPopup = formatPopup
         super.init()
     }
 
-    @objc func formatChanged(_ sender: NSSegmentedControl) {
-        let isJPEG = sender.selectedSegment == 1
-        let chosen: ImageFormat = isJPEG ? .jpg : .png
-        panel?.nameFieldStringValue = "\(baseName).\(chosen.ext)"
+    @objc func formatChanged(_ sender: NSPopUpButton) {
+        guard let rawValue = sender.selectedItem?.title,
+            let format = ExportFormat.allCases.first(where: { $0.displayName == rawValue })
+        else { return }
 
-        // Показываем слайдер качества только для JPEG
-        qualityStack?.isHidden = !isJPEG
+        // Обновляем расширение в имени файла
+        panel?.nameFieldStringValue = "\(baseName).\(format.fileExtension)"
+
+        // Показываем слайдер качества только для JPEG и JP2
+        qualityStack?.isHidden = !format.supportsQuality
     }
 
     @objc func qualityChanged(_ sender: NSSlider) {
@@ -2063,7 +2255,7 @@ struct ImageCanvas: View {
 
     /// Конвертирует изображение через системную утилиту sips.
     /// Сохраняет EXIF-метаданные и ICC-профили, в отличие от CGImageDestination.
-    private func convertWithSips(from source: URL, to dest: URL, format: ImageFormat, quality: Int)
+    private func convertWithSips(from source: URL, to dest: URL, format: ExportFormat, quality: Int)
     {
         // sips модифицирует файл на месте, поэтому сначала копируем исходник
         try? FileManager.default.removeItem(at: dest)
@@ -2072,20 +2264,15 @@ struct ImageCanvas: View {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sips")
 
-        switch format {
-        case .jpg:
-            // formatOptions для JPEG: 0-100 (качество сжатия)
-            process.arguments = [
-                "-s", "format", "jpeg",
-                "-s", "formatOptions", "\(quality)",
-                dest.path,
-            ]
-        case .png:
-            process.arguments = [
-                "-s", "format", "png",
-                dest.path,
-            ]
+        var args: [String] = ["-s", "format", format.sipsFormat]
+
+        // Добавляем качество только для форматов, которые его поддерживают
+        if format.supportsQuality {
+            args += ["-s", "formatOptions", "\(quality)"]
         }
+
+        args.append(dest.path)
+        process.arguments = args
 
         // Подавляем вывод sips в консоль
         process.standardOutput = FileHandle.nullDevice
@@ -2109,11 +2296,13 @@ struct ImageCanvas: View {
         let baseName = result.url.deletingPathExtension().lastPathComponent
         panel.nameFieldStringValue = baseName
 
-        let formatPicker = NSSegmentedControl(
-            labels: ["PNG", "JPEG"], trackingMode: .selectOne, target: nil, action: nil)
-        formatPicker.selectedSegment = 0
-        formatPicker.frame = NSRect(x: 0, y: 0, width: 140, height: 24)
+        // --- Выпадающий список форматов ---
+        let formatPopup = NSPopUpButton()
+        formatPopup.addItems(withTitles: ExportFormat.allCases.map { $0.displayName })
+        formatPopup.selectItem(at: 0)  // PNG по умолчанию
+        formatPopup.frame = NSRect(x: 0, y: 0, width: 140, height: 24)
 
+        // --- Слайдер качества ---
         let qualitySlider = NSSlider(
             value: 92, minValue: 50, maxValue: 100, target: nil, action: nil)
         qualitySlider.frame = NSRect(x: 0, y: 0, width: 180, height: 20)
@@ -2131,10 +2320,11 @@ struct ImageCanvas: View {
         qualityStack.spacing = 8
         qualityStack.isHidden = true  // По умолчанию PNG, слайдер скрыт
 
+        // --- Общий контейнер ---
         let container = NSStackView(views: [
             NSStackView(views: [
                 NSTextField(labelWithString: NSLocalizedString("Format:", comment: "")),
-                formatPicker,
+                formatPopup,
             ]),
             qualityStack,
         ])
@@ -2145,17 +2335,19 @@ struct ImageCanvas: View {
         container.frame = NSRect(x: 0, y: 0, width: 360, height: 70)
 
         panel.accessoryView = container
-        panel.allowedContentTypes = [.png, .jpeg]
+        panel.allowedContentTypes = ExportFormat.allCases.compactMap { $0.utType }
         panel.isExtensionHidden = false
 
+        // --- Observer ---
         let observer = FormatPickerObserver(
             panel: panel, baseName: baseName,
             qualitySlider: qualitySlider,
             qualityLabel: qualityLabel,
-            qualityStack: qualityStack
+            qualityStack: qualityStack,
+            formatPopup: formatPopup
         )
-        formatPicker.target = observer
-        formatPicker.action = #selector(FormatPickerObserver.formatChanged(_:))
+        formatPopup.target = observer
+        formatPopup.action = #selector(FormatPickerObserver.formatChanged(_:))
         qualitySlider.target = observer
         qualitySlider.action = #selector(FormatPickerObserver.qualityChanged(_:))
 
@@ -2164,15 +2356,22 @@ struct ImageCanvas: View {
 
         guard panel.runModal() == .OK, let dest = panel.url else { return }
 
-        let chosenFormat: ImageFormat = formatPicker.selectedSegment == 1 ? .jpg : .png
-        let sourceFormat = ImageFormat(rawValue: result.url.pathExtension.lowercased()) ?? .png
+        // Определяем выбранный формат
+        let selectedTitle = formatPopup.selectedItem?.title ?? "PNG"
+        let chosenFormat = ExportFormat.allCases.first { $0.displayName == selectedTitle } ?? .png
+        let sourceFormat =
+            ExportFormat.allCases.first {
+                $0.fileExtension == result.url.pathExtension.lowercased()
+            } ?? .png
 
+        // Если формат совпадает — просто копируем
         if chosenFormat == sourceFormat {
             try? FileManager.default.removeItem(at: dest)
             try? FileManager.default.copyItem(at: result.url, to: dest)
             return
         }
 
+        // Конвертация через sips
         convertWithSips(
             from: result.url, to: dest, format: chosenFormat, quality: Int(qualitySlider.intValue))
     }
@@ -2375,13 +2574,16 @@ struct ImageCanvas: View {
         let baseName = source.deletingPathExtension().lastPathComponent
         panel.nameFieldStringValue = baseName
 
-        // --- Переключатель формата PNG / JPEG ---
-        let formatPicker = NSSegmentedControl(
-            labels: ["PNG", "JPEG"], trackingMode: .selectOne, target: nil, action: nil)
-        formatPicker.selectedSegment = (format == .jpg) ? 1 : 0
-        formatPicker.frame = NSRect(x: 0, y: 0, width: 140, height: 24)
+        // --- Выпадающий список форматов ---
+        let formatPopup = NSPopUpButton()
+        formatPopup.addItems(withTitles: ExportFormat.allCases.map { $0.displayName })
+        // Выбираем формат по умолчанию
+        let defaultIndex =
+            ExportFormat.allCases.firstIndex { $0.fileExtension == format.rawValue } ?? 0
+        formatPopup.selectItem(at: defaultIndex)
+        formatPopup.frame = NSRect(x: 0, y: 0, width: 140, height: 24)
 
-        // --- Слайдер качества JPEG ---
+        // --- Слайдер качества ---
         let qualitySlider = NSSlider(
             value: 92, minValue: 50, maxValue: 100, target: nil, action: nil)
         qualitySlider.frame = NSRect(x: 0, y: 0, width: 180, height: 20)
@@ -2397,13 +2599,13 @@ struct ImageCanvas: View {
         ])
         qualityStack.orientation = .horizontal
         qualityStack.spacing = 8
-        qualityStack.isHidden = (format != .jpg)  // Скрываем, если изначально выбран PNG
+        qualityStack.isHidden = !ExportFormat.allCases[defaultIndex].supportsQuality
 
-        // --- Общий контейнер accessoryView ---
+        // --- Общий контейнер ---
         let container = NSStackView(views: [
             NSStackView(views: [
                 NSTextField(labelWithString: NSLocalizedString("Format:", comment: "")),
-                formatPicker,
+                formatPopup,
             ]),
             qualityStack,
         ])
@@ -2414,31 +2616,36 @@ struct ImageCanvas: View {
         container.frame = NSRect(x: 0, y: 0, width: 360, height: 70)
 
         panel.accessoryView = container
-        panel.allowedContentTypes = [.png, .jpeg]
+        panel.allowedContentTypes = ExportFormat.allCases.compactMap { $0.utType }
         panel.isExtensionHidden = false
 
-        // --- Observer для реакции на изменения ---
+        // --- Observer ---
         let observer = FormatPickerObserver(
             panel: panel, baseName: baseName,
             qualitySlider: qualitySlider,
             qualityLabel: qualityLabel,
-            qualityStack: qualityStack
+            qualityStack: qualityStack,
+            formatPopup: formatPopup
         )
-        formatPicker.target = observer
-        formatPicker.action = #selector(FormatPickerObserver.formatChanged(_:))
+        formatPopup.target = observer
+        formatPopup.action = #selector(FormatPickerObserver.formatChanged(_:))
         qualitySlider.target = observer
         qualitySlider.action = #selector(FormatPickerObserver.qualityChanged(_:))
 
         // Сохраняем observer в памяти на время жизни диалога
         objc_setAssociatedObject(panel, "formatObserver", observer, .OBJC_ASSOCIATION_RETAIN)
 
-        // Устанавливаем начальное расширение
-        panel.nameFieldStringValue = "\(baseName).\(format.ext)"
+        let defaultFormat = ExportFormat.allCases[defaultIndex]
+        panel.nameFieldStringValue = "\(baseName).\(defaultFormat.fileExtension)"
 
         guard panel.runModal() == .OK, let dest = panel.url else { return }
 
-        let chosenFormat: ImageFormat = formatPicker.selectedSegment == 1 ? .jpg : .png
-        let sourceFormat = ImageFormat(rawValue: source.pathExtension.lowercased()) ?? format
+        // Определяем выбранный формат
+        let selectedTitle = formatPopup.selectedItem?.title ?? "PNG"
+        let chosenFormat = ExportFormat.allCases.first { $0.displayName == selectedTitle } ?? .png
+        let sourceFormat =
+            ExportFormat.allCases.first { $0.fileExtension == source.pathExtension.lowercased() }
+            ?? .png
 
         // Если формат совпадает — просто копируем файл (мгновенно, без потерь)
         if chosenFormat == sourceFormat {

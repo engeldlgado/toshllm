@@ -55,6 +55,47 @@ struct ImageGenComponent: Identifiable {
     }
 }
 
+enum InpaintEngine: String, CaseIterable, Codable, Identifiable {
+    case sdcliCheckpoint = "sd-cli-checkpoint"  // sd-cli --model (полный чекпоинт)
+    case sdcliDiffusion = "sd-cli-diffusion"  // sd-cli --diffusion-model (только диффузия)
+    case sdcliDual = "sd-cli-dual"  // sd-cli с T5 + CLIP (SD 3.x/Flux)
+    case iopaint = "iopaint"  // iopaint run --model (LaMa)
+    case flex2Control = "flex2-control"  // Flex.2 с ControlNet
+
+    var id: String { self.rawValue }
+
+    var label: String {
+        switch self {
+        case .sdcliCheckpoint: return "sd-cli (Checkpoint)"
+        case .sdcliDiffusion: return "sd-cli (Diffusion)"
+        case .sdcliDual: return "sd-cli (T5 + CLIP)"
+        case .iopaint: return "iopaint (LaMa)"
+        case .flex2Control: return "Flex.2 (Control)"
+        }
+    }
+
+    var isDiffusionModel: Bool {
+        self == .sdcliDiffusion || self == .sdcliDual || self == .flex2Control
+    }
+
+    var requiresEncoders: Bool {
+        self == .sdcliDual || self == .flex2Control
+    }
+
+    var requiresT5: Bool {
+        self == .sdcliDual || self == .flex2Control
+    }
+
+    var supportsControl: Bool {
+        self == .flex2Control
+    }
+
+    var isIOPaint: Bool {
+        self == .iopaint
+    }
+}
+
+
 /// An image-generation model the app can install and run.
 struct ImageGenModel: Identifiable {
     let name: String
@@ -717,6 +758,26 @@ final class ImageGenerator: ObservableObject {
             .expandingTildeInPath
     }
 
+    /// Находит исполняемый файл iopaint в стандартных местах macOS.
+    /// Возвращает nil, если iopaint не установлен.
+    static func findIOPaint() -> String? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+
+        // Приоритет: виртуальное окружение
+        let candidates = [
+            "\(home)/.iopaint-env/bin/iopaint",  // <-- ДОБАВЛЕНО: виртуальное окружение
+            "/Library/Frameworks/Python.framework/Versions/3.12/bin/iopaint",
+            "/Library/Frameworks/Python.framework/Versions/3.11/bin/iopaint",
+            "/usr/local/bin/iopaint",
+            "/opt/homebrew/bin/iopaint",
+            "\(home)/.local/bin/iopaint",
+        ]
+
+        return candidates.first { fm.fileExists(atPath: $0) }
+    }
+
+
     static var engineInstalled: Bool { FileManager.default.fileExists(atPath: binary) }
 
     /// True when every component file for `model` is present (and named).
@@ -730,6 +791,19 @@ final class ImageGenerator: ObservableObject {
         process?.terminate()
         process = nil
         if isBusy { state = .idle }
+    }
+
+    /// Сбрасывает состояние генератора после завершения, чтобы можно было начать новый цикл.
+    func reset() {
+        process?.terminate()
+        process = nil
+        resultImage = nil
+        resultURL = nil
+        previewImage = nil
+        progress = 0
+        stepText = ""
+        state = .idle
+        stage = .loading
     }
 
     /// sd-cli --backend spec for the encoder/VAE split: diffusion on Metal slot 0,
@@ -764,6 +838,11 @@ final class ImageGenerator: ObservableObject {
                   auxGPUIndex: Int = -1,
                   initImagePath: String = "", maskPath: String = "",
                   strength: Double = 0.75,
+                  inpaintEngine: InpaintEngine = .iopaint,       // <-- ДОБАВЛЕНО
+                  textEncoderPath: String = "",                  // <-- ДОБАВЛЕНО
+                  t5EncoderPath: String = "",                    // <-- ДОБАВЛЕНО
+                  controlImagePath: String = "",                 // <-- ДОБАВЛЕНО
+                  controlStrength: Double = 0.5,              // <-- ДОБАВЛЕНО
                   referenceImagePaths: [String] = [],
                   fastMode: ImageFastMode = .off) {
         guard !isBusy else { return }
@@ -786,12 +865,149 @@ final class ImageGenerator: ObservableObject {
         let token = String(UUID().uuidString.prefix(4)).lowercased()
         let out = outputDir.appendingPathComponent("toshllm_\(fmt.string(from: Date()))_\(token).\(format.ext)")
 
+       // --- ВЕТКА IOPAINT (LaMa) ---
+        if inpaintEngine == .iopaint && !maskPath.isEmpty && !initImagePath.isEmpty {
+            guard let iopaintPath = Self.findIOPaint() else {
+                state = .failed("IOPaint no encontrado. Ejecuta: pip install iopaint")
+                return
+            }
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyy-MM-dd_HH.mm.ss"
+            let token = String(UUID().uuidString.prefix(4)).lowercased()
+            // iopaint run ожидает, что --output будет ПАПКой, а не файлом [[2]].
+            let outputDir = URL(fileURLWithPath: initImagePath).deletingLastPathComponent()
+            let expectedOutputName = "toshllm_\(fmt.string(from: Date()))_\(token).\(format.ext)"
+            let expectedOutputURL = outputDir.appendingPathComponent(expectedOutputName)
+            
+            let args = [
+                "run",
+                "--model=lama",
+                "--image=\(initImagePath)",
+                "--mask=\(maskPath)",
+                "--output=\(outputDir.path)",
+                "--device=cpu"
+            ]
+            
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: iopaintPath) 
+            p.arguments = args
+
+            var env = ProcessInfo.processInfo.environment
+            env["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
+            p.environment = env
+            
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = pipe
+            pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+                let data = h.availableData
+                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+                Task { @MainActor in
+                    // ИСПРАВЛЕНО: Явное преобразование Substring обратно в String
+                    let currentTail = self?.logTail ?? ""
+                    self?.logTail = String((currentTail + text).suffix(4000))
+                    self?.fileLog.append(text)
+                }
+            }
+            p.terminationHandler = { [weak self] proc in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.process = nil
+
+                    // Небольшая задержка (0.2 сек), чтобы файловая система macOS успела завершить запись файла
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+
+                    var finalOutputURL = expectedOutputURL
+                    var isDir: ObjCBool = false
+                    let fm = FileManager.default
+
+                    // 1. Если iopaint по ошибке создал каталог с именем файла (известная особенность)
+                    if fm.fileExists(atPath: expectedOutputURL.path, isDirectory: &isDir),
+                        isDir.boolValue
+                    {
+                        if let contents = try? fm.contentsOfDirectory(
+                            at: expectedOutputURL,
+                            includingPropertiesForKeys: [.contentModificationDateKey])
+                        {
+                            if let img = contents.first(where: {
+                                ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased())
+                            }) {
+                                finalOutputURL = img
+                            }
+                        }
+                    }
+                    // 2. Если ожидаемого файла нет, ищем самое свежее изображение в папке вывода
+                    else if !fm.fileExists(atPath: expectedOutputURL.path) {
+                        if let contents = try? fm.contentsOfDirectory(
+                            at: outputDir, includingPropertiesForKeys: [.contentModificationDateKey]
+                        ) {
+                            let images = contents.filter {
+                                ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased())
+                            }
+
+                            // УПРОЩЕННЫЙ ПОИСК: обычный цикл вместо сложного max(by:), чтобы не путать компилятор Swift
+                            var latestDate = Date.distantPast
+                            var latestURL: URL?
+
+                            for url in images {
+                                if let date = try? url.resourceValues(forKeys: [
+                                    .contentModificationDateKey
+                                ]).contentModificationDate {
+                                    if date > latestDate {
+                                        latestDate = date
+                                        latestURL = url
+                                    }
+                                }
+                            }
+
+                            if let latest = latestURL {
+                                finalOutputURL = latest
+                            }
+                        }
+                    }
+
+                    // Передаем найденный путь в finish
+                    self.finish(status: proc.terminationStatus, output: finalOutputURL)
+                }
+            }
+
+            fileLog.startSession()
+            fileLog.append("$ \(iopaintPath) " + args.joined(separator: " ") + "\n\n")
+            
+            resultImage = nil; resultURL = nil; previewImage = nil
+            progress = 0; stepText = ""; stage = .loading
+            state = .generating; startedAt = Date(); firstStepAt = nil
+            
+            do {
+                try p.run()
+                process = p
+                // iopaint не стримит превью пошагово, поэтому startPreviewWatch() не вызываем
+            } catch {
+                state = .failed(error.localizedDescription)
+            }
+            return // ВАЖНО: прерываем выполнение, чтобы не идти дальше к sd-cli
+        }
+
         // Each component maps to its own sd-cli flag (a full checkpoint via --model,
         // or a diffusion model plus its VAE and text encoders).
         var args: [String] = []
         for comp in model.components {
             args += [comp.flag, models.componentPath(comp).path]
         }
+
+        // --- ДОБАВЛЯЕМ ЯВНЫЕ ЭНКОДЕРЫ (для Flex.2 или кастомных сборок) ---
+        if !textEncoderPath.isEmpty && !model.components.contains(where: { $0.kind == .clipL || $0.kind == .textEncoder }) {
+            args += ["--clip_l", textEncoderPath]
+        }
+        if !t5EncoderPath.isEmpty && !model.components.contains(where: { $0.kind == .t5 }) {
+            args += ["--t5xxl", t5EncoderPath]
+        }
+
+        // --- ДОБАВЛЯЕМ CONTROL ДЛЯ FLEX.2 ---
+        if !controlImagePath.isEmpty && inpaintEngine == .flex2Control {
+            args += ["--control-image", controlImagePath, "--control-strength", String(format: "%.2f", controlStrength)]
+        }
+
         // sd-cli picks a LoRA up from the prompt, as <lora:file:weight>, but only when it knows
         // where to look. The folder is only passed when it holds something, so an empty one
         // does not make the engine scan on every run.
@@ -1026,7 +1242,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     var customTextEncoderPath = ""
     /// The custom file is a bare diffusion model (--diffusion-model) instead of a
     /// full checkpoint (--model). The engine cannot tell them apart by extension.
-    var customIsDiffusion = false
+    //var customIsDiffusion = false
     var customCfg = 7.0
     var prompt = ""
     /// Ignored at CFG 1: the sampler never runs the unconditional branch there.
@@ -1051,6 +1267,13 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
     var offloadCPU = false
     var fastMode = ImageFastMode.off.rawValue
 
+    var inpaintEngine: InpaintEngine = .iopaint  // "sd-cli" или "iopaint"
+    var textEncoderPath: String = ""  // Путь к CLIP-энкодеру
+    var t5EncoderPath: String = ""  // Путь к T5-XXL (для sd-cli-dual)
+    var controlImagePath: String = ""
+    var controlStrength: Double = 0.5  // Значение по умолчанию (обычно от 0.0 до 1.0)
+
+
     init() {}
 
     init(from decoder: Decoder) throws {
@@ -1060,7 +1283,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
         customModelPath = (try? c.decode(String.self, forKey: .customModelPath)) ?? ""
         customVAEPath = (try? c.decode(String.self, forKey: .customVAEPath)) ?? ""
         customTextEncoderPath = (try? c.decode(String.self, forKey: .customTextEncoderPath)) ?? ""
-        customIsDiffusion = (try? c.decode(Bool.self, forKey: .customIsDiffusion)) ?? false
+       // customIsDiffusion = (try? c.decode(Bool.self, forKey: .customIsDiffusion)) ?? false
         customCfg = (try? c.decode(Double.self, forKey: .customCfg)) ?? 7.0
         prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
         negativePrompt = (try? c.decode(String.self, forKey: .negativePrompt)) ?? ""
@@ -1078,6 +1301,14 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
         format = (try? c.decode(String.self, forKey: .format)) ?? ImageFormat.png.rawValue
         offloadCPU = (try? c.decode(Bool.self, forKey: .offloadCPU)) ?? false
         fastMode = (try? c.decode(String.self, forKey: .fastMode)) ?? ImageFastMode.off.rawValue
+
+        // --- НОВОЕ ДЕКОДИРОВАНИЕ ---
+        inpaintEngine = (try? c.decode(InpaintEngine.self, forKey: .inpaintEngine)) ?? .iopaint
+        textEncoderPath = (try? c.decode(String.self, forKey: .textEncoderPath)) ?? ""
+        t5EncoderPath = (try? c.decode(String.self, forKey: .t5EncoderPath)) ?? ""
+        controlImagePath = (try? c.decode(String.self, forKey: .controlImagePath)) ?? ""
+        controlStrength = (try? c.decode(Double.self, forKey: .controlStrength)) ?? 0.5
+
     }
 
     var isCustom: Bool { modelID == ImageGenCatalog.customID }
@@ -1104,7 +1335,7 @@ struct ImageInstanceConfig: Codable, Identifiable, Equatable {
         if isCustom {
             return ImageGenCatalog.custom(modelPath: customModelPath, vaePath: customVAEPath,
                                           textEncoderPath: customTextEncoderPath,
-                                          isDiffusion: customIsDiffusion,
+                                          isDiffusion: inpaintEngine.isDiffusionModel,  // <-- ИЗМЕНЕНО
                                           steps: steps, cfg: customCfg)
         }
         return ImageGenCatalog.model(id: modelID)
@@ -1178,7 +1409,7 @@ final class ImageGenPool: ObservableObject {
         c.customModelPath = d.string(forKey: SettingsKeys.imagenCustomModel) ?? ""
         c.customVAEPath = d.string(forKey: SettingsKeys.imagenCustomVAE) ?? ""
         c.customTextEncoderPath = d.string(forKey: SettingsKeys.imagenCustomTextEncoder) ?? ""
-        c.customIsDiffusion = d.bool(forKey: SettingsKeys.imagenCustomIsDiffusion)
+        //c.customIsDiffusion = d.bool(forKey: SettingsKeys.imagenCustomIsDiffusion)
         c.customCfg = dbl(SettingsKeys.imagenCustomCfg, 7.0)
         c.prompt = d.string(forKey: SettingsKeys.imagenPrompt) ?? ""
         c.initImagePath = d.string(forKey: SettingsKeys.imagenInitImage) ?? ""
@@ -1319,10 +1550,17 @@ final class ImageGenPool: ObservableObject {
             let (w, h) = c.dimensions
             gen.generate(model: c.resolvedModel(for: hardware), models: models, prompt: job.text,
                          negativePrompt: effectiveNegativePrompt(for: c),
-                         width: w, height: h, steps: c.steps, seed: job.seed, format: c.formatValue,
+                         width: w, height: h, steps: c.steps, seed: job.seed, format: .png,
                          offloadToCPU: c.offloadCPU, gpuIndex: c.gpuIndex, auxGPUIndex: aux ?? -1,
                          initImagePath: job.initImagePath ?? c.initImagePath,
                          maskPath: c.maskPath, strength: c.strength,
+                            // --- НОВЫЕ ПАРАМЕТРЫ ---
+                         inpaintEngine: c.inpaintEngine,
+                         textEncoderPath: c.textEncoderPath,
+                         t5EncoderPath: c.t5EncoderPath,
+                         controlImagePath: c.controlImagePath,
+                         controlStrength: c.controlStrength,
+                                                 
                          referenceImagePaths: c.referenceImagePaths,
                          fastMode: c.fastModeValue)
         }
