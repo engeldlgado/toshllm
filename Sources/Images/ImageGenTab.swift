@@ -1856,6 +1856,41 @@ class FormatPickerObserver: NSObject {
     }
 }
 
+/// Вспомогательный класс для обработки переключения формата и качества в диалоге сохранения.
+class FormatPickerObserver: NSObject {
+    weak var panel: NSSavePanel?
+    weak var qualitySlider: NSSlider?
+    weak var qualityLabel: NSTextField?
+    weak var qualityStack: NSStackView?
+    let baseName: String
+
+    init(
+        panel: NSSavePanel, baseName: String,
+        qualitySlider: NSSlider? = nil, qualityLabel: NSTextField? = nil,
+        qualityStack: NSStackView? = nil
+    ) {
+        self.panel = panel
+        self.baseName = baseName
+        self.qualitySlider = qualitySlider
+        self.qualityLabel = qualityLabel
+        self.qualityStack = qualityStack
+        super.init()
+    }
+
+    @objc func formatChanged(_ sender: NSSegmentedControl) {
+        let isJPEG = sender.selectedSegment == 1
+        let chosen: ImageFormat = isJPEG ? .jpg : .png
+        panel?.nameFieldStringValue = "\(baseName).\(chosen.ext)"
+
+        // Показываем слайдер качества только для JPEG
+        qualityStack?.isHidden = !isJPEG
+    }
+
+    @objc func qualityChanged(_ sender: NSSlider) {
+        qualityLabel?.stringValue = "\(Int(sender.intValue))%"
+    }
+}
+
 /// Detail column: single canvas for one instance, a tile grid for several.
 struct ImageCanvas: View {
     @ObservedObject var pool: ImageGenPool
