@@ -456,12 +456,12 @@ final class ModelStore: ObservableObject {
     /// Download an image-gen component into the `imagen/` subfolder under its fixed
     /// name. Reuses the resumable transfer used for models; skips the projector
     /// auto-fetch (components aren't vision models).
-    func downloadImageComponent(urlString: String, fileName: String) {
+    func downloadImageComponent(urlString: String, fileName: String, formerFileNames: [String] = []) {
         guard let remote = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
               remote.scheme?.hasPrefix("http") == true else { return }
         let dir = imagenDirectory
         let dest = dir.appendingPathComponent(fileName)
-        let names = componentNames(fileName: fileName, remote: remote)
+        let names = componentNames(fileName: fileName, remote: remote, former: formerFileNames)
         if fileIndex?.file(namedAny: names, preferredDirectory: dir) != nil { return }
         let key = fileName.precomposedStringWithCanonicalMapping.lowercased()
         guard !componentChecks.contains(key),
@@ -496,14 +496,15 @@ final class ModelStore: ObservableObject {
             return FileManager.default.fileExists(atPath: url.path) ? url : nil
         }
         let remote = URL(string: component.urlString)
-        return fileIndex?.file(namedAny: componentNames(fileName: component.fileName, remote: remote),
+        return fileIndex?.file(namedAny: componentNames(fileName: component.fileName, remote: remote,
+                                                        former: component.formerFileNames),
                                 preferredDirectory: imagenDirectory)
     }
 
-    private func componentNames(fileName: String, remote: URL?) -> [String] {
+    private func componentNames(fileName: String, remote: URL?, former: [String] = []) -> [String] {
         guard let sourceName = remote?.lastPathComponent, !sourceName.isEmpty,
-              sourceName.caseInsensitiveCompare(fileName) != .orderedSame else { return [fileName] }
-        return [fileName, sourceName]
+              sourceName.caseInsensitiveCompare(fileName) != .orderedSame else { return [fileName] + former }
+        return [fileName, sourceName] + former
     }
 
     func componentPath(_ component: ImageGenComponent) -> URL {

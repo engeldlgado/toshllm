@@ -1,0 +1,286 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -717,10 +717,20 @@ typedef struct {
+     int32_t  KH;
+     int32_t  KW;
+     int32_t  KHW; // KH * KW, pre-computed on CPU to save GPU resources
+ } ggml_metal_kargs_im2col;
+ 
++typedef struct {
++    int32_t  OW;
++    int32_t  OH;
++    int32_t  IC;
++    int32_t  TW;
++    int32_t  CB;
++    int32_t  nblk;
++    int32_t  ncols;
++} ggml_metal_kargs_im2col_tile;
++
+ typedef struct {
+     uint64_t nb10;
+     uint64_t nb11;
+     uint64_t nb12;
+     uint64_t nb13;
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -153,10 +153,11 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_group_nor
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_norm              (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t n_fuse);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rope_table      (ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rope              (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col_3d         (ggml_metal_library_t lib, const struct ggml_tensor * op);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col_tile       (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_transpose_1d (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_transpose_2d (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_col2im_1d         (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_snake             (ggml_metal_library_t lib, enum ggml_type type);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_2d           (ggml_metal_library_t lib, const struct ggml_tensor * op);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1996,12 +1996,13 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col(ggml_meta
+     const int64_t KW = ne00;
+ 
+     char base[256];
+     char name[256];
+ 
++    static const bool px_off = getenv("TOSH_IM2COL_PX_DISABLE") != nullptr;
+     if (KH*KW <= 1024) {
+-        snprintf(base, 256, "kernel_im2col_%s", ggml_type_name(op->type));
++        snprintf(base, 256, px_off ? "kernel_im2col_%s" : "kernel_im2col_px_%s", ggml_type_name(op->type));
+     } else {
+         snprintf(base, 256, "kernel_im2col_ext_%s", ggml_type_name(op->type));
+     }
+     snprintf(name, 256, "%s", base);
+ 
+@@ -2011,10 +2012,27 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col(ggml_meta
+     }
+ 
+     return res;
+ }
+ 
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col_tile(ggml_metal_library_t lib, const ggml_tensor * op) {
++    assert(op->op == GGML_OP_IM2COL);
++
++    char base[256];
++    char name[256];
++
++    snprintf(base, 256, "kernel_im2col_tile_%s", ggml_type_name(op->type));
++    snprintf(name, 256, "%s", base);
++
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
++    }
++
++    return res;
++}
++
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col_3d(ggml_metal_library_t lib, const ggml_tensor * op) {
+     assert(op->op == GGML_OP_IM2COL_3D);
+ 
+     GGML_ASSERT(op->src[1]->type == GGML_TYPE_F32);
+     GGML_ASSERT(op->type         == GGML_TYPE_F16 || op->type == GGML_TYPE_F32);
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4435,13 +4435,57 @@ int ggml_metal_op_im2col(ggml_metal_op_t ctx, int idx) {
+         /*.KH   =*/ KH,
+         /*.KW   =*/ KW,
+         /*.KHW  =*/ KH * KW,
+     };
+ 
++    // the tile kernel keeps its staged input under 16 KB of threadgroup memory
++    static const bool tile_off = getenv("TOSH_IM2COL_TILE_DISABLE") != nullptr;
++    const int esz = op->type == GGML_TYPE_F16 ? 2 : 4;
++    int TW = 64;
++    if (3*((TW - 1)*s0 + 2*d0 + 1)*(32 + 8)*esz > 16384) {
++        TW = 32;
++    }
++    const int ncols = (TW - 1)*s0 + 2*d0 + 1;
++    if (!tile_off && is_2D && KH == 3 && KW == 3 && IC % 8 == 0 && 3*ncols*(32 + 8)*esz <= 16384) {
++        ggml_metal_kargs_im2col_tile targs = {
++            /*.OW    =*/ OW,
++            /*.OH    =*/ OH,
++            /*.IC    =*/ IC,
++            /*.TW    =*/ TW,
++            /*.CB    =*/ 32,
++            /*.nblk  =*/ (IC + 31)/32,
++            /*.ncols =*/ ncols,
++        };
++
++        auto pipeline = ggml_metal_library_get_pipeline_im2col_tile(lib, op);
++
++        ggml_metal_encoder_set_pipeline(enc, pipeline);
++        ggml_metal_encoder_set_bytes   (enc, &args,  sizeof(args),  0);
++        ggml_metal_encoder_set_bytes   (enc, &targs, sizeof(targs), 1);
++        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
++        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
++
++        ggml_metal_encoder_set_threadgroup_memory_size(enc, 3*ncols*(32 + 8)*esz, 0);
++
++        ggml_metal_encoder_dispatch_threadgroups(enc, targs.nblk*((OW + TW - 1)/TW), OH, N, 256, 1, 1);
++
++        return 1;
++    }
++
+     auto pipeline = ggml_metal_library_get_pipeline_im2col(lib, op);
+ 
+-    if (KH*KW <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {
++    static const bool px_off = getenv("TOSH_IM2COL_PX_DISABLE") != nullptr;
++    if (!px_off && KH*KW <= 1024) {
++        const int nth = std::min<int>(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline), std::min(256, (CHW + 31)/32*32));
++
++        ggml_metal_encoder_set_pipeline(enc, pipeline);
++        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 1);
++        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
++
++        ggml_metal_encoder_dispatch_threadgroups(enc, OW, OH, N, nth, 1, 1);
++    } else if (KH*KW <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {
+         const uint64_t ntptg0 = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)/(KH*KW), N);
+ 
+         ggml_metal_encoder_set_pipeline(enc, pipeline);
+         ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 1);
+diff --git a/ggml/src/ggml-metal/ggml-metal.metal b/ggml/src/ggml-metal/ggml-metal.metal
+--- a/ggml/src/ggml-metal/ggml-metal.metal
++++ b/ggml/src/ggml-metal/ggml-metal.metal
+@@ -5244,10 +5244,135 @@ kernel void kernel_im2col(
+ }
+ 
+ template [[host_name("kernel_im2col_f32")]] kernel im2col_t kernel_im2col<float>;
+ template [[host_name("kernel_im2col_f16")]] kernel im2col_t kernel_im2col<half>;
+ 
++// one threadgroup per output pixel; the threads walk IC*KH*KW, which is contiguous in dst
++template <typename T>
++kernel void kernel_im2col_px(
++        constant ggml_metal_kargs_im2col & args,
++        device const float * x,
++        device        char * dst,
++        uint3 tgpig[[threadgroup_position_in_grid]],
++        uint3  tgpg[[threadgroups_per_grid]],
++        uint3 tpitg[[thread_position_in_threadgroup]],
++        uint3   ntg[[threads_per_threadgroup]]) {
++    const int iow = tgpig[0];
++    const int ioh = tgpig[1];
++    const int in  = tgpig[2];
++
++    device T * pdst = (device T *) dst + ((int64_t) (in*tgpg[1] + ioh)*tgpg[0] + iow)*args.CHW;
++    device const float * px = x + in*args.ofs0;
++
++    for (int idx = tpitg[0]; idx < args.CHW; idx += ntg[0]) {
++        const int iic = idx / args.KHW;
++        const int rem = idx - iic*args.KHW;
++        const int ikh = rem / args.KW;
++        const int ikw = rem - ikh*args.KW;
++
++        const int iiw = iow*args.s0 + ikw*args.d0 - args.p0;
++        const int iih = ioh*args.s1 + ikh*args.d1 - args.p1;
++
++        pdst[idx] = (iih < 0 || iih >= args.IH || iiw < 0 || iiw >= args.IW)
++            ? (T) 0.0f : (T) px[iic*args.ofs1 + (int64_t) iih*args.IW + iiw];
++    }
++}
++
++template [[host_name("kernel_im2col_px_f32")]] kernel im2col_t kernel_im2col_px<float>;
++template [[host_name("kernel_im2col_px_f16")]] kernel im2col_t kernel_im2col_px<half>;
++
++static inline void im2col_st8(device half * p, half4 a, half4 b) {
++    *((device uint4 *) p) = uint4(as_type<uint2>(a), as_type<uint2>(b));
++}
++
++static inline void im2col_st8(device float * p, float4 a, float4 b) {
++    ((device float4 *) p)[0] = a;
++    ((device float4 *) p)[1] = b;
++}
++
++// 3x3 only: the threadgroup stages its input columns as [kh][col][channel], so each thread reads
++// 8 channels at a time and writes their 72 contiguous outputs with 16-byte stores
++template <typename T>
++kernel void kernel_im2col_tile(
++        constant ggml_metal_kargs_im2col      & args,
++        constant ggml_metal_kargs_im2col_tile & ta,
++        device const float * x,
++        device        char * dst,
++        threadgroup   char * shmem [[threadgroup(0)]],
++        uint3   tgpig[[threadgroup_position_in_grid]],
++        ushort  tiitg[[thread_index_in_threadgroup]],
++        ushort3   ntg[[threads_per_threadgroup]]) {
++    typedef vec<T, 4> T4;
++    threadgroup T * sh = (threadgroup T *) shmem;
++
++    const int cb  = tgpig[0] % ta.nblk;
++    const int ow0 = (tgpig[0] / ta.nblk)*ta.TW;
++    const int oh  = tgpig[1];
++    const int in  = tgpig[2];
++
++    const int c0  = cb*ta.CB;
++    const int nc  = min(ta.CB, ta.IC - c0);
++    const int npx = min(ta.TW, ta.OW - ow0);
++    const int ncols = ta.ncols;
++    const int PC  = ta.CB + 8;
++
++    device const float * px = x + in*args.ofs0 + (int64_t) c0*args.ofs1;
++    const int iw0 = ow0*args.s0 - args.p0;
++
++    for (int r = tiitg/32; r < nc*3; r += ntg[0]/32) {
++        const int c   = r/3;
++        const int kh  = r - c*3;
++        const int iih = oh*args.s1 + kh*args.d1 - args.p1;
++        const bool rok = iih >= 0 && iih < args.IH;
++        device const float * prow = px + c*args.ofs1 + (int64_t) iih*args.IW;
++        for (int col = tiitg%32; col < ncols; col += 32) {
++            const int iiw = iw0 + col;
++            sh[(kh*ncols + col)*PC + c] = (!rok || iiw < 0 || iiw >= args.IW) ? (T) 0.0f : (T) prow[iiw];
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    const int ncg = nc/8;
++    device T * pdst = (device T *) dst + ((int64_t) (in*ta.OH + oh)*ta.OW + ow0)*args.CHW + c0*9;
++    for (int f = tiitg; f < npx*ncg; f += ntg[0]) {
++        const int p  = f/ncg;
++        const int cg = f - p*ncg;
++        T4 A[9];
++        T4 B[9];
++        for (int k = 0; k < 9; ++k) {
++            threadgroup const T4 * s4 = (threadgroup const T4 *) (sh + ((k/3)*ncols + p*args.s0 + (k%3)*args.d0)*PC + cg*8);
++            A[k] = s4[0];
++            B[k] = s4[1];
++        }
++        device T * o = pdst + (int64_t) p*args.CHW + cg*72;
++        for (int m = 0; m < 9; ++m) {
++            T4 v0;
++            T4 v1;
++            for (int j = 0; j < 4; ++j) {
++                const int i0 = 8*m + j;
++                const int i1 = i0 + 4;
++                v0[j] = i0/9 < 4 ? A[i0%9][i0/9] : B[i0%9][i0/9 - 4];
++                v1[j] = i1/9 < 4 ? A[i1%9][i1/9] : B[i1%9][i1/9 - 4];
++            }
++            im2col_st8(o + 8*m, v0, v1);
++        }
++    }
++}
++
++typedef void (im2col_tile_t)(
++        constant ggml_metal_kargs_im2col      & args,
++        constant ggml_metal_kargs_im2col_tile & ta,
++        device const float * x,
++        device        char * dst,
++        threadgroup   char * shmem [[threadgroup(0)]],
++        uint3   tgpig[[threadgroup_position_in_grid]],
++        ushort  tiitg[[thread_index_in_threadgroup]],
++        ushort3   ntg[[threads_per_threadgroup]]);
++
++template [[host_name("kernel_im2col_tile_f32")]] kernel im2col_tile_t kernel_im2col_tile<float>;
++template [[host_name("kernel_im2col_tile_f16")]] kernel im2col_tile_t kernel_im2col_tile<half>;
++
+ typedef void (im2col_3d_t)(
+         constant ggml_metal_kargs_im2col_3d & args,
+         device const char * src1,
+         device       char * dst,
+         uint3 tgpig[[threadgroup_position_in_grid]],

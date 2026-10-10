@@ -751,9 +751,10 @@ final class ImageGenTests: XCTestCase {
         XCTAssertTrue(base.extraArgs.contains("--scheduler"))
         XCTAssertEqual(ImageFastMode.easycache.args(for: turbo), [])
         XCTAssertEqual(ImageFastMode.spectrum.args(for: turbo), [])
-        // the download stays on the commit whose files were checked against the official weights
+        // the download stays on the commit that was measured, and the AtomicChat build 0.87.21 offered still counts
         XCTAssertEqual(turbo.components.first?.urlString,
-                       "https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-GGUF/resolve/bb25d06bc74119c12207243d68917951e6d9c232/Qwen-Image-2.1-Turbo-AD-Q4_K.gguf")
+                       "https://huggingface.co/unsloth/Qwen-Image-2.1-Turbo-GGUF/resolve/5d1f9f759ea877ae556cda88dbec958b62ad3809/qwen-image-2.1-turbo-Q4_K_M.gguf")
+        XCTAssertEqual(turbo.components.first?.formerFileNames, ["Qwen-Image-2.1-Turbo-AD-Q4_K.gguf"])
         XCTAssertTrue(base.components.first!.urlString.contains("/resolve/main/"))
         for m in [ImageGenCatalog.qwenImage21TurboQ3, ImageGenCatalog.qwenImage21TurboQ6, ImageGenCatalog.qwenImage21TurboQ8] {
             XCTAssertEqual(m.steps(25), 8)
@@ -785,6 +786,9 @@ final class ImageGenTests: XCTestCase {
         XCTAssertFalse(ImageGenCatalog.zImageTurbo.halfPartials)
         XCTAssertEqual(q.maxLongEdge(drivesDisplay: false), 2048)
         XCTAssertEqual(q.maxLongEdge(drivesDisplay: true), 1920)
+        // the size picker offers that ceiling itself, not the step below it
+        XCTAssertEqual(ImageGenLimits.baseSizes(vramGB: 12, residentGB: ImageGenCatalog.qwenImage21TurboQ4.residentGB,
+                                                maxLongEdge: q.maxLongEdge(drivesDisplay: true)).max(), 1920)
         XCTAssertEqual(ImageGenCatalog.sd15.maxLongEdge(drivesDisplay: true), ImageGenCatalog.sd15.maxLongEdge)
     }
 
