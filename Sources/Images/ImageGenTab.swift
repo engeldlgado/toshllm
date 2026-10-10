@@ -277,7 +277,7 @@ struct ImageControls: View {
                 Label(loc.t("Dos instancias comparten GPU: en Macs AMD puede colgar la tarjeta.",
                             "Two instances share a GPU: on AMD Macs this can hang the card."),
                       systemImage: "exclamationmark.triangle")
-                    .font(.caption2).foregroundStyle(.orange)
+                    .font(.caption2).foregroundStyle(Color(red: 0.5, green: 0.7, blue: 1.0))
             }
 
             DisclosureGroup(loc.t("Avanzado", "Advanced")) {
@@ -861,6 +861,54 @@ struct FeedLayoutPicker: View {
     }
 }
 
+/// Информационная метка с иконкой, которая при клике показывает полный текст во всплывающем окне.
+/// Используется для предупреждений, которые не помещаются в одну-две строки.
+/// Информационная метка с иконкой, которая при клике показывает полный текст во всплывающем окне.
+/// Используется для предупреждений, которые не помещаются в одну-две строки.
+/// Информационная метка с иконкой, которая при клике показывает полный текст во всплывающем окне.
+/// Используется для предупреждений, которые не помещаются в одну-две строки.
+private struct InfoLabel: View {
+    let text: String
+    let systemImage: String
+    let color: Color
+
+    @State private var showPopover = false
+    @EnvironmentObject private var loc: Localizer
+
+    var body: some View {
+        Button {
+            showPopover.toggle()
+        } label: {
+            Label(text, systemImage: systemImage)
+                .font(.caption2)
+                .foregroundStyle(color)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showPopover, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 10) {
+                // ИСПРАВЛЕНО: добавлены модификаторы для полного отображения текста
+                Label {
+                    Text(text)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)  // <-- ДОБАВЛЕНО: позволяет тексту переноситься
+                        .frame(maxWidth: .infinity, alignment: .leading)  // <-- ДОБАВЛЕНО: занимает всю ширину
+                        .textSelection(.enabled)
+                } icon: {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(color)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: 360)
+            .presentationCompactAdaptation(.popover)
+        }
+        .help(loc.t("Полный текст предупреждения", "Click to read the full warning"))
+    }
+}
+
 /// Full configuration form of one instance: model (with inline install), prompt,
 /// img2img, size, GPU, steps, seed, format and offload.
 struct ImageInstanceForm: View {
@@ -1067,7 +1115,7 @@ struct ImageInstanceForm: View {
                     Label(loc.t("Un modelo de difusión no genera nada sin su VAE y su codificador de texto.",
                                 "A diffusion model renders nothing without its VAE and text encoder."),
                           systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(Color(red: 0.5, green: 0.7, blue: 1.0))
                 }
             }
             HStack(spacing: 6) {
@@ -1090,19 +1138,27 @@ struct ImageInstanceForm: View {
 
     private var promptEditor: some View {
         TextEditor(text: $cfg.prompt)
-            .font(.body).frame(minHeight: 96)
+            .font(.body)
+            .frame(height: 64)  // Было: minHeight: 96 — теперь ровно 3 строки
             .scrollContentBackground(.hidden)
             .padding(8)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
             .overlay(alignment: .topLeading) {
                 if cfg.prompt.isEmpty {
-                    Text(isPrimary
-                         ? loc.t("Un zorro fotorrealista en un bosque nevado al atardecer…",
-                                 "A photorealistic fox in a snowy forest at golden hour…")
-                         : loc.t("Vacío: usa la descripción de la Instancia 1. Escribe aquí para personalizarla…",
-                                 "Empty: uses Instance 1's prompt. Type here to customize it…"))
-                        .font(.body).foregroundStyle(.tertiary)
-                        .padding(.horizontal, 13).padding(.vertical, 16).allowsHitTesting(false)
+                    Text(
+                        isPrimary
+                            ? loc.t(
+                                "Un zorro fotorrealista en un bosque nevado al atardecer…",
+                                "A photorealistic fox in a snowy forest at golden hour…")
+                            : loc.t(
+                                "Vacío: usa la descripción de la Instancia 1. Escribe aquí para personalizarla…",
+                                "Empty: uses Instance 1's prompt. Type here to customize it…")
+                    )
+                    .font(.body)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
                 }
             }
     }
@@ -1110,28 +1166,42 @@ struct ImageInstanceForm: View {
     /// img2img: optionally seed generation from an existing image. Strength shows
     /// only once an image is chosen (how much to transform it).
     private var negativePromptSection: some View {
-        let tip = loc.t("Lo que NO debe aparecer. Solo surte efecto por encima de CFG 1: a CFG 1 el motor no calcula esa rama.",
-                        "What must NOT appear. It only takes effect above CFG 1: at CFG 1 the engine does not compute that branch.")
+        let tip = loc.t(
+            "Lo que NO debe aparecer. Solo surte efecto por encima de CFG 1: a CFG 1 el motor no calcula esa rama.",
+            "What must NOT appear. It only takes effect above CFG 1: at CFG 1 the engine does not compute that branch."
+        )
         return VStack(alignment: .leading, spacing: 6) {
             Text(loc.t("Prompt negativo", "Negative prompt")).font(.subheadline).help(tip)
             TextEditor(text: $cfg.negativePrompt)
-                .font(.callout).frame(minHeight: 44)
+                .font(.callout)
+                .frame(height: 52)  // Было: minHeight: 44 — теперь фиксированная высота ~3 строки
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
                 .overlay(alignment: .topLeading) {
                     if cfg.negativePrompt.isEmpty {
-                        Text(loc.t("borroso, deforme, marca de agua, texto…",
-                                   "blurry, deformed, watermark, text…"))
-                            .font(.callout).foregroundStyle(.tertiary)
-                            .padding(.horizontal, 13).padding(.vertical, 15).allowsHitTesting(false)
+                        Text(
+                            loc.t(
+                                "borroso, deforme, marca de agua, texto…",
+                                "blurry, deformed, watermark, text…")
+                        )
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 8)
+                        .allowsHitTesting(false)
                     }
                 }
                 .help(tip)
             if model.cfgScale <= 1, !cfg.negativePrompt.isEmpty {
-                Label(loc.t("Este modelo va a CFG %@ y no usa el prompt negativo. Necesita un modelo con CFG mayor que 1 (SD 1.5, Qwen-Image) o subir el CFG en un modelo propio.", "This model runs at CFG %@ and ignores the negative prompt. It needs a model with CFG above 1 (SD 1.5, Qwen-Image), or a higher CFG on your own model.", "\(String(format: "%.1f", model.cfgScale))"),
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption2).foregroundStyle(.yellow)
+                InfoLabel(
+                    text: loc.t(
+                        "Este modelo va a CFG %@ y no usa el prompt negativo. Necesita un modelo con CFG mayor que 1 (SD 1.5, Qwen-Image) o subir el CFG en un modelo propio.",
+                        "This model runs at CFG %@ and ignores the negative prompt. It needs a model with CFG above 1 (SD 1.5, Qwen-Image), or a higher CFG on your own model.",
+                        "\(String(format: "%.1f", model.cfgScale))"),
+                    systemImage: "info.circle.fill",
+                    color: Color(red: 0.5, green: 0.7, blue: 1.0)
+                )
             }
         }
     }
@@ -1186,10 +1256,14 @@ struct ImageInstanceForm: View {
                         .font(.system(size: 11, design: .monospaced)).frame(width: 34).help(strengthTip)
                 }
                 if initImageRatioMismatch {
-                    Label(loc.t("La imagen inicial tiene otra proporción que el marco elegido; puede recortar o deformar (p. ej. cabezas cortadas). Usa una referencia con la misma proporción.",
-                                "The init image has a different ratio than the chosen frame; it may crop or distort (e.g. cut-off heads). Use a reference with the same ratio."),
-                          systemImage: "aspectratio")
-                        .font(.caption2).foregroundStyle(.yellow)
+                    InfoLabel(
+                        text: loc.t(
+                            "La imagen inicial tiene otra proporción que el marco elegido; puede recortar o deformar (p. ej. cabezas cortadas). Usa una referencia con la misma proporción.",
+                            "The init image has a different ratio than the chosen frame; it may crop or distort (e.g. cut-off heads). Use a reference with the same ratio."
+                        ),
+                        systemImage: "info.circle.fill",
+                        color: Color(red: 0.5, green: 0.7, blue: 1.0)
+                    )
                 }
                 maskRow
             }
@@ -1226,7 +1300,7 @@ struct ImageInstanceForm: View {
                     Label(loc.t("La máscara no tiene el mismo tamaño en píxeles que la imagen inicial; la zona retocada saldrá desplazada.",
                                 "The mask is not the same pixel size as the init image; the repainted area will land off-target."),
                           systemImage: "exclamationmark.triangle")
-                        .font(.caption2).foregroundStyle(.yellow)
+                        .font(.caption2).foregroundStyle(.pink)
                 }
             }
         }
@@ -1372,7 +1446,7 @@ struct ImageInstanceForm: View {
         Label(loc.t("Cerca del límite de VRAM. Si hay tirones o un crash, baja el tamaño.",
                     "Near the VRAM limit. If it freezes or crashes, lower the size."),
               systemImage: "gauge.with.dots.needle.67percent")
-            .font(.caption).foregroundStyle(.yellow)
+            .font(.caption).foregroundStyle(.pink)
             .padding(10).frame(maxWidth: .infinity, alignment: .leading)
             .background(.yellow.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
     }
@@ -1552,6 +1626,41 @@ private struct ImageGenerationThumbnail: View {
         case .sampling: return loc.t("Generando · paso %@", "Sampling · step %@", generator.stepText)
         case .decoding: return loc.t("Decodificando…", "Decoding…")
         }
+    }
+}
+
+/// Вспомогательный класс для обработки переключения формата и качества в диалоге сохранения.
+class FormatPickerObserver: NSObject {
+    weak var panel: NSSavePanel?
+    weak var qualitySlider: NSSlider?
+    weak var qualityLabel: NSTextField?
+    weak var qualityStack: NSStackView?
+    let baseName: String
+
+    init(
+        panel: NSSavePanel, baseName: String,
+        qualitySlider: NSSlider? = nil, qualityLabel: NSTextField? = nil,
+        qualityStack: NSStackView? = nil
+    ) {
+        self.panel = panel
+        self.baseName = baseName
+        self.qualitySlider = qualitySlider
+        self.qualityLabel = qualityLabel
+        self.qualityStack = qualityStack
+        super.init()
+    }
+
+    @objc func formatChanged(_ sender: NSSegmentedControl) {
+        let isJPEG = sender.selectedSegment == 1
+        let chosen: ImageFormat = isJPEG ? .jpg : .png
+        panel?.nameFieldStringValue = "\(baseName).\(chosen.ext)"
+
+        // Показываем слайдер качества только для JPEG
+        qualityStack?.isHidden = !isJPEG
+    }
+
+    @objc func qualityChanged(_ sender: NSSlider) {
+        qualityLabel?.stringValue = "\(Int(sender.intValue))%"
     }
 }
 
@@ -1952,9 +2061,120 @@ struct ImageCanvas: View {
         pool.configs[0].prompt = result.prompt
     }
 
+    /// Конвертирует изображение через системную утилиту sips.
+    /// Сохраняет EXIF-метаданные и ICC-профили, в отличие от CGImageDestination.
+    private func convertWithSips(from source: URL, to dest: URL, format: ImageFormat, quality: Int)
+    {
+        // sips модифицирует файл на месте, поэтому сначала копируем исходник
+        try? FileManager.default.removeItem(at: dest)
+        guard (try? FileManager.default.copyItem(at: source, to: dest)) != nil else { return }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sips")
+
+        switch format {
+        case .jpg:
+            // formatOptions для JPEG: 0-100 (качество сжатия)
+            process.arguments = [
+                "-s", "format", "jpeg",
+                "-s", "formatOptions", "\(quality)",
+                dest.path,
+            ]
+        case .png:
+            process.arguments = [
+                "-s", "format", "png",
+                dest.path,
+            ]
+        }
+
+        // Подавляем вывод sips в консоль
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            // Если sips завершился с ошибкой, удаляем повреждённый файл
+            if process.terminationStatus != 0 {
+                try? FileManager.default.removeItem(at: dest)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: dest)
+        }
+    }
+
     private func save(_ result: GeneratedImage) {
-        let format = ImageFormat(rawValue: result.url.pathExtension.lowercased()) ?? .png
-        saveAs(result.url, format: format)
+        let panel = NSSavePanel()
+        let baseName = result.url.deletingPathExtension().lastPathComponent
+        panel.nameFieldStringValue = baseName
+
+        let formatPicker = NSSegmentedControl(
+            labels: ["PNG", "JPEG"], trackingMode: .selectOne, target: nil, action: nil)
+        formatPicker.selectedSegment = 0
+        formatPicker.frame = NSRect(x: 0, y: 0, width: 140, height: 24)
+
+        let qualitySlider = NSSlider(
+            value: 92, minValue: 50, maxValue: 100, target: nil, action: nil)
+        qualitySlider.frame = NSRect(x: 0, y: 0, width: 180, height: 20)
+
+        let qualityLabel = NSTextField(labelWithString: "92%")
+        qualityLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        qualityLabel.frame = NSRect(x: 0, y: 0, width: 40, height: 20)
+
+        let qualityStack = NSStackView(views: [
+            NSTextField(labelWithString: NSLocalizedString("Quality:", comment: "")),
+            qualitySlider,
+            qualityLabel,
+        ])
+        qualityStack.orientation = .horizontal
+        qualityStack.spacing = 8
+        qualityStack.isHidden = true  // По умолчанию PNG, слайдер скрыт
+
+        let container = NSStackView(views: [
+            NSStackView(views: [
+                NSTextField(labelWithString: NSLocalizedString("Format:", comment: "")),
+                formatPicker,
+            ]),
+            qualityStack,
+        ])
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 8
+        container.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        container.frame = NSRect(x: 0, y: 0, width: 360, height: 70)
+
+        panel.accessoryView = container
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.isExtensionHidden = false
+
+        let observer = FormatPickerObserver(
+            panel: panel, baseName: baseName,
+            qualitySlider: qualitySlider,
+            qualityLabel: qualityLabel,
+            qualityStack: qualityStack
+        )
+        formatPicker.target = observer
+        formatPicker.action = #selector(FormatPickerObserver.formatChanged(_:))
+        qualitySlider.target = observer
+        qualitySlider.action = #selector(FormatPickerObserver.qualityChanged(_:))
+
+        objc_setAssociatedObject(panel, "formatObserver", observer, .OBJC_ASSOCIATION_RETAIN)
+        panel.nameFieldStringValue = "\(baseName).png"
+
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+
+        let chosenFormat: ImageFormat = formatPicker.selectedSegment == 1 ? .jpg : .png
+        let sourceFormat = ImageFormat(rawValue: result.url.pathExtension.lowercased()) ?? .png
+
+        if chosenFormat == sourceFormat {
+            try? FileManager.default.removeItem(at: dest)
+            try? FileManager.default.copyItem(at: result.url, to: dest)
+            return
+        }
+
+        convertWithSips(
+            from: result.url, to: dest, format: chosenFormat, quality: Int(qualitySlider.intValue))
     }
 
     // MARK: single instance
@@ -2152,12 +2372,84 @@ struct ImageCanvas: View {
 
     private func saveAs(_ source: URL, format: ImageFormat) {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "toshllm.\(format.ext)"
-        panel.allowedContentTypes = [format == .jpg ? .jpeg : .png]
-        if panel.runModal() == .OK, let dest = panel.url {
+        let baseName = source.deletingPathExtension().lastPathComponent
+        panel.nameFieldStringValue = baseName
+
+        // --- Переключатель формата PNG / JPEG ---
+        let formatPicker = NSSegmentedControl(
+            labels: ["PNG", "JPEG"], trackingMode: .selectOne, target: nil, action: nil)
+        formatPicker.selectedSegment = (format == .jpg) ? 1 : 0
+        formatPicker.frame = NSRect(x: 0, y: 0, width: 140, height: 24)
+
+        // --- Слайдер качества JPEG ---
+        let qualitySlider = NSSlider(
+            value: 92, minValue: 50, maxValue: 100, target: nil, action: nil)
+        qualitySlider.frame = NSRect(x: 0, y: 0, width: 180, height: 20)
+
+        let qualityLabel = NSTextField(labelWithString: "92%")
+        qualityLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        qualityLabel.frame = NSRect(x: 0, y: 0, width: 40, height: 20)
+
+        let qualityStack = NSStackView(views: [
+            NSTextField(labelWithString: NSLocalizedString("Quality:", comment: "")),
+            qualitySlider,
+            qualityLabel,
+        ])
+        qualityStack.orientation = .horizontal
+        qualityStack.spacing = 8
+        qualityStack.isHidden = (format != .jpg)  // Скрываем, если изначально выбран PNG
+
+        // --- Общий контейнер accessoryView ---
+        let container = NSStackView(views: [
+            NSStackView(views: [
+                NSTextField(labelWithString: NSLocalizedString("Format:", comment: "")),
+                formatPicker,
+            ]),
+            qualityStack,
+        ])
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 8
+        container.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        container.frame = NSRect(x: 0, y: 0, width: 360, height: 70)
+
+        panel.accessoryView = container
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.isExtensionHidden = false
+
+        // --- Observer для реакции на изменения ---
+        let observer = FormatPickerObserver(
+            panel: panel, baseName: baseName,
+            qualitySlider: qualitySlider,
+            qualityLabel: qualityLabel,
+            qualityStack: qualityStack
+        )
+        formatPicker.target = observer
+        formatPicker.action = #selector(FormatPickerObserver.formatChanged(_:))
+        qualitySlider.target = observer
+        qualitySlider.action = #selector(FormatPickerObserver.qualityChanged(_:))
+
+        // Сохраняем observer в памяти на время жизни диалога
+        objc_setAssociatedObject(panel, "formatObserver", observer, .OBJC_ASSOCIATION_RETAIN)
+
+        // Устанавливаем начальное расширение
+        panel.nameFieldStringValue = "\(baseName).\(format.ext)"
+
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+
+        let chosenFormat: ImageFormat = formatPicker.selectedSegment == 1 ? .jpg : .png
+        let sourceFormat = ImageFormat(rawValue: source.pathExtension.lowercased()) ?? format
+
+        // Если формат совпадает — просто копируем файл (мгновенно, без потерь)
+        if chosenFormat == sourceFormat {
             try? FileManager.default.removeItem(at: dest)
             try? FileManager.default.copyItem(at: source, to: dest)
+            return
         }
+
+        // Конвертация через sips (сохраняет EXIF и ICC-профили)
+        convertWithSips(
+            from: source, to: dest, format: chosenFormat, quality: Int(qualitySlider.intValue))
     }
 
     private var studioMode: ImageStudioMode {
