@@ -480,22 +480,42 @@ struct ServerLogView: View {
 private struct PresentedLogRow: View {
     let line: PresentedLogLine
     private var tint: Color {
-        switch line.level { case .info: .blue; case .warning: .orange; case .error: .red }
+        switch line.level {
+        case .info: .blue;
+        case .warning: .orange;
+        case .error: .red
+        }
     }
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(line.time).frame(width: 106, alignment: .leading).foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 12) {  // ИСПРАВЛЕНО: было .firstTextBaseline
+            Text(line.time)
+                .frame(width: 106, alignment: .leading)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)  // НОВОЕ
+
             Label(line.level.shortLabel, systemImage: "circle.fill")
-                .labelStyle(LogLevelLabelStyle()).foregroundStyle(tint).frame(width: 74, alignment: .leading)
-            Text(line.source).frame(width: 90, alignment: .leading).foregroundStyle(.secondary)
+                .labelStyle(LogLevelLabelStyle())
+                .foregroundStyle(tint)
+                .frame(width: 74, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)  // НОВОЕ
+
+            Text(line.source)
+                .frame(width: 90, alignment: .leading)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)  // НОВОЕ
+
             Divider()
-            Text(line.message).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+
+            Text(line.message)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)  // НОВОЕ: ключевое изменение
+                .textSelection(.enabled)
         }
         .font(.system(.caption, design: .monospaced))
-        .padding(.horizontal, 14).padding(.vertical, 6)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
         .background(line.level == .error ? Color.red.opacity(0.045) : .clear)
         .overlay(alignment: .bottom) { Divider().opacity(0.45) }
-        .accessibilityElement(children: .combine)
     }
 }
 

@@ -2816,6 +2816,15 @@ struct NativeChatView: View {
                 .onChange(of: chat.current?.title) { syncHeaderTitle() }
                 .help(loc.t("Haz clic para renombrar la conversación (Enter guarda).",
                             "Click to rename the conversation (Enter saves)."))
+            if let modelTitle = currentModelTitle {
+                Label(modelTitle, systemImage: "shippingbox")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(loc.t("Modelo usado por esta conversación.",
+                                "Model used by this conversation."))
+            }
             Spacer()
             workingDirectoryChip
             if let branches = chat.current?.branches, branches.count > 1,
@@ -2855,6 +2864,20 @@ struct NativeChatView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
+    }
+
+    private var currentModelTitle: String? {
+        if routerMode {
+            let alias = ServerSettings.activeRouterModel()
+            if let model = models.models.first(where: {
+                ServerSettings.routerAlias(for: $0.url.path) == alias
+            }) {
+                return ModelName.forPath(model.url.path).display
+            }
+            return alias
+        }
+        guard !modelPath.isEmpty else { return nil }
+        return ModelName.forPath(modelPath).display
     }
 
     /// Header shows the stored title; a brand-new empty chat starts blank

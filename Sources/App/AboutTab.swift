@@ -7,6 +7,7 @@ import SwiftUI
 // MARK: - About
 
 enum AppInfo {
+
     static let version = "0.87.22"
     /// True for the pre-AVX2 legacy build (Info.plist TOSHNoAVX2). Kept on its own
     /// update channel so it never pulls an AVX2 DMG that would SIGILL on those CPUs.

@@ -36,6 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AudioStudioController.shared.shutdown()
         ImageGenPool.cleanupOutputsIfEnabled()
     }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return true
+    }
 }
 
 private func defaultsMigrationExtraArgs() -> String? {
@@ -44,7 +48,7 @@ private func defaultsMigrationExtraArgs() -> String? {
 
 @main
 struct ToshLLMApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var macDelegate
     private let obj = AppObjects.shared
     @ObservedObject private var loc = AppObjects.shared.loc
     @AppStorage(SettingsKeys.menuBarIcon) private var menuBarIcon = true
