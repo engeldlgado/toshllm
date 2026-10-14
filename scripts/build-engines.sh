@@ -127,10 +127,14 @@ CMAKE_FLAGS=(
 # pin every ISA flag in both variants: with GGML_NATIVE=OFF ggml's defaults follow the build
 # host, an arm64 runner cross-building x86_64 does not count as cross-compiling, and a flag left
 # out keeps whatever the previous variant cached in build-static. TOSH_NO_AVX2=1 is the SSE4.2
-# baseline for pre-AVX Xeons.
+# baseline for pre-AVX Xeons. TOSH_AVX1=1 is the middle variant for AVX-but-no-AVX2 chips
+# (e.g. Ivy Bridge Xeon E5-2697 v2): AVX+F16C on, AVX2/FMA/BMI2 off (FMA needs AVX2).
 ISA_FLAGS=()
 if [ "$ARCH" = "x86_64" ]; then
-    if [ -z "${TOSH_NO_AVX2:-}" ]; then
+    if [ -n "${TOSH_AVX1:-}" ]; then
+        ISA_FLAGS=(-DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=OFF -DGGML_FMA=OFF
+                   -DGGML_F16C=ON -DGGML_BMI2=OFF -DGGML_AVX_VNNI=OFF -DGGML_AVX512=OFF)
+    elif [ -z "${TOSH_NO_AVX2:-}" ]; then
         ISA_FLAGS=(-DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON
                    -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX_VNNI=OFF -DGGML_AVX512=OFF)
     else
