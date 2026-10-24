@@ -48,7 +48,7 @@ hand.
 | Turkish (Türkçe) | `tr` | not started |
 | Dutch (Nederlands) | `nl` | not started |
 | Polish (Polski) | `pl` | not started |
-| Ukrainian (Українська) | `uk` | 100% (2048/2049) |
+| Ukrainian (Українська) | `uk` | 100% (2049/2049) |
 
 <!-- STATUS:END -->
 
