@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Improved
+
+- **LLMs: Qwen3.5 reads prompts about 4% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3.5-4B Q8_0 goes from 1515 to 1572 tokens a second on a 512-token prompt and from 1423 to 1473 on a 4096-token one.
+
 ## [0.87.31] - 2026-10-29
 
 ### Improved
