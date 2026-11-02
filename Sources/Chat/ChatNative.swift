@@ -530,6 +530,11 @@ final class ChatStore: ObservableObject {
     /// The message holding the calls of the server agent's current pass, per conversation.
     private var agentPassMessage: [UUID: (pass: Int, messageID: UUID)] = [:]
 
+    /// The model an answer came from, shown beside it: the router's choice, or the file the engine loaded.
+    static func replyModel() -> String? {
+        ServerSettings.activeRouterModel() ?? ServerManager.shared.active.loadedModelName
+    }
+
     /// A progress event of the server agent: the calls it ran show as cards, ahead of the answer.
     func agentEvent(_ event: [String: Any], conversation id: UUID) {
         switch event["type"] as? String {
@@ -573,7 +578,7 @@ final class ChatStore: ObservableObject {
             } else {
                 var round = ChatMessage(role: "assistant", content: "")
                 round.toolCalls = [toolCall]
-                round.model = ServerSettings.activeRouterModel()
+                round.model = Self.replyModel()
                 agentPassMessage[id] = (pass, round.id)
                 conversations[i].messages.insert(contentsOf: [round, reply], at: placeholder)
             }
@@ -1545,7 +1550,7 @@ final class ChatStore: ObservableObject {
                     conversations[i].messages[j].mtpAccept = mtpAccept
                     conversations[i].messages[j].timings = timings
                     conversations[i].messages[j].toolCalls = toolCalls.isEmpty ? nil : toolCalls
-                    conversations[i].messages[j].model = ServerSettings.activeRouterModel()
+                    conversations[i].messages[j].model = Self.replyModel()
                     if toolCalls.isEmpty { Self.carryDrawnMap(&conversations[i], to: j) }
                 }
             }
@@ -2886,6 +2891,7 @@ struct NativeChatView: View {
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var control: ControlPanelState
     @AppStorage(SettingsKeys.chatTemp) private var temperature = 0.7
+    @AppStorage(SettingsKeys.chatWidth) private var chatWidth = ChatWidth.standard.rawValue
     @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = 2048
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
     @AppStorage(SettingsKeys.chatThinking) private var thinkingEnabled = true
@@ -3457,7 +3463,7 @@ struct NativeChatView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
-        .frame(maxWidth: 1120)
+        .frame(maxWidth: (ChatWidth(rawValue: chatWidth) ?? .standard).maxWidth)
         .frame(maxWidth: .infinity)
     }
 

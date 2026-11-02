@@ -190,7 +190,7 @@ struct MessageBubble: View, Equatable {
                         .foregroundStyle(.secondary)
                         .help(loc.t("Métricas de procesamiento y generación", "Prompt and generation metrics"))
                         .popover(isPresented: $showingMetrics, arrowEdge: .bottom) {
-                            ChatMetricsView(timings: timings)
+                            ChatMetricsView(timings: timings, model: message.model)
                         }
                     }
                 }

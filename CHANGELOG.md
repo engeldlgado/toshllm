@@ -5,6 +5,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Chat: the metrics of an answer name the model that wrote it, with one model loaded as well as in router mode (#147).**
+- **Chat: View › Chat width runs the conversation at its standard width, wider or the full width of the window, so a large screen gives wide tables their columns (#148).**
+
 ### Improved
 
 - **LLMs: Qwen3.5 reads prompts up to 8% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3.5-4B Q8_0 goes from 1485 to 1604 tokens a second on a 512-token prompt and from 1396 to 1503 on a 4096-token one, and Qwen3.5-9B Q4_K_M from 800 to 833 on a 512-token one.

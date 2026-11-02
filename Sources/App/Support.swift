@@ -228,6 +228,7 @@ enum SettingsKeys {
     static let chatShowSystemMessage = "chatShowSystemMessage"
     static let smoothTyping = "smoothTyping"
     static let chatFontScale = "chatFontScale"
+    static let chatWidth = "chatWidth"
     static let onboardingDone = "onboardingDone"
 
     // Benchmark workload sizes (llama-bench -p / -n)

@@ -28,6 +28,27 @@ enum ChatFont {
     }
 }
 
+/// How wide the transcript runs: on a large screen a table or code block can take the room beside it.
+enum ChatWidth: String, CaseIterable {
+    case standard, wide, full
+
+    var maxWidth: CGFloat {
+        switch self {
+        case .standard: return 1120
+        case .wide: return 1600
+        case .full: return .infinity
+        }
+    }
+
+    func title(_ loc: Localizer) -> String {
+        switch self {
+        case .standard: return loc.t("Estándar", "Standard")
+        case .wide: return loc.t("Amplio", "Wide")
+        case .full: return loc.t("Todo el ancho", "Full width")
+        }
+    }
+}
+
 private struct ChatFontScaleKey: EnvironmentKey {
     static let defaultValue: Double = 1
 }

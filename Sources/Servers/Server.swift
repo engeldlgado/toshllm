@@ -1723,6 +1723,11 @@ final class ServerController: ObservableObject {
     private var currentPort = 8080
     /// The port a running engine answers on, nil while it is not up.
     var runningPort: Int? { state == .running ? currentPort : nil }
+    /// The model file the running engine loaded, without its extension; the settings may already name another.
+    var loadedModelName: String? {
+        guard state == .running, let path = launchedSettings?.modelPath, !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+    }
     private var discoveryService: NetService?
     private var discoveryEnabled = false
     private let fileLog = RotatingFileLog(name: "server.log")
