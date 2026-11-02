@@ -7,7 +7,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
-- **LLMs: Qwen3.5 reads prompts up to 4% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3.5-4B Q8_0 goes from 1515 to 1572 tokens a second on a 512-token prompt and from 1423 to 1473 on a 4096-token one, and Qwen3.5-9B Q4_K_M from 800 to 811 on a 512-token one.
+- **LLMs: Qwen3.5 reads prompts up to 8% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3.5-4B Q8_0 goes from 1485 to 1604 tokens a second on a 512-token prompt and from 1396 to 1503 on a 4096-token one, and Qwen3.5-9B Q4_K_M from 800 to 833 on a 512-token one.
 
 ### Fixed
 
