@@ -1,8 +1,11 @@
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 5785065dc..5515c39cf 100644
+index 5785065dc..6bd5b41aa 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -17,16 +17,18 @@ static inline size_t tosh_dmoe_private_bytes(void) { return 0; }
+@@ -14,22 +14,24 @@ static inline size_t tosh_dmoe_private_bytes(void) { return 0; }
+ #include "llama-io.h"
+ #include "llama-memory.h"
+ #include "llama-mmap.h"
  #include "llama-model.h"
  #include "llama-ext.h"
  #include "llama-sampler.h"
@@ -21,7 +24,13 @@ index 5785065dc..5515c39cf 100644
  //
  // llama_context
  //
-@@ -2897,10 +2899,14 @@ public:
+ 
+ // Every Hadamard-folded weight in the graph must consume its activation transform, and every
+ // row read from a latent table must get the inverse; otherwise the model loads and computes
+@@ -2894,16 +2896,20 @@ public:
+     void write_tensor(ggml_tensor * /* tensor */, size_t /* offset */, size_t size) override {
+         if (skip_tensors) {
+             return;
          }
  
          size_written += size;
@@ -36,13 +45,23 @@ index 5785065dc..5515c39cf 100644
      }
  
  private:
-@@ -2923,15 +2929,20 @@ public:
+     const bool skip_tensors;
+ 
+     size_t size_written = 0;
+@@ -2920,21 +2926,30 @@ public:
+         if (backends) {
+             for (const auto & b : *backends) {
+                 ggml_backend_read_batch_begin(b.get());
              }
          }
          for (const auto & winfo : winfos) {
              ggml_backend_tensor_get(winfo.tensor, winfo.ptr, winfo.offset, winfo.size);
          }
-+        std::vector<float> f32(n_quant_floats);
++        // kept between checkpoints: a fresh buffer the size of a recurrent state pays its page faults every time
++        static thread_local std::vector<float> f32;
++        if (f32.size() < n_quant_floats) {
++            f32.resize(n_quant_floats);
++        }
 +        for (const auto & q : qinfos) {
 +            ggml_backend_tensor_get(q.tensor, f32.data() + q.src, q.offset, q.size);
 +        }
@@ -57,7 +76,13 @@ index 5785065dc..5515c39cf 100644
      void write(const void * src, size_t size) override {
          if (size > buf_size) {
              throw std::runtime_error("unexpectedly reached end of buffer");
-@@ -2953,26 +2964,77 @@ public:
+         }
+         memcpy(ptr, src, size);
+         ptr += size;
+@@ -2950,32 +2965,83 @@ public:
+         // save the write for later during destruction
+         winfos.push_back({tensor, ptr, size, offset});
+ 
          ptr += size;
          size_written += size;
          buf_size -= size;
@@ -135,11 +160,14 @@ index 5785065dc..5515c39cf 100644
  
  class llama_io_read_host : public llama_io_read_i {
  public:
+     llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
+ 
+     ~llama_io_read_host() {
 diff --git a/src/llama-io.cpp b/src/llama-io.cpp
 index 5ec463494..7b14b94d5 100644
 --- a/src/llama-io.cpp
 +++ b/src/llama-io.cpp
-@@ -1,9 +1,20 @@
+@@ -1,12 +1,23 @@
  #include "llama-io.h"
  
 +#include "ggml-backend.h"
@@ -160,11 +188,15 @@ index 5ec463494..7b14b94d5 100644
  
      write(&str_size,  sizeof(str_size));
      write(str.data(), str_size);
+ }
+ 
+ void llama_io_read_i::read_string(std::string & str) {
 diff --git a/src/llama-io.h b/src/llama-io.h
 index 0aca73310..79b4108c4 100644
 --- a/src/llama-io.h
 +++ b/src/llama-io.h
-@@ -2,20 +2,23 @@
+@@ -1,24 +1,27 @@
+ #pragma once
  
  #include <cstddef>
  #include <cstdint>
@@ -189,11 +221,17 @@ index 0aca73310..79b4108c4 100644
  
      void write_string(const std::string & str);
  };
+ 
+ class llama_io_read_i {
+ public:
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 187bff861..11757a7e5 100644
+index b8df4cabb..00f0773f7 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
-@@ -924,17 +924,11 @@ static ggml_type rs_save_type() {
+@@ -921,23 +921,17 @@ static ggml_type rs_save_type() {
+     return t;
+ }
+ 
  static bool rs_save_small(const ggml_tensor * t, bool compact) {
      return compact && rs_save_type() != GGML_TYPE_F32 && t->type == GGML_TYPE_F32 && ggml_nelements(t) > 0;
  }
@@ -212,3 +250,6 @@ index 187bff861..11757a7e5 100644
  static void rs_read_small(llama_io_read_i & io, ggml_type type, ggml_tensor * t, size_t offset, size_t size, int64_t n_per_row) {
      std::vector<float> f(size/sizeof(float));
      std::vector<uint8_t> q(ggml_row_size(type, n_per_row)*(f.size()/n_per_row));
+     io.read(q.data(), q.size());
+     ggml_get_type_traits(type)->to_float(q.data(), f.data(), (int64_t) f.size());
+     ggml_backend_tensor_set(t, f.data(), offset, size);

@@ -1,5 +1,34 @@
+diff --git a/common/common.cpp b/common/common.cpp
+index 104e5e72b..494e237f8 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1231,19 +1231,23 @@ common_decision_type common_get_decision_type(const std::string & fname) {
+     }
+     return common_decision_type_from_string(gguf_get_val_str(gguf_ctx.get(), type_id));
+ }
+ 
+ common_init_result::common_init_result(common_params & params, bool model_only) :
+     pimpl(new impl{}) {
+     {
+         tosh_plan plan;
+-        if (!tosh_plan_apply(params, &plan) && plan.state == TOSH_PLAN_NOT_PLANNED && !params.dynamic_moe && getenv("TOSH_AUTO") == nullptr) {
++        const bool planned = tosh_plan_apply(params, &plan);
++        if (!planned && plan.state == TOSH_PLAN_NOT_PLANNED && !params.dynamic_moe && getenv("TOSH_AUTO") == nullptr) {
+             LOG_INF("Tosh MoE: standard\n");
+         }
++        if (!planned && plan.state != TOSH_PLAN_UNSUPPORTED) {
++            tosh_plan_checkpoints(params);
++        }
+         // no plan fits: loading with the defaults would hand memory to a layout nobody checked
+         if (plan.state == TOSH_PLAN_UNSUPPORTED && getenv("TOSH_AUTO_DRY_RUN") == nullptr) {
+             LOG_ERR("%s: TOSH_AUTO found no configuration that fits (%s), the model is not loaded\n", __func__, plan.primary_reason.c_str());
+             tosh_plan_report_load("PLAN_REFUSED", plan.primary_reason.c_str());
+             return;
+         }
+     }
+ 
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
-index 7b82d081c..a93bedbe7 100644
+index d8b286e93..5dda4ae07 100644
 --- a/common/tosh-plan.cpp
 +++ b/common/tosh-plan.cpp
 @@ -57,16 +57,18 @@ struct moe_info {
@@ -49,7 +78,65 @@ index 7b82d081c..a93bedbe7 100644
          char prefix[PATH_MAX] = {}, shard[PATH_MAX] = {};
          if (llama_split_prefix(prefix, sizeof(prefix), path, 0, mi.n_split) == 0) {
              mi.error = string_format("SPLIT_GGUF_METADATA_ERROR: %s is not the first of %d shards", path, mi.n_split);
-@@ -961,16 +974,23 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -530,16 +543,57 @@ static void plan_emit(const tosh_plan & p) {
+     if (dry != nullptr && strcmp(dry, "exit") == 0) {
+         // a caller previews the plan of these exact arguments without loading anything
+         printf("%s\n", tosh_plan_json(p).c_str());
+         fflush(stdout);
+         exit(p.state == TOSH_PLAN_UNSUPPORTED ? 2 : 0);
+     }
+ }
+ 
++// a recurrent state is checkpointed exact when at least this many checkpoints fit, in 8 bits below that
++static constexpr int RS_EXACT_MIN_CHECKPOINTS = 8;
++// what a plan keeps even when the model takes its whole budget: this turn's checkpoints and the last one's
++static constexpr int RS_MIN_CHECKPOINTS = 4;
++
++// sets TOSH_RS_STATE_TYPE for the server when it was not set by hand; returns the checkpoint size it chose
++static double rs_checkpoint_mib(double left_mib, double fixed_mib, double recr_elems, int n_wanted) {
++    const char * rs = getenv("TOSH_RS_STATE_TYPE");
++    if (rs != nullptr || recr_elems <= 0) {
++        const std::string t = rs ? rs : "f32";
++        const double b = t == "f32" ? 4.0 : t == "f16" || t == "bf16" ? 2.0 : 34.0/32.0;
++        return fixed_mib + recr_elems*b/MiB;
++    }
++    const double exact = fixed_mib + recr_elems*4.0/MiB;
++    if (left_mib >= std::min(n_wanted, RS_EXACT_MIN_CHECKPOINTS)*exact) {
++        return exact;
++    }
++    setenv("TOSH_RS_STATE_TYPE", "q8_0", 1);
++    LOG_WRN("%s: %.0f MiB left for checkpoints holds fewer than %d exact ones of %.1f MiB, keeping them in 8 bits\n",
++            __func__, left_mib, RS_EXACT_MIN_CHECKPOINTS, exact);
++    return fixed_mib + recr_elems*34.0/32.0/MiB;
++}
++
++void tosh_plan_checkpoints(common_params & params) {
++    if (params.n_ctx_checkpoints <= 0 || params.model.path.empty()) {
++        return;
++    }
++    const moe_info mi = read_moe_info(params.model.path.c_str(), params.lazy_mode);
++    if (!mi.error.empty() || mi.recr_elems <= 0) {
++        return;
++    }
++    const double left = read_host_info().available_mib - HOST_MARGIN_MIB;
++    const double ckpt = rs_checkpoint_mib(left, 0.0, mi.recr_elems, params.n_ctx_checkpoints);
++    const int fit = (int) std::max(0.0, std::floor(left/ckpt));
++    if (fit < params.n_ctx_checkpoints) {
++        LOG_WRN("%s: %d context checkpoints of %.1f MiB fit in %.0f MiB free, down from %d\n",
++                __func__, fit, ckpt, left, params.n_ctx_checkpoints);
++        params.n_ctx_checkpoints = fit;
++    }
++}
++
+ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+     // precedence: TOSH_DMOE_* set by hand, then TOSH_AUTO, then --dynamic-moe, then the standard path
+     const char * mode_env = getenv("TOSH_AUTO");
+     g_runtime_default = params.dynamic_moe;
+     if (mode_env == nullptr && params.dynamic_moe) mode_env = "1";
+     if (mode_env == nullptr || strcmp(mode_env, "0") == 0 || strcmp(mode_env, "off") == 0) {
+         return false;
+     }
+@@ -962,17 +1016,30 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
      if (p.plan_mode == TOSH_PLAN_MODE_FULL_HOST_DMOE || p.plan_mode == TOSH_PLAN_MODE_BOUNDED_DMOE) {
          p.coverage_state = p.coverage >= BOUNDED_GOOD_COVERAGE ? "GOOD" : p.coverage >= BOUNDED_MIN_COVERAGE ? "CONSTRAINED" : "REJECT";
          if (p.coverage_state == "CONSTRAINED") p.warnings.push_back("COVERAGE_CONSTRAINED");
@@ -59,13 +146,19 @@ index 7b82d081c..a93bedbe7 100644
      // checkpoints first since they spare re-reading a conversation, and the model before both
      double left = runtime ? p.effective_mib - p.host_required_mib : hi.available_mib - HOST_MARGIN_MIB - p.host_required_mib;
 +    if (sel && (mi.swa_elems > 0 || mi.recr_elems > 0) && params.n_ctx_checkpoints > 0) {
-+        // the server keeps checkpoints of a recurrent state in 8 bits unless told otherwise
-+        const char * rs = getenv("TOSH_RS_STATE_TYPE");
-+        const std::string rs_type = rs ? rs : "q8_0";
-+        const double rs_bytes = rs_type == "f32" ? 4.0 : rs_type == "f16" || rs_type == "bf16" ? 2.0 : 34.0/32.0;
-+        p.checkpoint_mib = mi.swa_elems*(mi.n_swa + sel->ubatch)*ggml_type_size(sel->kv)/ggml_blck_size(sel->kv)/MiB +
-+                           mi.recr_elems*rs_bytes/MiB;
++        const double swa_mib = mi.swa_elems*(mi.n_swa + sel->ubatch)*ggml_type_size(sel->kv)/ggml_blck_size(sel->kv)/MiB;
++        p.checkpoint_mib = rs_checkpoint_mib(left, swa_mib, mi.recr_elems, params.n_ctx_checkpoints);
          p.n_ctx_checkpoints = std::min(params.n_ctx_checkpoints, (int) std::max(0.0, std::floor(left/p.checkpoint_mib)));
++        // the next turn restores one of the last checkpoints, and with none a hybrid model re-reads the whole
++        // conversation: a few come out of what the load leaves to the system
++        const int n_min = std::min(params.n_ctx_checkpoints, RS_MIN_CHECKPOINTS);
++        if (p.n_ctx_checkpoints < n_min) {
++            const double extra = (n_min - p.n_ctx_checkpoints)*p.checkpoint_mib;
++            if (p.projected_left_mib - extra >= HOST_MARGIN_MIB) {
++                p.n_ctx_checkpoints = n_min;
++                p.projected_left_mib -= extra;
++            }
++        }
          if (p.n_ctx_checkpoints < params.n_ctx_checkpoints) p.warnings.push_back("CONTEXT_CHECKPOINTS_REDUCED");
          left -= p.n_ctx_checkpoints*p.checkpoint_mib;
          p.projected_rss_mib += p.n_ctx_checkpoints*p.checkpoint_mib;
@@ -73,6 +166,28 @@ index 7b82d081c..a93bedbe7 100644
          p.n_ctx_checkpoints = params.n_ctx_checkpoints;
      }
      if (sel && params.cache_ram_mib != 0) {
+         const double want = params.cache_ram_mib > 0 ? params.cache_ram_mib : std::max(0.0, left);
+diff --git a/common/tosh-plan.h b/common/tosh-plan.h
+index 430f53fa4..1ddde0698 100644
+--- a/common/tosh-plan.h
++++ b/common/tosh-plan.h
+@@ -122,12 +122,16 @@ struct tosh_plan {
+ const char * tosh_plan_state_name(tosh_plan_state s);
+ const char * tosh_plan_mode_name(tosh_plan_mode m);
+ std::string  tosh_plan_json(const tosh_plan & plan);
+ 
+ // Plans and applies the result to params. Returns false when planning is off or not needed, and
+ // when no plan exists: then out->state is TOSH_PLAN_UNSUPPORTED and the model must not be loaded.
+ bool tosh_plan_apply(common_params & params, tosh_plan * out = nullptr);
+ 
++// For a model the plan did not take: checkpoints of a recurrent state stay exact while enough of them fit in
++// the free memory, and drop to 8 bits otherwise; their number is cut to what fits either way.
++void tosh_plan_checkpoints(common_params & params);
++
+ // Outcome of the load that followed the last plan: READY, PLAN_REFUSED, MODEL_LOAD_FAILED,
+ // ALLOCATION_FAILED or CONTEXT_FAILED, with the measured RSS and VRAM next to the projection.
+ // Written to <TOSH_AUTO_PLAN_FILE>.actual; no-op when nothing was planned.
+ void tosh_plan_report_load(const char * result, const char * detail = nullptr);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
 index 6c6835640..f35b55917 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
@@ -194,7 +309,7 @@ index 19a50437b..2dc7f0d19 100644
  
      LLAMA_API size_t llama_state_seq_get_data_ext(
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 53130e868..187bff861 100644
+index 53130e868..b8df4cabb 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
 @@ -777,17 +777,16 @@ size_t llama_memory_recurrent::size_p_bytes() const {
@@ -244,11 +359,11 @@ index 53130e868..187bff861 100644
  }
  
 -void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges) const {
-+// cached copies of an f32 state are kept in 8 bits: restoring rounds once, the live state stays f32
++// cached copies of an f32 state stay exact by default: a rounded copy changes what the model answers after a restore
 +static ggml_type rs_save_type() {
 +    static const ggml_type t = [] {
 +        const char * e = getenv("TOSH_RS_STATE_TYPE");
-+        const std::string v = e ? e : "q8_0";
++        const std::string v = e ? e : "f32";
 +        return v == "f16" ? GGML_TYPE_F16 : v == "bf16" ? GGML_TYPE_BF16 : v == "q8_0" ? GGML_TYPE_Q8_0 : GGML_TYPE_F32;
 +    }();
 +    return t;

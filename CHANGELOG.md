@@ -12,10 +12,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
+- **LLMs: Gemma and the hybrid Qwen models start a follow-up answer sooner.** On a Radeon RX 6700 XT a short follow-up to Gemma-3-4B starts in about 0.2 s instead of 0.34, and one to Qwen3.5-4B in 0.19 s instead of 0.22.
+- **LLMs: Dynamic MoE keeps a few checkpoints of the conversation when the model fills the whole memory budget,** so a hybrid model no longer reads the conversation again from the start on every message. On a Radeon RX 6700 XT the fourth message to Qwen3.6-35B-A3B starts in 0.30 s instead of 0.74, and the gap grows with the conversation.
 - **LLMs: Qwen3.5 reads prompts up to 8% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3.5-4B Q8_0 goes from 1485 to 1604 tokens a second on a 512-token prompt and from 1396 to 1503 on a 4096-token one, and Qwen3.5-9B Q4_K_M from 800 to 833 on a 512-token one.
 
 ### Fixed
 
+- **LLMs: the hybrid Qwen models answer a follow-up the same as they would reading the conversation from scratch.** The copies of their state kept between messages were rounded to 8 bits, which changed later answers; they are now exact while memory allows, and drop to 8 bits only when it is short.
 - **Chat: a finished answer that takes long to draw, such as a large table, no longer stops the engine as if it had hung (#146).**
 
 ## [0.87.31] - 2026-10-29

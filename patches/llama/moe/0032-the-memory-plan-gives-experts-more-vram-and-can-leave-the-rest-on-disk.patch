@@ -1,5 +1,5 @@
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
-index d76ca9a23..3795a44ec 100644
+index 8af07d73b..1a04cecab 100644
 --- a/common/tosh-plan.cpp
 +++ b/common/tosh-plan.cpp
 @@ -34,16 +34,18 @@ static constexpr double MiB = 1048576.0;
@@ -43,7 +43,7 @@ index d76ca9a23..3795a44ec 100644
  static bool host_bank_lean() {
      const char * v = getenv("TOSH_AUTO_HOST_BANK");
      return v != nullptr && strcmp(v, "lean") == 0;
-@@ -756,23 +763,24 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -797,23 +804,24 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
                  tosh_plan_candidate c;
                  c.name = std::string("dmoe+") + kv_name(kvs[k]); c.mode = "dmoe"; c.kv = kvs[k]; c.ubatch = ubs[u];
                  const double base = pr.model + pr.context + pr.compute;
@@ -71,7 +71,7 @@ index d76ca9a23..3795a44ec 100644
                                        string_format("context and reserve kept, %.1f GiB of the bank in RAM", bounded_warm/1024)) :
                             string_format("VRAM_LIMIT: arena %.0f MiB under the useful minimum %.0f", c.arena_mib, p.min_arena_mib);
                  p.candidates.push_back(c);
-@@ -815,18 +823,19 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -856,18 +864,19 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
  
      // the ubatch for a DMoE candidate: larger ones speed prefill but take compute memory from the arena
      auto pick_ub = [&](ggml_type kv) -> tosh_plan_candidate * {
@@ -93,7 +93,7 @@ index d76ca9a23..3795a44ec 100644
      const tosh_plan_candidate * sel = nullptr;
      // VRAM kept free after every known allocation, for the desktop and other apps; the plan
      // already counts weights, KV, compute, prefill slots and the driver margin
-@@ -849,38 +858,41 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -891,38 +900,41 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
      std::vector<double> reserves = { reserve_pref, env_mib("TOSH_AUTO_MIN_RESERVE_MIB", std::max(512.0, reserve_pref - 256.0)) };
      // the head is optional: where it leaves no room, the plan is made again without it
      const size_t n_with_head = reserves.size();
@@ -138,7 +138,7 @@ index d76ca9a23..3795a44ec 100644
          if (sel) {
              p.mtp_head_dropped = ri >= n_with_head;
              if (R < reserves[p.mtp_head_dropped ? n_with_head : 0]) p.fallback = string_format("reserve lowered to %.1f GiB", R/1024);
-@@ -975,18 +987,20 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -1017,18 +1029,20 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
          p.plan_mode = TOSH_PLAN_MODE_FULL_HOST_DMOE;
          p.primary_reason = "FULL_HOST_SAFE";
          p.limiting_resource = "VRAM";
@@ -158,5 +158,5 @@ index d76ca9a23..3795a44ec 100644
      // checkpoints first since they spare re-reading a conversation, and the model before both
      double left = runtime ? p.effective_mib - p.host_required_mib : hi.available_mib - HOST_MARGIN_MIB - p.host_required_mib;
      if (sel && (mi.swa_elems > 0 || mi.recr_elems > 0) && params.n_ctx_checkpoints > 0) {
-         // the server keeps checkpoints of a recurrent state in 8 bits unless told otherwise
-         const char * rs = getenv("TOSH_RS_STATE_TYPE");
+         const double swa_mib = mi.swa_elems*(mi.n_swa + sel->ubatch)*ggml_type_size(sel->kv)/ggml_blck_size(sel->kv)/MiB;
+         p.checkpoint_mib = rs_checkpoint_mib(left, swa_mib, mi.recr_elems, params.n_ctx_checkpoints);
