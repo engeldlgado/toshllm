@@ -33,4 +33,30 @@ final class StreamLivenessTests: XCTestCase {
         XCTAssertFalse(liveness.stalled(now: start.addingTimeInterval(145)))
         XCTAssertTrue(liveness.stalled(now: start.addingTimeInterval(155)))
     }
+
+    // the answer ended while the main thread was still laying it out: the watchdog reads that late
+    func testAnEndedStreamNeverStalls() {
+        let buffer = StreamBuffer()
+        buffer.write(reasoning: "", visible: "| a | b |", speed: nil)
+        let late = Date().addingTimeInterval(StreamLiveness.textLimit + 5)
+        XCTAssertTrue(buffer.stalled(now: late))
+        buffer.finish()
+        XCTAssertFalse(buffer.stalled(now: late))
+    }
+
+    func testAHeldAnswerCountsAsPrompt() {
+        let buffer = StreamBuffer()
+        buffer.write(reasoning: "", visible: "", speed: nil)
+        XCTAssertFalse(buffer.stalled(now: Date().addingTimeInterval(StreamLiveness.textLimit + 5)))
+        XCTAssertTrue(buffer.stalled(now: Date().addingTimeInterval(StreamLiveness.promptLimit + 5)))
+    }
+
+    func testAgentKeepAlivesKeepTheStreamAlive() {
+        let buffer = StreamBuffer()
+        buffer.write(reasoning: "", visible: "x", speed: nil)
+        let alive = Date().addingTimeInterval(StreamLiveness.textLimit - 1)
+        buffer.note(now: alive)
+        XCTAssertFalse(buffer.stalled(now: alive.addingTimeInterval(StreamLiveness.textLimit - 1)))
+        XCTAssertTrue(buffer.stalled(now: alive.addingTimeInterval(StreamLiveness.textLimit + 1)))
+    }
 }

@@ -9,6 +9,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: Qwen3.5 reads prompts about 4% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3.5-4B Q8_0 goes from 1515 to 1572 tokens a second on a 512-token prompt and from 1423 to 1473 on a 4096-token one.
 
+### Fixed
+
+- **Chat: a finished answer that takes long to draw, such as a large table, no longer stops the engine as if it had hung (#146).**
+
 ## [0.87.31] - 2026-10-29
 
 ### Improved
