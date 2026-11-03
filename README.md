@@ -52,37 +52,41 @@ The stock wave64 path already makes an RX 580 usable — a tester measured a K-q
 **1.3 t/s (CPU decode) to ~51 t/s (GPU decode)**, coherent. What is below is *my* ongoing push on
 this exact card for **prompt processing (prefill)**, and it is the work furthest from done.
 
-Measured on `Ornith-1.5-9B-heretic-Q4_K_M`, this card only:
+Measured on `Ornith-1.5-9B-heretic-Q4_K_M`, this card only, on a quiet and warmed GPU (repeats agree
+to ±0.3%):
 
 | | before | now | my target |
 |---|---:|---:|---:|
-| Prefill (prompt processing) | 95.3 t/s | **~116–117 t/s** | 190 t/s ❌ not met |
+| Prefill (prompt processing) | 95.3 t/s | **~139–143 t/s** | 190 t/s ❌ not met |
 | Decode (generation) | — | **~23 t/s** | 28 t/s ❌ not met |
 
 The prefill gain is two changes to the tiled `mul_mm` matmul: **float accumulators** (worth **+22%**
 over half-accumulating on this ISA, which round-trips the product every step) and a **32-lane tile
 default** on the wide shapes. Both are real, but neither closes the gap to target.
 
-**What the profile actually shows.** The matmul sits at **~2.15 TFLOP/s** against this card's
-measured **5.54 TFLOP/s** fp32 ceiling; 190 t/s prefill would need **~2.92 TFLOP/s** on average. The
-limiter is not one bad shape and not the instruction stream — the *same* kernel already reaches
-**2.94 TFLOP/s** at `4096×4096` and falls to ~1.7 at `K=12288`, so the large-`K` tiles are what hurt.
-The binding constraint is **threadgroup memory (LDS)**: 8 KiB float panels let eight threadgroups
-share a compute unit, and every attempt to double occupancy by growing them collapses the tile
-(16 KiB halves the resident groups). For scale, the **identical silicon under Linux/RADV hits 201.7
-t/s pp512** — the handicap here is the Metal path, not the GPU.
+**What the profile actually shows.** The matmul averages **~2.15 TFLOP/s** over a prefill against this
+card's measured **5.54 TFLOP/s** fp32 ceiling; 190 t/s prefill would need **~2.9 TFLOP/s** on average.
+Re-measured per shape on a quiet, warmed card the kernel runs **~2.4 TFLOP/s** at the wide
+`12288×4096` and falls to ~2.2 (`4096×4096`), ~2.0 (`K=8192`) and ~1.85 (q6_K `K=12288`) — so large-`K`
+and the q6_K unpack drag the average, but there is no single catastrophic shape. For scale, the
+**identical silicon under Linux/RADV hits 201.7 t/s pp512** — the handicap here is the Metal path, not
+the GPU.
 
-**A measurement trap worth warning about.** My own kernel harness was filling weights with a
-synthetic constant pattern, and that pattern ran the biggest shape **~25% faster** than real trained
-weights — which made the engine look ~34% slower than it actually is. After forcing the harness onto
-realistic weight magnitudes, **engine and harness agree within −1%…+5% on every shape**, and the
-harness now defaults to faithful data. Any "the engine is leaving N% on the table" figure before
-that correction was an artifact of the filler, not the machine.
+**A measurement lesson, learned the hard way.** Most of this section was first measured against a card
+that was *not quiet* — a stray `llama-server` left running from an interrupted test, and a harness that
+warmed with only two dispatches on a GPU that needs ~1 s of load to reach boost clocks. That produced a
+"the synthetic weight panel runs the wide shape ~25% faster than real weights" result which, on an idle
+and warmed card, simply does not exist: synthetic and faithful weights time the same (±1–2%) at every
+shape. The same fault depressed the headline — the honest, repeatable prefill is **~139–143 t/s**, not
+the ~116 first recorded. The harness now refuses to measure unless the card is idle and warms to
+sustained clocks first. **A single-machine GPU number not taken on a quiet, warmed card is noise** —
+I am flagging this so you do not repeat my mistake, not quoting it as a supported result.
 
-**Open, and maybe a dead end.** Porting the mainline kernel's **half-precision LDS panels** into this
-tile looked like a clean 2× (21.8 ms), but the output fingerprint proved it was reading the wrong
-rows; the *correct* load (two 4-wide reads) is numerically right and **slower** than float. The 2×
-was a mirage — a load that is both correct *and* a single wide LDS transaction is still unsolved.
+**Closed: half-precision LDS panels.** Porting the mainline kernel's half-precision LDS panels into this
+tile looked like a clean 2×, but the output fingerprint proved the fast load read the wrong rows; the
+*correct* load (two 4-wide reads) is numerically exact and **slower** than float, and halving the panel
+(`lds=4096`) times identically to `8192` — so panel size / occupancy is not the binding constraint and
+half buys nothing here. Dead end, recorded so nobody re-tries it.
 
 These are diagnostic knobs on my working build, not shipped settings: `TOSH_MM_SKIP=k:rows` disables
 one matmul bucket to bill its cost, and `TOSH_MM_LOG=1` prints each dispatch's shape. If and only if
