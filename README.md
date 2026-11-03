@@ -1,43 +1,22 @@
-<div align="center">
+# gfx803 / Polaris Metal performance fork
 
-# ToshLLM
+Work on **Apple's Metal driver for AMD Polaris (GCN 4, `gfx803`)**, carried as a fork of
+[engeldlgado/toshllm](https://github.com/engeldlgado/toshllm) — which is upstream, credited below,
+and not this project's name or claim. Host of record: an RX 580 (36 CUs, 8 GB) under macOS 12 on an
+Intel Xeon box, with the same card measured under Linux/RADV for comparison.
 
-**Run large language models locally on Intel Macs with AMD GPUs.**
+One checkpoint (`Ornith-1.5-9B-heretic-Q4_K_M`), one `llama-bench` request, medians of four
+repetitions on a quiet, warmed card:
 
-Native macOS app · Metal acceleration · No cloud, no accounts, no per-token costs
+| build | pp512 | tg128 |
+|---|---:|---:|
+| upstream engine, none of this branch's work | 100.5 | 22.4 |
+| **this branch** | **167.5** | **26.67** |
+| same card, Linux/RADV, official llama.cpp | 206.6 | 29.20 |
 
-[![Build & Release](https://github.com/engeldlgado/toshllm/actions/workflows/build.yml/badge.svg)](https://github.com/engeldlgado/toshllm/actions/workflows/build.yml)
-[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20(Intel%20%2B%20AMD%20GPU)-lightgrey)](#requirements)
-[![Status: Beta](https://img.shields.io/badge/status-beta-orange)](https://github.com/engeldlgado/toshllm/issues)
-[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4%EF%B8%8F%20support%20the%20project-ea4aaa)](#support-the-project)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21908524.svg)](https://doi.org/10.5281/zenodo.21908524)
-
-### [⬇️ Download the latest release](https://github.com/engeldlgado/toshllm/releases/latest) · [📝 Changelog](CHANGELOG.md)
-
-*[Versión en español más abajo](#toshllm-en-español)*
-
-<img src="Assets/home.jpg" alt="ToshLLM home screen — hardware detection and model recommendations" width="760">
-
-</div>
-
----
-
-## What is ToshLLM?
-
-ToshLLM lets you run modern open LLMs **entirely on your own Mac** — your chats never leave the machine, there are no accounts, and there's nothing to pay per token.
-
-Most local-LLM tools on macOS only target Apple Silicon. Intel Macs with discrete AMD GPUs — including Hackintosh builds — get left behind: the stock engines produce **corrupted output** on AMD dGPUs and read model weights over PCIe at a fraction of the possible speed.
-
-**ToshLLM fixes that.** It bundles `llama.cpp` built with AMD-specific patches and wraps it in a polished native SwiftUI app — so a card like the RX 6700 XT goes from unusable to genuinely fast:
-
-| | Stock llama.cpp on AMD dGPU | ToshLLM |
-|---|---|---|
-| Output | corrupted | correct |
-| Qwen3-8B generation | 0.6–2.6 t/s | **~61 t/s** |
-| Qwen3.6-35B (MoE) generation | unusable | **~29 t/s**, flat on long runs |
-
-It opens, detects your hardware, and recommends models that will actually run well — no guesswork.
+Build it from `vendor/llama.cpp` (`make -C build-static llama-server`); read
+`patches/llama/metal/0052-*.patch` for what the engine carries, and the note in the commit that
+introduced it for the one series defect still open.
 
 ## Polaris performance work (RX 580 / `gfx803`) 🧪
 
@@ -80,6 +59,56 @@ So **+66.7% prefill and +19.0% decode** over what this branch started from, with
   bytes for a dword read on a word boundary, so the fast unaligned path is granted only to hardware
   measured to tolerate it, by `amdgpu_gfx<N>` ISA target where the OS reports one and by device name
   where it does not. Unknown hardware stays correct rather than fast.
+
+---
+
+# Upstream: ToshLLM
+
+The remainder of this file is the upstream README, kept
+intact and unedited for attribution and for how the engine is built and
+packaged.
+
+<div align="center">
+
+# ToshLLM
+
+**Run large language models locally on Intel Macs with AMD GPUs.**
+
+Native macOS app · Metal acceleration · No cloud, no accounts, no per-token costs
+
+[![Build & Release](https://github.com/engeldlgado/toshllm/actions/workflows/build.yml/badge.svg)](https://github.com/engeldlgado/toshllm/actions/workflows/build.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20(Intel%20%2B%20AMD%20GPU)-lightgrey)](#requirements)
+[![Status: Beta](https://img.shields.io/badge/status-beta-orange)](https://github.com/engeldlgado/toshllm/issues)
+[![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4%EF%B8%8F%20support%20the%20project-ea4aaa)](#support-the-project)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21908524.svg)](https://doi.org/10.5281/zenodo.21908524)
+
+### [⬇️ Download the latest release](https://github.com/engeldlgado/toshllm/releases/latest) · [📝 Changelog](CHANGELOG.md)
+
+*[Versión en español más abajo](#toshllm-en-español)*
+
+<img src="Assets/home.jpg" alt="ToshLLM home screen — hardware detection and model recommendations" width="760">
+
+</div>
+
+---
+
+## What is ToshLLM?
+
+ToshLLM lets you run modern open LLMs **entirely on your own Mac** — your chats never leave the machine, there are no accounts, and there's nothing to pay per token.
+
+Most local-LLM tools on macOS only target Apple Silicon. Intel Macs with discrete AMD GPUs — including Hackintosh builds — get left behind: the stock engines produce **corrupted output** on AMD dGPUs and read model weights over PCIe at a fraction of the possible speed.
+
+**ToshLLM fixes that.** It bundles `llama.cpp` built with AMD-specific patches and wraps it in a polished native SwiftUI app — so a card like the RX 6700 XT goes from unusable to genuinely fast:
+
+| | Stock llama.cpp on AMD dGPU | ToshLLM |
+|---|---|---|
+| Output | corrupted | correct |
+| Qwen3-8B generation | 0.6–2.6 t/s | **~61 t/s** |
+| Qwen3.6-35B (MoE) generation | unusable | **~29 t/s**, flat on long runs |
+
+It opens, detects your hardware, and recommends models that will actually run well — no guesswork.
+
 
 ## Features
 
