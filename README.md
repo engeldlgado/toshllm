@@ -41,57 +41,45 @@ It opens, detects your hardware, and recommends models that will actually run we
 
 ## Polaris performance work (RX 580 / `gfx803`) 🧪
 
-> ⚠️ **Trust me, bro — it works on *my* machine.** Everything on this line was measured on one
-> specific rig: an **AMD Radeon RX 580 (GCN 4 / `gfx803`, 36 CUs, 8 GB)** passed through to a
-> **macOS 12 Monterey** guest, running a hand-built engine off this branch. It has **not** been
-> reproduced on any other card, driver, macOS version, or host. Read this as one enthusiast's lab
-> notes on the least-validated part of the project — not a supported result. Do not expect these
-> numbers, and do not expect it not to break.
+> ⚠️ One card, one model, one branch. Measured on an **AMD Radeon RX 580 (GCN 4 / `gfx803`, 36 CUs,
+> 8 GB)** with `Ornith-1.5-9B-heretic-Q4_K_M` (5.23 GiB, q4_K weights + q6_K output/FFN-down),
+> Flash Attention on and a q4_0 KV cache. Not reproduced on any other card or driver.
 
-The stock wave64 path already makes an RX 580 usable — a tester measured a K-quant model go from
-**1.3 t/s (CPU decode) to ~51 t/s (GPU decode)**, coherent. What is below is *my* ongoing push on
-this exact card for **prompt processing (prefill)**, and it is the work furthest from done.
+`llama-bench -ngl 99 -fa 1 -ctk q4_0 -ctv q4_0 -b 2048 -ub 1024 -pg 512,128 -r 4 -t 10`, on a quiet
+and warmed card, base and tuned alternated in one session:
 
-Measured on `Ornith-1.5-9B-heretic-Q4_K_M`, this card only, on a quiet and warmed GPU (repeats agree
-to ±0.3%):
+| build | pp512 | tg128 |
+|---|---:|---:|
+| upstream engine, no Polaris work | 100.5 | 22.4 |
+| this branch | **167.5** | **26.7** |
+| same card under Linux/RADV, official llama.cpp | 206.6 | 29.2 |
 
-| | before | now | my target |
-|---|---:|---:|---:|
-| Prefill (prompt processing) | 95.3 t/s | **~139–143 t/s** | 190 t/s ❌ not met |
-| Decode (generation) | — | **~23 t/s** | 28 t/s ❌ not met |
+So **+66.7% prefill and +19.0% decode** over what this branch started from, with 19% of prefill and
+8.7% of decode still to give before the Metal path matches Linux on identical silicon.
 
-The prefill gain is two changes to the tiled `mul_mm` matmul: **float accumulators** (worth **+22%**
-over half-accumulating on this ISA, which round-trips the product every step) and a **32-lane tile
-default** on the wide shapes. Both are real, but neither closes the gap to target.
+**The kernel changes that got there.**
 
-**What the profile actually shows.** The matmul averages **~2.15 TFLOP/s** over a prefill against this
-card's measured **5.54 TFLOP/s** fp32 ceiling; 190 t/s prefill would need **~2.9 TFLOP/s** on average.
-Re-measured per shape on a quiet, warmed card the kernel runs **~2.4 TFLOP/s** at the wide
-`12288×4096` and falls to ~2.2 (`4096×4096`), ~2.0 (`K=8192`) and ~1.85 (q6_K `K=12288`) — so large-`K`
-and the q6_K unpack drag the average, but there is no single catastrophic shape. For scale, the
-**identical silicon under Linux/RADV hits 201.7 t/s pp512** — the handicap here is the Metal path, not
-the GPU.
-
-**A measurement lesson, learned the hard way.** Most of this section was first measured against a card
-that was *not quiet* — a stray `llama-server` left running from an interrupted test, and a harness that
-warmed with only two dispatches on a GPU that needs ~1 s of load to reach boost clocks. That produced a
-"the synthetic weight panel runs the wide shape ~25% faster than real weights" result which, on an idle
-and warmed card, simply does not exist: synthetic and faithful weights time the same (±1–2%) at every
-shape. The same fault depressed the headline — the honest, repeatable prefill is **~139–143 t/s**, not
-the ~116 first recorded. The harness now refuses to measure unless the card is idle and warms to
-sustained clocks first. **A single-machine GPU number not taken on a quiet, warmed card is noise** —
-I am flagging this so you do not repeat my mistake, not quoting it as a supported result.
-
-**Closed: half-precision LDS panels.** Porting the mainline kernel's half-precision LDS panels into this
-tile looked like a clean 2×, but the output fingerprint proved the fast load read the wrong rows; the
-*correct* load (two 4-wide reads) is numerically exact and **slower** than float, and halving the panel
-(`lds=4096`) times identically to `8192` — so panel size / occupancy is not the binding constraint and
-half buys nothing here. Dead end, recorded so nobody re-tries it.
-
-These are diagnostic knobs on my working build, not shipped settings: `TOSH_MM_SKIP=k:rows` disables
-one matmul bucket to bill its cost, and `TOSH_MM_LOG=1` prints each dispatch's shape. If and only if
-these numbers reproduce on hardware I do not own, they move up into the validated
-[research section](#research-amd-gpus-on-metal). Until then: **it works on my machine.**
+- **Float accumulators in the tiled prefill matmul.** GCN4 round-trips a half-precision product
+  through the register file on every accumulate step; accumulating in fp32 is worth **+22%** on its
+  own — the largest single change in the whole effort.
+- **One wavefront per tile, eight output columns per lane, two loads prefetched** in that same
+  tile: 2.03 → 2.97 TFLOP/s standalone at `12288×4096`. Reordering the panel loads and splitting the
+  tile-order dependency added a further few percent in situ.
+- **16-byte vectorised activation reads in the wave64 decode mat-vec**, four `float4` instead of
+  sixteen scalars — the shape RADV's shader emits — for **+6.6% decode** at the same traffic.
+- **Decode geometry chosen per shape and type**: rows per group and lanes per block are not one
+  constant. q4_K wants sixteen lanes and four rows at the FFN widths, q6_K wants four rows and eight
+  rows at different row counts, and the wave64 kernels are separate entry points from the wave32
+  ones rather than the same code with a different warp size.
+- **Fusions on the decode path**: swiglu, RMS-norm and norm-add folded into the q4_K mat-vec itself
+  (worth +3.7%, +1.7% and +1.4% respectively when switched back off to measure), and a dispatch-fusion
+  pass over the tail of tiny elementwise kernels that a decode token issues several hundred of.
+- **A wave64 flash-attention path** covering quantized KV, plus shared-dequant multi-column mat-vec
+  kernels so a batched step reads and unpacks each weight block once instead of once per column.
+- **Alignment and architecture probed, never assumed.** Cards older than Vega return the aligned
+  bytes for a dword read on a word boundary, so the fast unaligned path is granted only to hardware
+  measured to tolerate it, by `amdgpu_gfx<N>` ISA target where the OS reports one and by device name
+  where it does not. Unknown hardware stays correct rather than fast.
 
 ## Features
 

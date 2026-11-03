@@ -15,7 +15,9 @@ LLAMA_COMMIT="${LLAMA_COMMIT:-d81235049384534c167caea52b85a694f6103d14}"   # lla
 WHISPER_COMMIT="${WHISPER_COMMIT:-371b5a7561823ab2bb32142d2751e35e7534727b}" # whisper.cpp v1.9.3
 SD_COMMIT="${SD_COMMIT:-2f88688}"         # stable-diffusion.cpp commit validated for image gen
 ARCH="${ARCH:-$(uname -m)}"
-DEPLOYMENT_TARGET="14.0"        # same floor as the app (Package.swift)
+# Overridable for pre-macOS-14 hosts: this machine is a Westmere Xeon with no AVX
+# and cannot run the 14.0 slice, so TOSH_NO_AVX2=1 is paired with DEPLOYMENT_TARGET=12.0.
+DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-14.0}"        # same floor as the app (Package.swift)
 if [ "$ARCH" = "universal" ]; then
     # Build each slice separately (ggml has per-arch sources) and lipo them.
     for slice in x86_64 arm64; do

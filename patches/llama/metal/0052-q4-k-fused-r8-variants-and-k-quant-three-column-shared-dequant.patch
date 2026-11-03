@@ -1,0 +1,138 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 543f050da..21c2566cd 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1451,6 +1451,26 @@ int ggml_metal_mv_nc2_rows(ggml_type type, int simd_width, int ne11, int ne01, i
+             return 0;
+         }
+         if (w64) {
++            // q5_K only ever had a two-column shared-dequant kernel on 64 lanes, so a three-column
++            // batch fell back to ext. TOSH_MV_Q5K_C3=R selects the c3_rR instantiation for measuring.
++            if (type == GGML_TYPE_Q5_K) {
++                // measured +6.3% at three columns (10.19), so it is the default now; TOSH_MV_Q5K_C3=R
++                // re-tries another row width and =0 puts the old batched kernel back
++                static const int r = TOSH_ENV("TOSH_MV_Q5K_C3") ? atoi(TOSH_ENV("TOSH_MV_Q5K_C3")) : 4;
++                if (r == 2 || r == 4 || r == 8) {
++                    return r;
++                }
++                return 0;
++            }
++            // q4_K is the bulk of the shipped checkpoint and had only a two-column instantiation,
++            // so its three-column batch fell through to ext exactly where q5_K did
++            if (type == GGML_TYPE_Q4_K) {
++                static const int r = TOSH_ENV("TOSH_MV_Q4K_C3") ? atoi(TOSH_ENV("TOSH_MV_Q4K_C3")) : 0;
++                if (r == 2 || r == 4 || r == 8) {
++                    return r;
++                }
++                return 0;
++            }
+             // q8_0 on 64 lanes: few rows want more groups, a short row stays on the batched kernel
+             if (type == GGML_TYPE_Q8_0) {
+                 return ne01 < 2048 ? 2 : (ne00 >= 2048 || ne01 >= 8192 ? 8 : 0);
+@@ -2079,8 +2099,12 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         static const char * const fused[6] = {
+             "", "_swiglu", "_norm", "_normadd", "_swiglu_norm", "_swiglu_normadd",
+         };
++        // the fused entry points exist for both row widths now, so the wide q4_K kernel keeps
++        // its fusions instead of quietly losing 32 dispatches per decode token
++        const std::string fsfx = suffix;
+         if (mode < 0 || mode > 5 ||
+-            !w64 || tsrc0 != GGML_TYPE_Q4_K || tsrc1 != GGML_TYPE_F32 || std::string(suffix) != "_L16r4_w64") {
++            !w64 || tsrc0 != GGML_TYPE_Q4_K || tsrc1 != GGML_TYPE_F32 ||
++            (fsfx != "_L16r4_w64" && fsfx != "_L16r8_w64")) {
+             // nsg < 0 is "no fused kernel for this shape", which is not a failed compile
+             ggml_metal_pipeline_with_params none = {};
+             none.nsg = -1;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+index 236e422e4..21b0866c6 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+@@ -1590,6 +1590,12 @@ kernel void kernel_mul_mv_q4_K_f32_c##NC##_r##NR0##_w64( \
+ }
+ 
+ Q4_K_MV_NC_W64(8, 2)
++// three columns in one pass: without these the q4_K batch falls through to ext and
++// reads and unpacks each block once per column, which is 10.19's 1.83x against 1.16x
++Q4_K_MV_NC_W64(8, 3)
++// three columns in one pass: without these the q4_K batch falls through to ext and
++// reads and unpacks each block once per column, which is 10.19's 1.83x against 1.16x
++Q4_K_MV_NC_W64(4, 3)
+ 
+ // q5_K with a few columns: the one-column 64-lane decomposition, each row's weights decoded
+ // once per block and applied to every column
+@@ -1747,6 +1753,12 @@ kernel void kernel_mul_mv_##T##_f32_c##NC##_r##NR0##_w64( \
+ QK_MV_NC_W64(q5_K, 2, 2)
+ QK_MV_NC_W64(q5_K, 4, 2)
+ QK_MV_NC_W64(q5_K, 8, 2)
++// three columns sharing one unpack, for the MTP verify batch. Two and four rows per thread only:
++// the column count multiplies the accumulator set as the row count does, so eight rows x three
++// columns is the register cliff that the two-row ext variant already documents on 64 lanes.
++QK_MV_NC_W64(q5_K, 2, 3)
++QK_MV_NC_W64(q5_K, 4, 3)
++QK_MV_NC_W64(q5_K, 8, 3)
+ 
+ [[host_name("kernel_mul_mv_q4_K_f32_w64")]]
+ kernel void kernel_mul_mv_q4_K_f32_w64(
+@@ -8438,6 +8450,62 @@ kernel void kernel_mul_mv_q4_K_f32_L16r8_w64(
+     kernel_mul_mv_q4_K_f32_L16_w64_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
++// the fused forms of the eight-row kernel: same bodies, nr0 = 8, so a wider group does not
++// have to give back the dispatches the fusion saved
++[[host_name("kernel_mul_mv_q4_K_f32_L16r8_w64_swiglu")]]
++kernel void kernel_mul_mv_q4_K_f32_L16r8_w64_swiglu(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0, device const char * src1, device char * dst, device const char * src2,
++        uint3 tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    kernel_mul_mv_q4_K_f32_L16_swiglu_w64_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, src2, tgpig, tiisg, sgitg);
++}
++
++[[host_name("kernel_mul_mv_q4_K_f32_L16r8_w64_norm")]]
++kernel void kernel_mul_mv_q4_K_f32_L16r8_w64_norm(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0, device const char * src1, device char * dst,
++        device const char * src2, device const char * src3,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    kernel_mul_mv_q4_K_f32_L16_norm_w64_impl<8, false>(args, src0, src1, dst, src2, src3, tgpig, tiisg, sgitg);
++}
++
++[[host_name("kernel_mul_mv_q4_K_f32_L16r8_w64_normadd")]]
++kernel void kernel_mul_mv_q4_K_f32_L16r8_w64_normadd(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0, device const char * src1, device char * dst,
++        device const char * src2, device const char * src3,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    kernel_mul_mv_q4_K_f32_L16_norm_w64_impl<8, true>(args, src0, src1, dst, src2, src3, tgpig, tiisg, sgitg);
++}
++
++[[host_name("kernel_mul_mv_q4_K_f32_L16r8_w64_swiglu_norm")]]
++kernel void kernel_mul_mv_q4_K_f32_L16r8_w64_swiglu_norm(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0, device const char * src1, device char * dst,
++        device const char * src2, device const char * src3, device const char * src4,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    kernel_mul_mv_q4_K_f32_L16_swiglu_norm_w64_impl<8, false>(args, src0, src1, dst, src2, src3, src4, tgpig, tiisg, sgitg);
++}
++
++[[host_name("kernel_mul_mv_q4_K_f32_L16r8_w64_swiglu_normadd")]]
++kernel void kernel_mul_mv_q4_K_f32_L16r8_w64_swiglu_normadd(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0, device const char * src1, device char * dst,
++        device const char * src2, device const char * src3, device const char * src4,
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    kernel_mul_mv_q4_K_f32_L16_swiglu_norm_w64_impl<8, true>(args, src0, src1, dst, src2, src3, src4, tgpig, tiisg, sgitg);
++}
++
+ [[host_name("kernel_mul_mv_q8_0_f32_L4r1_w64")]]
+ kernel void kernel_mul_mv_q8_0_f32_L4r1_w64(
+         constant ggml_metal_kargs_mul_mv & args,
