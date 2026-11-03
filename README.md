@@ -39,6 +39,56 @@ Most local-LLM tools on macOS only target Apple Silicon. Intel Macs with discret
 
 It opens, detects your hardware, and recommends models that will actually run well — no guesswork.
 
+## Polaris performance work (RX 580 / `gfx803`) 🧪
+
+> ⚠️ **Trust me, bro — it works on *my* machine.** Everything on this line was measured on one
+> specific rig: an **AMD Radeon RX 580 (GCN 4 / `gfx803`, 36 CUs, 8 GB)** passed through to a
+> **macOS 12 Monterey** guest, running a hand-built engine off this branch. It has **not** been
+> reproduced on any other card, driver, macOS version, or host. Read this as one enthusiast's lab
+> notes on the least-validated part of the project — not a supported result. Do not expect these
+> numbers, and do not expect it not to break.
+
+The stock wave64 path already makes an RX 580 usable — a tester measured a K-quant model go from
+**1.3 t/s (CPU decode) to ~51 t/s (GPU decode)**, coherent. What is below is *my* ongoing push on
+this exact card for **prompt processing (prefill)**, and it is the work furthest from done.
+
+Measured on `Ornith-1.5-9B-heretic-Q4_K_M`, this card only:
+
+| | before | now | my target |
+|---|---:|---:|---:|
+| Prefill (prompt processing) | 95.3 t/s | **~116–117 t/s** | 190 t/s ❌ not met |
+| Decode (generation) | — | **~23 t/s** | 28 t/s ❌ not met |
+
+The prefill gain is two changes to the tiled `mul_mm` matmul: **float accumulators** (worth **+22%**
+over half-accumulating on this ISA, which round-trips the product every step) and a **32-lane tile
+default** on the wide shapes. Both are real, but neither closes the gap to target.
+
+**What the profile actually shows.** The matmul sits at **~2.15 TFLOP/s** against this card's
+measured **5.54 TFLOP/s** fp32 ceiling; 190 t/s prefill would need **~2.92 TFLOP/s** on average. The
+limiter is not one bad shape and not the instruction stream — the *same* kernel already reaches
+**2.94 TFLOP/s** at `4096×4096` and falls to ~1.7 at `K=12288`, so the large-`K` tiles are what hurt.
+The binding constraint is **threadgroup memory (LDS)**: 8 KiB float panels let eight threadgroups
+share a compute unit, and every attempt to double occupancy by growing them collapses the tile
+(16 KiB halves the resident groups). For scale, the **identical silicon under Linux/RADV hits 201.7
+t/s pp512** — the handicap here is the Metal path, not the GPU.
+
+**A measurement trap worth warning about.** My own kernel harness was filling weights with a
+synthetic constant pattern, and that pattern ran the biggest shape **~25% faster** than real trained
+weights — which made the engine look ~34% slower than it actually is. After forcing the harness onto
+realistic weight magnitudes, **engine and harness agree within −1%…+5% on every shape**, and the
+harness now defaults to faithful data. Any "the engine is leaving N% on the table" figure before
+that correction was an artifact of the filler, not the machine.
+
+**Open, and maybe a dead end.** Porting the mainline kernel's **half-precision LDS panels** into this
+tile looked like a clean 2× (21.8 ms), but the output fingerprint proved it was reading the wrong
+rows; the *correct* load (two 4-wide reads) is numerically right and **slower** than float. The 2×
+was a mirage — a load that is both correct *and* a single wide LDS transaction is still unsolved.
+
+These are diagnostic knobs on my working build, not shipped settings: `TOSH_MM_SKIP=k:rows` disables
+one matmul bucket to bill its cost, and `TOSH_MM_LOG=1` prints each dispatch's shape. If and only if
+these numbers reproduce on hardware I do not own, they move up into the validated
+[research section](#research-amd-gpus-on-metal). Until then: **it works on my machine.**
+
 ## Features
 
 - **Native chat** — multiple persistent conversations, full Markdown with code-copy, regenerate, system prompt, live tokens/sec, file attachments, conversation forking and per-message metrics
