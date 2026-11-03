@@ -1996,6 +1996,8 @@ final class ServerController: ObservableObject {
             ? "memory=auto-plan (\(settings.executionMode), kv \(settings.autoKVMode))"
             : settings.manualFullGPU ? "memory=full-gpu (manual)"
             : "ncmoe=\(settings.ncmoe)"
+        // the plan sets the cache type itself, so the keys/values pickers would only mislead here
+        let kvLine = settings.usesAutoPlan ? "" : " ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV)"
         var gpuSel = settings.multiGPU ? "split-all" : (settings.gpuIndex >= 0 ? "index \(settings.gpuIndex)" : "default (macOS picks)")
         if settings.isSplitting { gpuSel += " · split-mode \(settings.effectiveSplitMode)" }
         if settings.tensorSplitDowngraded {
@@ -2009,7 +2011,7 @@ final class ServerController: ObservableObject {
          GPUs detected:
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
-         settings: ngl=\(settings.ngl) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn) ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV) cacheRAM=\(settings.cacheRAM)
+         settings: ngl=\(settings.ngl) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn)\(kvLine) cacheRAM=\(settings.cacheRAM)
          dflash : \(settings.routerMode ? "per-model router plan" : settings.dflashPlanSummary)
          env: \(envLine)
          args: \(redact(settings.arguments).joined(separator: " "))
