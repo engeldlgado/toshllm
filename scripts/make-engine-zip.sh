@@ -74,7 +74,8 @@ cat > "$STAGE/start.sh" <<'EOF'
 #!/bin/sh
 # Starts the ToshLLM engine with the settings the app applies on AMD GPUs.
 # Usage: ./start.sh /path/to/model.gguf [extra llama-server arguments]
-# Optional: CTX (context, default 8192), PORT (default 8080), NCMOE (MoE layers kept on the CPU).
+# Optional: CTX (context, default 8192), PORT (default 8080), NCMOE (MoE layers kept on the CPU),
+# EGPU=1 when the GPU is in an external enclosure.
 set -e
 cd "$(dirname "$0")"
 
@@ -87,6 +88,11 @@ shift
 
 # the AMD attention kernels are off unless asked for
 export TOSH_FA_AMD=1
+
+# the backend keeps an external GPU's weights in system memory, read over Thunderbolt on every step
+if [ "$EGPU" = "1" ]; then
+    export GGML_METAL_SHARED_BUFFERS_DISABLE=1
+fi
 
 # with experts on the CPU, prefetching them keeps prompt reading on the GPU path
 if [ -n "$NCMOE" ]; then
@@ -144,6 +150,9 @@ Requirements: an Intel Mac on macOS 12 or newer with a Metal GPU.
        NCMOE=20  ./start.sh model.gguf     keep the experts of the first 20 layers of a
                                            mixture-of-experts model in system RAM, for models
                                            larger than the memory of the card
+       EGPU=1    ./start.sh model.gguf     the GPU is in an external enclosure: keeps the model
+                                           in the card's memory instead of reading it over
+                                           Thunderbolt on every step
 
    Any other llama-server option can be added after the model path.
 
