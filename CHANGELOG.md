@@ -7,6 +7,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Images: a LoRA saved in bf16 works with Qwen-Image 2.1 instead of stopping the generation (#152).** The engine lacked the kernel for bf16 weights against the half-precision inputs Qwen-Image 2.1 uses.
 - **LLMs: the engine alone for macOS 12 can keep the model in an external GPU's memory.** `EGPU=1 ./start.sh model.gguf` does what the app does on its own for an eGPU; without it the model was read over Thunderbolt on every step.
 
 ## [0.87.32] - 2026-11-02
