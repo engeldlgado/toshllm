@@ -14,9 +14,13 @@ repetitions on a quiet, warmed card:
 | **this branch** | **167.5** | **26.67** |
 | same card, Linux/RADV, official llama.cpp | 206.6 | 29.20 |
 
-Build it from `vendor/llama.cpp` (`make -C build-static llama-server`); read
-`patches/llama/metal/0052-*.patch` for what the engine carries, and the note in the commit that
-introduced it for the one series defect still open.
+`./scripts/build-engines.sh` is the whole build: it resets `vendor/llama.cpp` to the pinned commit,
+applies the engine series, and compiles. Nothing has to be exported first — on this host it reads
+AVX2 off the CPU and the deployment floor off the OS, which is what selects the SSE4.2 engine and the
+Polaris paths in it (`TOSH_NO_AVX2`/`DEPLOYMENT_TARGET` still override). Read
+`patches/llama/metal/0082-*.patch` for what the engine carries, and `patches/README.md` for the rule
+that keeps a fork's patches applying after upstream's — the series is ordered by file name alone, so
+a number that collides with an upstream one silently interleaves the two.
 
 ## Polaris performance work (RX 580 / `gfx803`) 🧪
 
