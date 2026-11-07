@@ -841,11 +841,13 @@ struct ServerSettings {
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/llama-server").path {
             candidates.append(bundled)
         }
-        // dev checkout: the engine this repo's own build scripts produce
+        // dev checkout: the engine this repo's own build scripts produce. It is not under the repo
+        // root - build-engines.sh compiles the vendor clone, so a candidate without
+        // vendor/llama.cpp in it never exists and the search silently falls through.
         let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
                                  .deletingLastPathComponent().deletingLastPathComponent().path
-        candidates.append(repoRoot + "/build-static/bin/llama-server")
-        candidates.append(NSString(string: "~/Downloads/rxllm/toshllm/build-static/bin/llama-server").expandingTildeInPath)
+        candidates.append(repoRoot + "/vendor/llama.cpp/build-static/bin/llama-server")
+        candidates.append(NSString(string: "~/Downloads/rxllm/toshllm/vendor/llama.cpp/build-static/bin/llama-server").expandingTildeInPath)
         // installed tuned engine, shared by all users of this machine
         candidates.append("/usr/local/lib/toshllm/llama-server")
         // last resort: a stock local build, so the app still runs on a machine with none of the above
