@@ -229,27 +229,35 @@ final class SearchStore: ObservableObject {
             .filter { headerMoE[$0] == nil }
         guard !pending.isEmpty else { return }
 
-        await withTaskGroup(of: (String, Bool?).self) { group in
+        // Results come back through the group's return value: writing @Published state
+        // inside the group closure is an isolation hop Swift 5.7 will not accept.
+        let moeHits = await withTaskGroup(of: (String, Bool?).self, returning: [(String, Bool)].self) { group -> [(String, Bool)] in
             for url in pending {
                 group.addTask { (url, await Self.probeMoE(urlString: url)) }
             }
+            var hits: [(String, Bool)] = []
             for await (url, moe) in group {
-                if let moe { headerMoE[url] = moe }
+                if let moe { hits.append((url, moe)) }
             }
+            return hits
         }
+        for (url, moe) in moeHits { headerMoE[url] = moe }
 
         // the size alone puts a large MoE's dense part and on-demand tables in RAM with its experts
         let large = files.filter { isMoE(repo: repo, file: $0) && $0.sizeBytes >= 8 << 30 }
             .filter { headerSplit[downloadURL(repo: repo, file: $0.path)] == nil }
-        await withTaskGroup(of: (String, GGUFWeightSplit?).self) { group in
+        let splitHits = await withTaskGroup(of: (String, GGUFWeightSplit?).self, returning: [(String, GGUFWeightSplit)].self) { group -> [(String, GGUFWeightSplit)] in
             for file in large {
                 let parts = file.paths.map { downloadURL(repo: repo, file: $0) }
                 group.addTask { (parts[0], await Self.probeSplit(urls: parts)) }
             }
+            var hits: [(String, GGUFWeightSplit)] = []
             for await (url, split) in group {
-                if let split { headerSplit[url] = split }
+                if let split { hits.append((url, split)) }
             }
+            return hits
         }
+        for (url, split) in splitHits { headerSplit[url] = split }
     }
 
     nonisolated private static func probeSplit(urls: [String]) async -> GGUFWeightSplit? {

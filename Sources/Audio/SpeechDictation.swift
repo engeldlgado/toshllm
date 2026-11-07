@@ -112,7 +112,7 @@ final class SpeechDictationController: ObservableObject {
         converter.terminationHandler = { [weak self] completed in
             let data = diagnostics.fileHandleForReading.readDataToEndOfFile()
             let details = String(data: data, encoding: .utf8) ?? ""
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.transcriptionID == runID else { return }
                 self.process = nil
                 guard completed.terminationStatus == 0 else {
@@ -211,8 +211,9 @@ final class SpeechDictationController: ObservableObject {
         p.terminationHandler = { [weak self] completed in
             let data = diagnostics.fileHandleForReading.readDataToEndOfFile()
             let details = String(data: data, encoding: .utf8) ?? ""
+            let owner = self
             Task { @MainActor in
-                self?.finish(runID: runID, status: completed.terminationStatus, diagnostics: details)
+                owner?.finish(runID: runID, status: completed.terminationStatus, diagnostics: details)
             }
         }
 
@@ -321,7 +322,7 @@ final class SpeechDictationController: ObservableObject {
                 AppLog.speech.debug("Whisper service: \(line, privacy: .public)")
             }
             server.terminationHandler = { [weak self] _ in
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
                     guard let self, self.serverProcess === server else { return }
                     self.serverProcess = nil
                     self.serverModelURL = nil
@@ -384,8 +385,9 @@ final class SpeechDictationController: ObservableObject {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         inferenceTask = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            let owner = self
             Task { @MainActor in
-                self?.finishServer(runID: runID, data: data, response: response, error: error)
+                owner?.finishServer(runID: runID, data: data, response: response, error: error)
             }
         }
         inferenceTask?.resume()

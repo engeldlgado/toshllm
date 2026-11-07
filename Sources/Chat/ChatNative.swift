@@ -421,11 +421,11 @@ private struct AgentRunContext {
 final class ChatStore: ObservableObject {
     nonisolated static func reasoningBudget(for effort: String) -> Int? {
         switch effort {
-        case "minimal": 128
-        case "low": 512
-        case "medium": 2_048
-        case "high": 8_192
-        default: nil
+        case "minimal": return 128
+        case "low": return 512
+        case "medium": return 2_048
+        case "high": return 8_192
+        default: return nil
         }
     }
     private static var configuredAgentTurnLimit: Int {
@@ -613,7 +613,8 @@ final class ChatStore: ObservableObject {
         // A fresh engine has empty KV slots: forget which conversation slot 0
         // held, so the next turn restores the active one's persisted cache.
         NotificationCenter.default.addObserver(forName: .engineDidStart, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.slotConvID = nil }
+            let owner = self
+            Task { @MainActor in owner?.slotConvID = nil }
         }
     }
 
@@ -929,26 +930,34 @@ final class ChatStore: ObservableObject {
         let clientToolsAgent = EngineExtensions.active().contains(where: \.agentTakesClientTools)
         let agentAllowed = (agentRun == nil || clientToolsAgent && agentRun?.instruction == nil && agentRun?.finalizing != true)
             && continuationInstruction == nil && !Self.serverAgentMissing && !agentDeclined
-        var history = Self.requestHistory(system: systemWithCwd,
-                                          summary: conversations[i].summary,
-                                          messages: conversations[i].messages,
-                                          from: conversations[i].summarizedCount ?? 0,
-                                          archived: conversations[i].archived,
-                                          modalities: modalities, kept: conversations[i].kept,
-                                          trimBefore: Self.trimStart(conversations[i], limit: Self.contextLimitSetting(),
-                                                                     toolTokens: toolTokens))
-        if let note = continuationInstruction ?? agentRun?.instruction ?? (holdText ? MathGrounding.standingNote : nil) {
-            history.append(["role": "user", "content": note])
-        }
+        // let, not var: the request task below captures these and Swift 5.7 rejects
+        // a mutable local crossing into concurrently-executing code.
+        let history: [[String: Any]] = {
+            var h = Self.requestHistory(system: systemWithCwd,
+                                        summary: conversations[i].summary,
+                                        messages: conversations[i].messages,
+                                        from: conversations[i].summarizedCount ?? 0,
+                                        archived: conversations[i].archived,
+                                        modalities: modalities, kept: conversations[i].kept,
+                                        trimBefore: Self.trimStart(conversations[i], limit: Self.contextLimitSetting(),
+                                                                   toolTokens: toolTokens))
+            if let note = continuationInstruction ?? agentRun?.instruction ?? (holdText ? MathGrounding.standingNote : nil) {
+                h.append(["role": "user", "content": note])
+            }
+            return h
+        }()
 
         // Reasoning off can come from the toggle or a typed /no_think; a typed
         // switch overrides the toggle for this turn.
-        var reasoningOff = !thinking || sampling.reasoningEffort == "off"
-        if let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
-            let typed = Self.messageText(history[last]["content"])
-            if typed.contains("/no_think") { reasoningOff = true }
-            else if typed.contains("/think") { reasoningOff = false }
-        }
+        let reasoningOff: Bool = {
+            var off = !thinking || sampling.reasoningEffort == "off"
+            if let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
+                let typed = Self.messageText(history[last]["content"])
+                if typed.contains("/no_think") { off = true }
+                else if typed.contains("/think") { off = false }
+            }
+            return off
+        }()
 
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
 
@@ -966,7 +975,7 @@ final class ChatStore: ObservableObject {
                 self?.noteStreamActivity(text: !prefilling)
                 let n = snap.visible.count
                 let ms = n > 12000 ? 600 : n > 6000 ? 350 : n > 2500 ? 180 : 80
-                try? await Task.sleep(for: .milliseconds(ms))
+                try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
             }
         }
 
@@ -2506,7 +2515,8 @@ final class ChatStore: ObservableObject {
             if let key = ServerSettings.activeAPIKey() {
                 req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
             }
-            Task.detached { _ = try? await URLSession.shared.data(for: req) }
+            let stopReq = req
+            Task.detached { _ = try? await URLSession.shared.data(for: stopReq) }
         }
     }
 
@@ -3001,14 +3011,14 @@ struct NativeChatView: View {
 
     private func reasoningEffortLabel(_ level: String) -> String {
         switch level {
-        case "none", "no_think": loc.t("Sin razonamiento", "No reasoning")
-        case "minimal": loc.t("Mínimo · sin presupuesto", "Minimal · no budget")
-        case "low": loc.t("Bajo · 512 tokens", "Low · 512 tokens")
-        case "medium": loc.t("Medio · 2.048 tokens", "Medium · 2,048 tokens")
-        case "high": loc.t("Alto · 8.192 tokens", "High · 8,192 tokens")
-        case "xhigh": loc.t("Muy alto · sin presupuesto", "Very high · no budget")
-        case "max": loc.t("Máximo · sin presupuesto", "Maximum · no budget")
-        default: level
+        case "none", "no_think": return loc.t("Sin razonamiento", "No reasoning")
+        case "minimal": return loc.t("Mínimo · sin presupuesto", "Minimal · no budget")
+        case "low": return loc.t("Bajo · 512 tokens", "Low · 512 tokens")
+        case "medium": return loc.t("Medio · 2.048 tokens", "Medium · 2,048 tokens")
+        case "high": return loc.t("Alto · 8.192 tokens", "High · 8,192 tokens")
+        case "xhigh": return loc.t("Muy alto · sin presupuesto", "Very high · no budget")
+        case "max": return loc.t("Máximo · sin presupuesto", "Maximum · no budget")
+        default: return level
         }
     }
 
@@ -3212,17 +3222,17 @@ struct NativeChatView: View {
                         .lineLimit(1)
                 }
                 .font(.caption.weight(.medium))
-                .foregroundStyle(missing ? AnyShapeStyle(.red)
-                                 : own == nil && active != nil ? AnyShapeStyle(.tertiary)
-                                 : AnyShapeStyle(.secondary))
+                .foregroundStyle(missing ? ToshShape(.red)
+                                 : own == nil && active != nil ? ToshStyle.tertiary
+                                 : ToshStyle.secondary)
                 .padding(.horizontal, 10).padding(.vertical, 4)
                 .glassSurface(in: Capsule(), interactive: true)
                 .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
                 .contentShape(Capsule())
             }
-            .menuStyle(.button).buttonStyle(.plain)
+            .menuStyle(.borderlessButton).buttonStyle(.plain)
             .menuIndicator(.hidden).fixedSize()
-            .tint(.secondary)
+            .tint(ToshStyle.secondary)
             .help(missing
                   ? loc.t("La carpeta ya no existe: las herramientas fallarán hasta que elijas otra.",
                           "That folder no longer exists: the tools will fail until you pick another.")
@@ -3271,9 +3281,9 @@ struct NativeChatView: View {
                     .overlay(Capsule().strokeBorder(.primary.opacity(0.07)))
                     .contentShape(Capsule())
                 }
-                .menuStyle(.button).buttonStyle(.plain)
+                .menuStyle(.borderlessButton).buttonStyle(.plain)
                 .menuIndicator(.hidden).fixedSize()
-                .tint(.secondary)
+                .tint(ToshStyle.secondary)
                 .help(loc.t("Proyecto de esta conversación.", "This conversation's project."))
             }
             TextField(loc.t("Título de la conversación", "Conversation title"),
@@ -3308,7 +3318,7 @@ struct NativeChatView: View {
                     Label("\(position.index)/\(position.count)", systemImage: "arrow.triangle.branch")
                         .font(.caption)
                 }
-                .menuStyle(.button)
+                .menuStyle(.borderlessButton)
                 .help(loc.t("Cambiar entre respuestas y ediciones alternativas sin salir del chat.",
                             "Switch between alternate responses and edits without leaving the chat."))
             }
@@ -3877,8 +3887,8 @@ struct NativeChatView: View {
                 Text(own ?? inherited ?? loc.t("Sin carpeta", "None"))
                     .font(.system(size: 11, design: .monospaced))
                     .lineLimit(1).truncationMode(.head)
-                    .foregroundStyle(directoryIsMissing(own ?? inherited) ? AnyShapeStyle(.red)
-                                     : own == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    .foregroundStyle(directoryIsMissing(own ?? inherited) ? ToshShape(.red)
+                                     : own == nil ? ToshStyle.secondary : ToshStyle.primary)
                 Spacer()
                 if own == nil, inherited != nil {
                     Text(loc.t("del proyecto", "from project"))
@@ -3936,6 +3946,7 @@ struct NativeChatView: View {
 
             modalityBadges
 
+            Group {
             Divider()
 
             workingDirectoryRow
@@ -3966,7 +3977,7 @@ struct NativeChatView: View {
             }
 
             HStack(spacing: 8) {
-                Label(loc.t("Creatividad", "Creativity"), systemImage: "dial.medium")
+                Label(loc.t("Creatividad", "Creativity"), systemImage: "dial.max")
                 Slider(value: $temperature, in: 0...1.5)
                 Text(String(format: "%.2f", temperature))
                     .font(.system(.caption, design: .monospaced))
@@ -3979,7 +3990,7 @@ struct NativeChatView: View {
                 ForEach(maxTokenOptions, id: \.self) { Text($0.formatted()).tag($0) }
             } label: {
                 Label(loc.t("Tokens de respuesta", "Response tokens"),
-                      systemImage: "text.line.last.and.arrowtriangle.forward")
+                      systemImage: "text.append")
             }
             .infoTip(loc.t("Máximo de tokens que el modelo puede generar en este turno, incluyendo razonamiento y respuesta visible. No aumenta el contexto. Recomendado: 2.048–4.096.",
                         "Maximum tokens the model may generate this turn, including reasoning and visible answer. It does not increase context. Recommended: 2,048–4,096."))
@@ -3989,9 +4000,11 @@ struct NativeChatView: View {
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
+            }
 
-            if false { DisclosureGroup {
+            DisclosureGroup {
                 VStack(alignment: .leading, spacing: 10) {
+                    Group {
                     samplingSlider(loc.t("Top P", "Top P"), value: $topP, range: 0...1)
                     samplingSlider(loc.t("Min P", "Min P"), value: $minP, range: 0...1)
                     samplingSlider(loc.t("Typical P", "Typical P"), value: $typicalP, range: 0...1)
@@ -4008,6 +4021,8 @@ struct NativeChatView: View {
                         parameterValue(loc.t("Ventana de repetición", "Repeat window"),
                                        value: repeatLastN.formatted())
                     }
+                    }
+                    Group {
                     HStack {
                         Text(loc.t("Semilla", "Seed"))
                         Spacer()
@@ -4056,6 +4071,8 @@ struct NativeChatView: View {
                                            ? loc.t("Desactivado", "Off")
                                            : pasteLongTextLength.formatted())
                     }
+                    }
+                    Group {
                     HStack {
                         Text(loc.t("Máximo de imagen (MP)", "Maximum image size (MP)"))
                         Spacer()
@@ -4072,6 +4089,7 @@ struct NativeChatView: View {
                         Text(loc.t("Las claves válidas reemplazan los parámetros anteriores para esta petición.",
                                    "Valid keys override the parameters above for this request."))
                             .font(.caption2).foregroundStyle(.secondary)
+                    }
                     }
                     Button(loc.t("Restaurar muestreo", "Reset sampling"),
                            systemImage: "arrow.counterclockwise") {
@@ -4106,9 +4124,10 @@ struct NativeChatView: View {
                 .padding(.top, 8)
             } label: {
                 Label(loc.t("Muestreo avanzado", "Advanced sampling"),
-                      systemImage: "slider.horizontal.2.square")
+                      systemImage: "slider.horizontal.3")
             }
 
+            Group {
             Divider()
 
             Label(loc.t("Prompt de sistema global", "Global system prompt"), systemImage: "gearshape")
@@ -4274,7 +4293,7 @@ struct NativeChatView: View {
                 Text(loc.t("Bajo demanda", "On demand")).tag(WhisperLoadPolicy.onDemand.rawValue)
                 Text(loc.t("Siempre cargado", "Always loaded")).tag(WhisperLoadPolicy.alwaysLoaded.rawValue)
             }
-            Menu(loc.t("Modelo Whisper", "Whisper model"), systemImage: "waveform.badge.magnifyingglass") {
+            Menu(loc.t("Modelo Whisper", "Whisper model"), systemImage: "waveform.path") {
                 Picker(loc.t("Modelo Whisper", "Whisper model"), selection: $whisperModelID) {
                     ForEach(WhisperModel.catalog) { model in
                         Text("\(model.name) · \(model.sizeMB) MB").tag(model.id)
@@ -4591,7 +4610,7 @@ struct NativeChatView: View {
     private func modalityBadge(_ title: String, icon: String, enabled: Bool) -> some View {
         Label(title, systemImage: icon)
             .font(.caption2.weight(.medium))
-            .foregroundStyle(enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+            .foregroundStyle(enabled ? ToshStyle.primary : ToshStyle.tertiary)
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background((enabled ? Color.accentColor : Color.secondary).opacity(enabled ? 0.14 : 0.07),
                         in: Capsule())
@@ -5280,7 +5299,7 @@ struct ConversationListView: View {
                         .foregroundStyle(.secondary)
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden)
-                .tint(.secondary)
+                .tint(ToshStyle.secondary)
                 .frame(width: 28, height: 28)
                 .glassSurface(in: Circle(), interactive: true)
                 .overlay(Circle().strokeBorder(.primary.opacity(0.07)))
@@ -5465,8 +5484,8 @@ struct ConversationListView: View {
                  : sortOrder.label(loc))
                 .font(.caption)
                 .foregroundStyle(ungroupedDropIsTargeted
-                                 ? AnyShapeStyle(Color.appAccent)
-                                 : AnyShapeStyle(.tertiary))
+                                 ? ToshShape(Color.appAccent)
+                                 : ToshStyle.tertiary)
         }
         .padding(.vertical, 3)
         .contentShape(Rectangle())
@@ -5642,8 +5661,8 @@ struct ConversationListView: View {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(hoveredConversationID == c.id || chat.currentID == c.id
-                                 ? AnyShapeStyle(Color.appAccent)
-                                 : AnyShapeStyle(.quaternary))
+                                 ? ToshShape(Color.appAccent)
+                                 : ToshStyle.quaternary)
                 .frame(width: 18, height: 26)
                 .help(loc.t("Puedes arrastrar toda la fila a un proyecto.",
                             "You can drag the entire row into a project."))
@@ -5675,8 +5694,9 @@ struct ConversationListView: View {
         .padding(.trailing, 6)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(.interaction, RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 8, style: .continuous))
+        // One shape for both purposes: macOS 12 has no drag-preview content shape, and
+        // this row gave the hit region and the preview the same rounded rect.
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture { chat.currentID = c.id }
         .onHover { inside in
             if inside {

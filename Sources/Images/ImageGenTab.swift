@@ -173,7 +173,7 @@ struct ImageControls: View {
                           ? upscaler.queued[0].lastPathComponent
                           : loc.t("%@ imágenes seleccionadas", "%@ images selected",
                                   "\(upscaler.queued.count)"),
-                          systemImage: upscaler.queued.count == 1 ? "photo" : "photo.stack")
+                          systemImage: upscaler.queued.count == 1 ? "photo" : "rectangle.stack")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2).truncationMode(.middle)
@@ -478,7 +478,7 @@ struct QueueFeedView: View {
                         if !pool.gallery.isEmpty {
                             queueSectionTitle(loc.t("Resultados", "Results"),
                                               count: pool.gallery.count,
-                                              icon: "photo.stack")
+                                              icon: "rectangle.stack")
                             if grid {
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 460), spacing: 12)],
                                           alignment: .leading, spacing: 12) {
@@ -579,7 +579,7 @@ struct QueueFeedView: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Color.appAccent)
             } else {
-                Label(loc.t("%@ resultados", "%@ results", "\(pool.gallery.count)"), systemImage: "photo.stack")
+                Label(loc.t("%@ resultados", "%@ results", "\(pool.gallery.count)"), systemImage: "rectangle.stack")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
             }
@@ -1166,7 +1166,7 @@ struct ImageInstanceForm: View {
             if cfg.referenceImagePaths.count < model.maxReferenceImages {
                 Button {
                     pickFile(types: ["png", "jpg", "jpeg", "webp"]) { cfg.referenceImagePaths.append($0) }
-                } label: { Label(loc.t("Añadir referencia…", "Add reference…"), systemImage: "photo.badge.plus") }
+                } label: { Label(loc.t("Añadir referencia…", "Add reference…"), systemImage: "rectangle.badge.plus") }
                     .font(.caption).help(tip)
             }
         }
@@ -1371,7 +1371,7 @@ struct ImageInstanceForm: View {
     private var nearLimitNote: some View {
         Label(loc.t("Cerca del límite de VRAM. Si hay tirones o un crash, baja el tamaño.",
                     "Near the VRAM limit. If it freezes or crashes, lower the size."),
-              systemImage: "gauge.with.dots.needle.67percent")
+              systemImage: "speedometer")
             .font(.caption).foregroundStyle(.yellow)
             .padding(10).frame(maxWidth: .infinity, alignment: .leading)
             .background(.yellow.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
@@ -1506,7 +1506,7 @@ private struct ImageGenerationThumbnail: View {
                             .transition(.opacity)
                     } else {
                         WorkspaceStyle.surface
-                        Image(systemName: "photo.badge.clock")
+                        Image(systemName: "clock")
                             .font(.system(size: 30, weight: .light))
                             .foregroundStyle(.tertiary)
                     }
@@ -2005,7 +2005,7 @@ struct ImageCanvas: View {
                     .transition(.opacity)
             } else {
                 VStack(spacing: 12) {
-                    Image(systemName: "photo.badge.clock")
+                    Image(systemName: "clock")
                         .font(.system(size: 42, weight: .light))
                         .foregroundStyle(.tertiary)
                     Text(loc.t("Preparando el lienzo…", "Preparing the canvas…"))

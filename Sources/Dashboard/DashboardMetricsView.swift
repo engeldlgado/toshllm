@@ -12,10 +12,11 @@ struct DashboardMetricsView: View {
     @State private var gpuHistory: [Double] = []
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
+        ToshAdaptive(minWidth: 830) {
             HStack(spacing: 14) {
                 metricCards
             }
+        } narrow: {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 3), spacing: 14) {
                 metricCards
             }

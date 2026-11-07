@@ -4,7 +4,6 @@
 
 import AppKit
 import SwiftUI
-import Charts
 
 // MARK: - Benchmarks
 
@@ -227,23 +226,11 @@ struct BenchmarksView: View {
                 }
              }) {
             VStack(alignment: .leading, spacing: 12) {
-                // Not ViewThatFits: measuring the model pop-up rebuilds its menu and asks for
-                // another layout, endlessly. AnyLayout keeps the fields' identity across the switch.
-                let outer = configFieldsWide ? AnyLayout(HStackLayout(alignment: .top, spacing: 0))
-                                             : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
-                outer {
-                    compactModelField.frame(minWidth: configFieldsWide ? 260 : nil, maxWidth: .infinity)
-                    HStack(alignment: .top, spacing: configFieldsWide ? 0 : 14) {
-                        if configFieldsWide { compactDivider }
-                        compactProfileField.frame(width: configFieldsWide ? 220 : nil)
-                        if configFieldsWide { compactDivider }
-                        compactGPUField.frame(width: configFieldsWide ? 220 : nil)
-                    }
-                }
-                .onGeometryChange(for: Bool.self) { $0.size.width >= 760 } action: { configFieldsWide = $0 }
-                .disabled(busy)
+                configFieldsRow
+                    .onGeometryChange(for: Bool.self) { $0.size.width >= 760 } action: { configFieldsWide = $0 }
+                    .disabled(busy)
 
-                BenchmarkWrappingLayout(spacing: 6) {
+                ToshFlowLayout(spacing: 6) {
                     chip("pp\(cfg.benchPPClamped)/tg\(cfg.benchTGClamped)",
                          active: cfg.benchPPClamped != 512 || cfg.benchTGClamped != 128)
                     if cfg.benchDepthClamped > 0 {
@@ -284,6 +271,31 @@ struct BenchmarksView: View {
                     }
                 }
                 statusNote
+            }
+        }
+    }
+
+    // Not ViewThatFits: measuring the model pop-up rebuilds its menu and asks for
+    // another layout, endlessly. The container is chosen from measured width only.
+    // Its own property so the width measurement type-checks apart from the card.
+    @ViewBuilder private var configFieldsRow: some View {
+        if configFieldsWide {
+            HStack(alignment: .top, spacing: 0) {
+                compactModelField.frame(minWidth: 260, maxWidth: .infinity)
+                HStack(alignment: .top, spacing: 0) {
+                    compactDivider
+                    compactProfileField.frame(width: 220)
+                    compactDivider
+                    compactGPUField.frame(width: 220)
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                compactModelField.frame(maxWidth: .infinity)
+                HStack(alignment: .top, spacing: 14) {
+                    compactProfileField
+                    compactGPUField
+                }
             }
         }
     }
@@ -435,7 +447,7 @@ struct BenchmarksView: View {
     }
 
     private var runCard: some View {
-        Card(title: loc.t("Laboratorio de rendimiento", "Performance lab"), icon: "gauge.with.needle",
+        Card(title: loc.t("Laboratorio de rendimiento", "Performance lab"), icon: "speedometer",
             trailing: { cardAccessories }) {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -622,9 +634,10 @@ struct BenchmarksView: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 4) {
                 Text(title.uppercased())
+                    .tracking(0.5)
                 Text(flag).foregroundStyle(.tertiary)
             }
-            .font(.system(size: 9, weight: .semibold)).tracking(0.5).foregroundStyle(.secondary)
+            .font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
             BenchmarkIntegerField(value: value, pointSize: 15)
                 .padding(.horizontal, 9).padding(.vertical, 7)
                 .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 8))
@@ -751,7 +764,7 @@ struct BenchmarksView: View {
         }
         .font(.system(size: 10.5, design: .monospaced))
         .padding(.horizontal, 7).padding(.vertical, 2)
-        .background(active ? AnyShapeStyle(Color.appAccent.opacity(0.18)) : AnyShapeStyle(.quaternary.opacity(0.5)),
+        .background(active ? ToshShape(Color.appAccent.opacity(0.18)) : ToshStyle.quaternary.toshOpacity(0.5),
                     in: Capsule())
         .foregroundStyle(active ? Color.appAccent : .secondary)
     }
@@ -776,7 +789,7 @@ struct BenchmarksView: View {
                 systemFact("display", hardware.bestGPU?.name ?? "GPU",
                            hardware.bestGPU.map { "\($0.vramGB) GB VRAM" } ?? "—")
                 systemDivider
-                systemFact("apple.logo", hardware.osVersion, hardware.model)
+                systemFact("macwindow", hardware.osVersion, hardware.model)
                 systemDivider
                 systemFact("bolt.fill", "Metal", faChipText(cfg.benchmarkFlashAttentionRoute))
             }
@@ -1039,6 +1052,7 @@ struct BenchmarksView: View {
     private func benchmarkChart(title: String, points: [BenchResult],
                                 value: KeyPath<BenchResult, Double>, color: Color) -> some View {
         let average = points.isEmpty ? 0 : points.reduce(0) { $0 + $1[keyPath: value] } / Double(points.count)
+        let peak = max(points.map { $0[keyPath: value] }.max() ?? 1, 1)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Circle().fill(color).frame(width: 8, height: 8)
@@ -1047,18 +1061,16 @@ struct BenchmarksView: View {
                 Text(loc.t("Promedio %@ t/s", "Average %@ t/s", String(format: "%.1f", average)))
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Chart(points) { result in
-                LineMark(x: .value("Date", result.date),
-                         y: .value(title, result[keyPath: value]))
-                    .foregroundStyle(color)
-                    .interpolationMethod(.catmullRom)
-                PointMark(x: .value("Date", result.date),
-                          y: .value(title, result[keyPath: value]))
-                    .foregroundStyle(color)
-                    .symbolSize(18)
+            // No Charts framework on macOS 12: a proportional bar strip carries the
+            // same trend without the dependency.
+            HStack(alignment: .bottom, spacing: 3) {
+                ForEach(Array(points.enumerated()), id: \.offset) { _, result in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(color.opacity(0.75))
+                        .frame(height: max(3, 196 * CGFloat(result[keyPath: value] / peak)))
+                }
             }
-            .chartXAxis { AxisMarks(values: .automatic(desiredCount: 5)) }
-            .chartYAxis { AxisMarks(position: .leading) }
+            .frame(maxWidth: .infinity, alignment: .bottom)
             .frame(height: 220)
         }
         .padding(12).frame(maxWidth: .infinity)
@@ -1150,7 +1162,7 @@ struct BenchmarksView: View {
     private func quantChip(_ quant: String) -> some View {
         Text(quant)
             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(quant == "—" ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.appAccent))
+            .foregroundStyle(quant == "—" ? ToshStyle.tertiary : ToshShape(Color.appAccent))
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background((quant == "—" ? Color.secondary : Color.appAccent).opacity(0.12), in: Capsule())
             .help(quant == "—"
@@ -1216,52 +1228,6 @@ private extension View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .background(WorkspaceStyle.inset.opacity(0.52), in: RoundedRectangle(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(WorkspaceStyle.border))
-    }
-}
-
-/// A lightweight wrapping row for the effective configuration. Unlike a clipped
-/// HStack, every active benchmark option remains readable at narrow widths.
-private struct BenchmarkWrappingLayout: Layout {
-    let spacing: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
-                      cache: inout ()) -> CGSize {
-        let width = proposal.width ?? .infinity
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var usedWidth: CGFloat = 0
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > 0 && x + size.width > width {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            usedWidth = max(usedWidth, x + size.width)
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-        return CGSize(width: proposal.width ?? usedWidth, height: y + rowHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
-                       subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > bounds.minX && x + size.width > bounds.maxX {
-                x = bounds.minX
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading,
-                          proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
     }
 }
 
@@ -1552,9 +1518,9 @@ private struct HoverIconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(hovering ? AnyShapeStyle(tint) : AnyShapeStyle(.secondary))
+            .foregroundStyle(hovering ? ToshShape(tint) : ToshStyle.secondary)
             .frame(width: 26, height: 26)
-            .background(hovering ? AnyShapeStyle(tint.opacity(0.15)) : AnyShapeStyle(Color.clear),
+            .background(hovering ? ToshShape(tint.opacity(0.15)) : ToshShape(Color.clear),
                         in: RoundedRectangle(cornerRadius: 6))
             .scaleEffect(configuration.isPressed ? 0.88 : 1)
             .contentShape(Rectangle())
@@ -1589,7 +1555,7 @@ private struct BenchHistoryRow: View, Equatable {
                     Text(r.shortModel).font(.callout.weight(.medium))
                     Text(r.quantization)
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(r.quantization == "—" ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.appAccent))
+                        .foregroundStyle(r.quantization == "—" ? ToshStyle.tertiary : ToshShape(Color.appAccent))
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background((r.quantization == "—" ? Color.secondary : Color.appAccent).opacity(0.12),
                                     in: Capsule())

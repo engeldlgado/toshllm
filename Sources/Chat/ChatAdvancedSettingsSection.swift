@@ -106,14 +106,22 @@ struct ChatAdvancedSettingsSection: View {
             if destination == .general {
                 ChatSettingsGroup(title: loc.t("Prompt de sistema global", "Global system prompt")) {
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField(loc.t("Instrucciones permanentes para el modelo…",
-                                    "Permanent instructions for the model…"),
-                              text: $systemPrompt, axis: .vertical)
+                    TextEditor(text: $systemPrompt)
                         .font(.system(.body, design: .monospaced))
-                        .lineLimit(5...10)
                         .textFieldStyle(.plain)
+                        .frame(minHeight: 110, maxHeight: 220)
                         .padding(8)
                         .workspaceFieldSurface()
+                        .overlay(alignment: .topLeading) {
+                            if systemPrompt.isEmpty {
+                                Text(loc.t("Instrucciones permanentes para el modelo…",
+                                           "Permanent instructions for the model…"))
+                                    .font(.system(.body, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.leading, 11).padding(.top, 13)
+                                    .allowsHitTesting(false)
+                            }
+                        }
                     Text(loc.t("Se usa cuando la conversación y el proyecto no tienen un prompt propio.",
                                "Used when neither the conversation nor its project has its own prompt."))
                         .font(.caption).foregroundStyle(.secondary)
@@ -297,7 +305,7 @@ struct ChatAdvancedSettingsSection: View {
                                    help: loc.t("Caracteres de cada resultado de herramienta que llegan al modelo. Si se pasa, se envían el principio y el final con una nota de lo recortado; la tarjeta de la herramienta sigue mostrando el resultado entero. Evita que una página web o un listado grande llene el contexto. 0 lo envía entero.",
                                                "Characters of each tool result that reach the model. Longer results send the beginning and the end with a note of what was cut; the tool card still shows the whole result. Keeps one web page or large listing from filling the context. 0 sends it whole."))
                     if !blockedToolModels.isEmpty {
-                        SettingsRow(icon: "hammer.slash",
+                        SettingsRow(icon: "hammer",
                                     title: loc.t("Modelos sin herramientas", "Models without tools"),
                                     help: loc.t("Modelos que escribieron mal una llamada y el motor cortó la respuesta, así que dejaron de recibir herramientas. Quita uno de la lista para volver a ofrecérselas.",
                                                 "Models that wrote a call in the wrong shape, so the engine stopped the answer and they stopped receiving tools. Remove one to offer them again.")) {
@@ -375,7 +383,7 @@ struct ChatAdvancedSettingsSection: View {
                             SettingsToggle(isOn: $chatRoadRouteEnabled)
                         }
                     }
-                    SettingsRow(icon: "square.3.layers.3d",
+                    SettingsRow(icon: "square.stack.3d.up",
                                 title: loc.t("Estilo del mapa base", "Base map style"),
                                 help: loc.t("Dirección de un estilo de MapLibre (style.json) para el fondo de los mapas, en la app y en el chat web. Vacío usa OpenFreeMap por internet, y none dibuja un fondo liso sin conectarse. Las rutas por carretera se dibujan siempre sobre Apple Maps.",
                                             "Address of a MapLibre style (style.json) for the background of maps, in the app and in the web chat. Empty uses OpenFreeMap over the internet, and none draws a plain background without connecting. Road routes are always drawn on Apple Maps.")) {
@@ -432,14 +440,22 @@ struct ChatAdvancedSettingsSection: View {
             if destination == .advanced {
                 ChatSettingsGroup(title: loc.t("Petición personalizada", "Custom request")) {
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField(loc.t("Objeto JSON para reemplazar parámetros…",
-                                    "JSON object that overrides parameters…"),
-                              text: $customJSON, axis: .vertical)
+                    TextEditor(text: $customJSON)
                         .font(.system(.body, design: .monospaced))
-                        .lineLimit(5...10)
                         .textFieldStyle(.plain)
+                        .frame(minHeight: 110, maxHeight: 220)
                         .padding(8)
                         .workspaceFieldSurface()
+                        .overlay(alignment: .topLeading) {
+                            if customJSON.isEmpty {
+                                Text(loc.t("Objeto JSON para reemplazar parámetros…",
+                                           "JSON object that overrides parameters…"))
+                                    .font(.system(.body, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.leading, 11).padding(.top, 13)
+                                    .allowsHitTesting(false)
+                            }
+                        }
                     if customJSONInvalid {
                         Label(loc.t("JSON inválido: debe ser un objeto {…}. Se ignorará hasta corregirlo.",
                                     "Invalid JSON: it must be an object {…}. It will be ignored until fixed."),
@@ -492,7 +508,7 @@ struct ChatAdvancedSettingsSection: View {
     /// fields do not each stop at a different place.
     private static let controlColumn: CGFloat = 250
 
-    private func parameterSlider(_ title: String, icon: String = "dial.medium",
+    private func parameterSlider(_ title: String, icon: String = "dial.max",
                                  value: Binding<Double>,
                                  range: ClosedRange<Double>, help: String) -> some View {
         SettingsRow(icon: icon, title: title, help: help) {

@@ -17,15 +17,15 @@ enum AudioVADProfile: String, CaseIterable, Identifiable {
     var calibration: AudioVADCalibration {
         switch self {
         case .sensitive:
-            AudioVADCalibration(threshold: 0.35, minSpeechDurationMS: 150,
+            return AudioVADCalibration(threshold: 0.35, minSpeechDurationMS: 150,
                                 minSilenceDurationMS: 100, maxSpeechDurationSeconds: 30,
                                 speechPadMS: 140, samplesOverlap: 0.2)
         case .balanced, .custom:
-            AudioVADCalibration(threshold: 0.5, minSpeechDurationMS: 250,
+            return AudioVADCalibration(threshold: 0.5, minSpeechDurationMS: 250,
                                 minSilenceDurationMS: 100, maxSpeechDurationSeconds: 30,
                                 speechPadMS: 80, samplesOverlap: 0.1)
         case .strict:
-            AudioVADCalibration(threshold: 0.75, minSpeechDurationMS: 500,
+            return AudioVADCalibration(threshold: 0.75, minSpeechDurationMS: 500,
                                 minSilenceDurationMS: 250, maxSpeechDurationSeconds: 25,
                                 speechPadMS: 60, samplesOverlap: 0.05)
         }

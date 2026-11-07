@@ -27,9 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         source.resume()
         sigtermSource = source
+
+        MenuBarItemController.shared.start()
+        ControlWindow.register()
+        LiveWindowShots.runIfRequested()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        MenuBarItemController.shared.stop()
         ServerManager.shared.stopAllImmediately()
         SpeechDictationController.shared.shutdown()
         AppleSpeechDictationController.shared.shutdown()
@@ -78,6 +83,9 @@ struct ToshLLMApp: App {
     /// The chat font shortcuts already existed on hidden buttons, which made them
     /// undiscoverable and scene-local; they are AppStorage, so a command reaches them.
     @CommandsBuilder private var appCommands: some Commands {
+        // WindowGroup would otherwise own ⌘N as "New Window"; the chat view binds it
+        // to a new conversation.
+        CommandGroup(replacing: .newItem) {}
         CommandGroup(after: .toolbar) {
             Button(loc.t("Aumentar el texto del chat", "Increase chat text")) {
                 setFontScale(chatFontScale + ChatFont.step)
@@ -109,9 +117,9 @@ struct ToshLLMApp: App {
     }
 
     var body: some Scene {
-        // Main window: the chat. A single Window (not WindowGroup) keeps ⌘N
-        // for "new conversation" instead of "new window".
-        Window(AppInfo.name, id: "chat") {
+        // Main window: the chat. macOS 12 has no single-instance `Window`, so these
+        // are WindowGroups and "New Window" is removed to leave ⌘N for conversations.
+        WindowGroup(AppInfo.name, id: "chat") {
             ChatMainView()
                 .environmentObject(obj.server)
                 .environmentObject(obj.manager)
@@ -126,46 +134,18 @@ struct ToshLLMApp: App {
                 .environmentObject(obj.control)
                 .tint(AppTheme.accent(appAccentRaw))
                 .frame(minWidth: 760, minHeight: 540)
+                .toshWindowID("chat", size: CGSize(width: 1240, height: 820))
                 .task {
                     await obj.updates.check()
                     obj.updates.startPeriodicChecks()
                 }
         }
-        .defaultSize(width: 1240, height: 820)
-        .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unifiedCompact)
         .commands { appCommands }
 
-        Window(loc.t("Configuración", "Configuration"), id: "control") {
-            ControlPanelView()
-                .tint(AppTheme.accent(appAccentRaw))
-                .environmentObject(obj.server)
-                .environmentObject(obj.manager)
-                .environmentObject(obj.models)
-                .environmentObject(obj.vram)
-                .environmentObject(loc)
-                .environmentObject(obj.bench)
-                .environmentObject(obj.search)
-                .environmentObject(obj.profiles)
-                .environmentObject(obj.updates)
-                .environmentObject(obj.modelUpdates)
-                .environmentObject(obj.control)
-                .frame(minWidth: 980, minHeight: 640)
-        }
-        .defaultSize(width: 1080, height: 700)
-        .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unifiedCompact)
-
-        MenuBarExtra(isInserted: $menuBarIcon) {
-            MenuBarView()
-                .environmentObject(obj.server)
-                .environmentObject(obj.manager)
-                .environmentObject(loc)
-                .environmentObject(obj.vram)
-        } label: {
-            MenuBarLabel(server: obj.server, vram: obj.vram, loc: obj.loc)
-        }
-        .menuBarExtraStyle(.window)
+        // The configuration panel is not a scene here: macOS 12 never renders a second
+        // WindowGroup's content, so ControlWindow (AppKit) builds it on demand.
+        // MenuBarExtra is macOS 13 too; that panel lives in an NSStatusItem
+        // (MenuBarAppKit.swift), inserted or removed by SettingsKeys.menuBarIcon.
     }
 }
 

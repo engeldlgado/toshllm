@@ -177,7 +177,7 @@ struct AboutView: View {
 
     private var benefits: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 0), spacing: 0), count: 4), spacing: 0) {
-            AboutBenefit(icon: "shield.checkered", color: .pink,
+            AboutBenefit(icon: "lock.shield", color: .pink,
                          title: loc.t("100% local", "100% Local"),
                          detail: loc.t("Tus datos permanecen en tu equipo.", "Your data stays on your machine."))
             AboutBenefit(icon: "bolt.fill", color: .pink,
@@ -277,7 +277,7 @@ struct AboutView: View {
                 }
                 .padding(.top, -38)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], spacing: 10) {
-                    AboutSystemMetric(icon: "apple.logo", title: "macOS", value: hardware.osVersion)
+                    AboutSystemMetric(icon: "macwindow", title: "macOS", value: hardware.osVersion)
                     AboutSystemMetric(icon: "cpu", title: loc.t("Chip", "Chip"),
                                       value: hardware.arch == "arm64" ? "Apple Silicon" : "Intel Mac")
                     AboutSystemMetric(icon: "display", title: "GPU", value: hardware.bestGPU?.name ?? "—")

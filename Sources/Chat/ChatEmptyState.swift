@@ -17,7 +17,7 @@ struct ChatEmptyState: View {
     var body: some View {
         ContentUnavailableView {
             Label(loc.t("¿En qué puedo ayudarte?", "What can I help with?"),
-                  systemImage: "bubble.left.and.text.bubble.right")
+                  systemImage: "bubble.left.and.bubble.right")
         } description: {
             Text(loc.t("Todo se ejecuta en tu GPU, sin salir de tu equipo. Adjunta código, texto o PDF para preguntar sobre ellos.",
                        "Everything runs on your GPU, never leaving your machine. Attach code, text or PDF files to ask about them."))

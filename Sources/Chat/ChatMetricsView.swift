@@ -18,7 +18,7 @@ struct ChatMetricsView: View {
                       value: combined(tokens: timings.promptTokens,
                                       milliseconds: timings.promptMilliseconds,
                                       rate: timings.promptTokensPerSecond),
-                      icon: "book.pages")
+                      icon: "books.vertical")
             if let ttft = timings.timeToFirstTokenMilliseconds {
                 metricRow(loc.t("Primer token", "First token"),
                           value: ttft >= 1000 ? String(format: "%.2f s", ttft / 1000)

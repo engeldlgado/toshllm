@@ -25,12 +25,12 @@ struct AudioVADCalibrationView: View {
 
     private var calibration: AudioVADCalibration {
         if profile == .custom {
-            .custom(threshold: threshold, minSpeechDurationMS: minSpeechMS,
+            return .custom(threshold: threshold, minSpeechDurationMS: minSpeechMS,
                     minSilenceDurationMS: minSilenceMS,
                     maxSpeechDurationSeconds: maxSpeechSeconds,
                     speechPadMS: speechPadMS)
         } else {
-            profile.calibration
+            return profile.calibration
         }
     }
 
@@ -90,48 +90,48 @@ struct AudioVADCalibrationView: View {
     private var modeDescription: String {
         switch mode {
         case .disabled:
-            loc.t("Whisper procesa el audio completo, incluidos los silencios.",
+            return loc.t("Whisper procesa el audio completo, incluidos los silencios.",
                   "Whisper processes the complete audio, including silence.")
         case .standard:
-            loc.t("Silero VAD usa los valores predeterminados de Whisper.cpp, sin calibración añadida.",
+            return loc.t("Silero VAD usa los valores predeterminados de Whisper.cpp, sin calibración añadida.",
                   "Silero VAD uses Whisper.cpp defaults with no added calibration.")
         case .calibrated:
-            loc.t("ToshLLM ajusta la sensibilidad y los cortes de voz con el perfil elegido.",
+            return loc.t("ToshLLM ajusta la sensibilidad y los cortes de voz con el perfil elegido.",
                   "ToshLLM adjusts speech sensitivity and segmentation with the selected profile.")
         }
     }
 
     private func modeName(_ mode: AudioVADMode) -> String {
         switch mode {
-        case .disabled: loc.t("Desactivado", "Disabled")
-        case .standard: loc.t("Predeterminado de Whisper", "Whisper default")
-        case .calibrated: loc.t("Calibrado", "Calibrated")
+        case .disabled: return loc.t("Desactivado", "Disabled")
+        case .standard: return loc.t("Predeterminado de Whisper", "Whisper default")
+        case .calibrated: return loc.t("Calibrado", "Calibrated")
         }
     }
 
     private var profileDescription: String {
         switch profile {
         case .sensitive:
-            loc.t("Conserva voces suaves y fragmentos breves; puede aceptar más fondo.",
+            return loc.t("Conserva voces suaves y fragmentos breves; puede aceptar más fondo.",
                   "Keeps quiet voices and brief fragments; may accept more background speech.")
         case .balanced:
-            loc.t("Adecuado para reuniones y grabaciones limpias.",
+            return loc.t("Adecuado para reuniones y grabaciones limpias.",
                   "Suitable for meetings and clean recordings.")
         case .strict:
-            loc.t("Exige voz más clara y sostenida; no separa voces de fondo que sigan siendo inteligibles.",
+            return loc.t("Exige voz más clara y sostenida; no separa voces de fondo que sigan siendo inteligibles.",
                   "Requires clearer, sustained speech; it does not separate background voices that remain intelligible.")
         case .custom:
-            loc.t("Control manual de la detección y los cortes de voz.",
+            return loc.t("Control manual de la detección y los cortes de voz.",
                   "Manual control over speech detection and segmentation.")
         }
     }
 
     private func profileName(_ profile: AudioVADProfile) -> String {
         switch profile {
-        case .sensitive: loc.t("Sensible", "Sensitive")
-        case .balanced: loc.t("Equilibrado", "Balanced")
-        case .strict: loc.t("Estricto", "Strict")
-        case .custom: loc.t("Personalizado", "Custom")
+        case .sensitive: return loc.t("Sensible", "Sensitive")
+        case .balanced: return loc.t("Equilibrado", "Balanced")
+        case .strict: return loc.t("Estricto", "Strict")
+        case .custom: return loc.t("Personalizado", "Custom")
         }
     }
 

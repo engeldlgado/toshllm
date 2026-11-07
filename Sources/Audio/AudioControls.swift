@@ -141,12 +141,19 @@ struct AudioControls: View {
                     }
                     chatRequirement
                     translationModelControl
-                    TextField(loc.t("Glosario: término = traducción", "Glossary: term = translation"),
-                              text: $glossary, axis: .vertical)
+                    TextEditor(text: $glossary)
                         .textFieldStyle(.plain)
+                        .frame(minHeight: 52, maxHeight: 120)
                         .padding(8)
                         .workspaceFieldSurface()
-                        .lineLimit(2...5)
+                        .overlay(alignment: .topLeading) {
+                            if glossary.isEmpty {
+                                Text(loc.t("Glosario: término = traducción", "Glossary: term = translation"))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.leading, 11).padding(.top, 10)
+                                    .allowsHitTesting(false)
+                            }
+                        }
                         .help(loc.t("Fija nombres, marcas y términos, uno por línea, para mantenerlos iguales durante todo el vídeo.",
                                     "Pins names, brands and terminology, one per line, to keep them consistent throughout the video."))
                 } else if operation == .translateEnglish {
@@ -336,7 +343,7 @@ struct AudioControls: View {
         }
         if vadMode.isEnabled && models.whisperVADInstalled && studio.sourceURL != nil {
             Button(loc.t("Probar VAD en 30 segundos", "Preview VAD on 30 seconds"),
-                   systemImage: "waveform.badge.magnifyingglass", action: previewVAD)
+                   systemImage: "waveform.path", action: previewVAD)
                 .disabled(studio.isBusy)
                 .help(loc.t("Analiza una muestra sin reemplazar la transcripción existente.",
                             "Analyzes a sample without replacing the existing transcript."))
@@ -478,30 +485,30 @@ struct AudioControls: View {
 
     private var actionTitle: String {
         switch operation {
-        case .transcribe: loc.t("Crear subtítulos", "Create subtitles")
-        case .translateEnglish: loc.t("Transcribir y traducir", "Transcribe and translate")
-        case .translateLocal: loc.t("Transcribir y traducir", "Transcribe and translate")
+        case .transcribe: return loc.t("Crear subtítulos", "Create subtitles")
+        case .translateEnglish: return loc.t("Transcribir y traducir", "Transcribe and translate")
+        case .translateLocal: return loc.t("Transcribir y traducir", "Transcribe and translate")
         }
     }
 
     private var stageText: String {
         switch studio.stage {
-        case .preparing: loc.t("Preparando el audio…", "Preparing audio…")
-        case .analyzingVAD: loc.t("Analizando VAD…", "Analyzing VAD…")
-        case .transcribing: loc.t("Whisper está transcribiendo…", "Whisper is transcribing…")
+        case .preparing: return loc.t("Preparando el audio…", "Preparing audio…")
+        case .analyzingVAD: return loc.t("Analizando VAD…", "Analyzing VAD…")
+        case .transcribing: return loc.t("Whisper está transcribiendo…", "Whisper is transcribing…")
         case .translating:
-            loc.t("Traduciendo lote %@ de %@…", "Translating batch %@ of %@…", "\(studio.translatedBatchCount + 1)", "\(max(1, studio.translationBatchCount))")
-        default: ""
+            return loc.t("Traduciendo lote %@ de %@…", "Translating batch %@ of %@…", "\(studio.translatedBatchCount + 1)", "\(max(1, studio.translationBatchCount))")
+        default: return ""
         }
     }
 
     private var stageIcon: String {
         switch studio.stage {
-        case .preparing: "waveform.badge.magnifyingglass"
-        case .analyzingVAD: "waveform.badge.magnifyingglass"
-        case .transcribing: "captions.bubble"
-        case .translating: "character.bubble"
-        default: "circle"
+        case .preparing: return "waveform.path"
+        case .analyzingVAD: return "waveform.path"
+        case .transcribing: return "captions.bubble"
+        case .translating: return "character.bubble"
+        default: return "circle"
         }
     }
 

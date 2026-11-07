@@ -16,16 +16,10 @@ struct AdaptiveTwoUp<First: View, Second: View>: View {
     @State private var wide = true
 
     var body: some View {
-        if #available(macOS 15, *) {
-            stack.onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                wide = width >= threshold
-            }
-        } else {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: alignment, spacing: spacing) { first; second }
-                    .frame(minWidth: threshold)
-                VStack(alignment: .leading, spacing: spacing) { first; second }
-            }
+        // The macOS 15 branch is what the compat layer's measured onGeometryChange
+        // implements, so both SDK generations take the same path here.
+        stack.onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            wide = width >= threshold
         }
     }
 

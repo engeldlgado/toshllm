@@ -145,14 +145,20 @@ struct MCPSettingsSection: View {
             await ToshMCPService.shared.disconnect(server.id)
             let tools = await ToshMCPService.shared.discoverTools()
             await MainActor.run {
-                testingID = nil
-                let count = tools.filter { $0.mcpServerID == server.id }.count
-                status[server.id] = count > 0
-                    ? loc.t("Conectado · %@ herramientas", "Connected · %@ tools", "\(count)")
-                    : loc.t("Sin herramientas o conexión fallida; revisa el registro.",
-                            "No tools or connection failed; check the log.")
+                reportTest(server.id, tools: tools)
             }
         }
+    }
+
+    /// The write lives in a method: on Swift 5.7 the same assignment straight inside a
+    /// MainActor.run closure counts as an inout hop out of the view's state.
+    private func reportTest(_ id: UUID, tools: [BuiltinToolInfo]) {
+        testingID = nil
+        let count = tools.filter { $0.mcpServerID == id }.count
+        status[id] = count > 0
+            ? loc.t("Conectado · %@ herramientas", "Connected · %@ tools", "\(count)")
+            : loc.t("Sin herramientas o conexión fallida; revisa el registro.",
+                    "No tools or connection failed; check the log.")
     }
 }
 

@@ -54,7 +54,8 @@ final class VRAMMonitor: ObservableObject {
     init() {
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.poll() }
+            let owner = self
+            Task { @MainActor in owner?.poll() }
         }
     }
 
@@ -160,7 +161,7 @@ final class VRAMMonitor: ObservableObject {
 /// The device list is fixed unless a GPU is plugged or unplugged, and building it
 /// takes the Metal global lock the render thread also wants.
 private enum MetalDeviceCache {
-    nonisolated(unsafe) private static var cached: [any MTLDevice] = []
+    private static var cached: [any MTLDevice] = []
     private static let lock = NSLock()
 
     static func devices(rescan: Bool) -> [any MTLDevice] {

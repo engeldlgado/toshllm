@@ -474,7 +474,7 @@ struct VideoCanvas: View {
 
     private var generationCanvas: some View {
         VStack(spacing: 18) {
-            Image(systemName: "film.stack").font(.system(size: 42, weight: .light)).foregroundStyle(.tertiary)
+            Image(systemName: "film").font(.system(size: 42, weight: .light)).foregroundStyle(.tertiary)
             VideoGenerationProgressCard(gen: pool.generator, compact: false)
                 .frame(maxWidth: 420)
         }

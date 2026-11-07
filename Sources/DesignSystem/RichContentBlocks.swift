@@ -50,17 +50,17 @@ struct RichContentBlock: View {
 
     private var label: String {
         switch kind {
-        case .math, .inlineMath: loc.t("Fórmula", "Formula")
-        case .mermaid: "Mermaid"
-        case .svg: "SVG"
+        case .math, .inlineMath: return loc.t("Fórmula", "Formula")
+        case .mermaid: return "Mermaid"
+        case .svg: return "SVG"
         }
     }
 
     private var icon: String {
         switch kind {
-        case .math, .inlineMath: "function"
-        case .mermaid: "point.3.connected.trianglepath.dotted"
-        case .svg: "scribble.variable"
+        case .math, .inlineMath: return "function"
+        case .mermaid: return "point.3.connected.trianglepath.dotted"
+        case .svg: return "scribble.variable"
         }
     }
 }
@@ -96,7 +96,7 @@ private struct RichContentPreview: View {
                 }
                     .labelStyle(.iconOnly)
                 .disabled(zoom >= 3)
-                Button(loc.t("Cerrar", "Close"), systemImage: "xmark", action: dismiss.callAsFunction)
+                Button(loc.t("Cerrar", "Close"), systemImage: "xmark", action: { dismiss() })
                     .labelStyle(.iconOnly)
                     .keyboardShortcut(.cancelAction)
             }

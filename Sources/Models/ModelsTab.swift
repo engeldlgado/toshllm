@@ -965,81 +965,96 @@ private struct MyModelsTab: View {
         return result
     }
 
+    // The four sections are separate properties: as one expression the library tab is
+    // more than Swift 5.7 can type-check in reasonable time.
+    @ViewBuilder private func libraryHero(library: LibraryIndex) -> some View {
+        ModelCollectionHero(
+            eyebrow: loc.t("EN ESTE MAC", "ON THIS MAC"), icon: "internaldrive",
+            title: loc.t("Tu biblioteca local", "Your local library"),
+            detail: loc.t("Administra modelos, configuraciones y archivos descargados desde un solo lugar.",
+                          "Manage downloaded models, settings, and files in one place."),
+            primaryValue: "\(models.models.count)", primaryLabel: loc.t("modelos", "models"),
+            secondaryValue: ByteCountFormatter.string(fromByteCount: library.totalBytes, countStyle: .file),
+            secondaryLabel: loc.t("almacenamiento", "storage"),
+            actionTitle: loc.t("Mostrar carpeta", "Show folder"), actionIcon: "folder"
+        ) {
+            NSWorkspace.shared.open(models.directory)
+        }
+    }
+
+    @ViewBuilder private var downloadsSection: some View {
+        if !models.downloads.isEmpty {
+            SectionHeader(icon: "arrow.down.circle", title: loc.t("Descargas", "Downloads"), subtitle: nil)
+            VStack(spacing: 8) {
+                ForEach(models.downloads) { DownloadRow(item: $0) }
+            }
+            Button(loc.t("Limpiar terminadas", "Clear finished"), systemImage: "checkmark.circle") {
+                models.clearFinishedDownloads()
+            }
+            .glassButton()
+            .controlSize(.small)
+        }
+    }
+
+    @ViewBuilder private func librarySection(library: LibraryIndex) -> some View {
+        if !models.models.isEmpty {
+            ModelSearchAndFilters(placeholder: loc.t("Buscar en tu biblioteca…", "Search your library…"), text: $query) {
+                ModelFilterBar(selection: $filter, filters: LocalFilter.allCases.map {
+                    .init(value: $0, title: label($0), systemImage: icon($0), count: library.counts[$0, default: 0])
+                })
+            }
+        }
+        if models.models.isEmpty {
+            ContentUnavailableView(loc.t("Todavía no hay modelos", "No models yet"),
+                                   systemImage: "internaldrive",
+                                   description: Text(loc.t("Descarga uno desde Recomendados o Buscar y aparecerá aquí.",
+                                                           "Download one from Recommended or Browse and it will show up here.")))
+        } else if library.visible.isEmpty {
+            ContentUnavailableView(loc.t("Ningún modelo con esa característica", "No model with that trait"),
+                                   systemImage: icon(filter),
+                                   description: Text(loc.t("Ninguno de tus modelos descargados la tiene.",
+                                                           "None of your downloaded models has it.")))
+        } else {
+            LazyVStack(spacing: 1) {
+                ForEach(library.visible) { m in
+                    LocalModelCard(model: m, pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate)
+                }
+            }
+            .background(WorkspaceStyle.border)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+        }
+    }
+
+    @ViewBuilder private var directDownloadSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(icon: "link",
+                          title: loc.t("Descarga directa", "Direct download"),
+                          subtitle: loc.t("Añade un archivo GGUF desde una URL.", "Add a GGUF file from a URL."))
+            HStack {
+                TextField("https://huggingface.co/…/resolve/main/model.gguf", text: $customURL)
+                    .textFieldStyle(.plain).padding(.horizontal, 11).padding(.vertical, 8)
+                    .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
+                Button(loc.t("Descargar", "Download"), systemImage: "arrow.down.circle") {
+                    models.download(urlString: customURL)
+                    customURL = ""
+                }
+                .glassButton(prominent: true)
+                .disabled(!customURL.hasPrefix("http"))
+            }
+        }
+        .padding(14)
+        .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+
     var body: some View {
         let library = libraryIndex
         VStack(alignment: .leading, spacing: 16) {
-            ModelCollectionHero(
-                eyebrow: loc.t("EN ESTE MAC", "ON THIS MAC"), icon: "internaldrive",
-                title: loc.t("Tu biblioteca local", "Your local library"),
-                detail: loc.t("Administra modelos, configuraciones y archivos descargados desde un solo lugar.",
-                              "Manage downloaded models, settings, and files in one place."),
-                primaryValue: "\(models.models.count)", primaryLabel: loc.t("modelos", "models"),
-                secondaryValue: ByteCountFormatter.string(fromByteCount: library.totalBytes, countStyle: .file),
-                secondaryLabel: loc.t("almacenamiento", "storage"),
-                actionTitle: loc.t("Mostrar carpeta", "Show folder"), actionIcon: "folder"
-            ) {
-                NSWorkspace.shared.open(models.directory)
-            }
-
-            if !models.downloads.isEmpty {
-                SectionHeader(icon: "arrow.down.circle", title: loc.t("Descargas", "Downloads"), subtitle: nil)
-                VStack(spacing: 8) {
-                    ForEach(models.downloads) { DownloadRow(item: $0) }
-                }
-                Button(loc.t("Limpiar terminadas", "Clear finished"), systemImage: "checkmark.circle") {
-                    models.clearFinishedDownloads()
-                }
-                .glassButton()
-                .controlSize(.small)
-            }
-
-            if !models.models.isEmpty {
-                ModelSearchAndFilters(placeholder: loc.t("Buscar en tu biblioteca…", "Search your library…"), text: $query) {
-                    ModelFilterBar(selection: $filter, filters: LocalFilter.allCases.map {
-                        .init(value: $0, title: label($0), systemImage: icon($0), count: library.counts[$0, default: 0])
-                    })
-                }
-            }
-            if models.models.isEmpty {
-                ContentUnavailableView(loc.t("Todavía no hay modelos", "No models yet"),
-                                       systemImage: "internaldrive",
-                                       description: Text(loc.t("Descarga uno desde Recomendados o Buscar y aparecerá aquí.",
-                                                               "Download one from Recommended or Browse and it will show up here.")))
-            } else if library.visible.isEmpty {
-                ContentUnavailableView(loc.t("Ningún modelo con esa característica", "No model with that trait"),
-                                       systemImage: icon(filter),
-                                       description: Text(loc.t("Ninguno de tus modelos descargados la tiene.",
-                                                               "None of your downloaded models has it.")))
-            } else {
-                LazyVStack(spacing: 1) {
-                    ForEach(library.visible) { m in
-                        LocalModelCard(model: m, pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate)
-                    }
-                }
-                .background(WorkspaceStyle.border)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                SectionHeader(icon: "link",
-                              title: loc.t("Descarga directa", "Direct download"),
-                              subtitle: loc.t("Añade un archivo GGUF desde una URL.", "Add a GGUF file from a URL."))
-                HStack {
-                    TextField("https://huggingface.co/…/resolve/main/model.gguf", text: $customURL)
-                        .textFieldStyle(.plain).padding(.horizontal, 11).padding(.vertical, 8)
-                        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
-                    Button(loc.t("Descargar", "Download"), systemImage: "arrow.down.circle") {
-                        models.download(urlString: customURL)
-                        customURL = ""
-                    }
-                    .glassButton(prominent: true)
-                    .disabled(!customURL.hasPrefix("http"))
-                }
-            }
-            .padding(14)
-            .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+            libraryHero(library: library)
+            downloadsSection
+            librarySection(library: library)
+            directDownloadSection
         }
         .padding(16)
         .task { await modelUpdates.checkIfStale(models.models) }
@@ -1101,7 +1116,7 @@ private struct CatalogModelRow: View {
     @EnvironmentObject private var loc: Localizer
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
+        ToshAdaptive(minWidth: 800) {
             HStack(spacing: 18) {
                 identity.frame(minWidth: 260, maxWidth: .infinity, alignment: .leading)
                 estimateColumn(est.expectedSpeed, label: loc.t("Velocidad", "Speed"), icon: "bolt")
@@ -1111,6 +1126,7 @@ private struct CatalogModelRow: View {
                 compatibility.frame(width: 105, alignment: .leading)
                 CatalogActionButton(model: model, est: est).frame(width: 108, alignment: .trailing)
             }
+        } narrow: {
             HStack(alignment: .center, spacing: 14) {
                 identity
                 Spacer(minLength: 8)
