@@ -1,6 +1,11 @@
 --- a/ggml/src/ggml-cpu/arch/x86/quants.c
 +++ b/ggml/src/ggml-cpu/arch/x86/quants.c
-@@ -14,6 +14,30 @@
+@@ -9,16 +9,40 @@
+ #include "../../ggml-cpu-impl.h"
+ 
+ #include <math.h>
+ #include <string.h>
+ #include <assert.h>
  #include <stdlib.h> // for qsort
  #include <stdio.h>  // for GGML_ASSERT
  
@@ -31,7 +36,17 @@
  #define GROUP_MAX_EPS 1e-15f
  #define GROUP_MAX_EPS_IQ3_XXS 1e-8f
  #define GROUP_MAX_EPS_IQ2_S 1e-8f
-@@ -1924,6 +1948,118 @@
+ #define GROUP_MAX_EPS_IQ1_M 1e-7f
+ #define GROUP_MAX_EPS_IQ1_S 1e-12f
+ 
+ #define UNUSED GGML_UNUSED
+ 
+@@ -1919,16 +1943,128 @@
+ 
+         // sumf += dall * isum - dmin * summs in 32bits
+         __m256i sumi = MM256_SET_M128I(sumi_1, sumi_0);
+         acc = _mm256_add_ps(_mm256_mul_ps(_mm256_broadcast_ss(&dall), _mm256_cvtepi32_ps(sumi)), acc);
+     }
  
      *s = hsum_float_8(acc);
  
@@ -150,7 +165,17 @@
  #else
      UNUSED(x);
      UNUSED(y);
-@@ -2194,6 +2330,153 @@
+     UNUSED(nb);
+     ggml_vec_dot_q2_K_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+ #endif
+ }
+ 
+@@ -2189,16 +2325,163 @@
+         // multiply with block scale and accumulate
+         __m256i sumi = MM256_SET_M128I(sumi_1, sumi_0);
+         acc = _mm256_add_ps(_mm256_mul_ps(_mm256_broadcast_ss(&d), _mm256_cvtepi32_ps(sumi)), acc);
+ 
+     }
  
      *s = hsum_float_8(acc);
  
@@ -304,7 +329,17 @@
  #else
      UNUSED(kmask1);
      UNUSED(kmask2);
-@@ -2446,6 +2729,93 @@
+     UNUSED(x);
+     UNUSED(y);
+     UNUSED(nb);
+     ggml_vec_dot_q3_K_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+ #endif
+@@ -2441,16 +2724,103 @@
+ 
+     }
+ 
+     acc_m = _mm_add_ps(acc_m, _mm_movehl_ps(acc_m, acc_m));
+     acc_m = _mm_add_ss(acc_m, _mm_movehdup_ps(acc_m));
  
      *s = hsum_float_8(acc) + _mm_cvtss_f32(acc_m);
  
@@ -398,7 +433,17 @@
  #else
      UNUSED(x);
      UNUSED(y);
-@@ -2656,6 +3026,111 @@
+     UNUSED(nb);
+     UNUSED(kmask1);
+     UNUSED(kmask2);
+     UNUSED(kmask3);
+     UNUSED(utmp);
+@@ -2651,16 +3021,121 @@
+         __m256 vd = _mm256_set1_ps(d);
+         __m256i sumi = MM256_SET_M128I(sumi_1, sumi_0);
+         acc = _mm256_add_ps(_mm256_mul_ps(vd, _mm256_cvtepi32_ps(sumi)), acc);
+ 
+     }
  
      *s = hsum_float_8(acc) + summs;
  
@@ -510,7 +555,17 @@
  #else
      UNUSED(x);
      UNUSED(y);
-@@ -2857,6 +3332,116 @@
+     UNUSED(nb);
+     UNUSED(kmask1);
+     UNUSED(kmask2);
+     UNUSED(kmask3);
+     UNUSED(utmp);
+@@ -2852,16 +3327,126 @@
+         sumi_0 = _mm_sub_epi32(sumi_0, q8sclsub_0);
+         sumi_1 = _mm_sub_epi32(sumi_1, q8sclsub_1);
+         const __m256i sumi = MM256_SET_M128I(sumi_1, sumi_0);
+         acc = _mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi)), acc);
+     }
  
      *s = hsum_float_8(acc);
  
@@ -627,7 +682,17 @@
  #else
      UNUSED(x);
      UNUSED(y);
-@@ -5486,3 +6071,516 @@
+     UNUSED(nb);
+     ggml_vec_dot_q6_K_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
+ #endif
+ }
+ 
+@@ -5481,8 +6066,521 @@
+         case GGML_TYPE_MXFP4: return ggml_vec_dot_mxfp4_q8_0_multi;
+         case GGML_TYPE_Q8_0: return ggml_vec_dot_q8_0_q8_0_multi;
+         default: break;
+     }
+ #endif
      GGML_UNUSED(type);
      return NULL;
  }
@@ -1146,7 +1211,12 @@
 +}
 --- a/ggml/src/ggml-cpu/quants.h
 +++ b/ggml/src/ggml-cpu/quants.h
-@@ -65,6 +65,15 @@
+@@ -60,16 +60,25 @@
+ // one weight row against nc (1..4) activation columns: each block is unpacked once for all of them, and
+ // every column gets the same operations in the same order as the single-column dot. NULL where missing.
+ typedef void (*ggml_vec_dot_multi_t)(int n, int nc, float * GGML_RESTRICT s, const void * GGML_RESTRICT vx, const void * const * vy);
+ ggml_vec_dot_multi_t ggml_get_vec_dot_multi(enum ggml_type type);
+ ggml_vec_dot_multi_t ggml_get_vec_dot_multi_generic(enum ggml_type type);
  void ggml_vec_dot_q5_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  
@@ -1162,9 +1232,19 @@
  void ggml_vec_dot_tq1_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_tq2_0_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  
+ void ggml_vec_dot_iq2_xxs_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_iq2_xs_q8_K (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_iq2_s_q8_K  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_iq3_xxs_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_iq1_s_q8_K  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 --- a/ggml/src/ggml-cpu/quants.c
 +++ b/ggml/src/ggml-cpu/quants.c
-@@ -1462,3 +1462,46 @@
+@@ -1457,8 +1457,51 @@
+     assert(k % QK_K == 0);
+     quantize_iq4_xs(x, y, 1, k, NULL);
+ }
+ 
+ ggml_vec_dot_multi_t ggml_get_vec_dot_multi_generic(enum ggml_type type) {
      GGML_UNUSED(type);
      return NULL;
  }
@@ -1213,7 +1293,12 @@
 +#endif
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
-@@ -1221,6 +1221,10 @@
+@@ -1216,16 +1216,20 @@
+             }
+     }
+ }
+ 
+ ////////////////////////////////////////////////////////////////////////////////
  
  // ggml_compute_forward_mul_mat
  
@@ -1224,7 +1309,17 @@
  static void ggml_compute_forward_mul_mat_one_chunk(
      const struct ggml_compute_params * params,
      struct ggml_tensor * dst,
-@@ -1264,6 +1268,51 @@
+     const enum ggml_type type,
+     const int64_t num_rows_per_vec_dot,
+     const int64_t ir0_start,
+     const int64_t ir0_end,
+     const int64_t ir1_start,
+@@ -1259,16 +1263,61 @@
+     assert(ne13 % ne03 == 0);
+ 
+     // block-tiling attempt
+     const int64_t blck_0 = 16;
+     const int64_t blck_1 = 16;
  
      const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
  
@@ -1276,3 +1371,8 @@
      // attempt to reduce false-sharing (does not seem to make a difference)
      // 16 * 2, accounting for mmla kernels
      float tmp[32];
+ 
+     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
+         for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
+             for (int64_t ir1 = iir1; ir1 < iir1 + blck_1 && ir1 < ir1_end; ir1 += num_rows_per_vec_dot) {
+                 const int64_t i13 = (ir1 / (ne12 * ne1));
