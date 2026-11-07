@@ -25,7 +25,7 @@ struct ChatSettingsView: View {
         HStack(spacing: 14) {
             GlassSegmentedControl(selection: $destination, segments: [
                 .init(value: .general, title: loc.t("General", "General"), systemImage: "bubble.left.and.bubble.right"),
-                .init(value: .sampling, title: loc.t("Muestreo", "Sampling"), systemImage: "dial.medium"),
+                .init(value: .sampling, title: loc.t("Muestreo", "Sampling"), systemImage: "dial.max"),
                 .init(value: .agents, title: loc.t("Agentes", "Agents"), systemImage: "hammer"),
                 .init(value: .advanced, title: loc.t("Avanzado", "Advanced"), systemImage: "slider.horizontal.3"),
                 .init(value: .mcp, title: "MCP", systemImage: "point.3.connected.trianglepath.dotted")
@@ -95,7 +95,7 @@ struct ChatSettingsView: View {
                     loc.t("Comportamiento del chat, texto y prompt de sistema.",
                           "Chat behavior, text, and system prompt."))
         case .sampling:
-            return ("dial.medium", loc.t("Muestreo", "Sampling"),
+            return ("dial.max", loc.t("Muestreo", "Sampling"),
                     loc.t("Cómo elige el modelo cada palabra.", "How the model picks each word."))
         case .agents:
             return ("hammer", loc.t("Agentes y adjuntos", "Agents and attachments"),
@@ -131,18 +131,18 @@ struct ChatSettingsView: View {
                                   detail: loc.t("Borra todas las conversaciones.", "Delete every conversation."))
                          ])
         case .sampling:
-            return .init(icon: "dial.medium",
+            return .init(icon: "dial.max",
                          title: loc.t("Cómo escribe el modelo", "How the model writes"),
                          detail: loc.t("Estos valores deciden cuánto arriesga el modelo al elegir cada palabra y cuánto se repite.",
                                        "These values decide how much the model gambles on each word and how much it repeats itself."),
                          note: loc.t("Si algo se desmadra, restaura los valores por defecto en Avanzado.",
                                      "If something goes wild, reset to defaults in Advanced."),
                          items: [
-                            .init(icon: "dial.medium", title: loc.t("Muestreo", "Sampling"),
+                            .init(icon: "dial.max", title: loc.t("Muestreo", "Sampling"),
                                   detail: loc.t("Top P, Min P, Top K y semilla.", "Top P, Min P, Top K, and seed.")),
                             .init(icon: "arrow.uturn.backward", title: loc.t("Penalizaciones", "Penalties"),
                                   detail: loc.t("Evita que se repita.", "Keep it from repeating.")),
-                            .init(icon: "thermometer.medium", title: loc.t("Temperatura", "Temperature"),
+                            .init(icon: "thermometer", title: loc.t("Temperatura", "Temperature"),
                                   detail: loc.t("Rango dinámico y XTC.", "Dynamic range and XTC.")),
                             .init(icon: "waveform.path", title: "DRY",
                                   detail: loc.t("Corta bucles largos de texto.", "Cuts long text loops."))

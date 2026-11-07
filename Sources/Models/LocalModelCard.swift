@@ -119,7 +119,7 @@ private struct LocalModelMenu: View {
             }
             if let visionCatalog = models.missingVisionProjector(for: model) {
                 Button(loc.t("Descargar archivo de visión", "Download vision file"),
-                       systemImage: "photo.badge.arrow.down") {
+                       systemImage: "arrow.down.circle") {
                     models.downloadProjector(for: visionCatalog)
                 }
             }

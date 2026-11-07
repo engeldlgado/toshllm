@@ -258,10 +258,12 @@ final class BenchmarkController: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             log.append(text)
-            Task { @MainActor in self?.appendOutput(text) }
+            let owner = self
+            Task { @MainActor in owner?.appendOutput(text) }
         }
         p.terminationHandler = { [weak self] _ in
-            Task { @MainActor in self?.finish(settings: settings) }
+            let owner = self
+            Task { @MainActor in owner?.finish(settings: settings) }
         }
 
         do {
@@ -311,64 +313,68 @@ final class BenchmarkController: ObservableObject {
         fileLog.append(head)
         running = true
 
-        Task {
-            defer { running = false; process?.terminate(); process = nil }
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: s.serverBinary)
-            p.arguments = s.arguments
-            p.environment = s.environment
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            do { try p.run() } catch {
-                emit("→ \(error.localizedDescription)\n")
-                return
-            }
-            process = p
+        // Swift 5.7 runs a defer inside a Task closure off-isolation, so the run lives
+        // in an isolated method and the task only calls it.
+        Task { @MainActor [weak self] in await self?.realGeneration(with: s, base: base) }
+    }
 
-            emit("… cargando modelo / loading model\n")
-            guard await waitForHealth(port: s.port, process: p) else {
-                emit("→ el servidor no arrancó / server did not start\n")
-                return
-            }
-
-            emit("… calentamiento (descartado) / warm-up (discarded)\n")
-            guard await completeOnce(port: s.port, nPredict: 64) != nil else {
-                emit("→ la generación falló / generation failed\n")
-                return
-            }
-
-            var reps: [(tg: Double, pp: Double, accept: Double?)] = []
-            for i in 1...3 {
-                guard running, let r = await completeOnce(port: s.port, nPredict: s.benchTGClamped) else { break }
-                reps.append(r)
-                let acc = r.accept.map { String(format: " · MTP %.0f%%", $0 * 100) } ?? ""
-                emit(String(format: "rep %d: %.2f t/s gen · %.1f t/s prompt%@\n", i, r.tg, r.pp, acc))
-            }
-            guard reps.count == 3 else {
-                fileLog.append("→ result: real-generation run incomplete\n\n")
-                fileLog.prune()
-                return
-            }
-
-            let tg = median(reps.map(\.tg))
-            let pp = median(reps.map(\.pp))
-            let accept = reps.compactMap(\.accept).last
-            let name = URL(fileURLWithPath: s.modelPath).lastPathComponent
-            let engine = s.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
-            let realPlan = s.usesAutoPlan ? AutoMemoryPlan.readPlan(port: s.port) : nil
-            history.insert(BenchResult(date: .now, model: name, ncmoe: realPlan?.ncmoe ?? s.ncmoe,
-                                       dmoeK: nil, dynamicMoe: s.usesAutoPlan ? (realPlan?.mode ?? "dmoe") : nil, pp: pp, tg: tg,
-                                       ctk: realPlan?.kv ?? s.cacheTypeK, ctv: realPlan?.kv ?? s.cacheTypeV, engine: engine,
-                                       fa: s.benchmarkFlashAttentionRoute,
-                                       gpu: s.gpuLabel, peer: s.mgpuPeer && s.isSplitting, profile: base.makeProfile(name: name),
-                                       ppN: nil, tgN: s.benchTGClamped,
-                                       kind: "real", accept: accept),
-                           at: 0)
-            save()
-            let accLine = accept.map { String(format: " · MTP %.0f%%", $0 * 100) } ?? ""
-            emit(String(format: "→ mediana / median: %.2f t/s gen · %.1f t/s prompt%@\n\n", tg, pp, accLine))
-            fileLog.prune()
+    private func realGeneration(with s: ServerSettings, base: ServerSettings) async {
+        defer { running = false; process?.terminate(); process = nil }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: s.serverBinary)
+        p.arguments = s.arguments
+        p.environment = s.environment
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch {
+            emit("→ \(error.localizedDescription)\n")
+            return
         }
+        process = p
+
+        emit("… cargando modelo / loading model\n")
+        guard await waitForHealth(port: s.port, process: p) else {
+            emit("→ el servidor no arrancó / server did not start\n")
+            return
+        }
+
+        emit("… calentamiento (descartado) / warm-up (discarded)\n")
+        guard await completeOnce(port: s.port, nPredict: 64) != nil else {
+            emit("→ la generación falló / generation failed\n")
+            return
+        }
+
+        var reps: [(tg: Double, pp: Double, accept: Double?)] = []
+        for i in 1...3 {
+            guard running, let r = await completeOnce(port: s.port, nPredict: s.benchTGClamped) else { break }
+            reps.append(r)
+            let acc = r.accept.map { String(format: " · MTP %.0f%%", $0 * 100) } ?? ""
+            emit(String(format: "rep %d: %.2f t/s gen · %.1f t/s prompt%@\n", i, r.tg, r.pp, acc))
+        }
+        guard reps.count == 3 else {
+            fileLog.append("→ result: real-generation run incomplete\n\n")
+            fileLog.prune()
+            return
+        }
+
+        let tg = median(reps.map(\.tg))
+        let pp = median(reps.map(\.pp))
+        let accept = reps.compactMap(\.accept).last
+        let name = URL(fileURLWithPath: s.modelPath).lastPathComponent
+        let engine = s.serverBinary == ServerSettings.defaultBinary ? "bundled" : "externo"
+        let realPlan = s.usesAutoPlan ? AutoMemoryPlan.readPlan(port: s.port) : nil
+        history.insert(BenchResult(date: .now, model: name, ncmoe: realPlan?.ncmoe ?? s.ncmoe,
+                                   dmoeK: nil, dynamicMoe: s.usesAutoPlan ? (realPlan?.mode ?? "dmoe") : nil, pp: pp, tg: tg,
+                                   ctk: realPlan?.kv ?? s.cacheTypeK, ctv: realPlan?.kv ?? s.cacheTypeV, engine: engine,
+                                   fa: s.benchmarkFlashAttentionRoute,
+                                   gpu: s.gpuLabel, peer: s.mgpuPeer && s.isSplitting, profile: base.makeProfile(name: name),
+                                   ppN: nil, tgN: s.benchTGClamped,
+                                   kind: "real", accept: accept),
+                       at: 0)
+        save()
+        let accLine = accept.map { String(format: " · MTP %.0f%%", $0 * 100) } ?? ""
+        emit(String(format: "→ mediana / median: %.2f t/s gen · %.1f t/s prompt%@\n\n", tg, pp, accLine))
+        fileLog.prune()
     }
 
     private func emit(_ text: String) {

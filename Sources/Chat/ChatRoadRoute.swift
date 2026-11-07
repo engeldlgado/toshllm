@@ -132,15 +132,15 @@ enum ChatRoadRoute {
     private enum RouteError: Error, CustomStringConvertible {
         case none(String, String)
         var description: String {
-            switch self { case .none(let from, let to): "Apple Maps found no route from \(from) to \(to)" }
+            switch self {
+            case .none(let from, let to):
+                return "Apple Maps found no route from \(from) to \(to)"
+            }
         }
     }
 
     private static func mapItem(_ coordinate: CLLocationCoordinate2D) -> MKMapItem {
-        if #available(macOS 26, *) {
-            return MKMapItem(location: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude), address: nil)
-        }
-        return MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+        MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
     }
 
     static func duration(_ seconds: Double) -> String {

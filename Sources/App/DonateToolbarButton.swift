@@ -55,7 +55,7 @@ struct DonateToolbarButton: View {
             animate { announcing = true }
             try? await Task.sleep(for: .seconds(4))
             animate { announcing = false }
-            try? await Task.sleep(for: .seconds(Int.random(in: 180...480)))
+            try? await Task.sleep(nanoseconds: UInt64(Int.random(in: 180...480)) * 1_000_000_000)
         }
     }
 

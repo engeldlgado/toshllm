@@ -239,7 +239,7 @@ struct ModelName {
         return name
     }
 
-    nonisolated(unsafe) private static var cache: [String: ModelName] = [:]
+    private static var cache: [String: ModelName] = [:]
     private static let cacheLock = NSLock()
 
     /// Called from list rows, so it is cached: each pass otherwise costs three stat

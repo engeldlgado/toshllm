@@ -75,18 +75,18 @@ enum SyntaxHighlighter {
     private static func keywordPattern(_ language: String) -> String {
         switch language.lowercased() {
         case "swift":
-            "actor|any|as|async|await|break|case|catch|class|continue|default|defer|do|else|enum|extension|false|for|func|guard|if|import|in|init|is|let|nil|nonisolated|private|protocol|public|repeat|return|self|some|static|struct|switch|throw|throws|true|try|typealias|var|where|while"
+            return "actor|any|as|async|await|break|case|catch|class|continue|default|defer|do|else|enum|extension|false|for|func|guard|if|import|in|init|is|let|nil|nonisolated|private|protocol|public|repeat|return|self|some|static|struct|switch|throw|throws|true|try|typealias|var|where|while"
         case "python", "py":
-            "and|as|assert|async|await|break|class|continue|def|del|elif|else|except|False|finally|for|from|global|if|import|in|is|lambda|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield"
+            return "and|as|assert|async|await|break|class|continue|def|del|elif|else|except|False|finally|for|from|global|if|import|in|is|lambda|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield"
         case "javascript", "js", "typescript", "ts", "tsx", "jsx":
-            "as|async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|false|finally|for|from|function|get|if|implements|import|in|instanceof|interface|let|new|null|of|package|private|protected|public|return|set|static|super|switch|this|throw|true|try|type|typeof|undefined|var|void|while|with|yield"
+            return "as|async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|false|finally|for|from|function|get|if|implements|import|in|instanceof|interface|let|new|null|of|package|private|protected|public|return|set|static|super|switch|this|throw|true|try|type|typeof|undefined|var|void|while|with|yield"
         case "c", "cpp", "c++", "objective-c", "objc":
-            "auto|bool|break|case|catch|char|class|const|constexpr|continue|default|delete|do|double|else|enum|explicit|extern|false|float|for|friend|if|inline|int|long|namespace|new|nullptr|operator|private|protected|public|register|return|short|signed|sizeof|static|struct|switch|template|this|throw|true|try|typedef|typename|union|unsigned|using|virtual|void|volatile|while"
-        case "json": "true|false|null"
+            return "auto|bool|break|case|catch|char|class|const|constexpr|continue|default|delete|do|double|else|enum|explicit|extern|false|float|for|friend|if|inline|int|long|namespace|new|nullptr|operator|private|protected|public|register|return|short|signed|sizeof|static|struct|switch|template|this|throw|true|try|typedef|typename|union|unsigned|using|virtual|void|volatile|while"
+        case "json": return "true|false|null"
         case "bash", "sh", "shell", "zsh":
-            "case|do|done|elif|else|esac|export|fi|for|function|if|in|local|readonly|return|then|until|while"
+            return "case|do|done|elif|else|esac|export|fi|for|function|if|in|local|readonly|return|then|until|while"
         default:
-            "break|case|class|const|continue|default|else|enum|false|for|func|function|if|import|let|nil|null|private|public|return|static|struct|switch|true|var|while"
+            return "break|case|class|const|continue|default|else|enum|false|for|func|function|if|import|let|nil|null|private|public|return|static|struct|switch|true|var|while"
         }
     }
 }
@@ -113,7 +113,7 @@ struct CodePreview: View {
             HStack {
                 Text(language.isEmpty ? "code" : language).font(.headline)
                 Spacer()
-                Button(loc.t("Cerrar", "Close"), systemImage: "xmark", action: dismiss.callAsFunction)
+                Button(loc.t("Cerrar", "Close"), systemImage: "xmark", action: { dismiss() })
                     .labelStyle(.iconOnly)
                     .keyboardShortcut(.cancelAction)
             }

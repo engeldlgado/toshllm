@@ -25,7 +25,7 @@ enum Section_: String, CaseIterable, Identifiable {
         case .benchmarks: return "speedometer"
         case .docs: return "book"
         case .logs: return "list.bullet.rectangle"
-        case .chatSettings: return "bubble.left.and.text.bubble.right"
+        case .chatSettings: return "bubble.left.and.bubble.right"
         case .settings: return "slider.horizontal.3"
         case .about: return "info.circle"
         }
@@ -90,13 +90,7 @@ struct ControlPanelView: View {
             }
             .background(WorkspaceStyle.canvas)
             .toolbar {
-                if #available(macOS 26, *) {
-                    ToolbarSpacer(.flexible)
-                    ToolbarItem(placement: .automatic) { DonateToolbarButton() }
-                        .sharedBackgroundVisibility(.hidden)
-                } else {
-                    ToolbarItem(placement: .automatic) { DonateToolbarButton() }
-                }
+                ToolbarItem(placement: .automatic) { DonateToolbarButton() }
             }
         }
         .tint(AppTheme.accent(accentRaw))
@@ -233,16 +227,16 @@ struct ServerStatsToolbar: View {
     @EnvironmentObject var loc: Localizer
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) {
-                stat("Prompt", server.promptSpeed)
-                stat(loc.t("Generación", "Generation"), server.genSpeed)
-                Divider().frame(height: 18)
-                statusBadge
-            }
-            .fixedSize()
-            statusBadge.fixedSize()
+        // No narrow branch: this bar hugs its own content, so there is no width to
+        // measure against, and the title bar already truncates it when the window
+        // is small.
+        HStack(spacing: 16) {
+            stat("Prompt", server.promptSpeed)
+            stat(loc.t("Generación", "Generation"), server.genSpeed)
+            Divider().frame(height: 18)
+            statusBadge
         }
+        .fixedSize()
         .padding(.horizontal, 14).padding(.vertical, 10)
         .glassSurface(in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(WorkspaceStyle.border))

@@ -85,7 +85,7 @@ struct SubtitlePreview: View {
     }
 
     private var emptyIcon: String {
-        studio.isBusy ? "waveform.badge.magnifyingglass" : "captions.bubble"
+        studio.isBusy ? "waveform.path" : "captions.bubble"
     }
 
     private var emptyDescription: String {

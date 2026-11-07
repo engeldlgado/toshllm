@@ -925,10 +925,12 @@ final class ImageGenerator: ObservableObject {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let data = h.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.consume(text, steps: steps) }
+            let owner = self
+            Task { @MainActor in owner?.consume(text, steps: steps) }
         }
         p.terminationHandler = { [weak self] proc in
-            Task { @MainActor in self?.finish(status: proc.terminationStatus, output: out) }
+            let owner = self
+            Task { @MainActor in owner?.finish(status: proc.terminationStatus, output: out) }
         }
 
         fileLog.startSession()
@@ -958,7 +960,7 @@ final class ImageGenerator: ObservableObject {
         previewTimer?.invalidate()
         previewSeenAt = nil
         previewTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refreshPreview() }
+            Task { @MainActor [weak self] in await self?.refreshPreview() }
         }
     }
 
@@ -1555,10 +1557,11 @@ final class ImageUpscaler: ObservableObject {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let data = h.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.consume(text) }
+            let owner = self
+            Task { @MainActor in owner?.consume(text) }
         }
         p.terminationHandler = { [weak self] proc in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.process = nil
                 guard proc.terminationStatus == 0, let img = NSImage(contentsOf: out) else {

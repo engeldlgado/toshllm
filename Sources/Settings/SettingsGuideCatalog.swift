@@ -31,7 +31,7 @@ extension SettingsDestination {
             ]
         case .inference:
             return [
-                .init(icon: "text.document", title: loc.t("Contexto", "Context"), detail: loc.t("Ajusta el límite de tokens.", "Set the token limit.")),
+                .init(icon: "doc.text", title: loc.t("Contexto", "Context"), detail: loc.t("Ajusta el límite de tokens.", "Set the token limit.")),
                 .init(icon: "square.stack.3d.up", title: loc.t("Caché KV", "KV cache"), detail: loc.t("Equilibra precisión y memoria.", "Balance precision and memory.")),
                 .init(icon: "bolt", title: "Flash Attention", detail: loc.t("Usa el kernel adecuado para tu GPU.", "Use the right kernel for your GPU.")),
                 .init(icon: "arrow.triangle.branch", title: loc.t("Concurrencia", "Concurrency"), detail: loc.t("Controla solicitudes y plantilla de chat.", "Control requests and chat templates."))

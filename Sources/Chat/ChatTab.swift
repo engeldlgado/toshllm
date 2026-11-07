@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import SwiftUI
-import Charts
 
 // MARK: - Main window: the chat
 
@@ -62,33 +61,13 @@ struct ChatMainView: View {
     @AppStorage(SettingsKeys.chatFontScale) private var chatFontScale = 1.0
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
-        // A single NavigationSplitView for both modes: only the sidebar and detail
-        // content swap, so the window chrome stays put and Chat/Images doesn't jump.
+        // One split view for every mode: only the sidebar and detail content swap, so
+        // the window chrome stays put and Chat/Images doesn't jump.
         NavigationSplitView {
-            Group {
-                if mode == .images {
-                    ImageControls(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
-                } else if mode == .video {
-                    VideoControls(pool: videoGenPool).transition(.opacity)
-                } else if mode == .audio {
-                    AudioControls(studio: audioStudio).transition(.opacity)
-                } else {
-                    ConversationListView().transition(.opacity)
-                }
-            }
+            sidebarContent
         } detail: {
-            Group {
-                if mode == .images {
-                    ImageCanvas(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
-                } else if mode == .video {
-                    VideoCanvas(pool: videoGenPool).transition(.opacity)
-                } else if mode == .audio {
-                    AudioCanvas(studio: audioStudio).transition(.opacity)
-                } else {
-                    chatDetail.transition(.opacity)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            detailContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .animation(.easeInOut(duration: 0.2), value: mode)
         .tint(AppTheme.accent(accentRaw))
@@ -114,20 +93,7 @@ struct ChatMainView: View {
                 .opacity(0)
         }
         .navigationTitle("")
-        .toolbar {
-            if #available(macOS 26.0, *) {
-                ToolbarItem(placement: .navigation) { toolbarIdentity }
-                    .sharedBackgroundVisibility(.hidden)
-                ToolbarItem(placement: .principal) { modePicker }
-                    .sharedBackgroundVisibility(.hidden)
-                toolbarActions
-                    .sharedBackgroundVisibility(.hidden)
-            } else {
-                ToolbarItem(placement: .navigation) { toolbarIdentity }
-                ToolbarItem(placement: .principal) { modePicker }
-                toolbarActions
-            }
-        }
+        .toolbar { chatToolbar }
         .hiddenChatToolbarBackground()
         .onAppear {
             imageGenPool.modelStore = models
@@ -161,6 +127,41 @@ struct ChatMainView: View {
         }
     }
 
+    /// Split out of body: the whole expression is too large for one type-check pass.
+    @ViewBuilder private var sidebarContent: some View {
+        Group {
+            if mode == .images {
+                ImageControls(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
+            } else if mode == .video {
+                VideoControls(pool: videoGenPool).transition(.opacity)
+            } else if mode == .audio {
+                AudioControls(studio: audioStudio).transition(.opacity)
+            } else {
+                ConversationListView().transition(.opacity)
+            }
+        }
+    }
+
+    @ViewBuilder private var detailContent: some View {
+        Group {
+            if mode == .images {
+                ImageCanvas(pool: imageGenPool, upscaler: upscaler).transition(.opacity)
+            } else if mode == .video {
+                VideoCanvas(pool: videoGenPool).transition(.opacity)
+            } else if mode == .audio {
+                AudioCanvas(studio: audioStudio).transition(.opacity)
+            } else {
+                chatDetail.transition(.opacity)
+            }
+        }
+    }
+
+    @ToolbarContentBuilder private var chatToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) { toolbarIdentity }
+        ToolbarItem(placement: .principal) { modePicker }
+        toolbarActions
+    }
+
     private var chatDetail: some View {
         NativeChatView()
     }
@@ -191,10 +192,10 @@ struct ChatMainView: View {
 
     private var serverStateColor: Color {
         switch server.state {
-        case .running: .green
-        case .starting: .orange
-        case .failed: .red
-        case .stopped: .secondary
+        case .running: return .green
+        case .starting: return .orange
+        case .failed: return .red
+        case .stopped: return .secondary
         }
     }
 
@@ -361,10 +362,10 @@ struct ChatMainView: View {
 
     private var modeSubtitle: String {
         switch mode {
-        case .chat: stateSubtitle
-        case .images: loc.t("Imágenes · Experimental", "Images · Experimental")
-        case .video: loc.t("Vídeo · Experimental", "Video · Experimental")
-        case .audio: loc.t("Audio · Whisper GPU", "Audio · Whisper GPU")
+        case .chat: return stateSubtitle
+        case .images: return loc.t("Imágenes · Experimental", "Images · Experimental")
+        case .video: return loc.t("Vídeo · Experimental", "Video · Experimental")
+        case .audio: return loc.t("Audio · Whisper GPU", "Audio · Whisper GPU")
         }
     }
 }

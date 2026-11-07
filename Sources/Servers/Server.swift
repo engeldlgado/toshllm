@@ -28,6 +28,31 @@ struct GPUDevice: Identifiable, Hashable {
     var vramGB: Int { Int((Double(vramMB) / 1024).rounded()) }
 }
 
+/// Cached: the UI reads the device list from view bodies, and MTLCopyAllDevices() is
+/// far too expensive to run on every render. File scope so the nonisolated scan
+/// reaching it needs no MainActor hop.
+enum GPUListCache {
+    private static var cached: [GPUDevice]?
+    private static let lock = NSLock()
+
+    static func devices(rescan: Bool) -> [GPUDevice] {
+        lock.lock()
+        defer { lock.unlock() }
+        if !rescan, let cached { return cached }
+        let devices = MTLCopyAllDevices().enumerated().map { i, dev in
+            GPUDevice(index: i, name: dev.name,
+                      vramMB: Int(dev.recommendedMaxWorkingSetSize / 1_048_576),
+                      isExternal: dev.location == .external,
+                      isIntegrated: dev.isLowPower,
+                      peerGroupID: dev.peerGroupID,
+                      peerCount: Int(dev.peerCount),
+                      supportsBF16: dev.supportsFamily(.toshMetal3))
+        }
+        cached = devices
+        return devices
+    }
+}
+
 struct ServerSettings {
     var serverBinary: String
     var modelPath: String
@@ -799,23 +824,44 @@ struct ServerSettings {
 
 
 
-    /// Default engine: the one bundled with the app (portable); falls back to the dev checkout.
+    /// Default engine the app launches when the user has not pointed it at a binary of their own.
+    ///
+    /// Ordered most-specific to least: the engine inside the running bundle, then the tuned engine this
+    /// checkout builds (`scripts/llama-build.sh` -> build-static/bin), then the tuned engine installed for
+    /// every user (/usr/local/lib/toshllm). Only after those does it consider a plain llama.cpp build.
+    ///
+    /// The previous version jumped straight from the bundle to `~/dev/repositorios/llama.cpp`, an
+    /// unpatched upstream tree: an app run outside a released bundle therefore launched a stock engine
+    /// and silently lost the Polaris Metal tuning, because nothing in this repo puts a tuned binary at
+    /// that path and the paths that DO hold one were never consulted.
     static var defaultBinary: String {
-        // Cached: view bodies reach this through fromDefaults(), and hitting the
-        // filesystem on every render shows up as lag.
         if let resolved = cachedDefaultBinary { return resolved }
-        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/llama-server").path,
-           FileManager.default.fileExists(atPath: bundled) {
-            cachedDefaultBinary = bundled
-            return bundled
+        let fm = FileManager.default
+        var candidates: [String] = []
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/llama-server").path {
+            candidates.append(bundled)
         }
-        // patched master build: supports recent architectures (qwen35moe / Qwen 3.6)
-        let fallback = NSString(string: "~/dev/repositorios/llama.cpp/build/bin/llama-server").expandingTildeInPath
-        cachedDefaultBinary = fallback
-        return fallback
+        // dev checkout: the engine this repo's own build scripts produce. It is not under the repo
+        // root - build-engines.sh compiles the vendor clone, so a candidate without
+        // vendor/llama.cpp in it never exists and the search silently falls through.
+        let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                                 .deletingLastPathComponent().deletingLastPathComponent().path
+        candidates.append(repoRoot + "/vendor/llama.cpp/build-static/bin/llama-server")
+        candidates.append(NSString(string: "~/Downloads/rxllm/toshllm/vendor/llama.cpp/build-static/bin/llama-server").expandingTildeInPath)
+        // installed tuned engine, shared by all users of this machine
+        candidates.append("/usr/local/lib/toshllm/llama-server")
+        // last resort: a stock local build, so the app still runs on a machine with none of the above
+        candidates.append(NSString(string: "~/dev/repositorios/llama.cpp/build/bin/llama-server").expandingTildeInPath)
+
+        for path in candidates where fm.isExecutableFile(atPath: path) {
+            cachedDefaultBinary = path
+            return path
+        }
+        cachedDefaultBinary = candidates[0]
+        return candidates[0]
     }
 
-    nonisolated(unsafe) private static var cachedDefaultBinary: String?
+    private static var cachedDefaultBinary: String?
 
     /// The engine to launch. "bundled" resolves against the running bundle, so two
     /// installs sharing this defaults domain each use their own binary.
@@ -1764,27 +1810,9 @@ final class ServerController: ObservableObject {
         return comps.url!
     }
 
-    /// Cached: the UI reads this from view bodies, and MTLCopyAllDevices() is far
-    /// too expensive to run on every render.
     nonisolated static func availableGPUs(rescan: Bool = false) -> [GPUDevice] {
-        gpuCacheLock.lock()
-        defer { gpuCacheLock.unlock() }
-        if !rescan, let cached = cachedGPUs { return cached }
-        let devices = MTLCopyAllDevices().enumerated().map { i, dev in
-            GPUDevice(index: i, name: dev.name,
-                      vramMB: Int(dev.recommendedMaxWorkingSetSize / 1_048_576),
-                      isExternal: dev.location == .external,
-                      isIntegrated: dev.isLowPower,
-                      peerGroupID: dev.peerGroupID,
-                      peerCount: Int(dev.peerCount),
-                      supportsBF16: dev.supportsFamily(.metal3))
-        }
-        cachedGPUs = devices
-        return devices
+        GPUListCache.devices(rescan: rescan)
     }
-
-    nonisolated(unsafe) private static var cachedGPUs: [GPUDevice]?
-    private nonisolated static let gpuCacheLock = NSLock()
 
     /// Whether any detected GPU is an external eGPU. Used to surface the
     /// VRAM-resident-weights option, which fixes eGPU slowness over Thunderbolt.
@@ -2055,10 +2083,11 @@ final class ServerController: ObservableObject {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.consume(text) }
+            let owner = self
+            Task { @MainActor in owner?.consume(text) }
         }
         p.terminationHandler = { [weak self] proc in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 // A process we already replaced (stop → start) must not touch
                 // the new engine's state, health watch or PID lockfile.

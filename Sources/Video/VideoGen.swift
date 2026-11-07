@@ -409,10 +409,12 @@ final class VideoGenerator: ObservableObject {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let data = h.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.consume(text) }
+            let owner = self
+            Task { @MainActor in owner?.consume(text) }
         }
         p.terminationHandler = { [weak self] proc in
-            Task { @MainActor in self?.finish(status: proc.terminationStatus, runDir: runDir) }
+            let owner = self
+            Task { @MainActor in owner?.finish(status: proc.terminationStatus, runDir: runDir) }
         }
 
         fileLog.startSession()

@@ -11,9 +11,9 @@ enum PresentedLogLevel: Int, Sendable {
 
     var shortLabel: String {
         switch self {
-        case .info: "INFO"
-        case .warning: "WARN"
-        case .error: "ERROR"
+        case .info: return "INFO"
+        case .warning: return "WARN"
+        case .error: return "ERROR"
         }
     }
 }
@@ -115,10 +115,10 @@ enum LogPresentationParser {
 
     private static func level(_ value: Substring) -> PresentedLogLevel? {
         switch value {
-        case "E": .error
-        case "W": .warning
-        case "I", "D": .info
-        default: nil
+        case "E": return .error
+        case "W": return .warning
+        case "I", "D": return .info
+        default: return nil
         }
     }
 
@@ -148,14 +148,12 @@ enum LogPresentationParser {
 
     private static func friendlySource(_ source: String) -> String {
         switch source.lowercased() {
-        case "srv", "server": "Server"
-        case "cmn", "common": "Common"
-        case "load": "Loader"
-        case "slot": "Slot"
-        case "sampler": "Sampler"
-        case "spec": "Speculative"
-        case "tosh": "ToshLLM"
-        default: source
+        case "srv", "server": return "Server"
+        case "cmn", "common": return "Common"
+        case "load": return "Loader"
+        case "slot": return "Slot"
+        case "sampler": return "Sampler"
+        default: return source
         }
     }
 }

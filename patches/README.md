@@ -57,11 +57,17 @@ git -C vendor/llama.cpp worktree add -f /tmp/series --detach <LLAMA_COMMIT>
 git -C /tmp/series diff -U8 <base-commit> > patches/llama/<area>/<NNNN-name>.patch
 ```
 
-Three rules that have each cost real time:
+Four rules that have each cost real time:
 
 - **`-U8` for `llama/`.** Anything narrower rewrites every hunk header in the file, and the
   `git diff` default of three lets a hunk land in a different kernel while the build still
   exits 0. Add new files with `git add -A` and take `git diff --cached`, or they are left out.
+- **A fork's own patches number above upstream's, not beside it.** `patch_series` sorts the whole
+  tree by *file name*, ignoring the area directories, so adding `metal/0051-*` while upstream is
+  at `metal/0051-*` too does not conflict — it interleaves, in whatever order the two titles
+  compare. The one that lands second then finds its context moved, and the failure is a build
+  without that work rather than an error. On this branch upstream's engine work runs to 0073, so
+  ours start at 0081.
 - **Every later patch must still apply.** `scripts/check-patch-series.sh <LLAMA_COMMIT>` runs the
   whole series in a throwaway worktree and reports each patch.
 - **Verify the round trip.** Apply the whole series into a worktree at the pinned commit, and

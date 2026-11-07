@@ -131,10 +131,10 @@ enum GGUFMetadataCache {
     }
 
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var metadataEntries: [FileKey: MetadataEntry] = [:]
-    nonisolated(unsafe) private static var tensorEntries: [FileKey: GGUFTensorFlags] = [:]
-    nonisolated(unsafe) private static var nextNEntries: [FileKey: Bool] = [:]
-    nonisolated(unsafe) private static var splitEntries: [FileKey: GGUFWeightSplit?] = [:]
+    private static var metadataEntries: [FileKey: MetadataEntry] = [:]
+    private static var tensorEntries: [FileKey: GGUFTensorFlags] = [:]
+    private static var nextNEntries: [FileKey: Bool] = [:]
+    private static var splitEntries: [FileKey: GGUFWeightSplit?] = [:]
 
     static func metadata(at path: String) -> GGUFMetadata? {
         guard let key = fileKey(for: path) else { return nil }

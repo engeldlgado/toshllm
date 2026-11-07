@@ -64,9 +64,9 @@ struct ServerLogView: View {
 
     private var rawLog: String {
         switch logSource {
-        case "images": imageLog
-        case "video": videoLog
-        default: server.log
+        case "images": return imageLog
+        case "video": return videoLog
+        default: return server.log
         }
     }
     private var parseToken: String {
@@ -113,9 +113,12 @@ struct ServerLogView: View {
                         .font(.title3.bold()).lineLimit(1)
                     statusPill
                 }
-                // on a narrow window the card's own details give way before the essentials are cut
-                ViewThatFits(in: .horizontal) {
+                // on a narrow window the card's own details give way before the essentials are cut.
+                // Upstream wrote this with ViewThatFits, which needs the Layout protocol (macOS 13):
+                // the same conversion every other adaptive container in this app already made.
+                ToshAdaptive(minWidth: 460) {
                     summaryValues(full: true)
+                } narrow: {
                     summaryValues(full: false)
                 }
             }
@@ -172,10 +175,10 @@ struct ServerLogView: View {
 
     private var statePresentation: (title: String, icon: String, color: Color) {
         switch server.state {
-        case .running: (loc.t("Ejecutándose", "Running"), "checkmark.circle.fill", .green)
-        case .starting: (loc.t("Iniciando", "Starting"), "clock.fill", .orange)
-        case .failed: (loc.t("Error", "Failed"), "xmark.circle.fill", .red)
-        case .stopped: (loc.t("Detenido", "Stopped"), "circle", .secondary)
+        case .running: return (loc.t("Ejecutándose", "Running"), "checkmark.circle.fill", .green)
+        case .starting: return (loc.t("Iniciando", "Starting"), "clock.fill", .orange)
+        case .failed: return (loc.t("Error", "Failed"), "xmark.circle.fill", .red)
+        case .stopped: return (loc.t("Detenido", "Stopped"), "circle", .secondary)
         }
     }
     private func compactContext(_ value: Int) -> String {
@@ -258,13 +261,14 @@ struct ServerLogView: View {
     }
 
     private var consoleToolbar: some View {
-        ViewThatFits(in: .horizontal) {
+        ToshAdaptive(minWidth: 720) {
             HStack(spacing: 10) {
                 searchField
                 levelFilter
                 Spacer(minLength: 8)
                 consoleActions
             }
+        } narrow: {
             VStack(spacing: 10) {
                 HStack { searchField; Spacer(minLength: 8); moreMenu }
                 HStack { levelFilter; Spacer(minLength: 8); compactConsoleActions }
@@ -290,7 +294,11 @@ struct ServerLogView: View {
     }
 
     private func levelKey(_ level: PresentedLogLevel) -> String {
-        switch level { case .info: "info"; case .warning: "warning"; case .error: "error" }
+        switch level {
+        case .info: return "info"
+        case .warning: return "warning"
+        case .error: return "error"
+        }
     }
 
     private var footerStatus: (title: String, color: Color) {
@@ -495,7 +503,11 @@ struct ServerLogView: View {
 private struct PresentedLogRow: View {
     let line: PresentedLogLine
     private var tint: Color {
-        switch line.level { case .info: .blue; case .warning: .orange; case .error: .red }
+        switch line.level {
+        case .info: return .blue
+        case .warning: return .orange
+        case .error: return .red
+        }
     }
     var body: some View {
         // top, not baseline: the column rule has no baseline and pushed a wrapped message down

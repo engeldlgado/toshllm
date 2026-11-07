@@ -100,13 +100,13 @@ private struct ServerMetricStrip: View {
                             value: server.genSpeed.map { String(format: "%.1f t/s", $0) } ?? "—",
                             detail: loc.t("Velocidad de la petición más reciente", "Most recent request speed"),
                             history: Array(server.genHistory.suffix(28)))
-            DashboardMetric(title: loc.t("Peticiones", "Requests"), icon: "bubble.left.and.text.bubble.right",
+            DashboardMetric(title: loc.t("Peticiones", "Requests"), icon: "bubble.left.and.bubble.right",
                             value: "\(server.requestCount)",
                             detail: loc.t("Completadas en esta sesión", "Completed this session"), tint: .chartSecondary)
             DashboardMetric(title: loc.t("Uso de VRAM", "VRAM usage"), icon: "memorychip",
                             value: vram.gpus.isEmpty ? "—" : String(format: "%.1f / %.0f GB", vram.usedMB / 1024, vram.totalMB / 1024),
                             detail: String(format: "%.0f%%", vram.fraction * 100), progress: vram.fraction)
-            DashboardMetric(title: loc.t("Memoria estimada", "Estimated memory"), icon: "gauge.with.needle",
+            DashboardMetric(title: loc.t("Memoria estimada", "Estimated memory"), icon: "speedometer",
                             value: estimate.map { String(format: "%.1f GB VRAM", $0.vramGB) } ?? "—",
                             detail: estimate.map { String(format: "%.1f GB RAM", $0.ramGB) }
                                 ?? loc.t("Selecciona un modelo", "Choose a model"), tint: .chartSecondary)
@@ -535,7 +535,7 @@ private struct ServerConfigurationWorkspace: View {
                           : settings.ncmoe > 0 && facts.isMoE
                           ? loc.t("Limitado por RAM", "RAM limited")
                           : loc.t("Limitado por VRAM", "VRAM limited"),
-                          systemImage: "gauge.with.needle")
+                          systemImage: "speedometer")
                         .font(.caption).foregroundStyle(.secondary).fixedSize()
                 }
                 .padding(.horizontal, 12).frame(minHeight: 42)
@@ -974,7 +974,7 @@ private struct ServerPerformanceWorkspace: View {
 
     private var resources: some View {
         DetailPanel(title: loc.t("Recursos", "Resources"),
-                    subtitle: loc.t("Datos ligeros obtenidos del sistema.", "Lightweight telemetry reported by the system."), icon: "gauge.with.needle") {
+                    subtitle: loc.t("Datos ligeros obtenidos del sistema.", "Lightweight telemetry reported by the system."), icon: "speedometer") {
             ServerSettingRow(icon: "memorychip", title: "VRAM") {
                 Text(String(format: "%.1f / %.0f GB", vram.usedMB / 1024, vram.totalMB / 1024)).monospacedDigit()
             }

@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import SwiftUI
-import Charts
 
 // MARK: - Settings
 
@@ -178,12 +177,13 @@ struct SettingsView: View {
     var body: some View {
 
         VStack(spacing: 0) {
-                ViewThatFits(in: .horizontal) {
+                ToshAdaptive(minWidth: 860) {
                     HStack(spacing: 14) {
                         settingsNavigation
                         Spacer(minLength: 16)
                         settingsActions
                     }
+                } narrow: {
                     VStack(alignment: .leading, spacing: 10) {
                         ScrollView(.horizontal) { settingsNavigation }
                             .scrollIndicators(.hidden)
@@ -387,7 +387,7 @@ struct SettingsView: View {
                                             "Local server port (OpenAI-compatible API and web chat).")) {
                         DeferredSettingsIntegerField(value: $port, in: 1...65_535, width: 120)
                     }
-                    SettingsRow(icon: "engine.combustion",
+                    SettingsRow(icon: "gearshape.2",
                                 title: loc.t("Motor de inferencia", "Inference engine"),
                                 help: loc.t("Integrado: llama.cpp oficial con los kernels Metal para AMD, recomendado. Externo: cualquier llama-server tuyo.",
                                             "Bundled: official llama.cpp with the Metal kernels for AMD, recommended. External: any llama-server of yours.")) {
@@ -585,12 +585,27 @@ struct SettingsView: View {
 
     private var otherSettingsForm: some View {
         Form {
-
             if settingsDestination == .speech {
             SpeechModelsSettingsSection()
             }
 
             if settingsDestination == .models {
+                modelsSettingsRows
+            }
+
+            if settingsDestination == .inference {
+                inferenceSettingsRows
+            }
+
+        }
+        .formStyle(.grouped)
+        .toggleStyle(SettingsCompactToggleStyle())
+        .scrollContentBackground(.hidden)
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Split out of the Form so the compiler can type-check each category on its own.
+    @ViewBuilder private var modelsSettingsRows: some View {
             Section(loc.t("Perfiles", "Profiles")) {
                 ProfileNameField()
                 ForEach(profileStore.profiles) { p in
@@ -776,7 +791,7 @@ struct SettingsView: View {
                 }
                 Stepper(loc.t("Capas en GPU (-ngl): %@", "GPU layers (-ngl): %@", "\(ngl)"),
                         value: $ngl, in: 0...99)
-                    .settingsGlyph("square.3.layers.3d")
+                    .settingsGlyph("square.stack.3d.up")
                     .infoTip(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM); bájalo solo si la VRAM se desborda.",
                                 "How many model layers go to the GPU. 99 = all (recommended if they fit in VRAM); lower it only if VRAM overflows."))
                 let modelIsMoE = modelPath.isEmpty || ServerSettings.modelIsMoE(at: modelPath)
@@ -795,7 +810,7 @@ struct SettingsView: View {
                             ? loc.t("Reserva de VRAM: automática", "VRAM reserve: automatic")
                             : loc.t("Reserva de VRAM: %@ MB", "VRAM reserve: %@ MB", "\(vramReserve)"),
                         value: $vramReserve, in: 0...4096, step: 256)
-                    .settingsGlyph("gauge.with.needle")
+                    .settingsGlyph("speedometer")
                     .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. La respetan el plan de Dynamic MoE, el modo router y DFlash en Auto. Automática deja un 8% de la tarjeta, entre 768 y 1536 MB.",
                                 "VRAM left free for the system and UI. The Dynamic MoE plan, router mode and DFlash in Auto keep it. Automatic leaves 8% of the card, between 768 and 1536 MB."))
                 Toggle(loc.t("Copiar pesos a VRAM (--no-mmap, recomendado)",
@@ -829,209 +844,208 @@ struct SettingsView: View {
                 .infoTip(loc.t("Cuántos tokens puede ocupar una imagen en los modelos con visión. Por defecto manda el modelo. La memoria del codificador de visión crece con el cuadrado de este número, así que bajarlo la recorta mucho, a costa de detalle: es lo que permite cargar un modelo con visión en tarjetas donde ese buffer no cabe.",
                             "How many tokens one image may take on vision models. The model decides by default. The vision encoder's memory grows with the square of this number, so lowering it cuts memory a lot at the cost of detail: it is what makes a vision model load on cards where that buffer does not fit."))
             }
-            }
+    }
 
-            if settingsDestination == .inference {
-            Section {
-                LabeledContent(loc.t("Contexto", "Context")) {
-                    ToshDropdown(selection: $ctx, options: ServerSettings.contextChoices(modelPath: modelPath).map {
-                        .init(value: $0, title: "\(ServerSettings.contextLabel($0)) tokens")
-                    })
-                }
-                .settingsGlyph("text.alignleft")
-                .infoTip(loc.t("Tamaño máximo de la conversación en tokens. Más contexto = más memoria para el KV cache (mira los tipos de abajo para compensar).",
-                            "Maximum conversation size in tokens. More context = more KV cache memory (see the types below to compensate)."))
-                if ctx >= 131072 {
-                    Label(loc.t("Contexto muy grande (para pruebas). El KV cache puede no caber en VRAM/RAM; en GPU AMD sin Flash Attention la generación se ralentiza con la profundidad. Cuantiza las claves (q8_0) para compensar; para uso normal 16–32k.",
-                                "Very large context (for testing). The KV cache may not fit in VRAM/RAM; on AMD GPUs without Flash Attention generation slows with depth. Quantize keys (q8_0) to compensate; 16–32k is fine for normal use."),
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                LabeledContent(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)")) {
-                    ToshDropdown(selection: $cacheTypeK, options: availableKVTypes.map { .init(value: $0, title: $0) }, width: 120)
-                }
-                .settingsGlyph("key")
-                .infoTip(amdFlashActive
-                    ? loc.t("Cuantización de las claves del KV cache. Con el kernel Flash Attention AMD, cualquier combinación estándar (f16/q8_0/q4_0 en claves y valores) corre en GPU a velocidad plena, incluida la ruta rápida de prompts largos. Para máximo ahorro de memoria: q8_0/q8_0 (mitad, recomendado) o q4_0/q4_0 (un cuarto); para comprimir solo las claves manteniendo los valores en precisión completa: q8_0/f16 o q4_0/f16.",
-                            "Quantization for KV cache keys. With the AMD Flash Attention kernel, any standard combination (f16/q8_0/q4_0 for keys and values) runs on the GPU at full speed, including the fast long-prompt route. For maximum memory savings: q8_0/q8_0 (half, recommended) or q4_0/q4_0 (a quarter); to compress only the keys while keeping values at full precision: q8_0/f16 or q4_0/f16.")
-                    : loc.t("Cuantización de las claves del KV cache. En GPU AMD (sin el kernel Flash Attention AMD): q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado), dejando los valores en f16; q4_0 a un cuarto.",
-                            "Quantization for KV cache keys. On AMD GPUs (without the AMD Flash Attention kernel): q8_0 halves key memory at almost no speed cost (recommended), keeping values at f16; q4_0 quarters it."))
-                LabeledContent(loc.t("KV cache: valores (-ctv)", "KV cache: values (-ctv)")) {
-                    ToshDropdown(selection: $cacheTypeV, options: availableKVTypes.map { .init(value: $0, title: $0) }, width: 120)
-                }
-                .settingsGlyph("number.square")
-                .infoTip(amdFlashActive
-                    ? loc.t("Cuantización de los valores del KV cache. Con el kernel Flash Attention AMD cualquier valor estándar (f16/q8_0/q4_0) corre en GPU a velocidad plena, incluida la ruta rápida de prompts largos. Cuantizar los valores ahorra más memoria; dejarlos en f16 (con claves cuantizadas) conserva más calidad... ambos van igual de rápidos.",
-                            "Quantization for KV cache values. With the AMD Flash Attention kernel any standard value type (f16/q8_0/q4_0) runs on the GPU at full speed, including the fast long-prompt route. Quantizing values saves more memory; keeping them at f16 (with quantized keys) preserves more quality... both run equally fast.")
-                    : loc.t("Cuantización de los valores del KV cache. ⚠️ En GPU AMD (sin el kernel Flash Attention AMD) esto fuerza Flash Attention en CPU: la generación baja ~3× (de ~50 a ~15-19 t/s en un 8B). Úsalo solo cuando necesites contexto enorme; si no, déjalo en f16 y cuantiza solo las claves.",
-                            "Quantization for KV cache values. ⚠️ On AMD GPUs (without the AMD Flash Attention kernel) this forces Flash Attention onto the CPU: generation drops ~3× (from ~50 to ~15-19 t/s on an 8B). Use only when you need huge context; otherwise keep f16 and quantize keys only."))
-                if !turboKVIncompatible, let s = kvSuggestion, cacheTypeK != s.k || cacheTypeV != s.v {
-                    HStack(alignment: .center, spacing: 12) {
-                        Image(systemName: "sparkles")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(loc.t("Sugerencia medida: claves %@, valores %@", "Measured suggestion: %@ keys, %@ values", "\(s.k)", "\(s.v)"))
-                                .font(.callout.weight(.medium))
-                            Text(loc.t("Calidad indistinguible de f16 y un 25% menos de caché que q8_0 en ambos.",
-                                       "Quality indistinguishable from f16, and 25% less cache than q8_0 on both."))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 8)
-                        Button(loc.t("Aplicar", "Apply")) { cacheTypeK = s.k; cacheTypeV = s.v }
-                            .glassButton()
-                            .controlSize(.small)
-                            .help(loc.t("Pone las claves en %@ y los valores en %@.",
-                                        "Sets keys to %@ and values to %@.", s.k, s.v))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .glassSurface(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                if let reason = turboKVIncompatibleReason {
-                    HStack(alignment: .center, spacing: 12) {
-                        Label(loc.t(reason.es, reason.en),
-                              systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if let s = kvSuggestion {
-                            Spacer(minLength: 8)
-                            Button(loc.t("Usar %@ / %@", "Use %@ / %@", "\(s.k)", "\(s.v)")) {
-                                cacheTypeK = s.k; cacheTypeV = s.v
-                            }
-                            .glassButton()
-                            .controlSize(.small)
-                            .help(loc.t("Cambia a una combinación válida y medida.",
-                                        "Switches to a valid, measured combination."))
-                        }
-                    }
-                } else if turboKVSelected {
-                    Label(loc.t("Turbo en las claves es lo que cuesta calidad, y más cuanto menor es el modelo. Con las claves en q8_0, los valores admiten Turbo4 sin pérdida apreciable en ningún tamaño, y Turbo3 casi; Turbo en ambos conviene solo en modelos grandes.",
-                                "Turbo on the keys is what costs quality, the more so the smaller the model. With keys at q8_0, values take Turbo4 with no appreciable loss at any size, and Turbo3 nearly so; Turbo on both is only worth it on large models."),
-                          systemImage: "info.circle")
+    @ViewBuilder private var inferenceSettingsRows: some View {
+        Section {
+            inferenceMemoryRows
+            inferenceAttentionRows
+            inferenceRequestRows
+        }
+    }
+
+    // Three properties instead of one Section: the original block is more than
+    // Swift 5.7 can type-check in reasonable time.
+    @ViewBuilder private var inferenceMemoryRows: some View {
+        LabeledContent(loc.t("Contexto", "Context")) {
+            ToshDropdown(selection: $ctx, options: ServerSettings.contextChoices(modelPath: modelPath).map {
+                .init(value: $0, title: "\(ServerSettings.contextLabel($0)) tokens")
+            })
+        }
+        .settingsGlyph("text.alignleft")
+        .infoTip(loc.t("Tamaño máximo de la conversación en tokens. Más contexto = más memoria para el KV cache (mira los tipos de abajo para compensar).",
+                    "Maximum conversation size in tokens. More context = more KV cache memory (see the types below to compensate)."))
+        if ctx >= 131072 {
+            Label(loc.t("Contexto muy grande (para pruebas). El KV cache puede no caber en VRAM/RAM; en GPU AMD sin Flash Attention la generación se ralentiza con la profundidad. Cuantiza las claves (q8_0) para compensar; para uso normal 16–32k.",
+                        "Very large context (for testing). The KV cache may not fit in VRAM/RAM; on AMD GPUs without Flash Attention generation slows with depth. Quantize keys (q8_0) to compensate; 16–32k is fine for normal use."),
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        LabeledContent(loc.t("KV cache: claves (-ctk)", "KV cache: keys (-ctk)")) {
+            ToshDropdown(selection: $cacheTypeK, options: availableKVTypes.map { .init(value: $0, title: $0) }, width: 120)
+        }
+        .settingsGlyph("key")
+        .infoTip(amdFlashActive
+            ? loc.t("Cuantización de las claves del KV cache. Con el kernel Flash Attention AMD, cualquier combinación estándar (f16/q8_0/q4_0 en claves y valores) corre en GPU a velocidad plena, incluida la ruta rápida de prompts largos. Para máximo ahorro de memoria: q8_0/q8_0 (mitad, recomendado) o q4_0/q4_0 (un cuarto); para comprimir solo las claves manteniendo los valores en precisión completa: q8_0/f16 o q4_0/f16.",
+                    "Quantization for KV cache keys. With the AMD Flash Attention kernel, any standard combination (f16/q8_0/q4_0 for keys and values) runs on the GPU at full speed, including the fast long-prompt route. For maximum memory savings: q8_0/q8_0 (half, recommended) or q4_0/q4_0 (a quarter); to compress only the keys while keeping values at full precision: q8_0/f16 or q4_0/f16.")
+            : loc.t("Cuantización de las claves del KV cache. En GPU AMD (sin el kernel Flash Attention AMD): q8_0 reduce las claves a la mitad casi sin costo de velocidad (recomendado), dejando los valores en f16; q4_0 a un cuarto.",
+                    "Quantization for KV cache keys. On AMD GPUs (without the AMD Flash Attention kernel): q8_0 halves key memory at almost no speed cost (recommended), keeping values at f16; q4_0 quarters it."))
+        LabeledContent(loc.t("KV cache: valores (-ctv)", "KV cache: values (-ctv)")) {
+            ToshDropdown(selection: $cacheTypeV, options: availableKVTypes.map { .init(value: $0, title: $0) }, width: 120)
+        }
+        .settingsGlyph("number.square")
+        .infoTip(amdFlashActive
+            ? loc.t("Cuantización de los valores del KV cache. Con el kernel Flash Attention AMD cualquier valor estándar (f16/q8_0/q4_0) corre en GPU a velocidad plena, incluida la ruta rápida de prompts largos. Cuantizar los valores ahorra más memoria; dejarlos en f16 (con claves cuantizadas) conserva más calidad... ambos van igual de rápidos.",
+                    "Quantization for KV cache values. With the AMD Flash Attention kernel any standard value type (f16/q8_0/q4_0) runs on the GPU at full speed, including the fast long-prompt route. Quantizing values saves more memory; keeping them at f16 (with quantized keys) preserves more quality... both run equally fast.")
+            : loc.t("Cuantización de los valores del KV cache. ⚠️ En GPU AMD (sin el kernel Flash Attention AMD) esto fuerza Flash Attention en CPU: la generación baja ~3× (de ~50 a ~15-19 t/s en un 8B). Úsalo solo cuando necesites contexto enorme; si no, déjalo en f16 y cuantiza solo las claves.",
+                    "Quantization for KV cache values. ⚠️ On AMD GPUs (without the AMD Flash Attention kernel) this forces Flash Attention onto the CPU: generation drops ~3× (from ~50 to ~15-19 t/s on an 8B). Use only when you need huge context; otherwise keep f16 and quantize keys only."))
+        if !turboKVIncompatible, let s = kvSuggestion, cacheTypeK != s.k || cacheTypeV != s.v {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(loc.t("Sugerencia medida: claves %@, valores %@", "Measured suggestion: %@ keys, %@ values", "\(s.k)", "\(s.v)"))
+                        .font(.callout.weight(.medium))
+                    Text(loc.t("Calidad indistinguible de f16 y un 25% menos de caché que q8_0 en ambos.",
+                               "Quality indistinguishable from f16, and 25% less cache than q8_0 on both."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Toggle(loc.t("Reuso de caché de prompt (rápido)", "Prompt cache reuse (fast)"), isOn: $cacheReuse)
-                    .settingsGlyph("arrow.triangle.2.circlepath")
-                    .infoTip(loc.t("Cuando reescribes/editas el prompt (asistentes de código) o se recorta el razonamiento entre turnos, reutiliza la caché desplazándola en vez de reprocesar — mucho más rápido. Es una aproximación: la salida sigue coherente pero puede variar levemente frente a un cálculo exacto. Desactívalo si quieres resultados idénticos y reproducibles.",
-                                "When the prompt is rewritten/edited (coding assistants) or the reasoning is trimmed between turns, it reuses the cache by shifting it instead of reprocessing — much faster. It's an approximation: output stays coherent but can differ slightly from an exact recompute. Turn it off for identical, reproducible results."))
-                Stepper(loc.t("Hilos de CPU: %@", "CPU threads: %@", "\(threads)"),
-                        value: $threads, in: 1...max(1, hardware.logicalCores))
-                    .settingsGlyph("cpu")
-                    .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Tu equipo tiene %@ hilos; los núcleos físicos (%@) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
-                                "Threads for the CPU side (MoE experts, tokenization). Your machine has %@ threads; physical cores (%@) are usually optimal; more threads won't help if RAM bandwidth is the limit.",
-                                String(hardware.logicalCores), String(hardware.physicalCores)))
-                    .onAppear { if threads > hardware.logicalCores { threads = max(1, hardware.logicalCores) } }
-                LabeledContent(loc.t("Flash Attention estándar (CPU)", "Standard Flash Attention (CPU)")) {
-                    ToshDropdown(selection: $flashAttn, options: ["auto", "on", "off"].map { .init(value: $0, title: $0) }, width: 120)
-                }
-                .settingsGlyph("bolt.horizontal.circle")
-                .disabled(amdFlashActive || kvNeedsFlashAttention)
-                .infoTip(loc.t("Ruta Flash Attention estándar de llama.cpp. En GPU AMD cae en CPU; se fuerza a 'on' cuando el KV está cuantizado. Para atención en GPU usa el kernel AMD de abajo.",
-                            "Standard llama.cpp Flash Attention path. On AMD GPUs it falls back to CPU; it is forced to 'on' when KV is quantized. For GPU attention use the AMD kernel below."))
-                if engineSelection.wrappedValue != "custom" {
-                    Toggle(loc.t("Kernel Flash Attention AMD (GPU)", "AMD Flash Attention kernel (GPU)"), isOn: $faAmd)
-                        .settingsGlyph("bolt.fill")
-                        .infoTip(loc.t("Kernel Metal propio, activo por defecto, que ejecuta la atención (prompt y generación) en la GPU AMD: cabezas estándar 64/72/128/256/512 y TurboQuant con padding 128/256/384/512/640. Si lo apagas, el KV cuantizado sigue requiriendo Flash Attention pero usa la ruta estándar en CPU.",
-                                    "Custom Metal kernel, on by default, that runs attention (prompt and generation) on the AMD GPU: standard heads 64/72/128/256/512 and TurboQuant padded heads 128/256/384/512/640. If you turn it off, quantized KV still requires Flash Attention but uses the standard CPU path."))
-                    Label(amdFlashActive
-                            ? loc.t("Usando kernel AMD en GPU; Flash Attention queda forzado a 'on'.",
-                                    "Using the AMD GPU kernel; Flash Attention is forced to 'on'.")
-                            : kvNeedsFlashAttention
-                              ? loc.t("El KV cuantizado requiere Flash Attention: con el kernel AMD apagado usa el FA estándar en CPU.",
-                                      "Quantized KV requires Flash Attention: with the AMD kernel off, it uses standard FA on CPU.")
-                              : loc.t("Flash Attention estándar corre en la CPU en GPU AMD; activa el kernel AMD para usar la GPU.",
-                                      "Standard Flash Attention runs on CPU on AMD GPUs; enable the AMD kernel to use the GPU."),
-                          systemImage: amdFlashActive ? "bolt.fill" : "cpu")
-                        .font(.caption).foregroundStyle(amdFlashActive ? .green : .secondary)
-                }
-                if !modelPath.isEmpty && ServerSettings.modelUsesMTP(at: modelPath) {
-                    Label(loc.t("MTP automático activo", "Automatic MTP active"),
-                          systemImage: "hare.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                        .infoTip(loc.t("MTP se activa automáticamente cuando el GGUF trae el cabezal, tanto en modelos densos como MoE.",
-                                    "MTP turns on automatically whenever the GGUF includes the head, for both dense and MoE models."))
-                }
-                if engineSelection.wrappedValue != "custom" {
-                    Toggle(loc.t("Prefetch de expertos MoE (prompt)", "MoE expert prefetch (prompt)"), isOn: $prefetchExperts)
-                        .settingsGlyph("square.stack.3d.down.forward")
-                        .infoTip(loc.t("Para modelos MoE con expertos en RAM (ncmoe > 0): sube los pesos de expertos a la GPU por una cola Metal paralela, solapando la subida con el cómputo. De 1.8× a 4.4× de velocidad de prompt medida (35B, gemma-4-26B, gpt-oss) sin costo de generación; el primer prompt tras cargar el modelo es algo más lento mientras se preparan los buffers.",
-                                    "For MoE models with experts in RAM (ncmoe > 0): uploads expert weights to the GPU through a parallel Metal queue, overlapping the upload with compute. Measured 1.8×-4.4× prompt speed (35B, gemma-4-26B, gpt-oss) at no generation cost; the first prompt after loading the model is slightly slower while buffers warm up."))
-                    if routerMode || ServerSettings.modelIsMoE(at: modelPath) {
-                        LabeledContent(loc.t("Micro-lote del prompt", "Prompt micro-batch")) {
-                            ToshDropdown(selection: $ubatch, options: ServerSettings.ubatchOptions.map {
-                                .init(value: $0, title: ServerSettings.ubatchLabel($0, loc: loc))
-                            })
-                        }
-                        .settingsGlyph("square.grid.3x3")
-                        .infoTip(loc.t("Cuántos tokens de prompt procesa la GPU de una vez. Solo aporta en modelos MoE, y cuánto depende de dónde estén los expertos. Con expertos en CPU cada micro-lote los sube por el bus, así que uno más grande paga ese viaje menos veces: medido en una Radeon RX 6700 XT, leer 2048 tokens pasa de 475 a 886 tokens por segundo en un 35B, y de 546 a 1133 en un 30B. Con el modelo entero en la tarjeta la mejora ronda el 10%, igual con una GPU que repartido entre varias. La generación no cambia en ningún caso. A cambio ocupa VRAM, cerca de 0.5 GB por cada 512 tokens de micro-lote, así que si vas justo tendrás que bajar los expertos en CPU para compensar.",
-                                    "How many prompt tokens the GPU processes at once. It only helps MoE models, and how much depends on where the experts live. With experts on the CPU every micro-batch uploads them over the bus, so a larger one pays that trip fewer times: measured on a Radeon RX 6700 XT, reading 2048 tokens goes from 475 to 886 tokens per second on a 35B, and from 546 to 1133 on a 30B. With the model whole on the card the gain is around 10%, the same on one GPU as split across several. Generation is unchanged in every case. In exchange it takes VRAM, around 0.5 GB per 512 tokens of micro-batch, so if you are tight you will have to lower the experts on CPU to make room."))
-                    }
-                }
-                LabeledContent(loc.t("Peticiones simultáneas", "Concurrent requests")) {
-                    ToshDropdown(selection: $parallelSlots, options: [
-                        .init(value: 1, title: loc.t("1 (recomendado)", "1 (recommended)")),
-                        .init(value: 2, title: "2"), .init(value: 4, title: "4"),
-                        .init(value: 0, title: "Auto")
-                    ])
-                }
-                .settingsGlyph("person.2")
-                .infoTip(loc.t("Cuántas peticiones procesa el motor a la vez. Con 1, las peticiones hacen cola en vez de competir por la GPU, y un prompt enorme interrumpido por el timeout de un cliente (VS Code) se retoma donde iba al reintentar. Sube el valor solo si varios clientes usan el servidor a la vez.",
-                            "How many requests the engine processes at once. With 1, requests queue instead of competing for the GPU, and a huge prompt interrupted by a client timeout (VS Code) resumes where it was on retry. Raise it only if several clients use the server at the same time."))
-                if parallelSlots > 1 {
-                    Toggle(loc.t("Contexto separado por petición", "Separate context per request"), isOn: $separateKV)
-                        .settingsGlyph("rectangle.split.2x1")
-                        .infoTip(loc.t("Cada petición simultánea tiene su propia parte del contexto (el contexto dividido entre las peticiones) en vez de compartirlo. Medido en una Radeon RX 6700 XT con varias peticiones a la vez: entre un 7 y un 11% más rápido al generar y entre un 11 y un 18% menos de espera con prompts largos. A cambio, ninguna conversación puede pasar de su parte; apagado, el chat conserva su ventana completa.",
-                                    "Each simultaneous request gets its own share of the context (the context divided by the requests) instead of sharing it. Measured on a Radeon RX 6700 XT with several requests at once: 7 to 11% faster generation and 11 to 18% less wait with long prompts. In exchange, no conversation can grow past its share; off, the chat keeps its full window."))
-                }
-                Toggle(loc.t("Razonamiento como texto (clientes externos)",
-                             "Reasoning as plain text (external clients)"), isOn: $reasoningInline)
-                    .settingsGlyph("brain")
-                    .infoTip(loc.t("Envía el razonamiento dentro de la respuesta (<think>…) en vez del campo aparte reasoning_content. Actívalo si un cliente externo (VS Code, plugins) se queda 'pensando' sin mostrar nada. El chat de la app entiende ambos formatos.",
-                                "Sends the reasoning inline in the response (<think>…) instead of the separate reasoning_content field. Enable it if an external client (VS Code, plugins) appears stuck 'thinking' showing nothing. The in-app chat understands both formats."))
-                LabeledContent(loc.t("Razonamiento por defecto", "Default reasoning")) {
-                    ToshDropdown(selection: $serverDefaultReasoning, options: [
-                        .init(value: "model", title: loc.t("El del modelo", "Model default")),
-                        .init(value: "off", title: loc.t("Desactivado", "Off")),
-                        .init(value: "low", title: loc.t("Bajo", "Low")),
-                        .init(value: "medium", title: loc.t("Medio", "Medium")),
-                        .init(value: "high", title: loc.t("Alto", "High")),
-                    ])
-                }
-                .settingsGlyph("brain.head.profile")
-                .infoTip(loc.t("Nivel de razonamiento para las peticiones que no eligen uno, como las de VS Code o muchos agentes. Una petición que lo indica siempre gana. Los niveles solo cambian algo en modelos cuya plantilla los acepta; «Desactivado» funciona en todos los que razonan.",
-                            "Reasoning level for requests that do not choose one, such as those from VS Code or many agents. A request that sets it always wins. Levels only change anything on models whose template accepts them; Off works on every reasoning model."))
-                LabeledContent(loc.t("Longitud máxima por defecto", "Default response limit")) {
-                    ToshDropdown(selection: $serverDefaultMaxTokens, options: [
-                        .init(value: -1, title: loc.t("Como el chat", "Same as the chat")),
-                        .init(value: 0, title: loc.t("Sin límite", "No limit")),
-                        .init(value: 2048, title: "2K"), .init(value: 4096, title: "4K"),
-                        .init(value: 8192, title: "8K"), .init(value: 16384, title: "16K"),
-                        .init(value: 32768, title: "32K"),
-                    ])
-                }
-                .settingsGlyph("text.append")
-                .infoTip(loc.t("Tokens de respuesta para las peticiones que no fijan max_tokens, como las del chat web o muchas apps. Evita que un cliente sin límite deje al modelo razonando o escribiendo sin fin. «Como el chat» usa el mismo máximo que el chat de la app.",
-                            "Response tokens for requests that do not set max_tokens, such as the web chat's or many apps'. It keeps a client without a limit from leaving the model reasoning or writing without end. “Same as the chat” uses the in-app chat's maximum."))
-                Toggle(loc.t("Plantilla de chat (--jinja)", "Chat template (--jinja)"), isOn: $jinja)
-                    .settingsGlyph("curlybraces")
-                    .infoTip(loc.t("Usa la plantilla de chat oficial del modelo (formato de mensajes, herramientas). Déjalo activado salvo problemas con un modelo concreto.",
-                                "Uses the model's official chat template (message format, tools). Keep it on unless a specific model misbehaves."))
+                Spacer(minLength: 8)
+                Button(loc.t("Aplicar", "Apply")) { cacheTypeK = s.k; cacheTypeV = s.v }
+                    .glassButton()
+                    .controlSize(.small)
+                    .help(loc.t("Pone las claves en %@ y los valores en %@.",
+                                "Sets keys to %@ and values to %@.", s.k, s.v))
             }
-            }
-
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .glassSurface(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .formStyle(.grouped)
-        .labeledContentStyle(SettingsLabeledContentStyle())
-        .toggleStyle(SettingsCompactToggleStyle())
-        .scrollContentBackground(.hidden)
-        .frame(maxWidth: .infinity)
+        if let reason = turboKVIncompatibleReason {
+            HStack(alignment: .center, spacing: 12) {
+                Label(loc.t(reason.es, reason.en),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let s = kvSuggestion {
+                    Spacer(minLength: 8)
+                    Button(loc.t("Usar %@ / %@", "Use %@ / %@", "\(s.k)", "\(s.v)")) {
+                        cacheTypeK = s.k; cacheTypeV = s.v
+                    }
+                    .glassButton()
+                    .controlSize(.small)
+                    .help(loc.t("Cambia a una combinación válida y medida.",
+                                "Switches to a valid, measured combination."))
+                }
+            }
+        } else if turboKVSelected {
+            Label(loc.t("Turbo en las claves es lo que cuesta calidad, y más cuanto menor es el modelo. Con las claves en q8_0, los valores admiten Turbo4 sin pérdida apreciable en ningún tamaño, y Turbo3 casi; Turbo en ambos conviene solo en modelos grandes.",
+                        "Turbo on the keys is what costs quality, the more so the smaller the model. With keys at q8_0, values take Turbo4 with no appreciable loss at any size, and Turbo3 nearly so; Turbo on both is only worth it on large models."),
+                  systemImage: "info.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        Toggle(loc.t("Reuso de caché de prompt (rápido)", "Prompt cache reuse (fast)"), isOn: $cacheReuse)
+            .settingsGlyph("arrow.triangle.2.circlepath")
+            .infoTip(loc.t("Cuando reescribes/editas el prompt (asistentes de código) o se recorta el razonamiento entre turnos, reutiliza la caché desplazándola en vez de reprocesar — mucho más rápido. Es una aproximación: la salida sigue coherente pero puede variar levemente frente a un cálculo exacto. Desactívalo si quieres resultados idénticos y reproducibles.",
+                        "When the prompt is rewritten/edited (coding assistants) or the reasoning is trimmed between turns, it reuses the cache by shifting it instead of reprocessing — much faster. It's an approximation: output stays coherent but can differ slightly from an exact recompute. Turn it off for identical, reproducible results."))
+        Stepper(loc.t("Hilos de CPU: %@", "CPU threads: %@", "\(threads)"),
+                value: $threads, in: 1...max(1, hardware.logicalCores))
+            .settingsGlyph("cpu")
+            .infoTip(loc.t("Hilos para la parte que corre en CPU (expertos MoE, tokenización). Tu equipo tiene %@ hilos; los núcleos físicos (%@) suelen ser el óptimo; más hilos no acelera si el límite es la RAM.",
+                        "Threads for the CPU side (MoE experts, tokenization). Your machine has %@ threads; physical cores (%@) are usually optimal; more threads won't help if RAM bandwidth is the limit.",
+                        String(hardware.logicalCores), String(hardware.physicalCores)))
+            .onAppear { if threads > hardware.logicalCores { threads = max(1, hardware.logicalCores) } }
+    }
+
+    @ViewBuilder private var inferenceAttentionRows: some View {
+        LabeledContent(loc.t("Flash Attention estándar (CPU)", "Standard Flash Attention (CPU)")) {
+            ToshDropdown(selection: $flashAttn, options: ["auto", "on", "off"].map { .init(value: $0, title: $0) }, width: 120)
+        }
+        .disabled(amdFlashActive || kvNeedsFlashAttention)
+        .infoTip(loc.t("Ruta Flash Attention estándar de llama.cpp. En GPU AMD cae en CPU; se fuerza a 'on' cuando el KV está cuantizado. Para atención en GPU usa el kernel AMD de abajo.",
+                    "Standard llama.cpp Flash Attention path. On AMD GPUs it falls back to CPU; it is forced to 'on' when KV is quantized. For GPU attention use the AMD kernel below."))
+        if engineSelection.wrappedValue != "custom" {
+            Toggle(loc.t("Kernel Flash Attention AMD (GPU)", "AMD Flash Attention kernel (GPU)"), isOn: $faAmd)
+                .infoTip(loc.t("Kernel Metal propio, activo por defecto, que ejecuta la atención (prompt y generación) en la GPU AMD: cabezas estándar 64/72/128/256/512 y TurboQuant con padding 128/256/384/512/640. Si lo apagas, el KV cuantizado sigue requiriendo Flash Attention pero usa la ruta estándar en CPU.",
+                            "Custom Metal kernel, on by default, that runs attention (prompt and generation) on the AMD GPU: standard heads 64/72/128/256/512 and TurboQuant padded heads 128/256/384/512/640. If you turn it off, quantized KV still requires Flash Attention but uses the standard CPU path."))
+            Label(amdFlashActive
+                    ? loc.t("Usando kernel AMD en GPU; Flash Attention queda forzado a 'on'.",
+                            "Using the AMD GPU kernel; Flash Attention is forced to 'on'.")
+                    : kvNeedsFlashAttention
+                      ? loc.t("El KV cuantizado requiere Flash Attention: con el kernel AMD apagado usa el FA estándar en CPU.",
+                              "Quantized KV requires Flash Attention: with the AMD kernel off, it uses standard FA on CPU.")
+                      : loc.t("Flash Attention estándar corre en la CPU en GPU AMD; activa el kernel AMD para usar la GPU.",
+                              "Standard Flash Attention runs on CPU on AMD GPUs; enable the AMD kernel to use the GPU."),
+                  systemImage: amdFlashActive ? "bolt.fill" : "cpu")
+                .font(.caption).foregroundStyle(amdFlashActive ? .green : .secondary)
+        }
+        if !modelPath.isEmpty && ServerSettings.modelUsesMTP(at: modelPath) {
+            Label(loc.t("MTP automático activo", "Automatic MTP active"),
+                  systemImage: "hare.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+                .infoTip(loc.t("MTP se activa automáticamente cuando el GGUF trae el cabezal, tanto en modelos densos como MoE.",
+                            "MTP turns on automatically whenever the GGUF includes the head, for both dense and MoE models."))
+        }
+        if engineSelection.wrappedValue != "custom" {
+            Toggle(loc.t("Prefetch de expertos MoE (prompt)", "MoE expert prefetch (prompt)"), isOn: $prefetchExperts)
+                .infoTip(loc.t("Para modelos MoE con expertos en RAM (ncmoe > 0): sube los pesos de expertos a la GPU por una cola Metal paralela, solapando la subida con el cómputo. De 1.8× a 4.4× de velocidad de prompt medida (35B, gemma-4-26B, gpt-oss) sin costo de generación; el primer prompt tras cargar el modelo es algo más lento mientras se preparan los buffers.",
+                            "For MoE models with experts in RAM (ncmoe > 0): uploads expert weights to the GPU through a parallel Metal queue, overlapping the upload with compute. Measured 1.8×-4.4× prompt speed (35B, gemma-4-26B, gpt-oss) at no generation cost; the first prompt after loading the model is slightly slower while buffers warm up."))
+            if routerMode || ServerSettings.modelIsMoE(at: modelPath) {
+                LabeledContent(loc.t("Micro-lote del prompt", "Prompt micro-batch")) {
+                    ToshDropdown(selection: $ubatch, options: ServerSettings.ubatchOptions.map {
+                        .init(value: $0, title: ServerSettings.ubatchLabel($0, loc: loc))
+                    })
+                }
+                .infoTip(loc.t("Cuántos tokens de prompt procesa la GPU de una vez. Solo aporta en modelos MoE, y cuánto depende de dónde estén los expertos. Con expertos en CPU cada micro-lote los sube por el bus, así que uno más grande paga ese viaje menos veces: medido en una Radeon RX 6700 XT, leer 2048 tokens pasa de 475 a 886 tokens por segundo en un 35B, y de 546 a 1133 en un 30B. Con el modelo entero en la tarjeta la mejora ronda el 10%, igual con una GPU que repartido entre varias. La generación no cambia en ningún caso. A cambio ocupa VRAM, cerca de 0.5 GB por cada 512 tokens de micro-lote, así que si vas justo tendrás que bajar los expertos en CPU para compensar.",
+                            "How many prompt tokens the GPU processes at once. It only helps MoE models, and how much depends on where the experts live. With experts on the CPU every micro-batch uploads them over the bus, so a larger one pays that trip fewer times: measured on a Radeon RX 6700 XT, reading 2048 tokens goes from 475 to 886 tokens per second on a 35B, and from 546 to 1133 on a 30B. With the model whole on the card the gain is around 10%, the same on one GPU as split across several. Generation is unchanged in every case. In exchange it takes VRAM, around 0.5 GB per 512 tokens of micro-batch, so if you are tight you will have to lower the experts on CPU to make room."))
+            }
+        }
+    }
+
+    @ViewBuilder private var inferenceRequestRows: some View {
+        LabeledContent(loc.t("Peticiones simultáneas", "Concurrent requests")) {
+            ToshDropdown(selection: $parallelSlots, options: [
+                .init(value: 1, title: loc.t("1 (recomendado)", "1 (recommended)")),
+                .init(value: 2, title: "2"), .init(value: 4, title: "4"),
+                .init(value: 0, title: "Auto")
+            ])
+        }
+        .infoTip(loc.t("Cuántas peticiones procesa el motor a la vez. Con 1, las peticiones hacen cola en vez de competir por la GPU, y un prompt enorme interrumpido por el timeout de un cliente (VS Code) se retoma donde iba al reintentar. Sube el valor solo si varios clientes usan el servidor a la vez.",
+                    "How many requests the engine processes at once. With 1, requests queue instead of competing for the GPU, and a huge prompt interrupted by a client timeout (VS Code) resumes where it was on retry. Raise it only if several clients use the server at the same time."))
+        if parallelSlots > 1 {
+            Toggle(loc.t("Contexto separado por petición", "Separate context per request"), isOn: $separateKV)
+                .infoTip(loc.t("Cada petición simultánea tiene su propia parte del contexto (el contexto dividido entre las peticiones) en vez de compartirlo. Medido en una Radeon RX 6700 XT con varias peticiones a la vez: entre un 7 y un 11% más rápido al generar y entre un 11 y un 18% menos de espera con prompts largos. A cambio, ninguna conversación puede pasar de su parte; apagado, el chat conserva su ventana completa.",
+                            "Each simultaneous request gets its own share of the context (the context divided by the requests) instead of sharing it. Measured on a Radeon RX 6700 XT with several requests at once: 7 to 11% faster generation and 11 to 18% less wait with long prompts. In exchange, no conversation can grow past its share; off, the chat keeps its full window."))
+        }
+        Toggle(loc.t("Razonamiento como texto (clientes externos)",
+                     "Reasoning as plain text (external clients)"), isOn: $reasoningInline)
+            .settingsGlyph("brain")
+            .infoTip(loc.t("Envía el razonamiento dentro de la respuesta (<think>…) en vez del campo aparte reasoning_content. Actívalo si un cliente externo (VS Code, plugins) se queda 'pensando' sin mostrar nada. El chat de la app entiende ambos formatos.",
+                        "Sends the reasoning inline in the response (<think>…) instead of the separate reasoning_content field. Enable it if an external client (VS Code, plugins) appears stuck 'thinking' showing nothing. The in-app chat understands both formats."))
+        LabeledContent(loc.t("Razonamiento por defecto", "Default reasoning")) {
+            ToshDropdown(selection: $serverDefaultReasoning, options: [
+                .init(value: "model", title: loc.t("El del modelo", "Model default")),
+                .init(value: "off", title: loc.t("Desactivado", "Off")),
+                .init(value: "low", title: loc.t("Bajo", "Low")),
+                .init(value: "medium", title: loc.t("Medio", "Medium")),
+                .init(value: "high", title: loc.t("Alto", "High")),
+            ])
+        }
+        .settingsGlyph("brain.head.profile")
+        .infoTip(loc.t("Nivel de razonamiento para las peticiones que no eligen uno, como las de VS Code o muchos agentes. Una petición que lo indica siempre gana. Los niveles solo cambian algo en modelos cuya plantilla los acepta; «Desactivado» funciona en todos los que razonan.",
+                    "Reasoning level for requests that do not choose one, such as those from VS Code or many agents. A request that sets it always wins. Levels only change anything on models whose template accepts them; Off works on every reasoning model."))
+        LabeledContent(loc.t("Longitud máxima por defecto", "Default response limit")) {
+            ToshDropdown(selection: $serverDefaultMaxTokens, options: [
+                .init(value: -1, title: loc.t("Como el chat", "Same as the chat")),
+                .init(value: 0, title: loc.t("Sin límite", "No limit")),
+                .init(value: 2048, title: "2K"), .init(value: 4096, title: "4K"),
+                .init(value: 8192, title: "8K"), .init(value: 16384, title: "16K"),
+                .init(value: 32768, title: "32K"),
+            ])
+        }
+        .settingsGlyph("text.append")
+        .infoTip(loc.t("Tokens de respuesta para las peticiones que no fijan max_tokens, como las del chat web o muchas apps. Evita que un cliente sin límite deje al modelo razonando o escribiendo sin fin. «Como el chat» usa el mismo máximo que el chat de la app.",
+                    "Response tokens for requests that do not set max_tokens, such as the web chat's or many apps'. It keeps a client without a limit from leaving the model reasoning or writing without end. “Same as the chat” uses the in-app chat's maximum."))
+        Toggle(loc.t("Plantilla de chat (--jinja)", "Chat template (--jinja)"), isOn: $jinja)
+            .infoTip(loc.t("Usa la plantilla de chat oficial del modelo (formato de mensajes, herramientas). Déjalo activado salvo problemas con un modelo concreto.",
+                        "Uses the model's official chat template (message format, tools). Keep it on unless a specific model misbehaves."))
     }
 }
 
