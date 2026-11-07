@@ -331,7 +331,12 @@ struct ServerSettings {
         // under the plan the engine picks offload and batch; by hand, Full GPU offloads nothing
         let planOwnsMemory = usesAutoPlan || manualFullGPU
         if ncmoe > 0 && !planOwnsMemory { args += ["--n-cpu-moe", String(ncmoe)] }
-        if !usesAutoPlan, let ub = effectiveUbatch { args += ["--ubatch-size", String(ub), "--batch-size", String(ub)] }
+        // The tuned pairing is batch = 2 * ubatch, which is what start.sh derives (`B=$((UB*2))`).
+        // Passing the ubatch to both made the app's prefill measure below the web UI's on the same
+        // engine and the same model: two launchers, two numbers, one binary.
+        if !usesAutoPlan, let ub = effectiveUbatch {
+            args += ["--ubatch-size", String(ub), "--batch-size", String(ub * 2)]
+        }
         if usesAutoPlan { args += ["--dynamic-moe", "on"] }
         let mode = Self.loadMode(noMmap: noMmap, mlock: mlock)
         if let mode { args += ["--load-mode", mode] }
@@ -902,7 +907,10 @@ struct ServerSettings {
             port: int(SettingsKeys.port, 8080),
             ngl: int(SettingsKeys.ngl, 99),
             ncmoe: int(SettingsKeys.ncmoe, 0),
-            ctx: int(SettingsKeys.ctx, 16384),
+            // 8192 is the context the polaris numbers were measured at and what start.sh uses; at
+            // 16384 the q4_0 KV on an 8 GB card changes what the engine can keep resident, so the
+            // GUI and the web UI did not run the same configuration even though they ran one binary.
+            ctx: int(SettingsKeys.ctx, 8192),
             contextAutomatic: bool(SettingsKeys.contextAutomatic, false),
             threads: int(SettingsKeys.threads, 6),
             flashAttn: d.string(forKey: SettingsKeys.flashAttn) ?? "auto",
