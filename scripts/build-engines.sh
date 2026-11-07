@@ -15,9 +15,21 @@ LLAMA_COMMIT="${LLAMA_COMMIT:-d81235049384534c167caea52b85a694f6103d14}"   # lla
 WHISPER_COMMIT="${WHISPER_COMMIT:-371b5a7561823ab2bb32142d2751e35e7534727b}" # whisper.cpp v1.9.3
 SD_COMMIT="${SD_COMMIT:-2f88688}"         # stable-diffusion.cpp commit validated for image gen
 ARCH="${ARCH:-$(uname -m)}"
-# Overridable for pre-macOS-14 hosts: this machine is a Westmere Xeon with no AVX
-# and cannot run the 14.0 slice, so TOSH_NO_AVX2=1 is paired with DEPLOYMENT_TARGET=12.0.
-DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-14.0}"        # same floor as the app (Package.swift)
+HOST_ARCH="$(uname -m)"
+# A native build has to start on the machine that ran it, so the OS floor below and the AVX2 floor
+# further down are probed from the host rather than left to whoever remembers the environment. An
+# explicit DEPLOYMENT_TARGET/TOSH_NO_AVX2 still wins, and a cross build (ARCH other than the host,
+# which is what the arm64 CI runners do) keeps the previous defaults untouched.
+# This VM is a Westmere Xeon under macOS 12.7: neither floor can be the default for it.
+DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET:-}"
+if [ -z "$DEPLOYMENT_TARGET" ]; then
+    OS_FLOOR="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+    DEPLOYMENT_TARGET="14.0"                          # same floor as the app (Package.swift)
+    if [ "$ARCH" = "$HOST_ARCH" ] && [ -n "$OS_FLOOR" ] && [ "$OS_FLOOR" -lt 14 ]; then
+        # 12.0 is the oldest slice this branch carries (see the macOS 12 GUI backport)
+        DEPLOYMENT_TARGET="12.0"
+    fi
+fi
 if [ "$ARCH" = "universal" ]; then
     # Build each slice separately (ggml has per-arch sources) and lipo them.
     for slice in x86_64 arm64; do
@@ -128,11 +140,22 @@ CMAKE_FLAGS=(
 
 # pin every ISA flag in both variants: with GGML_NATIVE=OFF ggml's defaults follow the build
 # host, an arm64 runner cross-building x86_64 does not count as cross-compiling, and a flag left
-# out keeps whatever the previous variant cached in build-static. TOSH_NO_AVX2=1 is the SSE4.2
-# baseline for pre-AVX Xeons.
+# out keeps whatever the previous variant cached in build-static.
+#
+# TOSH_NO_AVX2 remains the explicit switch, but it is no longer what makes a pre-AVX machine work:
+# -DGGML_AVX2=ON on a Westmere emits a server that SIGILLs before it prints a line, and the same
+# flag compiles out the SSE4.1 K-quant dots in patches/llama/cpu, so a build that runs at all is the
+# build that has them. A native x86_64 build therefore reads AVX2 off the host CPU.
+NO_AVX2="${TOSH_NO_AVX2:-}"
+if [ -z "$NO_AVX2" ] && [ "$ARCH" = "x86_64" ] && [ "$ARCH" = "$HOST_ARCH" ]; then
+    case "$(uname -s)" in
+        Darwin) if [ "$(sysctl -n hw.optional.avx2_0 2>/dev/null)" != "1" ]; then NO_AVX2=1; fi ;;
+        Linux)  if ! grep -qw avx2 /proc/cpuinfo 2>/dev/null; then NO_AVX2=1; fi ;;
+    esac
+fi
 ISA_FLAGS=()
 if [ "$ARCH" = "x86_64" ]; then
-    if [ -z "${TOSH_NO_AVX2:-}" ]; then
+    if [ -z "$NO_AVX2" ]; then
         ISA_FLAGS=(-DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON
                    -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX_VNNI=OFF -DGGML_AVX512=OFF)
     else
