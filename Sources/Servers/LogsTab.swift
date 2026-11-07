@@ -113,12 +113,10 @@ struct ServerLogView: View {
                         .font(.title3.bold()).lineLimit(1)
                     statusPill
                 }
-                HStack(spacing: 0) {
-                    summaryValue(modelName.quant.isEmpty ? "GGUF" : modelName.quant)
-                    summaryValue("\(hardware.bestGPU?.vramGB ?? 0) GB VRAM")
-                    summaryValue("\(loc.t("Puerto", "Port")) \(settings.port)")
-                    summaryValue("\(compactContext(settings.ctx)) context")
-                    summaryValue(settings.serverBinary == ServerSettings.defaultBinary ? "llama.cpp" : loc.t("Motor externo", "External engine"), last: true)
+                // on a narrow window the card's own details give way before the essentials are cut
+                ViewThatFits(in: .horizontal) {
+                    summaryValues(full: true)
+                    summaryValues(full: false)
                 }
             }
             Spacer(minLength: 12)
@@ -131,6 +129,18 @@ struct ServerLogView: View {
         .padding(16)
         .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private func summaryValues(full: Bool) -> some View {
+        HStack(spacing: 0) {
+            summaryValue(modelName.quant.isEmpty ? "GGUF" : modelName.quant)
+            if full { summaryValue("\(hardware.bestGPU?.vramGB ?? 0) GB VRAM") }
+            summaryValue("\(loc.t("Puerto", "Port")) \(settings.port)")
+            summaryValue(loc.t("%@ de contexto", "%@ context", compactContext(settings.ctx)), last: !full)
+            if full {
+                summaryValue(settings.serverBinary == ServerSettings.defaultBinary ? "llama.cpp" : loc.t("Motor externo", "External engine"), last: true)
+            }
+        }
     }
 
     private func summaryValue(_ value: String, last: Bool = false) -> some View {
@@ -186,13 +196,18 @@ struct ServerLogView: View {
     }
 
     private var statistics: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 10)], spacing: 10) {
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                statisticCard(icon: "bolt.fill", title: loc.t("Tiempo activo", "Uptime"), value: uptime, tint: Color.appAccent)
+        AdaptiveTwoUp(threshold: 640, spacing: 10) {
+            HStack(spacing: 10) {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    statisticCard(icon: "bolt.fill", title: loc.t("Tiempo activo", "Uptime"), value: uptime, tint: Color.appAccent)
+                }
+                statisticCard(icon: "doc.text.fill", title: loc.t("Total de líneas", "Total lines"), value: lines.count.formatted(), tint: .secondary)
             }
-            statisticCard(icon: "doc.text.fill", title: loc.t("Total de líneas", "Total lines"), value: lines.count.formatted(), tint: .secondary)
-            statisticCard(icon: "exclamationmark.triangle.fill", title: loc.t("Avisos", "Warnings"), value: warningCount.formatted(), tint: .orange)
-            statisticCard(icon: "xmark.octagon.fill", title: loc.t("Errores", "Errors"), value: errorCount.formatted(), tint: .red)
+        } second: {
+            HStack(spacing: 10) {
+                statisticCard(icon: "exclamationmark.triangle.fill", title: loc.t("Avisos", "Warnings"), value: warningCount.formatted(), tint: .orange)
+                statisticCard(icon: "xmark.octagon.fill", title: loc.t("Errores", "Errors"), value: errorCount.formatted(), tint: .red)
+            }
         }
     }
 
@@ -492,13 +507,16 @@ private struct PresentedLogRow: View {
         }
     }
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        // top, not baseline: the column rule has no baseline and pushed a wrapped message down
+        HStack(alignment: .top, spacing: 12) {
             Text(line.time).frame(width: 106, alignment: .leading).foregroundStyle(.secondary)
             Label(line.level.shortLabel, systemImage: "circle.fill")
                 .labelStyle(LogLevelLabelStyle()).foregroundStyle(tint).frame(width: 74, alignment: .leading)
-            Text(line.source).frame(width: 90, alignment: .leading).foregroundStyle(.secondary)
+            Text(line.source).lineLimit(1).truncationMode(.tail)
+                .frame(width: 90, alignment: .leading).foregroundStyle(.secondary)
             Divider()
-            Text(line.message).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            Text(LogPresentationParser.softBreaks(line.message))
+                .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
         }
         .font(.system(.caption, design: .monospaced))
         .padding(.horizontal, 14).padding(.vertical, 6)

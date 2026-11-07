@@ -16,11 +16,14 @@ struct SpeechModelsSettingsSection: View {
     var body: some View {
         // The panel header above already names this category.
         Section {
-            Picker(loc.t("Método del micrófono", "Microphone method"), selection: $methodRaw) {
-                Text(loc.t("Elegir…", "Choose…")).tag("")
-                Text(loc.t("Dictado de Apple", "Apple Dictation")).tag(SpeechInputMethod.apple.rawValue)
-                Text("Whisper.cpp · GPU").tag(SpeechInputMethod.whisper.rawValue)
+            LabeledContent(loc.t("Método del micrófono", "Microphone method")) {
+                ToshDropdown(selection: $methodRaw, options: [
+                    .init(value: "", title: loc.t("Elegir…", "Choose…")),
+                    .init(value: SpeechInputMethod.apple.rawValue, title: loc.t("Dictado de Apple", "Apple Dictation")),
+                    .init(value: SpeechInputMethod.whisper.rawValue, title: "Whisper.cpp · GPU"),
+                ])
             }
+            .settingsGlyph("mic")
             .help(loc.t("Elige el dictado de macOS o Whisper.cpp acelerado por la GPU.",
                         "Choose macOS dictation or GPU-accelerated Whisper.cpp."))
 
@@ -32,10 +35,13 @@ struct SpeechModelsSettingsSection: View {
             }
 
             if methodRaw != SpeechInputMethod.apple.rawValue {
-                Picker(loc.t("Carga de Whisper", "Whisper loading"), selection: $loadPolicyRaw) {
-                    Text(loc.t("Bajo demanda", "On demand")).tag(WhisperLoadPolicy.onDemand.rawValue)
-                    Text(loc.t("Siempre cargado", "Always loaded")).tag(WhisperLoadPolicy.alwaysLoaded.rawValue)
+                LabeledContent(loc.t("Carga de Whisper", "Whisper loading")) {
+                    ToshDropdown(selection: $loadPolicyRaw, options: [
+                        .init(value: WhisperLoadPolicy.onDemand.rawValue, title: loc.t("Bajo demanda", "On demand")),
+                        .init(value: WhisperLoadPolicy.alwaysLoaded.rawValue, title: loc.t("Siempre cargado", "Always loaded")),
+                    ])
                 }
+                .settingsGlyph("memorychip")
                 .help(loc.t("Carga bajo demanda libera VRAM; Siempre cargado reduce la espera del próximo dictado.",
                             "On demand releases VRAM; Always loaded reduces the wait for the next dictation."))
 
@@ -47,11 +53,12 @@ struct SpeechModelsSettingsSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-            Picker(loc.t("Modelo Whisper", "Whisper model"), selection: $selectedID) {
-                ForEach(WhisperModel.catalog) { model in
-                    Text(label(for: model)).tag(model.id)
-                }
+            LabeledContent(loc.t("Modelo Whisper", "Whisper model")) {
+                ToshDropdown(selection: $selectedID, options: WhisperModel.catalog.map {
+                    .init(value: $0.id, title: label(for: $0))
+                }, width: 320)
             }
+            .settingsGlyph("waveform")
             .help(loc.t("Elige el equilibrio entre velocidad, uso de VRAM y precisión.",
                         "Choose the balance between speed, VRAM use, and accuracy."))
 
@@ -59,6 +66,7 @@ struct SpeechModelsSettingsSection: View {
                 Text(loc.t(selected.detailES, selected.detailEN))
                     .foregroundStyle(.secondary)
             }
+            .settingsGlyph("info.circle")
 
             if models.whisperModelInstalled(selected) {
                 Label(loc.t("Instalado y listo para micrófono, audio y video",

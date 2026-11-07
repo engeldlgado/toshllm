@@ -78,6 +78,7 @@ struct ToshLLMApp: App {
 
     @AppStorage(SettingsKeys.appAccent) private var appAccentRaw = AppTheme.defaultKey
     @AppStorage(SettingsKeys.chatFontScale) private var chatFontScale = 1.0
+    @AppStorage(SettingsKeys.chatWidth) private var chatWidth = ChatWidth.standard.rawValue
     @Environment(\.openWindow) private var openWindow
 
     /// The chat font shortcuts already existed on hidden buttons, which made them
@@ -99,6 +100,11 @@ struct ToshLLMApp: App {
                 setFontScale(1)
             }
             .keyboardShortcut("0", modifiers: .command)
+            Picker(loc.t("Ancho del chat", "Chat width"), selection: $chatWidth) {
+                ForEach(ChatWidth.allCases, id: \.self) { width in
+                    Text(width.title(loc)).tag(width.rawValue)
+                }
+            }
             Divider()
         }
         CommandGroup(replacing: .help) {

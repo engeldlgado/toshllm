@@ -71,9 +71,6 @@ struct LocalModelCard: View {
 
     private func actions(path: String, traits: ModelTraits, active: Bool, updatable: Bool) -> some View {
         HStack(spacing: 8) {
-            if !active {
-                UseModelButton(path: path, modelName: model.name).controlSize(.small)
-            }
             if updatable {
                 Button(loc.t("Actualizar", "Update"), systemImage: "arrow.down.circle") {
                     pendingUpdate = model
@@ -89,6 +86,10 @@ struct LocalModelCard: View {
                 .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
                     LocalModelSettingsPopover(model: model, traits: traits)
                 }
+            }
+            // the primary action keeps one column across rows, whatever secondary ones a row has
+            if !active {
+                UseModelButton(path: path, modelName: model.name).controlSize(.small)
             }
             LocalModelMenu(model: model, traits: traits, updatable: updatable,
                            pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate)

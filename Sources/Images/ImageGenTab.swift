@@ -375,7 +375,7 @@ struct ImageControls: View {
     }
 
     /// An instance can run: model installed, an (own or inherited) prompt, and
-    /// a frame that fits its GPU(s).
+    /// a frame that fits its GPU(s). The model's VRAM class only warns.
     private func runnable(_ c: ImageInstanceConfig) -> Bool {
         let model = c.resolvedModel(for: hardware)
         let v = ImageControls.vram(of: c.gpuIndex)
@@ -383,7 +383,7 @@ struct ImageControls: View {
         let (w, h) = c.dimensions
         return ImageGenerator.installed(model, in: models)
             && !pool.effectivePrompt(for: c).isEmpty
-            && model.fitsGPU(mainVRAM: v, auxVRAM: aux.map { ImageControls.vram(of: $0) })
+            && model.auxHolds(aux.map { ImageControls.vram(of: $0) })
             && ImageGenLimits.fits(width: w, height: h, vramGB: v,
                                    residentGB: model.residentGB, attnVRAMSq: model.attnVRAMSq)
     }
@@ -928,11 +928,8 @@ struct ImageInstanceForm: View {
         VStack(alignment: .leading, spacing: 14) {
             modelPicker
             if cfg.isCustom { customSetup }
-            if !cfg.isCustom && !modelFitsGPU {
-                Label(loc.t("Necesita %@ GB de VRAM; no corre en esta GPU.", "Needs %@ GB of VRAM; it won't run on this GPU.", "\(Int(model.minVRAMGB))"),
-                      systemImage: "xmark.octagon.fill")
-                    .font(.caption2).foregroundStyle(.red)
-            } else if !cfg.isCustom && !installed {
+            if !cfg.isCustom && !modelFitsGPU { vramClassNote }
+            if !cfg.isCustom && !installed {
                 installBox
             } else {
                 Text(loc.t("Descripción", "Prompt")).font(.headline)
@@ -967,7 +964,7 @@ struct ImageInstanceForm: View {
             Text(loc.t("Modelo", "Model")).font(.caption).foregroundStyle(.secondary)
             Picker("", selection: $cfg.modelID) {
                 ForEach(ImageGenCatalog.models) { m in
-                    let fits = targetVRAM >= m.minVRAMGB
+                    let fits = m.fitsVRAMClass(targetVRAM)
                     Text(fits ? m.name : "\(m.name) · \(Int(m.minVRAMGB)) GB+").tag(m.id)
                 }
                 Divider()
@@ -1034,7 +1031,7 @@ struct ImageInstanceForm: View {
                 .foregroundStyle(present ? .green : .secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(comp.label(loc.isSpanish)).font(.caption)
-                Text(comp.fileName).font(.system(size: 9, design: .monospaced))
+                Text(comp.fileName).font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             Spacer()
@@ -1276,7 +1273,7 @@ struct ImageInstanceForm: View {
                     ForEach(offeredAspects) { a in
                         Text(a == .custom ? loc.t("Personalizado", "Custom") : a.rawValue).tag(a.rawValue)
                     }
-                }.labelsHidden().frame(width: 96)
+                }.labelsHidden().frame(width: 96, alignment: .trailing)
             }
             if cfg.aspectValue == .custom {
                 row(loc.t("Proporción W:H", "Ratio W:H"),
@@ -1291,7 +1288,7 @@ struct ImageInstanceForm: View {
                       "Long edge in pixels. The maximum adapts to the GPU's VRAM.")) {
                 Picker("", selection: $cfg.baseSize) {
                     ForEach(baseSizes, id: \.self) { Text("\($0) px").tag($0) }
-                }.labelsHidden().frame(width: 96)
+                }.labelsHidden().frame(width: 96, alignment: .trailing)
             }
             if !hardware.gpus.isEmpty {
                 row("GPU",
@@ -1302,7 +1299,7 @@ struct ImageInstanceForm: View {
                             ForEach(Array(hardware.gpus.enumerated()), id: \.offset) { i, g in
                                 Text(g.name).tag(i)
                             }
-                        }.labelsHidden().frame(width: 140)
+                        }.labelsHidden().frame(width: 140, alignment: .trailing)
                     } else {
                         // A single GPU: show which one, without a redundant picker.
                         Text(hardware.gpus[0].name)
@@ -1320,7 +1317,7 @@ struct ImageInstanceForm: View {
                         ForEach(Array(hardware.gpus.enumerated()), id: \.offset) { i, g in
                             if i != cfg.gpuIndex { Text(g.name).tag(i) }
                         }
-                    }.labelsHidden().frame(width: 140)
+                    }.labelsHidden().frame(width: 140, alignment: .trailing)
                     .onChange(of: cfg.gpuIndex) {
                         if cfg.auxGPUIndex == cfg.gpuIndex { cfg.auxGPUIndex = -1 }
                     }
@@ -1333,7 +1330,7 @@ struct ImageInstanceForm: View {
                     : loc.t("Este modelo va a %@ pasos fijos: trae su propio calendario de ruido y con otro la imagen sale mal.",
                             "This model runs a fixed %@ steps: it ships its own noise schedule, and any other one spoils the image.",
                             "\(model.steps(cfg.steps))")) {
-                Stepper(value: $cfg.steps, in: 4...30) { Text("\(model.steps(cfg.steps))").monospacedDigit() }.frame(width: 96)
+                Stepper(value: $cfg.steps, in: 4...30) { Text("\(model.steps(cfg.steps))").monospacedDigit() }.frame(width: 96, alignment: .trailing)
                     .disabled(!model.sigmas.isEmpty)
             }
             row(loc.t("Semilla", "Seed"),
@@ -1346,7 +1343,7 @@ struct ImageInstanceForm: View {
                       "JPG is far lighter; PNG is lossless.")) {
                 Picker("", selection: $cfg.format) {
                     ForEach(ImageFormat.allCases) { Text($0.rawValue.uppercased()).tag($0.rawValue) }
-                }.labelsHidden().frame(width: 96)
+                }.labelsHidden().frame(width: 96, alignment: .trailing)
             }
             row(loc.t("Modo rápido", "Fast mode"),
                 loc.t("Reutiliza pasos del muestreo en vez de recalcularlos. Más rápido, pero cambia el detalle de la imagen. En Qwen-Image 2.1 a 25 pasos, aproximadamente: cache-dit 1.46x, spectrum 1.91x, easycache 2.06x.",
@@ -1356,7 +1353,7 @@ struct ImageInstanceForm: View {
                         Text(fastModeLabel(mode)).tag(mode.rawValue)
                             .help(fastModeHelp(mode))
                     }
-                }.labelsHidden().frame(width: 150)
+                }.labelsHidden().frame(width: 150, alignment: .trailing)
             }
             row(loc.t("Descargar a CPU", "Offload to CPU"),
                 loc.t("Mantiene los pesos en RAM y los sube a VRAM por etapas. Más lento; solo si falta VRAM.",
@@ -1375,6 +1372,15 @@ struct ImageInstanceForm: View {
             .font(.caption).foregroundStyle(.yellow)
             .padding(10).frame(maxWidth: .infinity, alignment: .leading)
             .background(.yellow.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// The catalog class keeps headroom; what blocks a run is the frame estimate.
+    private var vramClassNote: some View {
+        Label(loc.t("Pensado para %@ GB de VRAM; esta GPU tiene %@ GB. Puede ir justo: si se cuelga o falla, baja el tamaño.",
+                    "Sized for %@ GB of VRAM; this GPU has %@ GB. It may be tight: if it freezes or fails, lower the size.",
+                    "\(Int(model.minVRAMGB))", "\(Int(targetVRAM.rounded()))"),
+              systemImage: "exclamationmark.triangle")
+            .font(.caption).foregroundStyle(.orange)
     }
 
     /// A square at a large base can exceed VRAM even when the engine is ready.
@@ -2227,7 +2233,7 @@ struct ImageCanvas: View {
                         VStack(spacing: 3) {
                             AsyncThumbnail(url: entry.output)
                             Text(entry.source.lastPathComponent)
-                                .font(.system(size: 9)).lineLimit(1).truncationMode(.middle)
+                                .font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
                                 .frame(width: 78)
                         }
                         .padding(4)

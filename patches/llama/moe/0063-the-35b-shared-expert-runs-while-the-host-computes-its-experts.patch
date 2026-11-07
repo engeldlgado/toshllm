@@ -1,0 +1,157 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index c853ca186..8c71e017c 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -2116,11 +2116,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * probs_in,
+          ggml_tensor * gate_up_exps,
+          ggml_tensor * up_exps_s,
+          ggml_tensor * gate_exps_s,
+          ggml_tensor * down_exps_s,
+-         ggml_tensor * selected_experts_in) const {
++         ggml_tensor * selected_experts_in,
++         ggml_tensor * overlap) const {
+     return build_moe_ffn(
+         cur,
+         gate_inp,  /* gate_inp_b  */ nullptr,
+         up_exps,   /* up_exps_b   */ nullptr,
+         gate_exps, /* gate_exps_b */ nullptr,
+@@ -2137,11 +2138,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         gate_up_exps,
+         /* gate_up_exps_b */ nullptr,
+         up_exps_s,
+         gate_exps_s,
+         down_exps_s,
+-        selected_experts_in
++        selected_experts_in,
++        overlap
+     );
+ }
+ 
+ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * cur,
+@@ -2165,11 +2167,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * gate_up_exps,
+          ggml_tensor * gate_up_exps_b,
+          ggml_tensor * up_exps_s,
+          ggml_tensor * gate_exps_s,
+          ggml_tensor * down_exps_s,
+-         ggml_tensor * selected_experts_in) const {
++         ggml_tensor * selected_experts_in,
++         ggml_tensor * overlap) const {
+     const int64_t n_embd   = cur->ne[0];
+     const int64_t n_tokens = cur->ne[1];
+     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
+ 
+     ggml_tensor * logits = nullptr;
+@@ -2357,10 +2360,22 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     }
+ 
+     //call early so that topk-moe can be used
+     ggml_build_forward_expand(gf, weights);
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++    // work that reads none of the routed experts goes between the publish and the join, where the
++    // GPU would otherwise wait for the host's share
++    static const bool overlap_off = getenv("TOSH_DMOE_OVERLAP_DISABLE") != nullptr;
++    if (overlap != nullptr && !overlap_off && (dmoe_slots != nullptr || dmoe_wide != nullptr)) {
++        ggml_build_forward_expand(gf, expert_ids);
++        ggml_build_forward_expand(gf, overlap);
++    }
++#else
++    GGML_UNUSED(overlap);
++#endif
++
+     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+ 
+     if (weight_before_ffn) {
+         // repeat cur to [n_embd, n_expert_used, n_tokens]
+         ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, n_expert_used, n_tokens, 1);
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index b424517d9..f3441e1a2 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -1181,11 +1181,12 @@ struct llm_graph_context {
+              ggml_tensor * probs_in = nullptr,
+              ggml_tensor * gate_up_exps = nullptr,
+              ggml_tensor * up_exps_s = nullptr,
+              ggml_tensor * gate_exps_s = nullptr,
+              ggml_tensor * down_exps_s = nullptr,
+-             ggml_tensor * selected_experts_in = nullptr) const;
++             ggml_tensor * selected_experts_in = nullptr,
++             ggml_tensor * overlap = nullptr) const;
+ 
+     ggml_tensor * build_moe_ffn(
+              ggml_tensor * cur,
+              ggml_tensor * gate_inp,
+              ggml_tensor * gate_inp_b,
+@@ -1207,11 +1208,12 @@ struct llm_graph_context {
+              ggml_tensor * gate_up_exps = nullptr,
+              ggml_tensor * gate_up_exps_b = nullptr,
+              ggml_tensor * up_exps_s = nullptr,
+              ggml_tensor * gate_exps_s = nullptr,
+              ggml_tensor * down_exps_s = nullptr,
+-             ggml_tensor * selected_experts_in = nullptr) const;
++             ggml_tensor * selected_experts_in = nullptr,
++             ggml_tensor * overlap = nullptr) const;
+ 
+     //
+     // inputs
+     //
+ 
+diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
+index 4e40a84d3..25846071a 100644
+--- a/src/models/qwen35moe.cpp
++++ b/src/models/qwen35moe.cpp
+@@ -504,10 +504,23 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn_linear(
+ 
+ ggml_tensor * llama_model_qwen35moe::graph::build_layer_ffn(ggml_tensor * cur, const int il) {
+     // Check if this is an MoE layer
+     GGML_ASSERT(model.layers[il].ffn_gate_inp != nullptr);
+ 
++    // the shared expert reads only cur, so with mixed execution it runs while the host computes
++    ggml_tensor * ffn_shexp = nullptr;
++    if (model.layers[il].ffn_up_shexp != nullptr) {
++        ffn_shexp =
++            build_ffn(cur,
++                model.layers[il].ffn_up_shexp, NULL, model.layers[il].ffn_up_shexp_s,
++                model.layers[il].ffn_gate_shexp, NULL, model.layers[il].ffn_gate_shexp_s,
++                model.layers[il].ffn_down_shexp, NULL, model.layers[il].ffn_down_shexp_s,
++                NULL,
++                LLM_FFN_SILU, LLM_FFN_PAR, il);
++        cb(ffn_shexp, "ffn_shexp", il);
++    }
++
+     ggml_tensor * moe_out =
+         build_moe_ffn(cur,
+             model.layers[il].ffn_gate_inp,
+             model.layers[il].ffn_up_exps,
+             model.layers[il].ffn_gate_exps,
+@@ -518,24 +531,16 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_ffn(ggml_tensor * cur, c
+             hparams.expert_weights_scale,
+             LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, il,
+             nullptr, model.layers[il].ffn_gate_up_exps,
+             model.layers[il].ffn_up_exps_s,
+             model.layers[il].ffn_gate_exps_s,
+-            model.layers[il].ffn_down_exps_s);
++            model.layers[il].ffn_down_exps_s,
++            nullptr, ffn_shexp);
+     cb(moe_out, "ffn_moe_out", il);
+ 
+     // Add shared experts if present - following Qwen3Next reference implementation
+-    if (model.layers[il].ffn_up_shexp != nullptr) {
+-        ggml_tensor * ffn_shexp =
+-            build_ffn(cur,
+-                model.layers[il].ffn_up_shexp, NULL, model.layers[il].ffn_up_shexp_s,
+-                model.layers[il].ffn_gate_shexp, NULL, model.layers[il].ffn_gate_shexp_s,
+-                model.layers[il].ffn_down_shexp, NULL, model.layers[il].ffn_down_shexp_s,
+-                NULL,
+-                LLM_FFN_SILU, LLM_FFN_PAR, il);
+-        cb(ffn_shexp, "ffn_shexp", il);
+-
++    if (ffn_shexp != nullptr) {
+         // Apply shared expert gating as in the reference implementation
+         // The shared expert has its own gate that is sigmoided
+         // Note: ffn_gate_inp_shexp is the shared expert gate (outputs 1 value per token)
+         ggml_tensor * shared_gate = build_lora_mm(model.layers[il].ffn_gate_inp_shexp, cur);
+         cb(shared_gate, "shared_expert_gate", il);

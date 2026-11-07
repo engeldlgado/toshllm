@@ -18,6 +18,13 @@ struct HardwareInfo {
     var gpus: [GPUDevice]
 
     var bestGPU: GPUDevice? { gpus.max(by: { $0.vramMB < $1.vramMB }) }
+    /// The brand string without trademarks or clock, which only crowd a narrow label.
+    var cpuShortName: String {
+        var name = cpuBrand.replacingOccurrences(of: "(R)", with: "").replacingOccurrences(of: "(TM)", with: "")
+        if let at = name.range(of: "@") { name = String(name[..<at.lowerBound]) }
+        name = name.replacingOccurrences(of: " CPU", with: "")
+        return name.split(separator: " ").joined(separator: " ")
+    }
     var vramGB: Double { Double(bestGPU?.vramMB ?? 0) / 1024 }
     /// Total VRAM across the split-eligible GPUs (iGPUs are never auto-selected).
     /// Only meaningful for a multi-GPU layer split.

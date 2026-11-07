@@ -175,10 +175,11 @@ struct VideoControls: View {
             settingRow(loc.t("Resolución", "Resolution"),
                        help: loc.t("Solo los tamaños que el modelo declara. Fuera de ellos la imagen sale blanda o el modelo ni acepta la forma.",
                                    "Only the sizes the model states. Outside them the picture comes back soft, or the model does not accept the shape at all.")) {
-                Picker("", selection: $sizeLabel) {
+                // shows the size a run will use, which is the model's first while none is chosen
+                Picker("", selection: Binding(get: { size.label }, set: { sizeLabel = $0 })) {
                     ForEach(model.sizes) { Text($0.label).tag($0.label) }
                 }
-                .labelsHidden().frame(width: 140)
+                .labelsHidden().frame(width: 140, alignment: .trailing)
             }
             settingRow(loc.t("Fotogramas", "Frames"),
                        help: loc.t("Los VAE temporales admitidos por el motor requieren cuentas 4n+1.",
@@ -188,12 +189,12 @@ struct VideoControls: View {
                         Text("\(count) · \(String(format: "%.1f", VideoGenLimits.seconds(frames: count, fps: model.fps)))s").tag(count)
                     }
                 }
-                .labelsHidden().frame(width: 140)
+                .labelsHidden().frame(width: 140, alignment: .trailing)
             }
             settingRow(loc.t("Pasos", "Steps"),
                        help: loc.t("Más pasos afinan el detalle y tardan proporcionalmente más. El modelo trae su propia recomendación.",
                                    "More steps refine the detail and take proportionally longer. The model ships its own recommendation.")) {
-                Stepper("\(steps)", value: $steps, in: 8...60, step: 2).frame(width: 140)
+                Stepper("\(steps)", value: $steps, in: 8...60, step: 2).frame(width: 140, alignment: .trailing)
             }
             settingRow(loc.t("Semilla", "Seed"),
                        help: loc.t("Repite la misma semilla con el mismo prompt para reproducir un vídeo. Cámbiala para explorar variantes.",
@@ -209,10 +210,10 @@ struct VideoControls: View {
                             Text(loc.t("Automática", "Automatic")).tag(-1)
                             ForEach(Array(hardware.gpus.enumerated()), id: \.offset) { i, gpu in Text(gpu.name).tag(i) }
                         }
-                        .labelsHidden().frame(width: 140)
+                        .labelsHidden().frame(width: 140, alignment: .trailing)
                     } else {
                         Text(hardware.gpus[0].name).font(.callout).foregroundStyle(.secondary)
-                            .lineLimit(1).truncationMode(.tail).frame(width: 140, alignment: .trailing)
+                            .lineLimit(1).truncationMode(.tail).frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
             }
@@ -346,7 +347,7 @@ struct VideoControls: View {
                         .foregroundStyle(present ? .green : .secondary)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(component.label(loc.isSpanish)).font(.caption)
-                        Text(component.fileName).font(.system(size: 9, design: .monospaced))
+                        Text(component.fileName).font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                     Spacer()

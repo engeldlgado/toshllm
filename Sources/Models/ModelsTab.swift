@@ -241,7 +241,7 @@ private struct FeaturedModelBanner: View {
                 Text(recommendation.model.detail(loc.isSpanish))
                     .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
                 AdaptiveTwoUp(threshold: 560, spacing: 10, alignment: .center) {
-                    metrics
+                    HStack(spacing: 10) { metrics }
                 } second: {
                     actions
                 }
@@ -325,7 +325,7 @@ private struct HeroMetric: View {
             Image(systemName: icon).foregroundStyle(color)
             VStack(alignment: .leading, spacing: 1) {
                 Text(value).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text(label).font(.system(size: 10)).foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
@@ -511,7 +511,7 @@ private struct InspectorMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label(value, systemImage: icon).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+            Text(label).font(.system(size: 10)).foregroundStyle(.tertiary)
         }
         .padding(9).frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
@@ -555,9 +555,10 @@ private struct ModelCollectionHero: View {
                 .background(Color.appAccent.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
             VStack(alignment: .leading, spacing: 5) {
                 Text(eyebrow.uppercased())
-                    .font(.system(size: 9, weight: .bold)).tracking(1.2).foregroundStyle(Color.appAccent)
+                    .font(.system(size: 10, weight: .bold)).tracking(1.2).foregroundStyle(Color.appAccent)
                 Text(title).font(.system(size: 19, weight: .semibold))
-                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 16)
             collectionStat(primaryValue, label: primaryLabel)
@@ -565,7 +566,7 @@ private struct ModelCollectionHero: View {
             collectionStat(secondaryValue, label: secondaryLabel)
             if let actionTitle, let action {
                 Button(actionTitle, systemImage: actionIcon, action: action)
-                    .glassButton().controlSize(.small)
+                    .glassButton().controlSize(.small).fixedSize()
             }
         }
         .padding(17)

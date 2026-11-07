@@ -1,0 +1,99 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 1e4bf6e4f..5b81531c0 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -2791,11 +2791,11 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                     ((dk == 40 || dk == 80 || dk == 160) && f16_kv);
+                 const bool simple =
+                     dk_ok &&
+                     op->src[2]->ne[0] == dk &&
+                     k_std && v_std && turbo_dk_ok &&
+-                    max_bias == 0.0f && softcap == 0.0f;
++                    max_bias == 0.0f;
+                 if (simple) {
+                     return true;
+                 }
+                 // MLA: asymmetric head, K is the latent plus the rope tail and V is the bare
+                 // latent. deepseek2 is 576/512; mistral4 has a 256-wide latent, so 320/256.
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 4973ecfdd..bfe3021bd 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -5022,11 +5022,11 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+     const bool amd_sparse  = amd_n_kv_max > 0 && ne01 == 1;
+     const int amd_n_kv_pad = amd_sparse ? GGML_PAD(amd_n_kv_max, OP_FLASH_ATTN_EXT_VEC_NCPSG) : 0;
+ 
+     if (TOSH_ENV("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
+         !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
+-        !has_bias && !has_scap) {
++        !has_bias) {
+ 
+         ggml_metal_kargs_flash_attn_ext_amd args = {
+             /*.ne01          =*/ ne01,
+             /*.ne02          =*/ ne02,
+             /*.ne03          =*/ ne03,
+diff --git a/ggml/src/ggml-metal/kernels/fa.metal b/ggml/src/ggml-metal/kernels/fa.metal
+index 770f2dfc4..1a302e20d 100644
+--- a/ggml/src/ggml-metal/kernels/fa.metal
++++ b/ggml/src/ggml-metal/kernels/fa.metal
+@@ -134,11 +134,13 @@ kernel void kernel_flash_attn_ext_vec_amd(
+         } else {
+             pl = simd_sum(pl);
+         }
+         const float p = pl; // full DK-dim Q.K
+ 
+-        const float pp   = p*args.scale + mv;
++        // the host has already divided the scale by the softcap
++        const float ps   = p*args.scale;
++        const float pp   = (args.logit_softcap != 0.0f ? args.logit_softcap*precise::tanh(ps) : ps) + mv;
+         const float nm   = msk ? m : max(m, pp);
+         const float corr = exp(m  - nm);
+         const float w    = msk ? 0.0f : exp(pp - nm);
+ 
+         device const v_t * vb = (device const v_t *) (vp + (uint64_t) i11a*args.nb21);
+@@ -598,11 +600,12 @@ kernel void kernel_flash_attn_ext_tile_amd(
+                     pl += dot(myq[c], (float4) sk[jj*DK4 + ch]);
+                 }
+             }
+             const float p = simd_sum(pl); // full DK-dim Q.K
+ 
+-            const float pp   = p*args.scale + mv;
++            const float ps   = p*args.scale;
++            const float pp   = (args.logit_softcap != 0.0f ? args.logit_softcap*precise::tanh(ps) : ps) + mv;
+             const float nm   = max(m, pp);
+             const float corr = exp(m  - nm);
+             const float w    = exp(pp - nm);
+ 
+             for (short c = 0; c < NCV; ++c) {
+@@ -937,10 +940,13 @@ kernel void kernel_flash_attn_ext_pf_amd(
+ 
+         for (short rr = 0; rr < NQR; ++rr) {
+             const short row = qg + NQG*rr;
+             float mx = -FLT_MAX;
+             for (short cc = 0; cc < NKC; ++cc) {
++                if (args.logit_softcap != 0.0f) {
++                    sc[rr][cc] = args.logit_softcap*precise::tanh(sc[rr][cc]);
++                }
+                 if (args.has_mask) {
+                     sc[rr][cc] += (float) mv[rr][cc];
+                 } else if (j0 + kg + 16*cc >= args.ne11) {
+                     sc[rr][cc] = -INFINITY;
+                 }
+diff --git a/ggml/src/ggml-metal/kernels/fa_w64.metal b/ggml/src/ggml-metal/kernels/fa_w64.metal
+index e945e7e98..c969b8925 100644
+--- a/ggml/src/ggml-metal/kernels/fa_w64.metal
++++ b/ggml/src/ggml-metal/kernels/fa_w64.metal
+@@ -163,10 +163,13 @@ kernel void kernel_flash_attn_ext_pf_amd_w64(
+ 
+         for (short rr = 0; rr < NQR; ++rr) {
+             const short row = qg + NQG*rr;
+             float mx = -FLT_MAX;
+             for (short cc = 0; cc < NKC; ++cc) {
++                if (args.logit_softcap != 0.0f) {
++                    sc[rr][cc] = args.logit_softcap*precise::tanh(sc[rr][cc]);
++                }
+                 if (args.has_mask) {
+                     sc[rr][cc] += (float) mv[rr][cc];
+                 } else if (j0 + kg + LG*cc >= args.ne11) {
+                     sc[rr][cc] = -INFINITY;
+                 }

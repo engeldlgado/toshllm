@@ -1,0 +1,497 @@
+diff --git a/tools/ui/src/app.css b/tools/ui/src/app.css
+index f9b544beb..d1b44f64f 100644
+--- a/tools/ui/src/app.css
++++ b/tools/ui/src/app.css
+@@ -94,10 +94,130 @@
+ 	--sidebar-ring: oklch(0.556 0 0);
+ 	--code-background: oklch(0.225 0 0);
+ 	--code-foreground: oklch(0.875 0 0);
+ }
+ 
++:root[data-color-theme='sepia'] {
++	--background: #f7f1e6;
++	--foreground: #3d3024;
++	--card: #fffaf1;
++	--popover: #fffaf1;
++	--primary: #86552c;
++	--primary-foreground: #ffffff;
++	--secondary: #ede1cf;
++	--muted: #efe6d8;
++	--muted-foreground: #77634e;
++	--accent: #e8dac4;
++	--border: #d4c2a8;
++	--input: #d4c2a8;
++	--ring: #986335;
++	--sidebar: #eee3d1;
++	--sidebar-accent: #e1d1b9;
++	--code-background: #f0e6d7;
++	--code-foreground: #493626;
++	--card-foreground: #3d3024;
++	--popover-foreground: #3d3024;
++	--secondary-foreground: #3d3024;
++	--accent-foreground: #3d3024;
++	--sidebar-foreground: #3d3024;
++	--sidebar-accent-foreground: #3d3024;
++	--sidebar-primary: #86552c;
++	--sidebar-primary-foreground: #ffffff;
++	--sidebar-border: #d4c2a8;
++	--sidebar-ring: #986335;
++}
++
++:root[data-color-theme='ocean'] {
++	--background: #101e2e;
++	--foreground: #e1edf7;
++	--card: #172a3e;
++	--popover: #172a3e;
++	--primary: #7cc9ef;
++	--primary-foreground: #102332;
++	--secondary: #223b53;
++	--muted: #1d3349;
++	--muted-foreground: #a0b8cd;
++	--accent: #294962;
++	--border: #3b566e;
++	--input: #3b566e;
++	--ring: #7cc9ef;
++	--sidebar: #142639;
++	--sidebar-accent: #233e57;
++	--code-background: #192d42;
++	--code-foreground: #d1e5f5;
++	--card-foreground: #e1edf7;
++	--popover-foreground: #e1edf7;
++	--secondary-foreground: #e1edf7;
++	--accent-foreground: #e1edf7;
++	--sidebar-foreground: #e1edf7;
++	--sidebar-accent-foreground: #e1edf7;
++	--sidebar-primary: #7cc9ef;
++	--sidebar-primary-foreground: #102332;
++	--sidebar-border: #3b566e;
++	--sidebar-ring: #7cc9ef;
++}
++
++:root[data-color-theme='forest'] {
++	--background: #14231d;
++	--foreground: #e4eee5;
++	--card: #1b3026;
++	--popover: #1b3026;
++	--primary: #9bcf9e;
++	--primary-foreground: #15271b;
++	--secondary: #2b4435;
++	--muted: #243c2e;
++	--muted-foreground: #a4bda8;
++	--accent: #34533f;
++	--border: #46634e;
++	--input: #46634e;
++	--ring: #9bcf9e;
++	--sidebar: #192c22;
++	--sidebar-accent: #2b4735;
++	--code-background: #1d3327;
++	--code-foreground: #d2e5d4;
++	--card-foreground: #e4eee5;
++	--popover-foreground: #e4eee5;
++	--secondary-foreground: #e4eee5;
++	--accent-foreground: #e4eee5;
++	--sidebar-foreground: #e4eee5;
++	--sidebar-accent-foreground: #e4eee5;
++	--sidebar-primary: #9bcf9e;
++	--sidebar-primary-foreground: #15271b;
++	--sidebar-border: #46634e;
++	--sidebar-ring: #9bcf9e;
++}
++
++:root[data-color-theme='lavender'] {
++	--background: #f5f1fb;
++	--foreground: #342b45;
++	--card: #fdfaff;
++	--popover: #fdfaff;
++	--primary: #7752a3;
++	--primary-foreground: #ffffff;
++	--secondary: #e9dff3;
++	--muted: #ece5f4;
++	--muted-foreground: #725e84;
++	--accent: #e1d2ee;
++	--border: #cec0df;
++	--input: #cec0df;
++	--ring: #8863b2;
++	--sidebar: #ece3f5;
++	--sidebar-accent: #dfd0ed;
++	--code-background: #eee6f6;
++	--code-foreground: #49345f;
++	--card-foreground: #342b45;
++	--popover-foreground: #342b45;
++	--secondary-foreground: #342b45;
++	--accent-foreground: #342b45;
++	--sidebar-foreground: #342b45;
++	--sidebar-accent-foreground: #342b45;
++	--sidebar-primary: #7752a3;
++	--sidebar-primary-foreground: #ffffff;
++	--sidebar-border: #cec0df;
++	--sidebar-ring: #8863b2;
++}
++
+ @theme inline {
+ 	--radius-sm: calc(var(--radius) - 4px);
+ 	--radius-md: calc(var(--radius) - 2px);
+ 	--radius-lg: var(--radius);
+ 	--radius-xl: calc(var(--radius) + 4px);
+diff --git a/tools/ui/src/lib/components/app/settings/SettingsChat/SettingsChat.svelte b/tools/ui/src/lib/components/app/settings/SettingsChat/SettingsChat.svelte
+index 879390075..0e15f3a77 100644
+--- a/tools/ui/src/lib/components/app/settings/SettingsChat/SettingsChat.svelte
++++ b/tools/ui/src/lib/components/app/settings/SettingsChat/SettingsChat.svelte
+@@ -13,14 +13,14 @@
+ 		NUMERIC_FIELDS,
+ 		POSITIVE_INTEGER_FIELDS,
+ 		SETTINGS_CHAT_SECTIONS,
+ 		SETTINGS_SECTION_SLUGS
+ 	} from '$lib/constants';
+-	import { ColorMode } from '$lib/enums/ui.enums';
+ 	import { modelsStore, serverStore, settingsStore } from '$lib/stores';
+ 	import type { SettingsSection, SettingsSectionTitle } from '$lib/types';
+-	import { setMode } from 'mode-watcher';
++	import { applyTheme } from '$lib/utils/theme';
++	import { onDestroy } from 'svelte';
+ 	import { fade } from 'svelte/transition';
+ 	interface Props {
+ 		initialSection?: string;
+ 		onSectionChange?: (section: SettingsSectionTitle) => void;
+ 		onClose?: () => void;
+@@ -61,22 +61,24 @@
+ 				.then(() => modelsStore.props.fetchModalitiesForLoadedModels())
+ 				.then(() => modelsStore.ensureFirstModelSelected());
+ 		}
+ 	});
+ 
++	onDestroy(() => applyTheme(settingsStore.config.theme));
++
+ 	function handleThemeChange(newTheme: string) {
+ 		localConfig.theme = newTheme;
+-		setMode(newTheme as ColorMode);
++		applyTheme(newTheme);
+ 	}
+ 
+ 	function handleConfigChange(key: string, value: string | boolean) {
+ 		localConfig[key] = value;
+ 	}
+ 
+ 	function handleReset() {
+ 		localConfig = { ...settingsStore.config };
+-		setMode(localConfig.theme as ColorMode);
++		applyTheme(localConfig.theme);
+ 		mobileHeader?.updateCarousel();
+ 	}
+ 
+ 	function handleSave() {
+ 		if (
+@@ -124,10 +126,11 @@
+ 		onClose?.();
+ 	}
+ 
+ 	export function reset() {
+ 		localConfig = { ...settingsStore.config };
++		applyTheme(localConfig.theme);
+ 	}
+ </script>
+ 
+ <div in:fade={{ duration: 150 }} class="mx-auto flex h-full w-full flex-col">
+ 	<div class="flex flex-1 flex-col md:flex-row md:gap-4">
+diff --git a/tools/ui/src/lib/constants/settings.constants.ts b/tools/ui/src/lib/constants/settings.constants.ts
+index 7140bbcc4..c5ea3c18e 100644
+--- a/tools/ui/src/lib/constants/settings.constants.ts
++++ b/tools/ui/src/lib/constants/settings.constants.ts
+@@ -3,18 +3,22 @@ import { DEFAULT_MCP_CONFIG } from './mcp.constants';
+ import { SETTINGS_KEYS } from './settings-keys.constants';
+ import { TITLE_GENERATION } from './title-generation.constants';
+ import { FILE_GLOB_SEARCH_PICKERS } from './working-directory.constants';
+ import {
+ 	Code,
++	Coffee,
+ 	Database,
++	Flower2,
+ 	Funnel,
+ 	ListRestart,
+ 	Monitor,
+ 	Moon,
+ 	PencilRuler,
+ 	SlidersVertical,
+-	Sun
++	Sun,
++	TreePine,
++	Waves
+ } from '@lucide/svelte';
+ import { SyncableParameterType } from '$lib/enums';
+ import { SettingsFieldType } from '$lib/enums/settings.enums';
+ import { ColorMode } from '$lib/enums/ui.enums';
+ import type {
+@@ -61,17 +65,21 @@ export const SETTINGS_REGISTRY: SettingsSectionEntry[] = [
+ 	{
+ 		icon: SlidersVertical,
+ 		settings: [
+ 			{
+ 				defaultValue: ColorMode.SYSTEM,
+-				help: 'Choose the color theme for the interface. You can choose between System (follows your device settings), Light, or Dark.',
++				help: 'Choose System to follow your device, Light or Dark for neutral colors, or Sepia, Ocean, Forest, or Lavender for a color palette. Preview changes immediately; use Save settings to keep your choice.',
+ 				key: SETTINGS_KEYS.THEME,
+ 				label: 'Theme',
+ 				options: [
+ 					{ icon: Monitor, label: 'System', value: ColorMode.SYSTEM },
+ 					{ icon: Sun, label: 'Light', value: ColorMode.LIGHT },
+-					{ icon: Moon, label: 'Dark', value: ColorMode.DARK }
++					{ icon: Moon, label: 'Dark', value: ColorMode.DARK },
++					{ icon: Coffee, label: 'Sepia', value: 'sepia' },
++					{ icon: Waves, label: 'Ocean', value: 'ocean' },
++					{ icon: TreePine, label: 'Forest', value: 'forest' },
++					{ icon: Flower2, label: 'Lavender', value: 'lavender' }
+ 				],
+ 				type: SettingsFieldType.SELECT
+ 			},
+ 			{
+ 				defaultValue: '',
+diff --git a/tools/ui/src/lib/stores/settings/index.svelte.ts b/tools/ui/src/lib/stores/settings/index.svelte.ts
+index a583a1423..f3ea9295e 100644
+--- a/tools/ui/src/lib/stores/settings/index.svelte.ts
++++ b/tools/ui/src/lib/stores/settings/index.svelte.ts
+@@ -7,11 +7,10 @@
+  * ParameterSyncService.
+  */
+ 
+ import { browser } from '$app/environment';
+ import { SETTING_CONFIG_DEFAULT, SETTINGS_KEYS } from '$lib/constants';
+-import { ColorMode } from '$lib/enums';
+ import { ParameterSyncService } from '$lib/services/parameter-sync.service';
+ import { SettingsService } from '$lib/services/settings.service';
+ import { deviceStore } from '$lib/stores/device.svelte';
+ // direct imports between stores, not via the barrel, to avoid circular deps
+ import { serverStore } from '$lib/stores/server.svelte';
+@@ -20,11 +19,11 @@ import {
+ 	configToParameterRecord,
+ 	getConfigValue,
+ 	normalizeFloatingPoint,
+ 	setConfigValue
+ } from '$lib/utils';
+-import { setMode } from 'mode-watcher';
++import { applyTheme } from '$lib/utils/theme';
+ 
+ class SettingsStore {
+ 	config = $state<SettingsConfigType>({ ...SETTING_CONFIG_DEFAULT });
+ 	isInitialized = $state(false);
+ 	userOverrides = $state<Set<string>>(new Set());
+@@ -121,11 +120,11 @@ class SettingsStore {
+ 					: getConfigValue(SETTING_CONFIG_DEFAULT, key);
+ 
+ 			setConfigValue(this.config, key, value);
+ 
+ 			if (key === SETTINGS_KEYS.THEME) {
+-				setMode(value as ColorMode);
++				applyTheme(value);
+ 			}
+ 
+ 			this.userOverrides.delete(key);
+ 		}
+ 
+@@ -203,11 +202,11 @@ class SettingsStore {
+ 
+ 		// Persist to localStorage
+ 		this.saveConfig();
+ 
+ 		// Apply theme for immediate visual feedback
+-		setMode(this.config[SETTINGS_KEYS.THEME] as ColorMode);
++		applyTheme(this.config[SETTINGS_KEYS.THEME]);
+ 
+ 		console.log('Settings imported successfully');
+ 	}
+ 
+ 	/**
+@@ -219,11 +218,11 @@ class SettingsStore {
+ 
+ 		try {
+ 			this.loadConfig();
+ 			this.migrateLegacyTheme();
+ 			// Apply the persisted theme from config on initial load
+-			setMode(this.config[SETTINGS_KEYS.THEME] as ColorMode);
++			applyTheme(this.config[SETTINGS_KEYS.THEME]);
+ 			this.isInitialized = true;
+ 		} catch (error) {
+ 			console.error('Failed to initialize settings store:', error);
+ 		}
+ 	}
+@@ -272,11 +271,11 @@ class SettingsStore {
+ 	 * Theme is now stored inside the config object.
+ 	 */
+ 	resetTheme() {
+ 		this.updateConfig(SETTINGS_KEYS.THEME, SETTING_CONFIG_DEFAULT[SETTINGS_KEYS.THEME]);
+ 
+-		setMode(SETTING_CONFIG_DEFAULT[SETTINGS_KEYS.THEME] as ColorMode);
++		applyTheme(SETTING_CONFIG_DEFAULT[SETTINGS_KEYS.THEME]);
+ 	}
+ 
+ 	/**
+ 	 * Initialize settings with props defaults when server properties are first loaded
+ 	 * This sets up the default values from /props endpoint
+@@ -320,13 +319,13 @@ class SettingsStore {
+ 					continue;
+ 				}
+ 
+ 				setConfigValue(this.config, key, value);
+ 
+-				// theme lives in mode-watcher, not just in config -> propagate
++				// Apply both the palette and its light/dark mode.
+ 				if (key === SETTINGS_KEYS.THEME) {
+-					setMode(value as ColorMode);
++					applyTheme(value);
+ 				}
+ 			}
+ 		}
+ 
+ 		this.saveConfig();
+@@ -402,11 +401,11 @@ class SettingsStore {
+ 	 * @param newTheme - The new theme value
+ 	 */
+ 	updateTheme(newTheme: string) {
+ 		this.updateConfig(SETTINGS_KEYS.THEME, newTheme);
+ 
+-		setMode(newTheme as ColorMode);
++		applyTheme(newTheme);
+ 	}
+ 
+ 	/**
+ 	 *
+ 	 *
+@@ -469,11 +468,11 @@ class SettingsStore {
+ 		const legacyTheme = SettingsService.migrateLegacyTheme();
+ 
+ 		if (legacyTheme) {
+ 			this.config[SETTINGS_KEYS.THEME] = legacyTheme;
+ 			this.saveConfig();
+-			setMode(legacyTheme as ColorMode);
++			applyTheme(legacyTheme);
+ 		}
+ 	}
+ 
+ 	/**
+ 	 * Save the current configuration to localStorage via the persistence service.
+diff --git a/tools/ui/src/lib/utils/theme.ts b/tools/ui/src/lib/utils/theme.ts
+new file mode 100644
+index 000000000..8bdb40ca2
+--- /dev/null
++++ b/tools/ui/src/lib/utils/theme.ts
+@@ -0,0 +1,22 @@
++import { browser } from '$app/environment';
++import { ColorMode } from '$lib/enums/ui.enums';
++import { setMode } from 'mode-watcher';
++
++const PALETTE_MODES = {
++	forest: ColorMode.DARK,
++	lavender: ColorMode.LIGHT,
++	ocean: ColorMode.DARK,
++	sepia: ColorMode.LIGHT
++} as const;
++
++export function applyTheme(theme: unknown): void {
++	if (!browser) return;
++
++	if (typeof theme === 'string' && Object.hasOwn(PALETTE_MODES, theme)) {
++		document.documentElement.dataset.colorTheme = theme;
++		setMode(PALETTE_MODES[theme as keyof typeof PALETTE_MODES]);
++	} else {
++		delete document.documentElement.dataset.colorTheme;
++		setMode(theme === ColorMode.LIGHT || theme === ColorMode.DARK ? theme : ColorMode.SYSTEM);
++	}
++}
+diff --git a/tools/ui/tests/client/color-themes.svelte.test.ts b/tools/ui/tests/client/color-themes.svelte.test.ts
+new file mode 100644
+index 000000000..a00dfc921
+--- /dev/null
++++ b/tools/ui/tests/client/color-themes.svelte.test.ts
+@@ -0,0 +1,93 @@
++import { CONFIG_LOCALSTORAGE_KEY, SETTING_CONFIG_DEFAULT } from '$lib/constants';
++import { serverStore } from '$lib/stores/server.svelte';
++import { settingsStore } from '$lib/stores/settings/index.svelte';
++import { applyTheme } from '$lib/utils/theme';
++import { userPrefersMode } from 'mode-watcher';
++import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++
++function mockDefaults(theme: string) {
++	Object.defineProperty(serverStore, 'props', {
++		configurable: true,
++		get: () =>
++			({
++				default_generation_settings: { params: { temperature: 0.8 } },
++				ui_settings: { theme }
++			}) as unknown as typeof serverStore.props
++	});
++}
++
++describe('color theme preferences', () => {
++	beforeEach(() => {
++		localStorage.clear();
++		settingsStore.initialize();
++	});
++
++	afterEach(() => applyTheme('system'));
++
++	it.each([
++		['sepia', 'light'],
++		['ocean', 'dark'],
++		['forest', 'dark'],
++		['lavender', 'light']
++	])('restores saved %s colors and %s highlighting after reload', (theme, expectedMode) => {
++		settingsStore.updateTheme(theme);
++		applyTheme('system');
++		settingsStore.initialize();
++
++		expect(settingsStore.config.theme).toBe(theme);
++		expect(document.documentElement.dataset.colorTheme).toBe(theme);
++		expect(userPrefersMode.current).toBe(expectedMode);
++	});
++
++	it('previews without overwriting the saved choice', () => {
++		settingsStore.updateTheme('sepia');
++		applyTheme('ocean');
++
++		expect(document.documentElement.dataset.colorTheme).toBe('ocean');
++		expect(JSON.parse(localStorage.getItem(CONFIG_LOCALSTORAGE_KEY) ?? '{}').theme).toBe('sepia');
++
++		applyTheme(settingsStore.config.theme);
++		expect(document.documentElement.dataset.colorTheme).toBe('sepia');
++	});
++
++	it('applies an imported palette and clears it when reset', () => {
++		settingsStore.updateTheme('forest');
++		const exported = settingsStore.exportSettings();
++
++		settingsStore.updateTheme('lavender');
++		settingsStore.importSettings(exported);
++		expect(document.documentElement.dataset.colorTheme).toBe('forest');
++
++		settingsStore.resetAll();
++		expect(settingsStore.config.theme).toBe(SETTING_CONFIG_DEFAULT.theme);
++		expect(document.documentElement.dataset.colorTheme).toBeUndefined();
++	});
++
++	it('applies the server palette for a new user and on reset', () => {
++		mockDefaults('ocean');
++		settingsStore.syncWithServerDefaults();
++		expect(document.documentElement.dataset.colorTheme).toBe('ocean');
++
++		settingsStore.updateTheme('sepia');
++		settingsStore.initialize();
++		settingsStore.syncWithServerDefaults();
++		expect(document.documentElement.dataset.colorTheme).toBe('sepia');
++
++		settingsStore.forceSyncWithServerDefaults();
++		expect(document.documentElement.dataset.colorTheme).toBe('ocean');
++	});
++
++	it.each(['light', 'dark', 'system'])('clears palette overrides for %s', (theme) => {
++		applyTheme('forest');
++		applyTheme(theme);
++		expect(document.documentElement.dataset.colorTheme).toBeUndefined();
++		expect(userPrefersMode.current).toBe(theme);
++	});
++
++	it('falls back to System for an unsupported theme', () => {
++		applyTheme('ocean');
++		applyTheme('unknown');
++		expect(document.documentElement.dataset.colorTheme).toBeUndefined();
++		expect(userPrefersMode.current).toBe('system');
++	});
++});

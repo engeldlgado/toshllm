@@ -78,7 +78,7 @@ private struct ComparisonRunPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title.uppercased()).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+            Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
             // Not a Picker: a native pop-up is as wide as its longest item, and this one lists the whole history.
             ToshDropdown(selection: $selection, options: options, width: nil, listWidth: 420)
                 .help(loc.t("Elige la ejecución a comparar", "Choose the run to compare"))

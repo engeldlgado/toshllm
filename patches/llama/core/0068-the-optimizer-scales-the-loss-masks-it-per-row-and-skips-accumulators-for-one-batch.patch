@@ -1,0 +1,1171 @@
+diff --git a/ggml/include/ggml-opt.h b/ggml/include/ggml-opt.h
+index 1c2ed79..469dbc3 100644
+--- a/ggml/include/ggml-opt.h
++++ b/ggml/include/ggml-opt.h
+@@ -26,50 +26,69 @@ extern "C" {
+     // ====== Loss ======
+ 
+     // built-in loss types, i.e. the built-in quantities minimized by the optimizer
+     // custom loss types can be defined via mean or sum which simply reduce the outputs for all datapoints to a single value
+     enum ggml_opt_loss_type {
+         GGML_OPT_LOSS_TYPE_MEAN,
+         GGML_OPT_LOSS_TYPE_SUM,
+         GGML_OPT_LOSS_TYPE_CROSS_ENTROPY,
++        GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED,
+         GGML_OPT_LOSS_TYPE_MEAN_SQUARED_ERROR,
+     };
+ 
+     // ====== Dataset ======
+ 
+     GGML_API ggml_opt_dataset_t ggml_opt_dataset_init(
+             enum ggml_type type_data,    // the type for the internal data tensor
+             enum ggml_type type_label,   // the type for the internal labels tensor
+             int64_t        ne_datapoint, // number of elements per datapoint
+             int64_t        ne_label,     // number of elements per label
+             int64_t        ndata,        // total number of datapoints/labels
+             int64_t        ndata_shard); // number of datapoints/labels per shard (unit at which the dataset is shuffled/copied)
++
++    GGML_API ggml_opt_dataset_t ggml_opt_dataset_init_with_masks(
++            enum ggml_type type_data,    // the type for the internal data tensor
++            enum ggml_type type_label,   // the type for the internal labels tensor
++            enum ggml_type type_mask,    // the type for the internal masks tensor
++            int64_t        ne_datapoint, // number of elements per datapoint
++            int64_t        ne_label,     // number of elements per label
++            int64_t        ne_mask,      // number of elements per mask
++            int64_t        ndata,        // total number of datapoints/labels
++            int64_t        ndata_shard); // number of datapoints/labels per shard
+     GGML_API void ggml_opt_dataset_free(ggml_opt_dataset_t dataset);
+ 
+     // get underlying tensors that store the data
+     GGML_API int64_t              ggml_opt_dataset_ndata (ggml_opt_dataset_t dataset);
+     GGML_API struct ggml_tensor * ggml_opt_dataset_data  (ggml_opt_dataset_t dataset); // shape = [ne_datapoint, ndata]
+     GGML_API struct ggml_tensor * ggml_opt_dataset_labels(ggml_opt_dataset_t dataset); // shape = [nd_label,     ndata]
++    GGML_API struct ggml_tensor * ggml_opt_dataset_masks (ggml_opt_dataset_t dataset); // shape = [ne_datapoint, ndata], can be null
+ 
+     // shuffle idata first datapoints from dataset with RNG from opt_ctx, shuffle all datapoints if idata is negative
+     GGML_API void ggml_opt_dataset_shuffle(ggml_opt_context_t opt_ctx, ggml_opt_dataset_t dataset, int64_t idata);
+ 
+     // get batch at position ibatch from dataset and copy the data to data_batch and labels_batch
+     GGML_API void ggml_opt_dataset_get_batch(
+             ggml_opt_dataset_t   dataset,
+             struct ggml_tensor * data_batch,   // shape = [ne_datapoint, ndata_batch]
+             struct ggml_tensor * labels_batch, // shape = [ne_label,     ndata_batch]
+             int64_t              ibatch);
+     GGML_API void ggml_opt_dataset_get_batch_host(
+             ggml_opt_dataset_t   dataset,
+             void               * data_batch,
+             size_t               nb_data_batch,
+             void               * labels_batch,
+             int64_t              ibatch);
++    GGML_API void ggml_opt_dataset_get_batch_host_with_masks(
++            ggml_opt_dataset_t   dataset,
++            void               * data_batch,
++            size_t               nb_data_batch,
++            void               * labels_batch,
++            void               * masks_batch,
++            int64_t              ibatch);
+ 
+     // ====== Model / Context ======
+ 
+     enum ggml_opt_build_type {
+         GGML_OPT_BUILD_TYPE_FORWARD = 10,
+         GGML_OPT_BUILD_TYPE_GRAD    = 20,
+         GGML_OPT_BUILD_TYPE_OPT     = 30,
+     };
+@@ -122,16 +141,23 @@ extern "C" {
+ 
+         int32_t opt_period; // after how many gradient accumulation steps an optimizer step should be done
+ 
+         ggml_opt_get_optimizer_params get_opt_pars;    // callback for calculating optimizer parameters
+         void *                        get_opt_pars_ud; // userdata for calculating optimizer parameters
+ 
+         // only GGML_OPT_OPTIMIZER_TYPE_ADAMW needs m, v momenta per parameter tensor
+         enum ggml_opt_optimizer_type optimizer;
++
++        // backward loss scale (1.0 = off): the backward starts from loss*loss_scale so small gradients stay
++        // representable
++        float loss_scale;
++
++        // the global norm of the gradients is clipped to this value before each optimizer step (0 = off)
++        float grad_clip;
+     };
+ 
+     // get parameters for an optimization context with defaults set where possible
+     // parameters for which no sensible defaults exist are supplied as arguments to this function
+     GGML_API struct ggml_opt_params ggml_opt_default_params(
+             ggml_backend_sched_t    backend_sched,
+             enum ggml_opt_loss_type loss_type);
+ 
+@@ -143,23 +169,38 @@ extern "C" {
+ 
+     GGML_API bool ggml_opt_static_graphs(ggml_opt_context_t opt_ctx); // whether the graphs are allocated_statically
+ 
+     // get underlying tensors that store data
+     // if not using static graphs these pointers become invalid with the next call to ggml_opt_alloc
+     GGML_API struct ggml_tensor * ggml_opt_inputs(  ggml_opt_context_t opt_ctx); // forward graph input tensor
+     GGML_API struct ggml_tensor * ggml_opt_outputs( ggml_opt_context_t opt_ctx); // forward graph output tensor
+     GGML_API struct ggml_tensor * ggml_opt_labels(  ggml_opt_context_t opt_ctx); // labels to compare outputs against
++    GGML_API struct ggml_tensor * ggml_opt_masks(   ggml_opt_context_t opt_ctx); // assistant masks for instruction tuning, can be null
++    GGML_API float                ggml_opt_grad_norm(ggml_opt_context_t opt_ctx); // global gradient norm of the last optimizer step, before clipping (-1 when unknown)
+     GGML_API struct ggml_tensor * ggml_opt_loss(    ggml_opt_context_t opt_ctx); // scalar tensor that contains the loss
+     GGML_API struct ggml_tensor * ggml_opt_pred(    ggml_opt_context_t opt_ctx); // predictions made by outputs
+     GGML_API struct ggml_tensor * ggml_opt_ncorrect(ggml_opt_context_t opt_ctx); // number of matching predictions between outputs and labels
+ 
+     // get the gradient accumulator for a node from the forward graph
+     GGML_API struct ggml_tensor * ggml_opt_grad_acc(ggml_opt_context_t opt_ctx, struct ggml_tensor * node);
+ 
++    // get optimizer state tensors (momentum and variance for AdamW)
++    GGML_API int64_t ggml_opt_get_iter(ggml_opt_context_t opt_ctx);
++    GGML_API void    ggml_opt_set_iter(ggml_opt_context_t opt_ctx, int64_t iter);
++    GGML_API int32_t ggml_opt_get_nparams(ggml_opt_context_t opt_ctx);
++    GGML_API struct ggml_tensor * ggml_opt_get_grad_m(ggml_opt_context_t opt_ctx, int32_t index);
++    GGML_API struct ggml_tensor * ggml_opt_get_grad_v(ggml_opt_context_t opt_ctx, int32_t index);
++
++    // ====== Optimizer State Persistence ======
++
++    GGML_API bool ggml_opt_save_state(ggml_opt_context_t opt_ctx, const char* filename);
++    GGML_API bool ggml_opt_load_state(ggml_opt_context_t opt_ctx, const char* filename);
++    GGML_API bool ggml_opt_load_tensors(ggml_opt_context_t opt_ctx, const char* filename);
++
+     GGML_API enum ggml_opt_optimizer_type ggml_opt_context_optimizer_type(ggml_opt_context_t); //TODO consistent naming scheme
+ 
+     GGML_API const char * ggml_opt_optimizer_name(enum ggml_opt_optimizer_type);
+ 
+     // ====== Optimization Result ======
+ 
+     GGML_API ggml_opt_result_t ggml_opt_result_init(void);
+     GGML_API void ggml_opt_result_free(ggml_opt_result_t result);
+diff --git a/ggml/src/ggml-opt.cpp b/ggml/src/ggml-opt.cpp
+index 53903de..3abf00e 100644
+--- a/ggml/src/ggml-opt.cpp
++++ b/ggml/src/ggml-opt.cpp
+@@ -5,82 +5,97 @@
+ #include "ggml-backend.h"
+ #include "ggml-impl.h"
+ 
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdint>
+ #include <cinttypes>
+ #include <map>
++
+ #include <random>
+ #include <vector>
+ 
+ struct ggml_opt_dataset {
+     struct ggml_context   * ctx    = nullptr;
+     ggml_backend_buffer_t   buf    = nullptr;
+     struct ggml_tensor    * data   = nullptr;
+     struct ggml_tensor    * labels = nullptr;
++    struct ggml_tensor    * masks  = nullptr;
+ 
+     int64_t ndata       = -1;
+     int64_t ndata_shard = -1;
+     size_t  nbs_data    = -1;
+     size_t  nbs_labels  = -1;
+-
++    size_t  nbs_masks   = -1;
+     std::vector<int64_t> permutation;
+ };
+ 
+ struct ggml_opt_context {
+     ggml_backend_sched_t       backend_sched        = nullptr;
+     ggml_cgraph              * allocated_graph      = nullptr;
+     ggml_cgraph              * allocated_graph_copy = nullptr;
+     struct ggml_context      * ctx_static           = nullptr;
+     struct ggml_context      * ctx_cpu              = nullptr;
+     struct ggml_context      * ctx_compute          = nullptr;
+     struct ggml_context      * ctx_copy             = nullptr;
+     ggml_backend_buffer_t      buf_static           = nullptr;
+     ggml_backend_buffer_t      buf_cpu              = nullptr;
++    std::map<ggml_backend_buffer_type_t, struct ggml_context *> ctx_params;
++    std::vector<ggml_backend_buffer_t>                          bufs_params;
+     std::mt19937               rng;
+     enum ggml_opt_loss_type    loss_type;
+     enum ggml_opt_build_type   build_type;
+     enum ggml_opt_build_type   build_type_alloc;
+ 
+     struct ggml_tensor * inputs  = nullptr;
+     struct ggml_tensor * outputs = nullptr;
+     struct ggml_tensor * labels  = nullptr;
++    struct ggml_tensor * masks   = nullptr;
+ 
+     struct ggml_tensor * loss     = nullptr;
+     struct ggml_tensor * pred     = nullptr;
+     struct ggml_tensor * ncorrect = nullptr;
++    struct ggml_tensor * nmasked  = nullptr;
+ 
+     struct ggml_cgraph * gf      = nullptr;
+     struct ggml_cgraph * gb_grad = nullptr;
+     struct ggml_cgraph * gb_opt  = nullptr;
+     bool static_graphs           = false;
+     bool eval_ready              = false;
+     std::vector<struct ggml_tensor *> grad_accs;
+     std::vector<struct ggml_tensor *> grad_m;
+     std::vector<struct ggml_tensor *> grad_v;
+ 
+     int64_t iter               = 1;
+     int32_t opt_period         = 1;
+     int32_t opt_i              = 0;
+     bool    loss_per_datapoint = false;
+ 
++    // Backward loss scale: the backward is seeded from loss*loss_scale so gradient
++    // magnitudes stay within fp32 range through deep backprop.
++    float   loss_scale         = 1.0f;
++    float   grad_clip          = 0.0f;
++    float   last_grad_norm     = -1.0f;
++    struct ggml_tensor * grad_norm = nullptr; // global norm of the gradients of the optimizer step
++    struct ggml_tensor * grad_clip_max = nullptr; // input: the norm the gradients are clipped to
++
+     ggml_opt_get_optimizer_params get_opt_pars    = nullptr;
+     void *                        get_opt_pars_ud = nullptr;
+     struct ggml_tensor *          opt_step_params = nullptr; // Stores output of get_opt_pars.
+ 
+     enum ggml_opt_optimizer_type optimizer = GGML_OPT_OPTIMIZER_TYPE_ADAMW;
+ };
+ 
+ struct ggml_opt_result {
+     int64_t              ndata    = 0;
+     std::vector<float>   loss;
+     std::vector<int32_t> pred;
+     int64_t              ncorrect = 0;
++    int64_t              nmasked  = 0;
+ 
+     int64_t opt_period         = -1;
+     bool    loss_per_datapoint = false;
+ };
+ 
+ // ====== Dataset ======
+ 
+ ggml_opt_dataset_t ggml_opt_dataset_init(
+@@ -124,16 +139,73 @@ ggml_opt_dataset_t ggml_opt_dataset_init(
+     const int64_t nshards = ndata/ndata_shard;
+     result->permutation.resize(nshards);
+     for (int64_t i = 0; i < nshards; ++i) {
+         result->permutation[i] = i;
+     }
+     return result;
+ }
+ 
++ggml_opt_dataset_t ggml_opt_dataset_init_with_masks(
++        enum ggml_type type_data,
++        enum ggml_type type_label,
++        enum ggml_type type_mask,
++        int64_t        ne_datapoint,
++        int64_t        ne_label,
++        int64_t        ne_mask,
++        int64_t        ndata,
++        int64_t        ndata_shard) {
++    GGML_ASSERT(ne_datapoint >  0);
++    GGML_ASSERT(ne_label     >= 0);
++    GGML_ASSERT(ne_mask      >= 0);
++    GGML_ASSERT(ndata        >  0);
++    GGML_ASSERT(ndata_shard  >  0);
++
++    ggml_opt_dataset_t result = new ggml_opt_dataset;
++    result->ndata       = ndata;
++    result->ndata_shard = ndata_shard;
++
++    {
++        struct ggml_init_params params = {
++            /*.mem_size   =*/ 3*ggml_tensor_overhead(),
++            /*.mem_buffer =*/ nullptr,
++            /*.no_alloc   =*/ true,
++        };
++        result->ctx = ggml_init(params);
++    }
++
++    result->data = ggml_new_tensor_2d(result->ctx, type_data, ne_datapoint, ndata);
++    result->nbs_data = ggml_nbytes(result->data) * ndata_shard/ndata;
++
++    if (ne_label > 0) {
++        result->labels = ggml_new_tensor_2d(result->ctx, type_label, ne_label, ndata);
++        result->nbs_labels = ggml_nbytes(result->labels) * ndata_shard/ndata;
++    } else {
++        result->labels = nullptr;
++        result->nbs_labels = 0;
++    }
++
++    if (ne_mask > 0) {
++        result->masks = ggml_new_tensor_2d(result->ctx, type_mask, ne_mask, ndata);
++        result->nbs_masks = ggml_nbytes(result->masks) * ndata_shard/ndata;
++    } else {
++        result->masks = nullptr;
++        result->nbs_masks = 0;
++    }
++
++    result->buf = ggml_backend_alloc_ctx_tensors_from_buft(result->ctx, ggml_backend_cpu_buffer_type());
++
++    const int64_t nshards = ndata/ndata_shard;
++    result->permutation.resize(nshards);
++    for (int64_t i = 0; i < nshards; ++i) {
++        result->permutation[i] = i;
++    }
++    return result;
++}
++
+ void ggml_opt_dataset_free(ggml_opt_dataset_t dataset) {
+     ggml_backend_buffer_free(dataset->buf);
+     ggml_free(dataset->ctx);
+     delete dataset;
+ }
+ 
+ int64_t ggml_opt_dataset_ndata(ggml_opt_dataset_t dataset) {
+     return dataset->ndata;
+@@ -142,16 +214,20 @@ int64_t ggml_opt_dataset_ndata(ggml_opt_dataset_t dataset) {
+ struct ggml_tensor * ggml_opt_dataset_data(ggml_opt_dataset_t dataset) {
+     return dataset->data;
+ }
+ 
+ struct ggml_tensor * ggml_opt_dataset_labels(ggml_opt_dataset_t dataset) {
+     return dataset->labels;
+ }
+ 
++struct ggml_tensor * ggml_opt_dataset_masks(ggml_opt_dataset_t dataset) {
++    return dataset->masks;
++}
++
+ void ggml_opt_dataset_shuffle(ggml_opt_context_t opt_ctx, ggml_opt_dataset_t dataset, int64_t idata) {
+     GGML_ASSERT(idata <= dataset->ndata);
+ 
+     if (idata < 0) {
+         std::shuffle(dataset->permutation.begin(), dataset->permutation.end(), opt_ctx->rng);
+         return;
+     }
+ 
+@@ -189,37 +265,42 @@ void ggml_opt_dataset_get_batch(ggml_opt_dataset_t dataset, struct ggml_tensor *
+         }
+ 
+         const char * ptr_labels = (const char *) dataset->labels->data + ishard*dataset->nbs_labels;
+         ggml_backend_tensor_set(labels_batch, ptr_labels, ishard_batch*dataset->nbs_labels, dataset->nbs_labels);
+     }
+ }
+ 
+ void ggml_opt_dataset_get_batch_host(ggml_opt_dataset_t dataset, void * data_batch, size_t nb_data_batch, void * labels_batch, int64_t ibatch) {
++    ggml_opt_dataset_get_batch_host_with_masks(dataset, data_batch, nb_data_batch, labels_batch, nullptr, ibatch);
++}
++
++void ggml_opt_dataset_get_batch_host_with_masks(ggml_opt_dataset_t dataset, void * data_batch, size_t nb_data_batch, void * labels_batch, void * masks_batch, int64_t ibatch) {
+     GGML_ASSERT((labels_batch == nullptr) == (dataset->labels == nullptr));
++    GGML_ASSERT(masks_batch == nullptr || dataset->masks != nullptr);
+     GGML_ASSERT(nb_data_batch % dataset->nbs_data == 0);
+ 
+     const int64_t shards_per_batch = nb_data_batch / dataset->nbs_data;
+ 
+     GGML_ASSERT((ibatch + 1)*shards_per_batch <= int64_t(dataset->permutation.size()));
+ 
+     for (int64_t ishard_batch = 0; ishard_batch < shards_per_batch; ++ishard_batch) {
+         const int64_t ishard = dataset->permutation[ibatch*shards_per_batch + ishard_batch];
+ 
+-        const char * ptr_data       = (const char *) dataset->data->data + ishard      *dataset->nbs_data;
+-        char       * ptr_data_batch = (char       *) data_batch          + ishard_batch*dataset->nbs_data;
+-        memcpy(ptr_data_batch, ptr_data, dataset->nbs_data);
+-
+-        if (!labels_batch) {
+-            continue;
+-        }
++        auto copy_shard = [ishard, ishard_batch](const struct ggml_tensor * tensor, void * batch_dst, size_t nbs) {
++            if (batch_dst && tensor) {
++                const char * ptr_tensor = (const char *) tensor->data + ishard       * nbs;
++                char       * ptr_batch  = (char       *) batch_dst    + ishard_batch * nbs;
++                memcpy(ptr_batch, ptr_tensor, nbs);
++            }
++        };
+ 
+-        const char * ptr_labels       = (const char *) dataset->labels->data + ishard      *dataset->nbs_labels;
+-        char       * ptr_labels_batch = (char       *) labels_batch          + ishard_batch*dataset->nbs_labels;
+-        memcpy(ptr_labels_batch, ptr_labels, dataset->nbs_labels);
++        copy_shard(dataset->data,   data_batch,   dataset->nbs_data);
++        copy_shard(dataset->labels, labels_batch, dataset->nbs_labels);
++        copy_shard(dataset->masks,  masks_batch,  dataset->nbs_masks);
+     }
+ }
+ 
+ // ====== Model / Context ======
+ 
+ struct ggml_opt_optimizer_params ggml_opt_get_default_optimizer_params(void * userdata) {
+     GGML_UNUSED(userdata);
+ 
+@@ -251,16 +332,18 @@ struct ggml_opt_params ggml_opt_default_params(
+         /*inputs          =*/ nullptr,
+         /*logits          =*/ nullptr,
+         /*loss_type       =*/ loss_type,
+         /*build_type      =*/ GGML_OPT_BUILD_TYPE_OPT,
+         /*opt_period      =*/ 1,
+         /*get_opt_pars    =*/ ggml_opt_get_default_optimizer_params,
+         /*get_opt_pars_ud =*/ nullptr,
+         /*optimizer       =*/ GGML_OPT_OPTIMIZER_TYPE_ADAMW,
++        /*loss_scale      =*/ 1.0f,
++        /*grad_clip       =*/ 0.0f,
+     };
+ }
+ 
+ static ggml_tensor * map_tensor(std::map<ggml_tensor *, ggml_tensor *> & tensor_map, ggml_context * ctx, ggml_tensor * tensor) {
+     if (!tensor) {
+         return nullptr;
+     }
+ 
+@@ -320,18 +403,20 @@ static ggml_cgraph * dup_graph(ggml_context * ctx, ggml_cgraph * src) {
+ }
+ 
+ static void ggml_opt_build(ggml_opt_context_t opt_ctx) {
+     GGML_ASSERT(opt_ctx->ctx_compute && "no compute context set, either use static graphs or set one with ggml_opt_prepare_alloc");
+     GGML_ASSERT((!opt_ctx->static_graphs || opt_ctx->inputs->data) && "when using static graphs the inputs must be allocated statically");
+ 
+     const enum ggml_opt_optimizer_type optimizer = opt_ctx->optimizer;
+ 
++    // a step of one physical batch takes its gradients straight from the graph: no accumulators, which a
++    // dynamic graph would otherwise have to zero one by one every step
+     const bool accumulate = opt_ctx->build_type_alloc >= GGML_OPT_BUILD_TYPE_GRAD &&
+-        !(opt_ctx->static_graphs && opt_ctx->build_type_alloc == GGML_OPT_BUILD_TYPE_OPT && opt_ctx->opt_period == 1);
++        !(opt_ctx->build_type_alloc == GGML_OPT_BUILD_TYPE_OPT && opt_ctx->opt_period == 1);
+ 
+     const bool need_momenta = opt_ctx->build_type_alloc == GGML_OPT_BUILD_TYPE_OPT &&
+         opt_ctx->optimizer == GGML_OPT_OPTIMIZER_TYPE_ADAMW;
+ 
+     ggml_set_input(opt_ctx->inputs);
+     ggml_set_output(opt_ctx->outputs);
+ 
+     int n_param = 0;
+@@ -363,17 +448,18 @@ static void ggml_opt_build(ggml_opt_context_t opt_ctx) {
+         opt_ctx->ctx_static = ggml_init(params);
+     }
+     GGML_ASSERT(opt_ctx->build_type <= opt_ctx->build_type_alloc);
+ 
+     {
+         // The cpu context is allocated statically if using static graphs, dynamically otherwise.
+         // It is used for:
+         //   - optimizer parameters (1 shared for all optimizer invocations)
+-        const size_t size_meta = 1 * ggml_tensor_overhead();
++        //   - the gradient clipping threshold
++        const size_t size_meta = 2 * ggml_tensor_overhead();
+         struct ggml_init_params params = {
+             /*.mem_size   =*/ size_meta,
+             /*.mem_buffer =*/ nullptr,
+             /*.no_alloc   =*/ true,
+         };
+         ggml_free(opt_ctx->ctx_cpu);
+         opt_ctx->ctx_cpu = ggml_init(params);
+ 
+@@ -407,16 +493,34 @@ static void ggml_opt_build(ggml_opt_context_t opt_ctx) {
+             ggml_set_name(opt_ctx->loss, "loss_cross_entropy");
+             if (opt_ctx->opt_period > 1) {
+                 opt_ctx->loss = ggml_scale(ctx_results, opt_ctx->loss, 1.0f / opt_ctx->opt_period);
+                 ggml_set_name(opt_ctx->loss, "loss_cross_entropy_scaled");
+             }
+             opt_ctx->loss_per_datapoint = true;
+             break;
+         }
++        case GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED: {
++            // one label index and one mask value per output row instead of logits-sized matrices
++            opt_ctx->labels = ggml_new_tensor_1d(ctx_results, GGML_TYPE_I32, ggml_nrows(opt_ctx->outputs));
++            ggml_set_input(opt_ctx->labels);
++            ggml_set_name(opt_ctx->labels, "labels");
++            opt_ctx->masks = ggml_new_tensor_1d(ctx_results, GGML_TYPE_F32, ggml_nrows(opt_ctx->outputs));
++            ggml_set_input(opt_ctx->masks);
++            ggml_set_output(opt_ctx->masks);
++            ggml_set_name(opt_ctx->masks, "masks");
++            opt_ctx->loss = ggml_cross_entropy_loss_masked(ctx_results, opt_ctx->outputs, opt_ctx->labels, opt_ctx->masks);
++            ggml_set_name(opt_ctx->loss, "loss_cross_entropy_masked");
++            if (opt_ctx->opt_period > 1) {
++                opt_ctx->loss = ggml_scale(ctx_results, opt_ctx->loss, 1.0f / opt_ctx->opt_period);
++                ggml_set_name(opt_ctx->loss, "loss_cross_entropy_masked_scaled");
++            }
++            opt_ctx->loss_per_datapoint = true;
++            break;
++        }
+         case GGML_OPT_LOSS_TYPE_MEAN_SQUARED_ERROR: {
+             opt_ctx->labels = ggml_dup_tensor(ctx_results, opt_ctx->outputs);
+             ggml_set_input(opt_ctx->labels);
+             ggml_set_name(opt_ctx->labels, "labels");
+             opt_ctx->loss = ggml_sub(ctx_results, opt_ctx->outputs, opt_ctx->labels);
+             ggml_set_name(opt_ctx->loss, "loss_error");
+             opt_ctx->loss = ggml_sqr(ctx_results, opt_ctx->loss);
+             ggml_set_name(opt_ctx->loss, "loss_squared_error");
+@@ -425,99 +529,176 @@ static void ggml_opt_build(ggml_opt_context_t opt_ctx) {
+             const float scale = 1.0f / (opt_ctx->opt_period * ggml_nelements(opt_ctx->outputs));
+             opt_ctx->loss = ggml_scale(ctx_results, opt_ctx->loss, scale);
+             ggml_set_name(opt_ctx->loss, "loss_mean_squared_error");
+             opt_ctx->loss_per_datapoint = true;
+             break;
+         }
+     }
+     ggml_set_output(opt_ctx->loss);
+-    ggml_set_loss(opt_ctx->loss);
+-    ggml_build_forward_expand(opt_ctx->gf, opt_ctx->loss);
+ 
+-    if (opt_ctx->loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY) {
++    struct ggml_tensor * loss_for_backward = opt_ctx->loss;
++    if (opt_ctx->loss_scale != 1.0f) {
++        loss_for_backward = ggml_scale(ctx_results, opt_ctx->loss, opt_ctx->loss_scale);
++        ggml_set_name(loss_for_backward, "loss_backward_scaled");
++        ggml_set_output(loss_for_backward);
++    }
++    ggml_set_loss(loss_for_backward);
++    ggml_build_forward_expand(opt_ctx->gf, loss_for_backward);
++
++    if (opt_ctx->loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY || opt_ctx->loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED) {
+         opt_ctx->pred = ggml_argmax(ctx_results, opt_ctx->outputs);
+         ggml_set_name(opt_ctx->pred, "pred");
+         ggml_set_output(opt_ctx->pred);
+         ggml_build_forward_expand(opt_ctx->gf, opt_ctx->pred);
+ 
+-        opt_ctx->ncorrect = ggml_count_equal(ctx_results, opt_ctx->pred, ggml_argmax(ctx_results, opt_ctx->labels));
+-        ggml_set_name(opt_ctx->ncorrect, "ncorrect");
+-        ggml_set_output(opt_ctx->ncorrect);
+-        ggml_build_forward_expand(opt_ctx->gf, opt_ctx->ncorrect);
++        if (opt_ctx->loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED && opt_ctx->masks != nullptr) {
++            // the labels are already indices: the predictions compare against them directly
++            opt_ctx->ncorrect = ggml_count_equal_masked(ctx_results, opt_ctx->pred, opt_ctx->labels, opt_ctx->masks);
++            ggml_set_name(opt_ctx->ncorrect, "ncorrect_masked");
++            ggml_set_output(opt_ctx->ncorrect);
++            ggml_build_forward_expand(opt_ctx->gf, opt_ctx->ncorrect);
++        } else {
++            opt_ctx->ncorrect = ggml_count_equal(ctx_results, opt_ctx->pred, ggml_argmax(ctx_results, opt_ctx->labels));
++            ggml_set_name(opt_ctx->ncorrect, "ncorrect");
++            ggml_set_output(opt_ctx->ncorrect);
++            ggml_build_forward_expand(opt_ctx->gf, opt_ctx->ncorrect);
++        }
+     }
+ 
+     if (opt_ctx->buf_static) {
+         if (opt_ctx->build_type == GGML_OPT_BUILD_TYPE_FORWARD) {
+             return;
+         }
+     } else if (opt_ctx->build_type_alloc == GGML_OPT_BUILD_TYPE_FORWARD) {
+         opt_ctx->buf_static = ggml_backend_alloc_ctx_tensors(
+             opt_ctx->ctx_static, ggml_backend_sched_get_backend(opt_ctx->backend_sched, 0));
+         return;
+     }
+ 
+     if (opt_ctx->grad_accs.empty()) {
+         GGML_ASSERT(opt_ctx->build_type_alloc >= GGML_OPT_BUILD_TYPE_GRAD);
+ 
++        auto ctx_for_param = [&](const ggml_tensor * node) -> ggml_context * {
++            if (!node->buffer) {
++                return opt_ctx->ctx_static;
++            }
++            ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(node->buffer);
++            auto it = opt_ctx->ctx_params.find(buft);
++            if (it != opt_ctx->ctx_params.end()) {
++                return it->second;
++            }
++            const size_t tensors_per_param = (accumulate ? 1 : 0) + (need_momenta ? 2 : 0);
++            struct ggml_init_params params = {
++                /*.mem_size   =*/ tensors_per_param*n_param*ggml_tensor_overhead(),
++                /*.mem_buffer =*/ nullptr,
++                /*.no_alloc   =*/ true,
++            };
++            ggml_context * ctx = ggml_init(params);
++            opt_ctx->ctx_params[buft] = ctx;
++            return ctx;
++        };
++
+         const int n_nodes = opt_ctx->gf->n_nodes;
+         opt_ctx->grad_accs.resize(n_nodes);
+         for (int i = 0; i < n_nodes; ++i) {
+             ggml_tensor * node = opt_ctx->gf->nodes[i];
+             if ((accumulate && (node->flags & GGML_TENSOR_FLAG_PARAM)) || (node->flags & GGML_TENSOR_FLAG_LOSS)) {
+-                opt_ctx->grad_accs[i] = ggml_new_tensor(opt_ctx->ctx_static, GGML_TYPE_F32, GGML_MAX_DIMS, node->ne);
++                ggml_context * ctx = (node->flags & GGML_TENSOR_FLAG_PARAM) ? ctx_for_param(node) : opt_ctx->ctx_static;
++                opt_ctx->grad_accs[i] = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, node->ne);
++                ggml_format_name(opt_ctx->grad_accs[i], "grad acc for %s", node->name);
+             } else {
+                 opt_ctx->grad_accs[i] = nullptr;
+             }
+         }
+ 
+         if (need_momenta && opt_ctx->build_type_alloc >= GGML_OPT_BUILD_TYPE_OPT) {
+             opt_ctx->grad_m.resize(n_nodes);
+             opt_ctx->grad_v.resize(n_nodes);
+             for (int i = 0; i < n_nodes; ++i) {
+                 ggml_tensor * node = opt_ctx->gf->nodes[i];
+                 if (node->flags & GGML_TENSOR_FLAG_PARAM) {
+-                    opt_ctx->grad_m[i] = ggml_new_tensor(opt_ctx->ctx_static, GGML_TYPE_F32, GGML_MAX_DIMS, node->ne);
+-                    opt_ctx->grad_v[i] = ggml_new_tensor(opt_ctx->ctx_static, GGML_TYPE_F32, GGML_MAX_DIMS, node->ne);
++                    ggml_context * ctx = ctx_for_param(node);
++                    opt_ctx->grad_m[i] = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, node->ne);
++                    opt_ctx->grad_v[i] = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, node->ne);
+                 } else {
+                     opt_ctx->grad_m[i] = nullptr;
+                     opt_ctx->grad_v[i] = nullptr;
+                 }
+             }
+         }
+     }
+ 
+     // gb_grad == graph backward gradients, forward pass, then backward pass to calculate gradients.
+     opt_ctx->gb_grad = ggml_graph_dup(opt_ctx->ctx_compute, opt_ctx->gf, /*force_grads =*/ true);
+     ggml_build_backward_expand(opt_ctx->ctx_compute, opt_ctx->gb_grad, opt_ctx->grad_accs.data());
+ 
++    auto alloc_param_bufs = [&]() {
++        for (auto & kv : opt_ctx->ctx_params) {
++            ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(kv.second, kv.first);
++            GGML_ASSERT(buf && "failed to allocate optimizer state in the buffer type of a param");
++            opt_ctx->bufs_params.push_back(buf);
++        }
++    };
++
+     if (opt_ctx->buf_static) {
+         if (opt_ctx->build_type == GGML_OPT_BUILD_TYPE_GRAD) {
+             return;
+         }
+     } else if (opt_ctx->build_type_alloc == GGML_OPT_BUILD_TYPE_GRAD) {
+         opt_ctx->buf_static = ggml_backend_alloc_ctx_tensors(opt_ctx->ctx_static, ggml_backend_sched_get_backend(opt_ctx->backend_sched, 0));
++        alloc_param_bufs();
+         ggml_graph_reset(opt_ctx->gb_grad);
+     }
+ 
+     GGML_ASSERT(opt_ctx->build_type_alloc == GGML_OPT_BUILD_TYPE_OPT);
+ 
+     // gb_opt == graph backward optimize, forward pass, then backward pass to calculate gradients, then optimizer step.
+     opt_ctx->gb_opt = ggml_graph_dup(opt_ctx->ctx_compute, opt_ctx->gb_grad, /*force_grads =*/ true);
+ 
+     opt_ctx->opt_step_params = ggml_new_tensor_1d(opt_ctx->ctx_cpu, GGML_TYPE_F32, need_momenta ? 7 : 2);
+     ggml_tensor * adamw_params = opt_ctx->opt_step_params;
+     ggml_set_input(adamw_params);
+     const char * optimizer_name = ggml_opt_optimizer_name(opt_ctx->optimizer);
+     ggml_format_name(adamw_params, "%s_params", optimizer_name);
++    // global gradient norm; with clipping, every gradient is scaled by min(1, clip/norm)
++    struct ggml_tensor * sumsq = nullptr;
++    for (int i = opt_ctx->gf->n_nodes-1; i >= 0; --i) {
++        struct ggml_tensor * node = opt_ctx->gb_opt->nodes[i];
++        struct ggml_tensor * grad = ggml_graph_get_grad(opt_ctx->gb_opt, node);
++        if (grad && (node->flags & GGML_TENSOR_FLAG_PARAM)) {
++            struct ggml_tensor * s = ggml_sum(opt_ctx->ctx_compute, ggml_sqr(opt_ctx->ctx_compute, grad));
++            sumsq = sumsq ? ggml_add(opt_ctx->ctx_compute, sumsq, s) : s;
++        }
++    }
++    struct ggml_tensor * clip_factor = nullptr;
++    if (sumsq) {
++        opt_ctx->grad_norm = ggml_sqrt(opt_ctx->ctx_compute, sumsq);
++        ggml_set_name(opt_ctx->grad_norm, "grad_norm");
++        ggml_set_output(opt_ctx->grad_norm);
++        ggml_build_forward_expand(opt_ctx->gb_opt, opt_ctx->grad_norm);
++        if (opt_ctx->grad_clip > 0.0f) {
++            opt_ctx->grad_clip_max = ggml_new_tensor_1d(opt_ctx->ctx_cpu, GGML_TYPE_F32, 1);
++            ggml_set_name(opt_ctx->grad_clip_max, "grad_clip_max");
++            ggml_set_input(opt_ctx->grad_clip_max);
++            clip_factor = ggml_clamp(opt_ctx->ctx_compute,
++                ggml_div(opt_ctx->ctx_compute, opt_ctx->grad_clip_max,
++                         ggml_scale_bias(opt_ctx->ctx_compute, opt_ctx->grad_norm, 1.0f, 1e-6f*opt_ctx->loss_scale)),
++                0.0f, 1.0f);
++            ggml_set_name(clip_factor, "grad_clip_factor");
++        }
++    }
+     for (int i = opt_ctx->gf->n_nodes-1; i >= 0; --i) {
+         struct ggml_tensor * node = opt_ctx->gb_opt->nodes[i];
+         struct ggml_tensor * grad = ggml_graph_get_grad(opt_ctx->gb_opt, node);
+ 
+         if (grad && (node->flags & GGML_TENSOR_FLAG_PARAM)) {
++            if (clip_factor) {
++                grad = ggml_mul(opt_ctx->ctx_compute, grad, clip_factor);
++            }
+             struct ggml_tensor * m = nullptr;
+             struct ggml_tensor * v = nullptr;
+             if (need_momenta) {
+                 m = opt_ctx->grad_m[i];
+                 v = opt_ctx->grad_v[i];
+                 ggml_format_name(m, "AdamW m for %s", node->name);
+                 ggml_format_name(v, "AdamW v for %s", node->name);
+             }
+@@ -535,16 +716,17 @@ static void ggml_opt_build(ggml_opt_context_t opt_ctx) {
+             ggml_format_name(opt_step, "%s step for %s", optimizer_name, node->name);
+             ggml_build_forward_expand(opt_ctx->gb_opt, opt_step);
+         }
+     }
+ 
+     if (!opt_ctx->buf_static) {
+         opt_ctx->buf_static = ggml_backend_alloc_ctx_tensors(
+             opt_ctx->ctx_static, ggml_backend_sched_get_backend(opt_ctx->backend_sched, 0));
++        alloc_param_bufs();
+         ggml_graph_reset(opt_ctx->gb_opt);
+     }
+ 
+     opt_ctx->buf_cpu = ggml_backend_alloc_ctx_tensors_from_buft(opt_ctx->ctx_cpu, ggml_backend_cpu_buffer_type());
+ }
+ 
+ ggml_opt_context_t ggml_opt_init(struct ggml_opt_params params) {
+     ggml_opt_context_t result = new struct ggml_opt_context;
+@@ -555,16 +737,19 @@ ggml_opt_context_t ggml_opt_init(struct ggml_opt_params params) {
+     result->build_type_alloc = params.build_type;
+     result->inputs           = params.inputs;
+     result->outputs          = params.outputs;
+     result->opt_period       = params.opt_period;
+     result->get_opt_pars     = params.get_opt_pars;
+     result->get_opt_pars_ud  = params.get_opt_pars_ud;
+     result->optimizer        = params.optimizer;
+ 
++    result->loss_scale = params.loss_scale > 0.0f ? params.loss_scale : 1.0f;
++    result->grad_clip  = params.grad_clip > 0.0f ? params.grad_clip : 0.0f;
++
+     GGML_ASSERT(result->opt_period >= 1);
+ 
+     result->static_graphs = result->ctx_compute;
+ 
+     if (!result->static_graphs) {
+         GGML_ASSERT(!result->inputs);
+         GGML_ASSERT(!result->outputs);
+         return result;
+@@ -582,16 +767,22 @@ ggml_opt_context_t ggml_opt_init(struct ggml_opt_params params) {
+ }
+ 
+ void ggml_opt_free(ggml_opt_context_t opt_ctx) {
+     if (opt_ctx == nullptr) {
+         return;
+     }
+     ggml_backend_buffer_free(opt_ctx->buf_static);
+     ggml_backend_buffer_free(opt_ctx->buf_cpu);
++    for (ggml_backend_buffer_t buf : opt_ctx->bufs_params) {
++        ggml_backend_buffer_free(buf);
++    }
++    for (auto & kv : opt_ctx->ctx_params) {
++        ggml_free(kv.second);
++    }
+     ggml_free(opt_ctx->ctx_static);
+     ggml_free(opt_ctx->ctx_cpu);
+     ggml_free(opt_ctx->ctx_copy);
+     delete opt_ctx;
+ }
+ 
+ void ggml_opt_reset(ggml_opt_context_t opt_ctx, bool optimizer) {
+     if (optimizer) {
+@@ -613,47 +804,81 @@ struct ggml_tensor * ggml_opt_inputs(ggml_opt_context_t opt_ctx) {
+ struct ggml_tensor * ggml_opt_outputs(ggml_opt_context_t opt_ctx) {
+     return opt_ctx->outputs;
+ }
+ 
+ struct ggml_tensor * ggml_opt_labels(ggml_opt_context_t opt_ctx) {
+     return opt_ctx->labels;
+ }
+ 
++struct ggml_tensor * ggml_opt_masks(ggml_opt_context_t opt_ctx) {
++    return opt_ctx->masks;
++}
++
+ struct ggml_tensor * ggml_opt_loss(ggml_opt_context_t opt_ctx) {
+     return opt_ctx->loss;
+ }
+ 
+ struct ggml_tensor * ggml_opt_pred(ggml_opt_context_t opt_ctx) {
+     return opt_ctx->pred;
+ }
+ 
+ struct ggml_tensor * ggml_opt_ncorrect(ggml_opt_context_t opt_ctx) {
+     return opt_ctx->ncorrect;
+ }
+ 
+ struct ggml_tensor * ggml_opt_grad_acc(ggml_opt_context_t opt_ctx, struct ggml_tensor * node) {
+     return ggml_graph_get_grad_acc(opt_ctx->gb_opt, node);
+ }
+ 
++int64_t ggml_opt_get_iter(ggml_opt_context_t opt_ctx) {
++    return opt_ctx->iter;
++}
++
++void ggml_opt_set_iter(ggml_opt_context_t opt_ctx, int64_t iter) {
++    opt_ctx->iter = iter;
++}
++
++int32_t ggml_opt_get_nparams(ggml_opt_context_t opt_ctx) {
++    if (!opt_ctx) {
++        return 0;
++    }
++    return (int32_t)opt_ctx->grad_m.size();
++}
++
++struct ggml_tensor * ggml_opt_get_grad_m(ggml_opt_context_t opt_ctx, int32_t index) {
++    if (index < 0 || index >= (int32_t)opt_ctx->grad_m.size()) {
++        return nullptr;
++    }
++    return opt_ctx->grad_m[index];
++}
++
++struct ggml_tensor * ggml_opt_get_grad_v(ggml_opt_context_t opt_ctx, int32_t index) {
++    if (index < 0 || index >= (int32_t)opt_ctx->grad_v.size()) {
++        return nullptr;
++    }
++    return opt_ctx->grad_v[index];
++}
++
+ // ====== Optimization Result ======
+ 
+ ggml_opt_result_t ggml_opt_result_init() {
+     return new ggml_opt_result;
+ }
+ 
+ void ggml_opt_result_free(ggml_opt_result_t result) {
+     delete result;
+ }
+ 
+ void ggml_opt_result_reset(ggml_opt_result_t result) {
+     result->ndata = 0;
+     result->loss.clear();
+     result->pred.clear();
+     result->ncorrect = 0;
++    result->nmasked = 0;
+ }
+ 
+ void ggml_opt_result_ndata(ggml_opt_result_t result, int64_t * ndata) {
+     *ndata = result->ndata;
+ }
+ 
+ void ggml_opt_result_loss(ggml_opt_result_t result, double * loss, double * unc) {
+     const int64_t nbatches = result->loss.size(); // Number of physical batches.
+@@ -692,24 +917,25 @@ void ggml_opt_result_loss(ggml_opt_result_t result, double * loss, double * unc)
+ 
+ void ggml_opt_result_pred(ggml_opt_result_t result, int32_t * pred) {
+     for (size_t i = 0; i < result->pred.size(); ++i) {
+         pred[i] = result->pred[i];
+     }
+ }
+ 
+ void ggml_opt_result_accuracy(ggml_opt_result_t result, double * accuracy, double * unc) {
+-    *accuracy = result->ncorrect >= 0 ? double(result->ncorrect) / double(result->ndata) : NAN;
++    int64_t denominator = (result->nmasked > 0) ? result->nmasked : result->ndata;
++    *accuracy = result->ncorrect >= 0 ? double(result->ncorrect) / double(denominator) : NAN;
+ 
+     if (!unc) {
+         return;
+     }
+ 
+-    *unc = result->ncorrect >= 0 && result->ndata >= 2 ?
+-        sqrt((*accuracy) * (1.0 - (*accuracy)) / double(result->ndata - 1)) : NAN;
++    *unc = result->ncorrect >= 0 && denominator >= 2 ?
++        sqrt((*accuracy) * (1.0 - (*accuracy)) / double(denominator - 1)) : NAN;
+ }
+ 
+ // ====== Computation ======
+ 
+ void ggml_opt_prepare_alloc(
+         ggml_opt_context_t    opt_ctx,
+         struct ggml_context * ctx_compute,
+         struct ggml_cgraph  * gf,
+@@ -731,32 +957,37 @@ void ggml_opt_alloc(ggml_opt_context_t opt_ctx, bool backward) {
+         const int32_t opt_i_next = (opt_ctx->opt_i + 1) % opt_ctx->opt_period;
+         opt_ctx->build_type = opt_i_next == 0 ? GGML_OPT_BUILD_TYPE_OPT : GGML_OPT_BUILD_TYPE_GRAD;
+     } else {
+         opt_ctx->build_type = GGML_OPT_BUILD_TYPE_FORWARD;
+     }
+ 
+     if (!opt_ctx->static_graphs) {
+         ggml_opt_build(opt_ctx);
++        // gb_grad only exists after the rebuild, so the reset above cannot reach the accumulators
++        if (backward && opt_ctx->opt_i == 0) {
++            ggml_graph_reset(opt_ctx->gb_grad);
++        }
+     }
+ 
+     struct ggml_cgraph * graph = nullptr;
+     switch (opt_ctx->build_type) {
+         case GGML_OPT_BUILD_TYPE_FORWARD: {
+             graph = opt_ctx->gf;
+         } break;
+         case GGML_OPT_BUILD_TYPE_GRAD: {
+             graph = opt_ctx->gb_grad;
+         } break;
+         case GGML_OPT_BUILD_TYPE_OPT: {
+             graph = opt_ctx->gb_opt;
+         } break;
+     }
+     GGML_ASSERT(graph);
+ 
++
+     if (opt_ctx->allocated_graph == graph) {
+         opt_ctx->eval_ready = true;
+         return;
+     }
+ 
+     ggml_backend_sched_reset(opt_ctx->backend_sched); // clear allocation of previous graph
+ 
+     if (opt_ctx->static_graphs) {
+@@ -774,21 +1005,27 @@ void ggml_opt_alloc(ggml_opt_context_t opt_ctx, bool backward) {
+     }
+ 
+     ggml_backend_sched_alloc_graph(opt_ctx->backend_sched, opt_ctx->allocated_graph_copy);
+     opt_ctx->allocated_graph = graph;
+ 
+     opt_ctx->eval_ready = true;
+ }
+ 
++
+ void ggml_opt_eval(ggml_opt_context_t opt_ctx, ggml_opt_result_t result) {
+     GGML_ASSERT(opt_ctx->eval_ready);
+     if (opt_ctx->allocated_graph == opt_ctx->gb_opt) {
+         const ggml_opt_optimizer_params & opt_pars = opt_ctx->get_opt_pars(opt_ctx->get_opt_pars_ud);
+ 
++        if (opt_ctx->grad_clip_max) {
++            // the gradients carry the loss scale, so the threshold does too
++            ggml_get_data_f32(opt_ctx->grad_clip_max)[0] = opt_ctx->grad_clip*opt_ctx->loss_scale;
++        }
++
+         switch (opt_ctx->optimizer) {
+             case GGML_OPT_OPTIMIZER_TYPE_ADAMW: {
+                 GGML_ASSERT(opt_pars.adamw.alpha > 0.0f);
+                 GGML_ASSERT(opt_pars.adamw.beta1 >= 0.0f);
+                 GGML_ASSERT(opt_pars.adamw.beta1 <= 1.0f);
+                 GGML_ASSERT(opt_pars.adamw.beta2 >= 0.0f);
+                 GGML_ASSERT(opt_pars.adamw.beta2 <= 1.0f);
+                 GGML_ASSERT(opt_pars.adamw.eps >= 0.0f);
+@@ -798,35 +1035,45 @@ void ggml_opt_eval(ggml_opt_context_t opt_ctx, ggml_opt_result_t result) {
+                 // beta1, beta2 after applying warmup
+                 const float beta1h = 1.0f / (1.0f - powf(opt_pars.adamw.beta1, opt_ctx->iter));
+                 const float beta2h = 1.0f / (1.0f - powf(opt_pars.adamw.beta2, opt_ctx->iter));
+ 
+                 float * adamw_par_data = ggml_get_data_f32(opt_ctx->opt_step_params);
+                 adamw_par_data[0] = opt_pars.adamw.alpha;
+                 adamw_par_data[1] = opt_pars.adamw.beta1;
+                 adamw_par_data[2] = opt_pars.adamw.beta2;
+-                adamw_par_data[3] = opt_pars.adamw.eps;
++                adamw_par_data[3] = opt_pars.adamw.eps * opt_ctx->loss_scale;
+                 adamw_par_data[4] = opt_pars.adamw.wd;
+                 adamw_par_data[5] = beta1h;
+                 adamw_par_data[6] = beta2h;
+             } break;
+             case GGML_OPT_OPTIMIZER_TYPE_SGD: {
+                 GGML_ASSERT(opt_pars.sgd.alpha > 0.0f);
+                 GGML_ASSERT(opt_pars.sgd.wd >= 0.0f);
+                 GGML_ASSERT(opt_pars.sgd.wd <= 1.0f);
+                 float * sgd = ggml_get_data_f32(opt_ctx->opt_step_params);
+-                sgd[0] = opt_pars.sgd.alpha;
+-                sgd[1] = opt_pars.sgd.wd;
++                sgd[0] = opt_pars.sgd.alpha / opt_ctx->loss_scale;
++                sgd[1] = opt_pars.sgd.wd * opt_ctx->loss_scale;
+             } break;
+             default:
+                 GGML_ABORT("fatal error");
+         }
+     }
+ 
+-    ggml_backend_sched_graph_compute(opt_ctx->backend_sched, opt_ctx->allocated_graph_copy);
++    const enum ggml_status status = ggml_backend_sched_graph_compute(opt_ctx->backend_sched, opt_ctx->allocated_graph_copy);
++    if (opt_ctx->grad_norm && opt_ctx->allocated_graph == opt_ctx->gb_opt) {
++        ggml_backend_tensor_get(opt_ctx->grad_norm, &opt_ctx->last_grad_norm, 0, sizeof(float));
++        opt_ctx->last_grad_norm /= opt_ctx->loss_scale;
++        static const bool log_norm = getenv("GGML_OPT_LOG_GRAD_NORM") != nullptr;
++        if (log_norm) {
++            fprintf(stderr, "grad_norm %lld %.6f\n", (long long) opt_ctx->iter, opt_ctx->last_grad_norm);
++        }
++    }
++    // a failed compute leaves the loss and gradients unwritten
++    GGML_ASSERT(status == GGML_STATUS_SUCCESS && "ggml_opt: backend graph compute failed, cannot continue training");
+     opt_ctx->iter += opt_ctx->allocated_graph == opt_ctx->gb_opt;
+     opt_ctx->opt_i = (opt_ctx->opt_i + 1) % opt_ctx->opt_period;
+ 
+     if (!opt_ctx->static_graphs) {
+         opt_ctx->gf                   = nullptr;
+         opt_ctx->gb_grad              = nullptr;
+         opt_ctx->gb_opt               = nullptr;
+         opt_ctx->allocated_graph      = nullptr;
+@@ -843,17 +1090,19 @@ void ggml_opt_eval(ggml_opt_context_t opt_ctx, ggml_opt_result_t result) {
+         result->loss_per_datapoint = opt_ctx->loss_per_datapoint;
+         result->opt_period         = opt_ctx->opt_period;
+     } else {
+         GGML_ASSERT(result->loss_per_datapoint == opt_ctx->loss_per_datapoint);
+         GGML_ASSERT(result->opt_period         == opt_ctx->opt_period);
+     }
+ 
+     const int64_t ndata = opt_ctx->outputs->ne[1];
+-    GGML_ASSERT(result->ndata == ndata*int64_t(result->loss.size()) && "varying batch size not supported");
++    // the masked loss keeps only the rows it counts, so its batches vary; loss and accuracy do not depend on ndata
++    GGML_ASSERT((opt_ctx->loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED ||
++                 result->ndata == ndata*int64_t(result->loss.size())) && "varying batch size not supported");
+     result->ndata += ndata;
+ 
+     GGML_ASSERT(ggml_is_scalar(opt_ctx->loss));
+     GGML_ASSERT(opt_ctx->loss->type == GGML_TYPE_F32);
+     float loss;
+     ggml_backend_tensor_get(opt_ctx->loss, &loss, 0, ggml_nbytes(opt_ctx->loss));
+     result->loss.push_back(loss);
+ 
+@@ -869,16 +1118,27 @@ void ggml_opt_eval(ggml_opt_context_t opt_ctx, ggml_opt_result_t result) {
+         return;
+     }
+ 
+     GGML_ASSERT(ggml_is_scalar(opt_ctx->ncorrect));
+     GGML_ASSERT(opt_ctx->ncorrect->type == GGML_TYPE_I64);
+     int64_t ncorrect;
+     ggml_backend_tensor_get(opt_ctx->ncorrect, &ncorrect, 0, ggml_nbytes(opt_ctx->ncorrect));
+     result->ncorrect += ncorrect;
++
++    if (opt_ctx->loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED && opt_ctx->masks) {
++        int64_t total_valid = 0;
++        std::vector<float> mask_data(ggml_nelements(opt_ctx->masks));
++        ggml_backend_tensor_get(opt_ctx->masks, mask_data.data(), 0, ggml_nbytes(opt_ctx->masks));
++
++        for (const float mask_value : mask_data) {
++            total_valid += mask_value > 0.5f;
++        }
++        result->nmasked += total_valid;
++    }
+ }
+ 
+ // ====== High-Level Functions ======
+ 
+ void ggml_opt_epoch(
+         ggml_opt_context_t      opt_ctx,
+         ggml_opt_dataset_t      dataset,
+         ggml_opt_result_t       result_train,
+@@ -1087,8 +1347,162 @@ GGML_API const char * ggml_opt_optimizer_name(enum ggml_opt_optimizer_type o) {
+         case GGML_OPT_OPTIMIZER_TYPE_ADAMW:
+             return "adamw";
+         case GGML_OPT_OPTIMIZER_TYPE_SGD:
+             return "sgd";
+         default:
+             return "undefined";
+     };
+ }
++
++// ====== Optimizer State Persistence ======
++
++bool ggml_opt_save_state(ggml_opt_context_t opt_ctx, const char* filename) {
++    if (!opt_ctx || !filename) {
++        return false;
++    }
++
++    struct gguf_context * gguf_ctx = gguf_init_empty();
++    if (!gguf_ctx) {
++        return false;
++    }
++
++    gguf_set_val_str(gguf_ctx, "general.type", "optimizer");
++    gguf_set_val_i64(gguf_ctx, "optimizer.iteration", ggml_opt_get_iter(opt_ctx));
++    gguf_set_val_i32(gguf_ctx, "optimizer.n_params", ggml_opt_get_nparams(opt_ctx));
++    gguf_set_val_f32(gguf_ctx, "optimizer.loss_scale", opt_ctx->loss_scale);
++
++    int32_t total_params = ggml_opt_get_nparams(opt_ctx);
++
++    for (int32_t i = 0; i < total_params; ++i) {
++        struct ggml_tensor * grad_m = ggml_opt_get_grad_m(opt_ctx, i);
++        struct ggml_tensor * grad_v = ggml_opt_get_grad_v(opt_ctx, i);
++        if (grad_m) {
++            gguf_add_tensor(gguf_ctx, grad_m);
++        }
++        if (grad_v) {
++            gguf_add_tensor(gguf_ctx, grad_v);
++        }
++    }
++
++    bool success = gguf_write_to_file(gguf_ctx, filename, false);
++    gguf_free(gguf_ctx);
++
++    return success;
++}
++
++bool ggml_opt_load_state(ggml_opt_context_t opt_ctx, const char* filename) {
++    if (!opt_ctx || !filename) {
++        return false;
++    }
++
++    struct gguf_init_params gguf_params = {
++        /* .no_alloc = */ true,
++        /* .ctx      = */ nullptr,
++    };
++
++    struct gguf_context * gguf_context = gguf_init_from_file(filename, gguf_params);
++    if (!gguf_context) {
++        return false;
++    }
++
++    int key_idx = gguf_find_key(gguf_context, "optimizer.iteration");
++    if (key_idx >= 0) {
++        int64_t saved_iter = gguf_get_val_i64(gguf_context, key_idx);
++        ggml_opt_set_iter(opt_ctx, saved_iter);
++    }
++
++    gguf_free(gguf_context);
++    return true;
++}
++
++bool ggml_opt_load_tensors(ggml_opt_context_t opt_ctx, const char* filename) {
++    if (!opt_ctx || !filename) {
++        return false;
++    }
++
++    struct ggml_context * gguf_ctx = nullptr;
++    struct gguf_init_params gguf_params = {
++        /* .no_alloc = */ false,
++        /* .ctx      = */ &gguf_ctx,
++    };
++
++    struct gguf_context * gguf_context = gguf_init_from_file(filename, gguf_params);
++    if (!gguf_context) {
++        return false;
++    }
++
++    if (!gguf_ctx) {
++        gguf_free(gguf_context);
++        return false;
++    }
++
++    int tensor_count = gguf_get_n_tensors(gguf_context);
++    int grad_m_loaded = 0, grad_v_loaded = 0;
++    const int32_t n_params = ggml_opt_get_nparams(opt_ctx);
++
++    float loss_scale_file = 1.0f;
++    {
++        const int key_idx = gguf_find_key(gguf_context, "optimizer.loss_scale");
++        if (key_idx >= 0) {
++            loss_scale_file = gguf_get_val_f32(gguf_context, key_idx);
++        }
++    }
++    const bool  rescale = loss_scale_file > 0.0f && loss_scale_file != opt_ctx->loss_scale;
++    const float ratio_m = rescale ? opt_ctx->loss_scale / loss_scale_file : 1.0f;
++    const float ratio_v = ratio_m * ratio_m;
++
++    for (int i = 0; i < tensor_count; ++i) {
++        const char* tensor_name = gguf_get_tensor_name(gguf_context, i);
++        if (!tensor_name) continue;
++
++        struct ggml_tensor* gguf_tensor = ggml_get_tensor(gguf_ctx, tensor_name);
++        if (!gguf_tensor) continue;
++
++        for (int32_t param_idx = 0; param_idx < n_params; ++param_idx) {
++            struct ggml_tensor* grad_m = ggml_opt_get_grad_m(opt_ctx, param_idx);
++            struct ggml_tensor* grad_v = ggml_opt_get_grad_v(opt_ctx, param_idx);
++
++            if (grad_m && strlen(grad_m->name) > 0 && strcmp(tensor_name, grad_m->name) == 0) {
++                if (grad_m->type == gguf_tensor->type &&
++                    ggml_nelements(grad_m) == ggml_nelements(gguf_tensor)) {
++                    if (grad_m->data) {
++                        if (rescale && gguf_tensor->type == GGML_TYPE_F32) {
++                            float * data = (float *) gguf_tensor->data;
++                            for (int64_t j = 0; j < ggml_nelements(gguf_tensor); ++j) {
++                                data[j] *= ratio_m;
++                            }
++                        }
++                        ggml_backend_tensor_set(grad_m, gguf_tensor->data, 0, ggml_nbytes(grad_m));
++                        grad_m_loaded++;
++                    }
++                }
++                break;
++            }
++
++            if (grad_v && strlen(grad_v->name) > 0 && strcmp(tensor_name, grad_v->name) == 0) {
++                if (grad_v->type == gguf_tensor->type &&
++                    ggml_nelements(grad_v) == ggml_nelements(gguf_tensor)) {
++                    if (grad_v->data) {
++                        if (rescale && gguf_tensor->type == GGML_TYPE_F32) {
++                            float * data = (float *) gguf_tensor->data;
++                            for (int64_t j = 0; j < ggml_nelements(gguf_tensor); ++j) {
++                                data[j] *= ratio_v;
++                            }
++                        }
++                        ggml_backend_tensor_set(grad_v, gguf_tensor->data, 0, ggml_nbytes(grad_v));
++                        grad_v_loaded++;
++                    }
++                }
++                break;
++            }
++        }
++
++    }
++
++    ggml_free(gguf_ctx);
++    gguf_free(gguf_context);
++    return (grad_m_loaded > 0 || grad_v_loaded > 0);
++}
++
++float ggml_opt_grad_norm(ggml_opt_context_t opt_ctx) {
++    return opt_ctx->last_grad_norm;
++}

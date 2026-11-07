@@ -207,6 +207,17 @@ struct SettingsRowDivider: View {
 
 /// Puts a row glyph in front of a platform control, so form-based sections match
 /// the hand-built ones without rebuilding every control.
+/// The grouped form puts a label at the top of a tall control; these rows read as one line.
+struct SettingsLabeledContentStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            configuration.label
+            Spacer(minLength: 10)
+            configuration.content
+        }
+    }
+}
+
 private struct SettingsGlyphModifier: ViewModifier {
     let icon: String
 

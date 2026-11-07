@@ -717,6 +717,7 @@ struct SettingsView: View {
                                 onSelect: { gpuListCSV = $0.sorted().map(String.init).joined(separator: ",") },
                                 onToggle: toggleSplitGPU)
                         }
+                        .settingsGlyph("rectangle.split.3x1")
                         .infoTip(loc.t("Qué GPUs concretas participan en el reparto (p. ej. la 0 y la 6, saltándose las demás). Con 'Todas' se usan las primeras N del selector de arriba, y cada atajo 'Fabric' elige de una vez las tarjetas unidas por un mismo puente.",
                                     "Which specific GPUs take part in the split (e.g. 0 and 6, skipping the rest). With 'All', the first N from the picker above are used, and each 'Fabric' shortcut picks every card behind one bridge at once."))
                         if splitSelection.count == 1 {

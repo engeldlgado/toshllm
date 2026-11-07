@@ -39,6 +39,7 @@ struct ChatEmptyState: View {
                            action: { onAction(.explore) })
                 }
             }
+            .fixedSize()
         }
         .frame(maxWidth: 760)
     }

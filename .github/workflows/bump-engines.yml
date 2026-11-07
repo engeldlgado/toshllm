@@ -33,11 +33,6 @@ jobs:
         if: steps.upstream.outputs.sha == steps.upstream.outputs.current
         run: echo "Already up to date" && exit 0
 
-      - name: Pin new commit
-        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
-        run: |
-          sed -i '' "s/LLAMA_COMMIT:-[a-f0-9]*/LLAMA_COMMIT:-${{ steps.upstream.outputs.sha }}/" scripts/build-engines.sh
-
       - name: Check which patches apply
         id: series
         if: steps.upstream.outputs.sha != steps.upstream.outputs.current
@@ -63,6 +58,11 @@ jobs:
           fi
           echo "the series does not apply to ${{ steps.upstream.outputs.sha }}; see the job summary" >&2
           exit 1
+
+      - name: Pin new commit
+        if: steps.upstream.outputs.sha != steps.upstream.outputs.current
+        run: |
+          sed -i '' "s/LLAMA_COMMIT:-[a-f0-9]*/LLAMA_COMMIT:-${{ steps.upstream.outputs.sha }}/" scripts/build-engines.sh
 
       - name: Build engines with patches (native arch, for smoke test)
         if: steps.upstream.outputs.sha != steps.upstream.outputs.current

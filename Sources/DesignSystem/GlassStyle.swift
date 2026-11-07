@@ -262,3 +262,16 @@ extension View {
         buttonStyle(GlassPillButtonStyle(prominent: prominent))
     }
 }
+
+/// Icon only while the row is short of room; the title comes back with the space.
+struct CompactLabelStyle: LabelStyle {
+    var compact: Bool
+
+    @ViewBuilder func makeBody(configuration: Configuration) -> some View {
+        if compact {
+            Label(configuration).labelStyle(.iconOnly)
+        } else {
+            Label(configuration).labelStyle(.titleAndIcon)
+        }
+    }
+}

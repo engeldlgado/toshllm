@@ -171,7 +171,7 @@ struct BenchmarkShareCard: View {
     }
 
     private func fieldLabel(_ value: String) -> some View {
-        Text(value).font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
+        Text(value).font(.system(size: 10, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary)
     }
 
     @ViewBuilder private var shareButton: some View {

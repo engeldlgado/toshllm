@@ -1,0 +1,403 @@
+diff --git a/common/common.cpp b/common/common.cpp
+index 364a4aba0..83704c955 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1479,11 +1479,11 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+ 
+     if (!params.control_vectors.empty()) {
+         if (params.control_vector_layer_start <= 0) params.control_vector_layer_start = 1;
+         if (params.control_vector_layer_end   <= 0) params.control_vector_layer_end   = llama_model_n_layer(model);
+ 
+-        const auto cvec = common_control_vector_load(params.control_vectors);
++        const auto cvec = common_control_vector_load(params.control_vectors, llama_model_n_layer(model));
+         if (cvec.n_embd == -1) {
+             return res;
+         }
+ 
+         int err = llama_set_adapter_cvec(
+@@ -2005,11 +2005,11 @@ float common_embd_similarity_cos(const float * embd1, const float * embd2, int n
+ 
+ //
+ // Control vector utils
+ //
+ 
+-static common_control_vector_data common_control_vector_load_one(const common_control_vector_load_info & load_info) {
++static common_control_vector_data common_control_vector_load_one(const common_control_vector_load_info & load_info, int32_t n_layer) {
+     common_control_vector_data result = { -1, {} };
+ 
+     ggml_context * ctx = nullptr;
+     struct gguf_init_params meta_gguf_params = {
+         /* .no_alloc = */ false,
+@@ -2046,10 +2046,14 @@ static common_control_vector_data common_control_vector_load_one(const common_co
+             break;
+         } else if (layer_idx == 0) {
+             COM_ERR("invalid (zero) direction tensor layer index in %s\n", load_info.fname.c_str());
+             result.n_embd = -1;
+             break;
++        } else if (layer_idx > n_layer) {
++            COM_ERR("direction tensor layer index %d exceeds the model layer count %d in %s\n", layer_idx, n_layer, load_info.fname.c_str());
++            result.n_embd = -1;
++            break;
+         }
+ 
+         struct ggml_tensor * tensor = ggml_get_tensor(ctx, name.c_str());
+         if (tensor->type != GGML_TYPE_F32) {
+             COM_ERR("invalid (non-F32) direction tensor type in %s\n", load_info.fname.c_str());
+@@ -2069,14 +2073,14 @@ static common_control_vector_data common_control_vector_load_one(const common_co
+             result.n_embd = -1;
+             break;
+         }
+ 
+         // extend if necessary - do not store data for layer 0 (it's not used)
+-        result.data.resize(std::max(result.data.size(), static_cast<size_t>(result.n_embd * layer_idx)), 0.0f);
++        result.data.resize(std::max(result.data.size(), (size_t) result.n_embd * layer_idx), 0.0f);
+ 
+         const float * src = (const float *) tensor->data;
+-        float * dst = result.data.data() + result.n_embd * (layer_idx - 1);  // layer 1 at [0]
++        float * dst = result.data.data() + (size_t) result.n_embd * (layer_idx - 1);  // layer 1 at [0]
+         for (int j = 0; j < result.n_embd; j++) {
+             dst[j] += src[j] * load_info.strength;  // allows multiple directions for same layer in same file
+         }
+ 
+     }
+@@ -2090,15 +2094,15 @@ static common_control_vector_data common_control_vector_load_one(const common_co
+     ggml_free(ctx);
+ 
+     return result;
+ }
+ 
+-common_control_vector_data common_control_vector_load(const std::vector<common_control_vector_load_info> & load_infos) {
++common_control_vector_data common_control_vector_load(const std::vector<common_control_vector_load_info> & load_infos, int32_t n_layer) {
+     common_control_vector_data result = { -1, {} };
+ 
+     for (const auto & info : load_infos) {
+-        auto cur = common_control_vector_load_one(info);
++        auto cur = common_control_vector_load_one(info, n_layer);
+ 
+         if (cur.n_embd == -1) {
+             result.n_embd = -1;
+             break;
+         }
+diff --git a/common/common.h b/common/common.h
+index 63a06f4d5..7b871e56c 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -1216,12 +1216,13 @@ struct common_control_vector_load_info {
+ 
+     std::string fname;
+ };
+ 
+ // Load control vectors, scale each by strength, and add them together.
++// Direction layer indices must be in [1, n_layer].
+ // On error, returns {-1, empty}
+-common_control_vector_data common_control_vector_load(const std::vector<common_control_vector_load_info> & load_infos);
++common_control_vector_data common_control_vector_load(const std::vector<common_control_vector_load_info> & load_infos, int32_t n_layer);
+ 
+ //
+ // Split utils
+ //
+ 
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index 71a651c77..aa27acf60 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -533,13 +533,10 @@ static BOOL CALLBACK ggml_time_init_once(PINIT_ONCE once, PVOID param, PVOID *ct
+ 
+     LARGE_INTEGER t;
+     QueryPerformanceFrequency(&t);
+     timer_freq = t.QuadPart;
+ 
+-    // The multiplication by 1000 or 1000000 below can cause an overflow if timer_freq
+-    // and the uptime is high enough.
+-    // We subtract the program start time to reduce the likelihood of that happening.
+     QueryPerformanceCounter(&t);
+     timer_start = t.QuadPart;
+ 
+     return TRUE;
+ }
+@@ -548,16 +545,16 @@ void ggml_time_init(void) {
+     InitOnceExecuteOnce(&once, ggml_time_init_once, NULL, NULL);
+ }
+ int64_t ggml_time_ms(void) {
+     LARGE_INTEGER t;
+     QueryPerformanceCounter(&t);
+-    return ((t.QuadPart-timer_start) * 1000) / timer_freq;
++    return (int64_t) (((double) (t.QuadPart - timer_start) / timer_freq) * 1000);
+ }
+ int64_t ggml_time_us(void) {
+     LARGE_INTEGER t;
+     QueryPerformanceCounter(&t);
+-    return ((t.QuadPart-timer_start) * 1000000) / timer_freq;
++    return (int64_t) (((double) (t.QuadPart - timer_start) / timer_freq) * 1000000);
+ }
+ #else
+ void ggml_time_init(void) {}
+ int64_t ggml_time_ms(void) {
+     struct timespec ts;
+@@ -2265,10 +2262,11 @@ static struct ggml_tensor * ggml_acc_impl(
+     GGML_ASSERT(a->type == GGML_TYPE_F32);
+     GGML_ASSERT(b->type == GGML_TYPE_F32);
+ 
+     struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
+ 
++    GGML_ASSERT(offset < (size_t)(1 << 30));
+     int32_t params[] = { nb1, nb2, nb3, offset, inplace ? 1 : 0 };
+     ggml_set_op_params(result, params, sizeof(params));
+ 
+     result->op     = GGML_OP_ACC;
+     result->src[0] = a;
+diff --git a/src/llama-grammar.cpp b/src/llama-grammar.cpp
+index 0a8a61e7e..ffc7cf27c 100644
+--- a/src/llama-grammar.cpp
++++ b/src/llama-grammar.cpp
+@@ -9,10 +9,11 @@
+ #include <cstdint>
+ #include <set>
+ #include <stdexcept>
+ 
+ #define MAX_REPETITION_THRESHOLD 2000
++#define MAX_GRAMMAR_RECURSION_DEPTH 256
+ //
+ // helpers
+ //
+ 
+ // NOTE: assumes valid utf8 (but checks for overrun)
+@@ -438,28 +439,30 @@ void llama_grammar_parser::add_rule(uint32_t rule_id, const llama_grammar_rule &
+ 
+ const char * llama_grammar_parser::parse_alternates(
+         const char        * src,
+         const std::string & rule_name,
+         uint32_t            rule_id,
+-        bool                is_nested) {
++        bool                is_nested,
++        uint32_t            depth) {
+     llama_grammar_rule rule;
+-    const char * pos = parse_sequence(src, rule_name, rule, is_nested);
++    const char * pos = parse_sequence(src, rule_name, rule, is_nested, depth);
+     while (*pos == '|') {
+         rule.push_back({LLAMA_GRETYPE_ALT, 0});
+         pos = parse_space(pos + 1, true);
+-        pos = parse_sequence(pos, rule_name, rule, is_nested);
++        pos = parse_sequence(pos, rule_name, rule, is_nested, depth);
+     }
+     rule.push_back({LLAMA_GRETYPE_END, 0});
+     add_rule(rule_id, rule);
+     return pos;
+ }
+ 
+ const char * llama_grammar_parser::parse_sequence(
+         const char         * src,
+         const std::string  & rule_name,
+         llama_grammar_rule & rule,
+-        bool               is_nested) {
++        bool               is_nested,
++        uint32_t           depth) {
+     size_t last_sym_start = rule.size();
+     const char * pos = src;
+     uint64_t n_prev_rules = 1;
+ 
+     // use UINT64_MAX as the empty value because we aligned to the proper uint64_t type so -1 can't be used
+@@ -593,15 +596,18 @@ const char * llama_grammar_parser::parse_sequence(
+             pos = parse_space(name_end, is_nested);
+             last_sym_start = rule.size();
+             n_prev_rules = 1;
+             rule.push_back({LLAMA_GRETYPE_RULE_REF, ref_rule_id});
+         } else if (*pos == '(') { // grouping
++            if (depth >= MAX_GRAMMAR_RECURSION_DEPTH) {
++                throw std::runtime_error("grammar recursion depth limit exceeded (max " + std::to_string(MAX_GRAMMAR_RECURSION_DEPTH) + "), please reduce nesting depth");
++            }
+             // parse nested alternates into synthesized rule
+             pos = parse_space(pos + 1, true);
+             uint32_t n_rules_before = symbol_ids.size();
+             uint32_t sub_rule_id = generate_symbol_id(rule_name);
+-            pos = parse_alternates(pos, rule_name, sub_rule_id, true);
++            pos = parse_alternates(pos, rule_name, sub_rule_id, true, depth + 1);
+             n_prev_rules = std::max(1u, (uint32_t)symbol_ids.size() - n_rules_before);
+             last_sym_start = rule.size();
+             // output reference to synthesized rule
+             rule.push_back({LLAMA_GRETYPE_RULE_REF, sub_rule_id});
+             if (*pos != ')') {
+diff --git a/src/llama-grammar.h b/src/llama-grammar.h
+index b5a0e588e..2885f7705 100644
+--- a/src/llama-grammar.h
++++ b/src/llama-grammar.h
+@@ -100,17 +100,19 @@ struct llama_grammar_parser {
+ 
+     const char * parse_alternates(
+             const char        * src,
+             const std::string & rule_name,
+             uint32_t            rule_id,
+-            bool                is_nested);
++            bool                is_nested,
++            uint32_t            depth = 0);
+ 
+     const char * parse_sequence(
+             const char         * src,
+             const std::string  & rule_name,
+             llama_grammar_rule & rule,
+-            bool               is_nested);
++            bool               is_nested,
++            uint32_t           depth = 0);
+ 
+     const char * parse_rule(const char * src);
+ 
+     bool parse(const char * src);
+     void print(FILE * file);
+diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
+index 50fb6c408..7519f6cb1 100644
+--- a/tools/mtmd/clip.cpp
++++ b/tools/mtmd/clip.cpp
+@@ -4847,22 +4847,24 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
+         case PROJECTOR_TYPE_LING3VL:
+         case PROJECTOR_TYPE_GLM4V:
+         case PROJECTOR_TYPE_GLM5V:
+             {
+                 const int merge_ratio = hparams.n_merge;
+-                const int pw = image_size_width  / patch_size;
+-                const int ph = image_size_height / patch_size;
++                const int pw = image_size_width  / patch_size / merge_ratio;
++                const int ph = image_size_height / patch_size / merge_ratio;
+                 std::vector<int> positions(n_pos * 4);
+                 int ptr = 0;
+-                for (int y = 0; y < ph; y += merge_ratio) {
+-                    for (int x = 0; x < pw; x += merge_ratio) {
+-                        for (int dy = 0; dy < 2; dy++) {
+-                            for (int dx = 0; dx < 2; dx++) {
+-                                positions[                  ptr] = y + dy;
+-                                positions[    num_patches + ptr] = x + dx;
+-                                positions[2 * num_patches + ptr] = y + dy;
+-                                positions[3 * num_patches + ptr] = x + dx;
++                for (int ty = 0; ty < ph; ty++) {
++                    for (int tx = 0; tx < pw; tx++) {
++                        for (int dy = 0; dy < merge_ratio; dy++) {
++                            for (int dx = 0; dx < merge_ratio; dx++) {
++                                const int y = ty * merge_ratio + dy;
++                                const int x = tx * merge_ratio + dx;
++                                positions[                  ptr] = y;
++                                positions[    num_patches + ptr] = x;
++                                positions[2 * num_patches + ptr] = y;
++                                positions[3 * num_patches + ptr] = x;
+                                 ptr++;
+                             }
+                         }
+                     }
+                 }
+@@ -4882,23 +4884,25 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
+                 set_input_i32("pos_w", pos_data);
+             } break;
+         case PROJECTOR_TYPE_PADDLEOCR:
+             {
+                 const int merge_ratio = hparams.n_merge;
+-                const int pw = image_size_width  / patch_size;
+-                const int ph = image_size_height / patch_size;
++                const int pw = image_size_width  / patch_size / merge_ratio;
++                const int ph = image_size_height / patch_size / merge_ratio;
+                 std::vector<int> positions(n_pos * 4);
+                 int ptr = 0;
+                 // NOTE: same as Qwen-VL, but x and y are swapped
+-                for (int y = 0; y < ph; y += merge_ratio) {
+-                    for (int dy = 0; dy < 2; dy++) {
+-                        for (int x = 0; x < pw; x += merge_ratio) {
+-                            for (int dx = 0; dx < 2; dx++) {
+-                                positions[                  ptr] = y + dy;
+-                                positions[    num_patches + ptr] = x + dx;
+-                                positions[2 * num_patches + ptr] = y + dy;
+-                                positions[3 * num_patches + ptr] = x + dx;
++                for (int ty = 0; ty < ph; ty++) {
++                    for (int dy = 0; dy < merge_ratio; dy++) {
++                        for (int tx = 0; tx < pw; tx++) {
++                            for (int dx = 0; dx < merge_ratio; dx++) {
++                                const int y = ty * merge_ratio + dy;
++                                const int x = tx * merge_ratio + dx;
++                                positions[                  ptr] = y;
++                                positions[    num_patches + ptr] = x;
++                                positions[2 * num_patches + ptr] = y;
++                                positions[3 * num_patches + ptr] = x;
+                                 ptr++;
+                             }
+                         }
+                     }
+                 }
+@@ -5012,21 +5016,23 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
+ 
+                 const int mpow = merge_ratio * merge_ratio;
+                 std::vector<int> positions(n_pos * 4);
+ 
+                 int ptr = 0;
+-                for (int y = 0; y < iph; y += merge_ratio) {
+-                    for (int x = 0; x < ipw; x += merge_ratio) {
+-                        for (int dy = 0; dy < 2; dy++) {
+-                            for (int dx = 0; dx < 2; dx++) {
++                for (int ty = 0; ty < ph; ty++) {
++                    for (int tx = 0; tx < pw; tx++) {
++                        for (int dy = 0; dy < merge_ratio; dy++) {
++                            for (int dx = 0; dx < merge_ratio; dx++) {
+                                 auto remap = idx[ptr / mpow];
+                                 remap = (remap * mpow) + (ptr % mpow);
+ 
+-                                positions[                  remap] = y + dy;
+-                                positions[    num_patches + remap] = x + dx;
+-                                positions[2 * num_patches + remap] = y + dy;
+-                                positions[3 * num_patches + remap] = x + dx;
++                                const int y = ty * merge_ratio + dy;
++                                const int x = tx * merge_ratio + dx;
++                                positions[                  remap] = y;
++                                positions[    num_patches + remap] = x;
++                                positions[2 * num_patches + remap] = y;
++                                positions[3 * num_patches + remap] = x;
+                                 ptr++;
+                             }
+                         }
+                     }
+                 }
+diff --git a/tools/mtmd/models/paddleocr.cpp b/tools/mtmd/models/paddleocr.cpp
+index 5d3a13fb5..0e6b3f4b6 100644
+--- a/tools/mtmd/models/paddleocr.cpp
++++ b/tools/mtmd/models/paddleocr.cpp
+@@ -1,8 +1,11 @@
+ #include "models.h"
+ 
+ ggml_cgraph * clip_graph_paddleocr::build() {
++    GGML_ASSERT(img.nx() % (patch_size * model.hparams.n_merge) == 0);
++    GGML_ASSERT(img.ny() % (patch_size * model.hparams.n_merge) == 0);
++
+     const int n_pos            = n_patches;
+     const int num_position_ids = n_pos * 4; // m-rope requires 4 dim per position
+ 
+     int mrope_sections[4] = {d_head/4, d_head/4, d_head/4, d_head/4};
+ 
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 81e85834c..e10ecf18d 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -3631,10 +3631,13 @@ private:
+                                 n_past = 0;
+                             }
+ 
+                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
+ 
++                            // number of cached tokens shared with the new prompt, before any checkpoint is restored
++                            const int n_prefix = n_past;
++
+                             // ref: https://github.com/ggml-org/llama.cpp/pull/24110
+                             const bool has_new_tokens = (n_past < slot.task->n_tokens());
+ 
+                             // the largest pos_min required for a checkpoint to be useful
+                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
+@@ -3727,14 +3730,14 @@ private:
+                                     }
+                                 }
+                             }
+ 
+                             {
+-                                // erase any checkpoints with pos_max > pos_next
++                                // erase any checkpoints with pos_max > pos_next, or that cover tokens not shared with the new prompt
+                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
+                                     const auto & cur = *it;
+-                                    if (cur.pos_max > pos_next) {
++                                    if (cur.pos_max > pos_next || cur.n_tokens > n_prefix) {
+                                         SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
+                                         it = slot.prompt.checkpoints.erase(it);
+                                     } else {
+                                         ++it;
+                                     }

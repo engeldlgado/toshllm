@@ -399,7 +399,7 @@ struct InlineDownloadProgress: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     ProgressView(value: item.progress).frame(width: 88)
                     Text("\(Int(item.progress * 100))%  ·  \(Int(item.receivedMB))/\(Int(item.totalMB)) MB")
-                        .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                 }
                 Button {
                     item.phase == .paused ? item.resume() : item.pause()

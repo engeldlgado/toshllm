@@ -6,10 +6,14 @@ import SwiftUI
 
 struct ChatMetricsView: View {
     let timings: ChatTimings
+    var model: String? = nil
     @EnvironmentObject private var loc: Localizer
 
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+            if let model, !model.isEmpty {
+                metricRow(loc.t("Modelo", "Model"), value: model, icon: "cube")
+            }
             if timings.cachedTokens != nil {
                 metricRow(loc.t("Contexto en caché", "Cached context"),
                           value: tokenValue(timings.cachedTokens), icon: "bolt.horizontal.circle")

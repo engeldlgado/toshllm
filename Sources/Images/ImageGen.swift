@@ -110,9 +110,15 @@ struct ImageGenModel: Identifiable {
     /// plus the aux card holding the moved components.
     func fitsGPU(mainVRAM: Double, auxVRAM: Double?) -> Bool {
         guard let auxVRAM else { return fitsVRAMClass(mainVRAM) }
-        return auxVRAM >= totalGB - residentGB
+        return auxHolds(auxVRAM)
             && !ImageGenLimits.baseSizes(vramGB: mainVRAM, residentGB: residentGB,
                                          attnVRAMSq: attnVRAMSq, maxLongEdge: maxLongEdge).isEmpty
+    }
+
+    /// The components moved to an aux GPU have to fit on it.
+    func auxHolds(_ auxVRAM: Double?) -> Bool {
+        guard let auxVRAM else { return true }
+        return auxVRAM >= totalGB - residentGB
     }
 
     /// A transformer (DiT) ships its denoiser as a diffusion model file; the UNet models

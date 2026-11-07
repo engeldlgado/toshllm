@@ -1,0 +1,483 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index ce5ba8326..bbbbb47a1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1386,10 +1386,11 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_dense_swi
+     switch (type) {
+         case GGML_TYPE_Q4_0: nsg = N_SG_Q4_0; nr0 = N_R0_Q4_0; break;
+         case GGML_TYPE_Q4_K: nsg = N_SG_Q4_K; nr0 = N_R0_Q4_K; break;
+         case GGML_TYPE_Q5_K: nsg = N_SG_Q5_K; nr0 = N_R0_Q5_K; break;
+         case GGML_TYPE_Q8_0: nsg = N_SG_Q8_0; nr0 = N_R0_Q8_0; break;
++        case GGML_TYPE_MXFP4: nsg = N_SG_MXFP4; nr0 = N_R0_MXFP4; break;
+         default: GGML_ABORT("unsupported dense swiglu type");
+     }
+ 
+     // the word-wide reads the standalone q8_0 mat-vec takes for this stride
+     const bool row8  = type == GGML_TYPE_Q8_0 && w->nb[1] % 4 == 0 &&
+@@ -1421,12 +1422,35 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_dense_swi
+     }
+ 
+     res.nsg  = nsg;
+     res.nr0  = nr0/2; // rows of each matrix, so a group reads what it did alone
+     res.nr1  = 32;    // threads per simdgroup for the dispatch
+-    // q8_0 splits each row across its simdgroups and reduces gate and up rows in threadgroup memory
+-    res.smem = type == GGML_TYPE_Q8_0 ? 32*sizeof(float)*nr0 : 0;
++    // q8_0 splits each row across its simdgroups and reduces gate and up rows in threadgroup memory;
++    // mxfp4 keeps its value table there
++    res.smem = type == GGML_TYPE_Q8_0 ? 32*sizeof(float)*nr0 : type == GGML_TYPE_MXFP4 ? 32*sizeof(float) : 0;
++
++    return res;
++}
++
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id_mxfp4_swiglu_oai(ggml_metal_library_t lib) {
++    const char * name = "kernel_mul_mv_id_mxfp4_swiglu_oai_f32";
++
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        ggml_metal_cv_t cv = ggml_metal_cv_init();
++
++        ggml_metal_cv_set_int16(cv, 32, FC_MUL_MV + 5);
++
++        res = ggml_metal_library_compile_pipeline(lib, name, name, cv);
++
++        ggml_metal_cv_free(cv);
++    }
++
++    res.nsg  = 1;
++    res.nr0  = N_R0_MXFP4/2; // rows of each matrix, so a group reads what it did alone
++    res.nr1  = 32;
++    res.smem = 32*sizeof(float);
+ 
+     return res;
+ }
+ 
+ // a pair of columns shares one read of each block, where one pass per column would read and
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index 14ca88ebb..5d13c2822 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -174,10 +174,11 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_tosh_topk
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argsort           (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argsort_merge     (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_fwht              (ggml_metal_library_t lib, int n, enum ggml_type tsrc, bool w64);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_pq2_swiglu      (ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_dense_swiglu    (ggml_metal_library_t lib, const struct ggml_tensor * w);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id_mxfp4_swiglu_oai(ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_fwht_fused        (ggml_metal_library_t lib, int n, int hd, int rep, int nk, bool w64);
+ 
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k             (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_radix       (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_merge       (ggml_metal_library_t lib, const struct ggml_tensor * op);
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index 75c0ca8f0..5dc6ddf05 100644
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -690,10 +690,18 @@ typedef struct {
+     int32_t  ne1;
+     uint64_t nb1;
+     int32_t  nr0;
+ } ggml_metal_kargs_mul_mv_id;
+ 
++typedef struct {
++    ggml_metal_kargs_mul_mv_id mv;
++    uint64_t nbg1; // per-expert stride of the gate bias
++    uint64_t nbu1; // and of the up bias
++    float    alpha;
++    float    limit;
++} ggml_metal_kargs_mul_mv_id_swiglu_oai;
++
+ // NORM
+ // RMS_NORM
+ typedef struct {
+     int32_t  ne00;
+     int32_t  ne00_t;
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 130d8728f..3b2409b50 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3611,11 +3611,11 @@ static int ggml_metal_op_mul_mat_swiglu(ggml_metal_op_t ctx, int idx) {
+     // two rows); measured on discrete cards only, so unified memory keeps the separate ones
+     static const bool dense_disabled = TOSH_ENV("TOSH_DENSE_SWIGLU_FUSION_DISABLE") != nullptr;
+     const ggml_type wt = gate->src[0]->type;
+     const ggml_metal_device_props * props = ggml_metal_device_get_props(ctx->dev);
+     const bool dense = !dense_disabled && props->simd_width == 32 && !props->has_unified_memory &&
+-        (wt == GGML_TYPE_Q4_0 || wt == GGML_TYPE_Q5_K || wt == GGML_TYPE_Q8_0 ||
++        (wt == GGML_TYPE_Q4_0 || wt == GGML_TYPE_Q5_K || wt == GGML_TYPE_Q8_0 || wt == GGML_TYPE_MXFP4 ||
+          (wt == GGML_TYPE_Q4_K && gate->src[0]->ne[0] > 2048 && gate->src[0]->ne[1] > 2048));
+ 
+     const bool ok =
+         (wt == GGML_TYPE_PQ2_0 || dense) && up->src[0]->type == wt &&
+         ggml_are_same_shape(gate->src[0], up->src[0]) && up->src[1] == x &&
+@@ -3671,10 +3671,13 @@ static int ggml_metal_op_mul_mat_swiglu(ggml_metal_op_t ctx, int idx) {
+     const int nsg = pipeline.nsg;
+     if (wt == GGML_TYPE_Q8_0) {
+         ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
+         ggml_metal_encoder_dispatch_threadgroups(enc, (w->ne[1] + nr0 - 1)/nr0, 1, 1, pipeline.nr1, nsg, 1);
+     } else {
++        if (pipeline.smem) {
++            ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
++        }
+         ggml_metal_encoder_dispatch_threadgroups(enc, (w->ne[1] + nr0*nsg - 1)/(nr0*nsg), 1, 1, pipeline.nr1, nsg, 1);
+     }
+ 
+     return 3;
+ }
+@@ -3978,13 +3981,131 @@ size_t ggml_metal_op_mul_mat_id_extra_amax(const ggml_tensor * op) {
+ 
+     // 2 scaling factors (8 bytes) + N_MM_NPART_AMAX per-threadgroup scales for stage-1
+     return 8 + N_MM_NPART_AMAX*sizeof(float);
+ }
+ 
++// gpt-oss decode: the gate and up expert mat-vecs, their per-expert bias adds and the clamped
++// swiglu that follow them go as one kernel that writes the swiglu output
++static int ggml_metal_op_mul_mat_id_swiglu_oai(ggml_metal_op_t ctx, int idx) {
++    static const bool disabled = TOSH_ENV("TOSH_MOE_SWIGLU_OAI_FUSION_DISABLE") != nullptr;
++    if (disabled || !ctx->use_fusion() || idx + 4 >= ctx->n_nodes()) {
++        return 0;
++    }
++
++    const ggml_metal_device_props * props = ggml_metal_device_get_props(ctx->dev);
++    if (props->simd_width != 32 || props->has_unified_memory) {
++        return 0;
++    }
++
++    const ggml_tensor * m0  = ctx->node(idx);
++    const ggml_tensor * a0  = ctx->node(idx + 1);
++    const ggml_tensor * m1  = ctx->node(idx + 2);
++    const ggml_tensor * a1  = ctx->node(idx + 3);
++    const ggml_tensor * glu = ctx->node(idx + 4);
++
++    if (m0->op != GGML_OP_MUL_MAT_ID || a0->op != GGML_OP_ADD_ID || m1->op != GGML_OP_MUL_MAT_ID ||
++        a1->op != GGML_OP_ADD_ID || glu->op != GGML_OP_GLU || ggml_get_glu_op(glu) != GGML_GLU_OP_SWIGLU_OAI ||
++        ggml_get_op_params_i32(glu, 1) != 0 || !glu->src[1] || a0->src[0] != m0 || a1->src[0] != m1) {
++        return 0;
++    }
++
++    const ggml_tensor * gate_b = glu->src[0];
++    const ggml_tensor * up_b   = glu->src[1];
++    if (!((gate_b == a0 && up_b == a1) || (gate_b == a1 && up_b == a0))) {
++        return 0;
++    }
++
++    const ggml_tensor * gate = gate_b->src[0];
++    const ggml_tensor * up   = up_b->src[0];
++    const ggml_tensor * x    = gate->src[1];
++    const ggml_tensor * ids  = gate->src[2];
++    const ggml_tensor * bg   = gate_b->src[1];
++    const ggml_tensor * bu   = up_b->src[1];
++
++    const ggml_cgraph * gf = ctx->graph();
++
++    const bool ok =
++        gate->src[0]->type == GGML_TYPE_MXFP4 && up->src[0]->type == GGML_TYPE_MXFP4 &&
++        ggml_are_same_shape(gate->src[0], up->src[0]) && ggml_is_contiguous(gate->src[0]) && ggml_is_contiguous(up->src[0]) &&
++        up->src[1] == x && up->src[2] == ids && gate_b->src[2] == ids && up_b->src[2] == ids &&
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++        ids->op != GGML_OP_TOSH_DMOE_PUBLISH &&
++#endif
++        !ggml_metal_op_mul_mat_id_use_mm(gate, props->has_simdgroup_mm || props->use_mm_manual) &&
++        x->type == GGML_TYPE_F32 && x->nb[0] == sizeof(float) &&
++        bg->type == GGML_TYPE_F32 && bu->type == GGML_TYPE_F32 && bg->nb[0] == sizeof(float) && bu->nb[0] == sizeof(float) &&
++        bg->ne[0] == gate->ne[0] && bu->ne[0] == gate->ne[0] &&
++        gate->type == GGML_TYPE_F32 && ggml_is_contiguous(gate) && ggml_are_same_shape(gate, up) &&
++        glu->type == GGML_TYPE_F32 && ggml_is_contiguous(glu) && ggml_are_same_shape(glu, gate) &&
++        gate->src[0]->ne[0] % ggml_blck_size(GGML_TYPE_MXFP4) == 0 &&
++        ggml_metal_use_count(gf, m0) == 1 && ggml_metal_use_count(gf, m1) == 1 &&
++        ggml_metal_use_count(gf, a0) == 1 && ggml_metal_use_count(gf, a1) == 1 &&
++        !(m0->flags & GGML_TENSOR_FLAG_OUTPUT) && !(m1->flags & GGML_TENSOR_FLAG_OUTPUT) &&
++        !(a0->flags & GGML_TENSOR_FLAG_OUTPUT) && !(a1->flags & GGML_TENSOR_FLAG_OUTPUT) &&
++        !ggml_metal_ranges_overlap(glu, x);
++    if (!ok) {
++        return 0;
++    }
++
++    auto pipeline = ggml_metal_library_get_pipeline_mul_mv_id_mxfp4_swiglu_oai(ctx->lib);
++
++    const ggml_tensor * w = gate->src[0];
++
++    ggml_metal_kargs_mul_mv_id_swiglu_oai args = {
++        /*.mv =*/ {
++            /*.nei0 =*/ (int32_t) ids->ne[0],
++            /*.nei1 =*/ (int32_t) ids->ne[1],
++            /*.nbi1 =*/ ids->nb[1],
++            /*.ne00 =*/ (int32_t) w->ne[0],
++            /*.ne01 =*/ (int32_t) w->ne[1],
++            /*.ne02 =*/ (int32_t) w->ne[2],
++            /*.nb00 =*/ w->nb[0],
++            /*.nb01 =*/ w->nb[1],
++            /*.nb02 =*/ w->nb[2],
++            /*.ne10 =*/ (int32_t) x->ne[0],
++            /*.ne11 =*/ (int32_t) x->ne[1],
++            /*.ne12 =*/ (int32_t) x->ne[2],
++            /*.ne13 =*/ (int32_t) x->ne[3],
++            /*.nb10 =*/ x->nb[0],
++            /*.nb11 =*/ x->nb[1],
++            /*.nb12 =*/ x->nb[2],
++            /*.ne0  =*/ (int32_t) gate->ne[0],
++            /*.ne1  =*/ (int32_t) gate->ne[1],
++            /*.nb1  =*/ gate->nb[1],
++            /*.nr0  =*/ pipeline.nr0,
++        },
++        /*.nbg1  =*/ bg->nb[1],
++        /*.nbu1  =*/ bu->nb[1],
++        /*.alpha =*/ ggml_get_op_params_f32(glu, 2),
++        /*.limit =*/ ggml_get_op_params_f32(glu, 3),
++    };
++
++    ggml_metal_encoder_t enc = ctx->enc;
++    ggml_metal_encoder_set_pipeline(enc, pipeline);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(gate->src[0]), 1);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(up->src[0]),   2);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(x),            3);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(glu),          4);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(ids),          5);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(bg),           6);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(bu),           7);
++
++    ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
++    ggml_metal_encoder_dispatch_threadgroups(enc, (w->ne[1] + pipeline.nr0 - 1)/pipeline.nr0, 1, ids->ne[0]*ids->ne[1],
++                                             pipeline.nr1, pipeline.nsg, 1);
++
++    return 5;
++}
++
+ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+     ggml_tensor * op = ctx->node(idx);
+ 
++    if (const int n_fuse = ggml_metal_op_mul_mat_id_swiglu_oai(ctx, idx)) {
++        return n_fuse;
++    }
++
+     ggml_metal_library_t lib = ctx->lib;
+     ggml_metal_encoder_t enc = ctx->enc;
+ 
+     const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
+ 
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index 8f1e459b8..93c02a9e6 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -10079,10 +10079,113 @@ template [[host_name("kernel_mul_mv_id_iq4_nl_f32")]]  kernel kernel_mul_mv_id_t
+ template [[host_name("kernel_mul_mv_id_iq4_xs_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_xs_f32_impl <N_R0_IQ4_XS>>>;
+ template [[host_name("kernel_mul_mv_id_tq2_0_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_tq2_0_f32_impl  <N_R0_TQ2_0>>>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_5_nr0_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 2, block_q3_K>;
+ template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 4, block_q3_K>;
+ 
++// gpt-oss expert gate and up mat-vecs, their per-expert biases and the clamped swiglu in one
++// dispatch; each simdgroup takes half the standalone rows from each matrix, with the same sums
++[[host_name("kernel_mul_mv_id_mxfp4_swiglu_oai_f32")]]
++kernel void kernel_mul_mv_id_mxfp4_swiglu_oai_f32(
++        constant ggml_metal_kargs_mul_mv_id_swiglu_oai & argsg,
++        device const char * src0g,
++        device const char * src0u,
++        device const char * src1,
++        device       char * dst,
++        device const char * ids,
++        device const char * biasg,
++        device const char * biasu,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]]) {
++    constant ggml_metal_kargs_mul_mv_id & args = argsg.mv;
++
++    const short NR0 = N_R0_MXFP4/2;
++
++    const int iid1 = tgpig.z/args.nei0;
++    const int idx  = tgpig.z%args.nei0;
++
++    const int32_t i02 = ((device const int32_t *) (ids + iid1*args.nbi1))[idx];
++
++    threadgroup float * shmem_f32 = (threadgroup float *) shmem;
++
++    shmem_f32[tiisg] = kvalues_mxfp4_f[tiisg%16];
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    const int first_row = tgpig.x*NR0;
++
++    const uint64_t offset0 = i02*args.nb02 + first_row*args.nb01;
++
++    device const block_mxfp4 * xg = (device const block_mxfp4 *) (src0g + offset0);
++    device const block_mxfp4 * xu = (device const block_mxfp4 *) (src0u + offset0);
++    device const float       * y  = (device const float       *) (src1 + (idx % args.ne11)*args.nb11 + iid1*args.nb12);
++
++    const int nb   = args.ne00/QK_MXFP4;
++    const int ns01 = args.nb01/args.nb00;
++
++    const short NG = FC_mul_mv_nw/2;
++
++    const short ix = tiisg/2;
++    const short it = tiisg%2;
++
++    float4 yl[4];
++    float sumg[NR0]={0.f};
++    float sumu[NR0]={0.f};
++
++    device const float * yb = y + ix*QK_MXFP4 + it*8;
++
++    for (int ib = ix; ib < nb && ib < ns01; ib += NG) {
++        device const float4 * y4 = (device const float4 *) yb;
++
++        yl[0] = y4[0];
++        yl[1] = y4[4];
++        yl[2] = y4[1];
++        yl[3] = y4[5];
++
++        FOR_UNROLL (short row = 0; row < 2*NR0; row++) {
++            device const block_mxfp4 & xb = row < NR0 ? xg[row*ns01 + ib] : xu[(row - NR0)*ns01 + ib];
++            device const uint8_t     * q2 = (device const uint8_t *)(xb.qs + 8*it);
++
++            float4 acc1 = yl[0]*float4(shmem_f32[q2[0] &  0x0F], shmem_f32[q2[1] &  0x0F], shmem_f32[q2[2] &  0x0F], shmem_f32[q2[3] &  0x0F]);
++            float4 acc2 = yl[1]*float4(shmem_f32[q2[0] >> 4   ], shmem_f32[q2[1] >> 4   ], shmem_f32[q2[2] >> 4   ], shmem_f32[q2[3] >> 4   ]);
++            float4 acc3 = yl[2]*float4(shmem_f32[q2[4] &  0x0F], shmem_f32[q2[5] &  0x0F], shmem_f32[q2[6] &  0x0F], shmem_f32[q2[7] &  0x0F]);
++            float4 acc4 = yl[3]*float4(shmem_f32[q2[4] >> 4   ], shmem_f32[q2[5] >> 4   ], shmem_f32[q2[6] >> 4   ], shmem_f32[q2[7] >> 4   ]);
++
++            acc1 = (acc1 + acc3) + (acc2 + acc4);
++
++            const float s = e8m0_to_fp32(xb.e) * ((acc1[0] + acc1[1]) + (acc1[2] + acc1[3]));
++            if (row < NR0) {
++                sumg[row] += s;
++            } else {
++                sumu[row - NR0] += s;
++            }
++        }
++
++        yb += NG * QK_MXFP4;
++    }
++
++    device const float * bg = (device const float *) (biasg + i02*argsg.nbg1);
++    device const float * bu = (device const float *) (biasu + i02*argsg.nbu1);
++
++    device float * dst_f32 = (device float *) dst + (uint64_t)iid1*args.ne1*args.ne0 + (uint64_t)idx*args.ne0;
++
++    for (int row = 0; row < NR0 && first_row + row < args.ne0; ++row) {
++        const float g = simd_sum(sumg[row]);
++        const float u = simd_sum(sumu[row]);
++        if (tiisg == 0) {
++            float x0 = g + bg[first_row + row];
++            float x1 = u + bu[first_row + row];
++
++            x0 = min(x0, argsg.limit);
++            x1 = max(min(x1, argsg.limit), -argsg.limit);
++
++            float out_glu = x0 / (1.0f + exp(-x0 * argsg.alpha));
++            out_glu = out_glu * (1.0f + x1);
++
++            dst_f32[first_row + row] = out_glu;
++        }
++    }
++}
+ 
+ // gate and up mat-vecs of one token and their swiglu in one dispatch; each simdgroup takes half the
+ // standalone rows from each matrix, so as many groups stay in flight as the two dispatches had
+ template<short nr0>
+ void kernel_mul_mv_q4_K_swiglu_f32_impl(
+@@ -10294,10 +10397,91 @@ kernel void kernel_mul_mv_q4_0_swiglu_f32(
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+     kernel_mul_mv_q4_0_swiglu_f32_impl<N_R0_Q4_0/2>(args, src0g, src0u, src1, dst, tgpig, tiisg, sgitg);
+ }
+ 
++[[host_name("kernel_mul_mv_mxfp4_swiglu_f32")]]
++kernel void kernel_mul_mv_mxfp4_swiglu_f32(
++        constant ggml_metal_kargs_mul_mv & args,
++        device const char * src0g,
++        device const char * src0u,
++        device const char * src1,
++        device       char * dst,
++        threadgroup  char * shmem [[threadgroup(0)]],
++        uint3  tgpig[[threadgroup_position_in_grid]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
++    const short NSG = FC_mul_mv_nsg;
++    const short NR0 = N_R0_MXFP4/2;
++
++    threadgroup float * shmem_f32 = (threadgroup float *) shmem;
++
++    shmem_f32[tiisg] = kvalues_mxfp4_f[tiisg%16];
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    const int r0 = (tgpig.x*NSG + sgitg)*NR0;
++
++    device const block_mxfp4 * xg = (device const block_mxfp4 *) (src0g + (uint64_t) r0*args.nb01);
++    device const block_mxfp4 * xu = (device const block_mxfp4 *) (src0u + (uint64_t) r0*args.nb01);
++    device const float       * y  = (device const float       *) src1;
++
++    const int nb   = args.ne00/QK_MXFP4;
++    const int ns01 = args.nb01/args.nb00;
++
++    const short NG = FC_mul_mv_nw/2;
++
++    const short ix = tiisg/2;
++    const short it = tiisg%2;
++
++    float4 yl[4];
++    float sumg[NR0]={0.f};
++    float sumu[NR0]={0.f};
++
++    device const float * yb = y + ix*QK_MXFP4 + it*8;
++
++    for (int ib = ix; ib < nb && ib < ns01; ib += NG) {
++        device const float4 * y4 = (device const float4 *) yb;
++
++        yl[0] = y4[0];
++        yl[1] = y4[4];
++        yl[2] = y4[1];
++        yl[3] = y4[5];
++
++        FOR_UNROLL (short row = 0; row < 2*NR0; row++) {
++            device const block_mxfp4 & xb = row < NR0 ? xg[row*ns01 + ib] : xu[(row - NR0)*ns01 + ib];
++            device const uint8_t     * q2 = (device const uint8_t *)(xb.qs + 8*it);
++
++            float4 acc1 = yl[0]*float4(shmem_f32[q2[0] &  0x0F], shmem_f32[q2[1] &  0x0F], shmem_f32[q2[2] &  0x0F], shmem_f32[q2[3] &  0x0F]);
++            float4 acc2 = yl[1]*float4(shmem_f32[q2[0] >> 4   ], shmem_f32[q2[1] >> 4   ], shmem_f32[q2[2] >> 4   ], shmem_f32[q2[3] >> 4   ]);
++            float4 acc3 = yl[2]*float4(shmem_f32[q2[4] &  0x0F], shmem_f32[q2[5] &  0x0F], shmem_f32[q2[6] &  0x0F], shmem_f32[q2[7] &  0x0F]);
++            float4 acc4 = yl[3]*float4(shmem_f32[q2[4] >> 4   ], shmem_f32[q2[5] >> 4   ], shmem_f32[q2[6] >> 4   ], shmem_f32[q2[7] >> 4   ]);
++
++            acc1 = (acc1 + acc3) + (acc2 + acc4);
++
++            const float s = e8m0_to_fp32(xb.e) * ((acc1[0] + acc1[1]) + (acc1[2] + acc1[3]));
++            if (row < NR0) {
++                sumg[row] += s;
++            } else {
++                sumu[row - NR0] += s;
++            }
++        }
++
++        yb += NG * QK_MXFP4;
++    }
++
++    device float * dst_f32 = (device float *) dst;
++
++    for (int row = 0; row < NR0; ++row) {
++        const float g = simd_sum(sumg[row]);
++        const float u = simd_sum(sumu[row]);
++
++        if (tiisg == 0 && r0 + row < args.ne01) {
++            dst_f32[r0 + row] = g / (1.0f + exp(-g)) * u;
++        }
++    }
++}
++
+ template<short nr0>
+ void kernel_mul_mv_q5_K_swiglu_f32_impl(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0g,
+         device const char * src0u,
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 8b4741e62..e38c6042a 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -11593,11 +11593,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+                     }
+                     for (bool with_bias : {false, true}) {
+                         if (!with_gate && !with_bias) {
+                             continue;
+                         }
+-                        for (ggml_glu_op glu_op : {GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_CLAMP}) {
++                        for (ggml_glu_op glu_op : {GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_CLAMP, GGML_GLU_OP_SWIGLU_OAI}) {
+                             if (!with_bias && glu_op == GGML_GLU_OP_SWIGLU_OAI) {
+                                 continue;
+                             }
+                             if (!with_gate && glu_op != GGML_GLU_OP_SWIGLU) {
+                                 continue;

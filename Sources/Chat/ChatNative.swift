@@ -367,6 +367,8 @@ final class StreamBuffer: @unchecked Sendable {
     private var progress: Double?
     private var dirty = false
     private var done = false
+    // Kept by the network side, so a main thread busy laying out the answer never reads as a hung engine.
+    private var liveness = StreamLiveness()
 
     func write(reasoning: String, visible: String, speed: Double?) {
         lock.lock()
@@ -374,15 +376,31 @@ final class StreamBuffer: @unchecked Sendable {
         self.visible = visible
         if let speed { self.speed = speed }
         dirty = true
+        liveness.note(text: !reasoning.isEmpty || !visible.isEmpty)
         lock.unlock()
     }
 
     func writeProgress(_ p: Double?) {
-        lock.lock(); progress = p; dirty = true; lock.unlock()
+        lock.lock()
+        progress = p
+        dirty = true
+        liveness.note(text: !reasoning.isEmpty || !visible.isEmpty)
+        lock.unlock()
+    }
+
+    /// Something that shows the engine at work without changing the text, like the agent's keep-alives.
+    func note(now: Date = Date()) {
+        lock.lock(); liveness.note(text: false, now: now); lock.unlock()
     }
 
     func finish() {
         lock.lock(); done = true; dirty = true; lock.unlock()
+    }
+
+    /// An ended stream never stalls, whatever is still pending on the main thread.
+    func stalled(now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !done && liveness.stalled(now: now)
     }
 
     /// The latest snapshot if it changed since the last take (or the stream
@@ -512,9 +530,13 @@ final class ChatStore: ObservableObject {
     /// The message holding the calls of the server agent's current pass, per conversation.
     private var agentPassMessage: [UUID: (pass: Int, messageID: UUID)] = [:]
 
+    /// The model an answer came from, shown beside it: the router's choice, or the file the engine loaded.
+    static func replyModel() -> String? {
+        ServerSettings.activeRouterModel() ?? ServerManager.shared.active.loadedModelName
+    }
+
     /// A progress event of the server agent: the calls it ran show as cards, ahead of the answer.
     func agentEvent(_ event: [String: Any], conversation id: UUID) {
-        liveness.note(text: false)
         switch event["type"] as? String {
         case "intent":
             lastMathIntent = (event["intent"] as? String).flatMap(MathIntent.init(rawValue:))
@@ -556,7 +578,7 @@ final class ChatStore: ObservableObject {
             } else {
                 var round = ChatMessage(role: "assistant", content: "")
                 round.toolCalls = [toolCall]
-                round.model = ServerSettings.activeRouterModel()
+                round.model = Self.replyModel()
                 agentPassMessage[id] = (pass, round.id)
                 conversations[i].messages.insert(contentsOf: [round, reply], at: placeholder)
             }
@@ -570,7 +592,6 @@ final class ChatStore: ObservableObject {
     private var watchdog: Task<Void, Never>?
     /// Where the running reply is streamed from, so Stop can cancel it on the engine too.
     private var activeStream: (port: Int, identity: String)?
-    private var liveness = StreamLiveness()
     /// Estimated tokens of the tool definitions the last request sent, which the context holds before any reply.
     @Published private(set) var toolTokens = 0
     private var slotConvID: UUID?
@@ -898,7 +919,6 @@ final class ChatStore: ObservableObject {
         generating = true
         generatingConvID = conversations[i].id
         live.reset()
-        startWatchdog(port: port)
         // The user can switch or delete conversations mid-stream; the result
         // must land in the one this request started from, found by id.
         let convID = conversations[i].id
@@ -962,6 +982,7 @@ final class ChatStore: ObservableObject {
         conversations[i].messages.append(ChatMessage(role: "assistant", content: ""))
 
         let buffer = StreamBuffer()
+        startWatchdog(buffer)
         let pump = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let snap = buffer.take() else {
@@ -972,7 +993,6 @@ final class ChatStore: ObservableObject {
                 self?.live.update(reasoning: snap.reasoning, visible: snap.visible, speed: snap.speed)
                 let prefilling = snap.reasoning.isEmpty && snap.visible.isEmpty
                 self?.live.setPrefillProgress(prefilling ? snap.progress : nil)
-                self?.noteStreamActivity(text: !prefilling)
                 let n = snap.visible.count
                 let ms = n > 12000 ? 600 : n > 6000 ? 350 : n > 2500 ? 180 : 80
                 try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
@@ -1039,8 +1059,7 @@ final class ChatStore: ObservableObject {
                     bytesReceived += line.utf8.count + 1
                     // between the passes the agent sends keep-alives, which show it is working
                     if agentTurn, line.hasPrefix(":") {
-                        let owner = self
-                        await MainActor.run { owner?.liveness.note(text: false) }
+                        buffer.note()
                         continue
                     }
                     if agentTurn, line.hasPrefix("data: "), line.contains("\"tosh\""),
@@ -1074,6 +1093,7 @@ final class ChatStore: ObservableObject {
                             accumulator.visible += text
                             flush()
                         }
+                        buffer.note()
                         let owner = self
                         await MainActor.run { owner?.agentEvent(event, conversation: convID) }
                         continue
@@ -1318,6 +1338,7 @@ final class ChatStore: ObservableObject {
                                         .localizedDescription, cut: true)
                 }
             } catch {
+                buffer.finish()
                 // a stop cancels the task, and URLSession may report that as its own error or a cut stream
                 if error is CancellationError || Task.isCancelled || (error as? URLError)?.code == .cancelled {
                     cancelled = true
@@ -1538,7 +1559,7 @@ final class ChatStore: ObservableObject {
                     conversations[i].messages[j].mtpAccept = mtpAccept
                     conversations[i].messages[j].timings = timings
                     conversations[i].messages[j].toolCalls = toolCalls.isEmpty ? nil : toolCalls
-                    conversations[i].messages[j].model = ServerSettings.activeRouterModel()
+                    conversations[i].messages[j].model = Self.replyModel()
                     if toolCalls.isEmpty { Self.carryDrawnMap(&conversations[i], to: j) }
                 }
             }
@@ -1886,19 +1907,13 @@ final class ChatStore: ObservableObject {
 
     // MARK: stall watchdog
 
-    /// Called from the stream whenever something reaches the UI: prompt progress or text.
-    func noteStreamActivity(text: Bool) {
-        liveness.note(text: text)
-    }
-
-    private func startWatchdog(port: Int) {
+    private func startWatchdog(_ stream: StreamBuffer) {
         watchdog?.cancel()
-        liveness = StreamLiveness()
         watchdog = Task { [weak self] in
             while true {
                 try? await Task.sleep(for: .seconds(5))
                 guard let self, !Task.isCancelled, self.generating else { return }
-                if self.liveness.stalled() {
+                if stream.stalled() {
                     self.handleStreamStall()
                     return
                 }
@@ -2886,6 +2901,7 @@ struct NativeChatView: View {
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var control: ControlPanelState
     @AppStorage(SettingsKeys.chatTemp) private var temperature = 0.7
+    @AppStorage(SettingsKeys.chatWidth) private var chatWidth = ChatWidth.standard.rawValue
     @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = 2048
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
     @AppStorage(SettingsKeys.chatThinking) private var thinkingEnabled = true
@@ -3457,7 +3473,7 @@ struct NativeChatView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
-        .frame(maxWidth: 1120)
+        .frame(maxWidth: (ChatWidth(rawValue: chatWidth) ?? .standard).maxWidth)
         .frame(maxWidth: .infinity)
     }
 
@@ -4658,7 +4674,7 @@ struct NativeChatView: View {
                         Text(a.name).lineLimit(1)
                         if a.mediaKind == nil {
                             Text("~\(a.estimatedTokens)t")
-                                .font(.system(size: 9, design: .monospaced))
+                                .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         } else {
                             Button(loc.t("Vista previa", "Preview"), systemImage: "play.circle") {

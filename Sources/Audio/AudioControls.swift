@@ -100,26 +100,33 @@ struct AudioControls: View {
     private var taskCard: some View {
         AudioSidebarSection(title: loc.t("Resultado", "Result"), icon: "captions.bubble") {
             VStack(alignment: .leading, spacing: 10) {
-                Picker(loc.t("Operación", "Operation"), selection: $operationRaw) {
-                    Text(loc.t("Transcribir", "Transcribe")).tag(AudioStudioOperation.transcribe.rawValue)
-                    Text(loc.t("Traducir a inglés", "Translate to English")).tag(AudioStudioOperation.translateEnglish.rawValue)
-                    Text(loc.t("Traducir con el chat", "Translate with chat")).tag(AudioStudioOperation.translateLocal.rawValue)
-                }
-                .help(loc.t("Whisper transcribe o traduce directamente al inglés; otros idiomas usan el modelo local del chat sin cambiar los tiempos.",
-                            "Whisper transcribes or translates directly to English; other languages use the local chat model without changing timestamps."))
-
-                Picker(loc.t("Idioma hablado", "Spoken language"), selection: $language) {
-                    ForEach(WhisperLanguage.common) { item in
-                        Text(loc.isSpanish ? item.es : item.en).tag(item.id)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(loc.t("Operación", "Operation")).font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: $operationRaw) {
+                        Text(loc.t("Transcribir", "Transcribe")).tag(AudioStudioOperation.transcribe.rawValue)
+                        Text(loc.t("Traducir a inglés", "Translate to English")).tag(AudioStudioOperation.translateEnglish.rawValue)
+                        Text(loc.t("Traducir con el chat", "Translate with chat")).tag(AudioStudioOperation.translateLocal.rawValue)
                     }
+                    .labelsHidden()
+                    .help(loc.t("Whisper transcribe o traduce directamente al inglés; otros idiomas usan el modelo local del chat sin cambiar los tiempos.",
+                                "Whisper transcribes or translates directly to English; other languages use the local chat model without changing timestamps."))
                 }
-                .help(loc.t("Fijar el idioma mejora la precisión; Automático es útil cuando no lo conoces.",
-                            "Choosing the language improves accuracy; Automatic is useful when it is unknown."))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(loc.t("Idioma hablado", "Spoken language")).font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: $language) {
+                        ForEach(WhisperLanguage.common) { item in
+                            Text(loc.isSpanish ? item.es : item.en).tag(item.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .help(loc.t("Fijar el idioma mejora la precisión; Automático es útil cuando no lo conoces.",
+                                "Choosing the language improves accuracy; Automatic is useful when it is unknown."))
+                }
 
                 if operation == .translateLocal {
-                    HStack(spacing: 10) {
-                        Text(loc.t("Idioma de destino", "Target language"))
-                        Spacer(minLength: 8)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(loc.t("Idioma de destino", "Target language")).font(.caption).foregroundStyle(.secondary)
                         ToshDropdown(selection: targetLanguageSelection,
                                      options: targetLanguageOptions,
                                      placeholder: loc.t("Elegir idioma", "Choose language"),
@@ -266,13 +273,17 @@ struct AudioControls: View {
     private var modelCard: some View {
         AudioSidebarSection(title: "Whisper.cpp · GPU", icon: "memorychip") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker(loc.t("Modelo", "Model"), selection: $whisperModelID) {
-                    ForEach(WhisperModel.catalog) { item in
-                        Text("\(item.name) · \(item.sizeMB) MB").tag(item.id)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(loc.t("Modelo", "Model")).font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: $whisperModelID) {
+                        ForEach(WhisperModel.catalog) { item in
+                            Text(verbatim: "\(item.name) · \(item.sizeMB) MB").tag(item.id)
+                        }
                     }
+                    .labelsHidden()
+                    .help(loc.t("Turbo ofrece el mejor equilibrio; Large v3 prioriza precisión.",
+                                "Turbo offers the best balance; Large v3 prioritizes accuracy."))
                 }
-                .help(loc.t("Turbo ofrece el mejor equilibrio; Large v3 prioriza precisión.",
-                            "Turbo offers the best balance; Large v3 prioritizes accuracy."))
 
                 Text(loc.isSpanish ? model.detailES : model.detailEN)
                     .font(.caption)

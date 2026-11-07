@@ -56,7 +56,7 @@ struct ModelSectionSwitcher<Value: Hashable>: View {
                             .font(.system(size: 13, weight: .medium))
                         Text(item.title).font(.system(size: 12, weight: selected ? .semibold : .medium))
                         if let badge = item.badge {
-                            Text(badge).font(.system(size: 9, weight: .bold, design: .rounded))
+                            Text(badge).font(.system(size: 10, weight: .bold, design: .rounded))
                                 .padding(.horizontal, 5).padding(.vertical, 2)
                                 .background(selected ? Color.white.opacity(0.16) : Color.appAccent.opacity(0.13),
                                             in: Capsule())

@@ -149,6 +149,9 @@ Requirements: an Intel Mac on macOS 12 or newer with a Metal GPU.
        NCMOE=20  ./start.sh model.gguf     keep the experts of the first 20 layers of a
                                            mixture-of-experts model in system RAM, for models
                                            larger than the memory of the card
+       EGPU=1    ./start.sh model.gguf     the GPU is in an external enclosure: keeps the model
+                                           in the card's memory instead of reading it over
+                                           Thunderbolt on every step
 
    Any other llama-server option can be added after the model path.
 

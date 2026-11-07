@@ -7,7 +7,7 @@ import SwiftUI
 // MARK: - About
 
 enum AppInfo {
-    static let version = "0.87.29"
+    static let version = "0.87.33"
     /// True for the pre-AVX2 legacy build (Info.plist TOSHNoAVX2). Kept on its own
     /// update channel so it never pulls an AVX2 DMG that would SIGILL on those CPUs.
     static let isNoAVX2 = Bundle.main.object(forInfoDictionaryKey: "TOSHNoAVX2") as? Bool ?? false
@@ -217,11 +217,11 @@ struct AboutView: View {
                 Button { open(AppInfo.githubURL) } label: {
                     Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
-                .glassButton()
+                .glassButton().fixedSize()
                 Button { showDonate = true } label: {
                     Label(loc.t("Donar", "Donate"), systemImage: "heart.fill")
                 }
-                .glassButton(prominent: true)
+                .glassButton(prominent: true).fixedSize()
                 .popover(isPresented: $showDonate, arrowEdge: .bottom) { DonateView() }
             }
         }
@@ -399,9 +399,12 @@ private struct AboutLinkRow: View {
                         .background(WorkspaceStyle.inset,
                                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                Text(title).font(.system(size: 13, weight: .medium))
-                if let detail {
-                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 13, weight: .medium))
+                    if let detail {
+                        Text(detail).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "arrow.up.right")

@@ -3,6 +3,83 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.87.33] - 2026-11-04
+
+### Fixed
+
+- **Images: a LoRA saved in bf16 works with Qwen-Image 2.1 instead of stopping the generation (#152).** The engine lacked the kernel for bf16 weights against the half-precision inputs Qwen-Image 2.1 uses.
+- **LLMs: with Dynamic MoE the server log no longer lists the keys and values cache types from Inference & context, which the plan does not use (#151).** The cache it picked is the `kv=` on the `Tosh Dynamic MoE` line.
+- **LLMs: the engine alone for macOS 12 can keep the model in an external GPU's memory.** `EGPU=1 ./start.sh model.gguf` does what the app does on its own for an eGPU; without it the model was read over Thunderbolt on every step.
+
+## [0.87.32] - 2026-11-02
+
+### Added
+
+- **Chat: the metrics of an answer name the model that wrote it, with one model loaded as well as in router mode (#147).**
+- **Chat: View › Chat width runs the conversation at its standard width, wider or the full width of the window, so a large screen gives wide tables their columns (#148).**
+
+### Improved
+
+- **LLMs: Gemma and the hybrid Qwen models start a follow-up answer sooner.** On a Radeon RX 6700 XT a short follow-up to Gemma-3-4B starts in about 0.2 s instead of 0.34, and one to Qwen3.5-4B in 0.19 s instead of 0.22.
+- **LLMs: with Dynamic MoE a hybrid model no longer reads the whole conversation again on every message.** On a Radeon RX 6700 XT the fourth message to Qwen3.6-35B-A3B starts in 0.30 s instead of 0.74, and the gap grows with the conversation.
+- **LLMs: Qwen3.5 reads prompts up to 8% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3.5-4B Q8_0 goes from 1485 to 1604 tokens a second on a 512-token prompt and from 1396 to 1503 on a 4096-token one, and Qwen3.5-9B Q4_K_M from 800 to 833 on a 512-token one.
+
+### Fixed
+
+- **LLMs: the hybrid Qwen models answer a follow-up the same as they would reading the conversation from scratch.** The copies of their state kept between messages were rounded to 8 bits, which changed later answers; they are now exact while memory allows, and drop to 8 bits only when it is short.
+- **Chat: a finished answer that takes long to draw, such as a large table, no longer stops the engine as if it had hung (#146).**
+
+## [0.87.31] - 2026-10-29
+
+### Improved
+
+- **LLMs: Q5_1, Q5_0, Q8_0, Q4_1, Q2_K and Q4_0 models read prompts up to 15% faster on Radeon RX 6000 cards, with identical output.** On an RX 6700 XT Qwen3-4B Q5_1 goes from 1426 to 1645 tokens a second, Q5_0 from 1452 to 1601, Q4_1 from 1640 to 1694 and Q8_0 from 1642 to 1663, Llama 2 7B Q8_0 from 945 to 990, and gemma-4-26B-A4B, whose experts are partly Q5_1, from 569 to 582; generation is unchanged.
+- **LLMs: MXFP4 models read prompts up to 15% faster on Radeon RX 6000 cards, with identical output.** On an RX 6700 XT Ornith 1.5 9B goes from 782 to 864 tokens a second, Mellum2 12B from 2073 to 2185 and gpt-oss 20b, fully on the GPU, from 1313 to 1514; generation is unchanged.
+- **LLMs: MXFP4 mixture-of-experts models read short prompts up to three times faster on Radeon RX 6000 cards.** On an RX 6700 XT gpt-oss 20b, fully on the GPU, reads a 128-token prompt at 964 tokens a second instead of 304, and gemma-4-26B-A4B MXFP4 at 177 instead of 148.
+- **LLMs: BF16 models read prompts up to 34% faster on Radeon RX 6000 cards.** On an RX 6700 XT Qwen3 0.6B BF16 goes from 6910 to 9263 tokens a second, within 3% of the same model in F16; generation is unchanged.
+- **LLMs: gpt-oss generates 3% faster, and dense MXFP4 models 1% faster, on Radeon RX 6000 cards.** On an RX 6700 XT gpt-oss 20b, fully on the GPU, goes from 106.4 to 109.6 tokens a second and Ornith 1.5 9B from 65.0 to 65.7.
+- **LLMs: Qwen3.6-35B-A3B generates 3% faster with Dynamic MoE on Radeon RX 6000 cards, with identical output.** On an RX 6700 XT it goes from 55.5 to 57.2 tokens a second.
+- **LLMs: mixture-of-experts models with small Q4_K experts, such as Qwen3.6-35B-A3B, generate 1% faster and read short prompts 6% faster on Radeon RX 6000 cards, with identical output.** On an RX 6700 XT Qwen3.6-35B-A3B with Dynamic MoE goes from 59.6 to 60.4 tokens a second, and from 150 to 159 on a short prompt.
+- **LLMs: Q8_0 mixture-of-experts models with small experts generate 4% faster on Radeon RX 6000 cards, with identical output.** On an RX 6700 XT Granite 3.1 3B-A800M Q8_0 goes from 175.1 to 182.6 tokens a second.
+- **LLMs: with Dynamic MoE on Radeon RX 6000 cards, a model whose MTP head would take too much of the VRAM left for experts starts without it, and generates faster.** On an RX 6700 XT Qwen3.6-35B-A3B goes from 58.2 to 60.9 tokens a second once its experts are cached.
+
+### Fixed
+
+- **LLMs: Qwen3.8-Flash-Next and other models with a gated shared expert load again with TensorMesh,** where 0.87.30 stopped the engine as soon as it generated its first token.
+- **LLMs: a model with an MTP head starts without it when there is no room for the head, instead of the engine stopping with "failed to create MTP context".**
+
+## [0.87.30] - 2026-10-28
+
+### Added
+
+- **The web chat has four more colour themes, Sepia, Ocean, Forest and Lavender,** next to System, Light and Dark; a theme shows as soon as it is picked and stays with Save settings. Contributed by [Basten7](https://github.com/Basten7) in [#142](https://github.com/engeldlgado/toshllm/issues/142).
+
+### Improved
+
+- **LLMs: Q4_0, Q4_K_M, Q5_K_M and Q8_0 models generate up to 4% more tokens per second on Radeon RX 6000 cards.** The gate and up projections and their activation run as one step while generating, with identical output. On an RX 6700 XT: Qwen3-4B Q5_K_M 87.6 to 91.1 t/s, Qwen3-4B Q8_0 69.5 to 71.3, Qwen3-8B Q4_K_M 63.7 to 65.0 and Llama 2 7B Q4_0 77.9 to 79.2.
+- **LLMs: small models generate up to 12% more tokens per second on Radeon RX 6000 cards.** The GPU no longer waits for the engine to finish preparing each step: Qwen3-0.6B goes from 321.7 to 359.0 t/s and Qwen3-4B from 112.0 to 114.1 on an RX 6700 XT, while 7B and larger models are unchanged.
+- **LLMs: Q5_1 models generate 10% more tokens per second on Radeon RX 6000 cards.** Qwen3-4B Q5_1 goes from 79.6 to 87.6 t/s on an RX 6700 XT.
+- **LLMs: IQ1, IQ2, IQ3, Q2_K and Q3_K models generate up to 36% more tokens per second on Radeon RX 6000 cards, and Q5_K models up to 2%.** Their weights are unpacked with fewer operations while generating, with identical output: on an RX 6700 XT Qwen3.5-9B IQ1_M goes from 45.3 to 61.5 t/s and IQ2_XXS from 60.8 to 69.3, and Qwen3-4B IQ3_M from 82.7 to 99.1, IQ2_XS from 91.5 to 108.5, Q2_K from 111.0 to 121.8 and Q5_K_M from 88.9 to 90.4.
+- **LLMs: MoE models whose experts are Q5_K, Q3_K, Q2_K or IQ generate up to 4% more tokens per second on Radeon RX 6000 cards when the experts run on the GPU.** The expert layers take the same lighter unpacking as the dense ones: on an RX 6700 XT OLMoE 1B-7B Q5_K_M goes from 243 to 253 t/s, with the same text.
+- **LLMs: MoE models that normalise their router, such as Qwen3, Qwen3.5 and Qwen3.6, take fewer GPU steps per token on Radeon RX 6000 cards, with identical output.** The router's weight normalisation and the shared expert's gate now run inside the steps around them: on an RX 6700 XT Qwen3.6-35B-A3B spends 1.6% less GPU time per token.
+- **Images: a model sized for more VRAM than the card has can be installed and run.** The tab says how much VRAM the model was sized for and lets it run when the chosen size fits the card; it used to refuse the model outright. Reported by [Mic238](https://github.com/Mic238) in [#138](https://github.com/engeldlgado/toshllm/issues/138).
+- **Settings: every row has its icon and keeps its label in line with its control,** and Speech & Audio uses the same rows as the other tabs; in Audio each choice has its label above it, as in Images and Video.
+- **No text in the app is smaller than 10 points.** Badges, table headers, file names and progress labels were 9, under the size macOS treats as its minimum; the chat text still grows with ⌘+. Reported by [TomDev234](https://github.com/TomDev234) in [#141](https://github.com/engeldlgado/toshllm/issues/141).
+- **Screens keep their layout in a narrow window.** Benchmarks, Logs and About set their cards two by two instead of cutting titles or splitting a word, the benchmark results stack each run's details under its model instead of hiding the speeds past the edge, the benchmark buttons that do not fit show only their icon, and the system card puts its figures on two rows with the processor's short name. The recommended model's figures sit in one row and a library's Use button keeps one column.
+
+### Fixed
+
+- **LLMs: the server no longer crashes on a deeply nested grammar sent through the API;** the request is refused with an error instead. Taken from upstream.
+- **LLMs: an edited or regenerated conversation no longer resumes from a checkpoint of the old text** on models with sliding-window or recurrent layers, such as Gemma and the hybrid Qwen models. Taken from upstream.
+- **LLMs: MoE models on the GPU can no longer write the sum of their experts over the memory it reads from,** which rarely gave a wrong result, and very large matrix outputs no longer overflow their offsets. Taken from upstream.
+- **LLMs: Gemma 2 runs its attention on the GPU with flash attention on, so it no longer slows down with a quantized KV cache on Radeon RX 6000 cards.** Its attention went to the CPU in every layer, which the app does whenever the KV cache is quantized: on an RX 6700 XT gemma-2 2B goes from 51 to 142 t/s and gemma-2 9B from 20 to 54.
+- **LLMs: LFM2 models no longer stop the engine with code 8.** Keeping a checkpoint or the prompt cache of an LFM2 model, which happens on almost every message, stopped the engine; they now answer and pick a conversation up from the cache. Reported by [mnerd](https://github.com/mnerd) in [#144](https://github.com/engeldlgado/toshllm/issues/144).
+- **Logs: an engine crash shows as errors.** Its abort, backtrace and restart notice counted as information, so the error count read 0 after a crash; the backtrace now reads compact, the restart notice gives its reason once, the cards of a narrow window keep one row, and a wrapped line no longer leaves a gap above it; a long name such as an IOKit error wraps at its parts instead of a hyphen the log does not have.
+- **Video: the resolution picker shows the size a run will use** instead of an empty box, and the side panel's controls line up on the right, as in Images.
+- **The web chat builds from source again with npm 10,** whose `npm ci` stopped on a package missing from the lock file. Reported by [Basten7](https://github.com/Basten7) in [#142](https://github.com/engeldlgado/toshllm/issues/142).
+- **Buttons and descriptions that were cut are whole again,** such as Attach file and Suggestions on an empty chat, the library's description and the About credits.
+- **The system card's cores and threads and a server's context in Logs are translated.**
+
 ## [0.87.29] - 2026-10-22
 
 ### Fixed

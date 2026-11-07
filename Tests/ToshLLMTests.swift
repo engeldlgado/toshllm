@@ -795,6 +795,18 @@ final class ImageGenTests: XCTestCase {
         XCTAssertEqual(ImageGenCatalog.sd15.maxLongEdge(drivesDisplay: true), ImageGenCatalog.sd15.maxLongEdge)
     }
 
+    func testVRAMClassWarnsButTheFrameEstimateDecides() {
+        // Qwen-Image 2.1 Q4 is sized for 12 GB, yet a 1024x1024 frame fits an 8 GB card
+        let q = ImageGenCatalog.qwenImage21Q4
+        XCTAssertFalse(q.fitsVRAMClass(8))
+        XCTAssertTrue(ImageGenLimits.fits(width: 1024, height: 1024, vramGB: 8, residentGB: q.residentGB))
+        XCTAssertFalse(ImageGenLimits.fits(width: 1024, height: 1024, vramGB: 4, residentGB: q.residentGB))
+        // an aux GPU still has to hold the encoder and VAE moved to it
+        XCTAssertTrue(q.auxHolds(nil))
+        XCTAssertTrue(q.auxHolds(q.totalGB - q.residentGB))
+        XCTAssertFalse(q.auxHolds(2))
+    }
+
     func testRecommendationScalesWithVRAM() {
         // A tiny 2 GB card gets nothing; bigger cards get progressively larger models.
         XCTAssertNil(ImageGenCatalog.recommended(for: hw(vramMB: 2048)))

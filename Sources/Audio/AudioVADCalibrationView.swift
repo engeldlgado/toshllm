@@ -36,13 +36,17 @@ struct AudioVADCalibrationView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker(loc.t("Detección de voz", "Voice detection"), selection: $modeRaw) {
-                ForEach(AudioVADMode.allCases) { item in
-                    Text(modeName(item)).tag(item.rawValue)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(loc.t("Detección de voz", "Voice detection")).font(.caption).foregroundStyle(.secondary)
+                Picker("", selection: $modeRaw) {
+                    ForEach(AudioVADMode.allCases) { item in
+                        Text(modeName(item)).tag(item.rawValue)
+                    }
                 }
+                .labelsHidden()
+                .help(loc.t("Desactiva VAD, usa los valores nativos de Whisper.cpp o aplica una calibración de ToshLLM.",
+                            "Disables VAD, uses Whisper.cpp native values, or applies a ToshLLM calibration."))
             }
-            .help(loc.t("Desactiva VAD, usa los valores nativos de Whisper.cpp o aplica una calibración de ToshLLM.",
-                        "Disables VAD, uses Whisper.cpp native values, or applies a ToshLLM calibration."))
 
             Text(modeDescription)
                 .font(.caption)

@@ -1,0 +1,102 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-fusion.cpp b/ggml/src/ggml-metal/ggml-metal-fusion.cpp
+index d4f03feb1..ae32ec239 100644
+--- a/ggml/src/ggml-metal/ggml-metal-fusion.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-fusion.cpp
+@@ -664,10 +664,15 @@ static bool ggml_metal_fusion_check_moe_reduce(
+ 
+     if (mode == GGML_METAL_FUSION_FULL) {
+         if (!match.experts->data || !match.weights->data || !match.dst->data) {
+             return false;
+         }
++
++        // the fused kernel reads experts and weights while writing dst, so dst must not overlap either input
++        if (ggml_metal_fusion_overlap(match.dst, match.experts) || ggml_metal_fusion_overlap(match.dst, match.weights)) {
++            return false;
++        }
+     }
+ 
+     return true;
+ }
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index bfe3021bd..192624551 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -3103,11 +3103,12 @@ static int ggml_metal_op_mul_mat_mma(ggml_metal_op_t ctx, int idx) {
+     const ggml_tensor * dst = op;
+     const ggml_tensor * res = dst;
+ 
+     if (fuse_add) {
+         dst = ctx->node(idx + n_fuse - 1);
+-        res = dst->src[0]->op == GGML_OP_MUL_MAT ? dst->src[1] : dst->src[0];
++        // the residual is the other operand of the ADD, by identity: it can itself be a MUL_MAT output
++        res = dst->src[0] == op ? dst->src[1] : dst->src[0];
+     }
+ 
+     auto pipeline = ggml_metal_library_get_pipeline_mul_mv_mma_auto(lib, op, fuse_add);
+ 
+     ggml_metal_kargs_mul_mv_ext args = {
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+index 96e00fa29..2ec7bc6bb 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
+@@ -501,14 +501,14 @@ kernel void kernel_mul_mm(
+             }
+         }
+     } else if (!FC_mul_mm_bc_out || (r0 + NR0 <= args.ne0 && r1 + NR1 <= args.ne1)) {
+         device float * C = (device float *) dst +
+             (r0 + 32*(sgitg &  1)) +
+-            (r1 + 16*(sgitg >> 1)) * args.ne0 + im*args.ne1*args.ne0;
++            (int64_t) (r1 + 16*(sgitg >> 1))*args.ne0 + (int64_t) im*args.ne1*args.ne0;
+ 
+         for (short i = 0; i < 8; i++) {
+-            simdgroup_store(mc[i], C + 8*(i%4) + 8*args.ne0*(i/4), args.ne0, 0, false);
++            simdgroup_store(mc[i], C + 8*(i%4) + (int64_t) 8*args.ne0*(i/4), args.ne0, 0, false);
+         }
+     } else {
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+         threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+@@ -519,11 +519,11 @@ kernel void kernel_mul_mm(
+ 
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+         if (sgitg == 0) {
+             for (int j = tiitg; j < nr1; j += NR1) {
+-                device float  * D  = (device float  *) dst + r0 + (r1 + j)*args.ne0 + im*args.ne1*args.ne0;
++                device float  * D  = (device float  *) dst + r0 + (int64_t) (r1 + j)*args.ne0 + (int64_t) im*args.ne1*args.ne0;
+                 device float4 * D4 = (device float4 *) D;
+ 
+                 threadgroup float  * C  = temp_str + (j*NR0);
+                 threadgroup float4 * C4 = (threadgroup float4 *) C;
+ 
+@@ -1172,11 +1172,11 @@ kernel void kernel_mul_mm_id(
+             // int, not short: the AMD Metal compiler miscompiles device address math
+             // built from short indices with ids-derived dynamic bases
+             const int ide = id % args.ne20;
+             const int idt = id / args.ne20;
+ 
+-            device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
++            device float  * D  = (device float  *) dst + r0 + (int64_t) ide*args.ne0 + (int64_t) idt*args.ne1*args.ne0;
+             device float4 * D4 = (device float4 *) D;
+ 
+             threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
+             threadgroup float4 * C4 = (threadgroup float4 *) C;
+ 
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+index 4064360b5..3251bb605 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+@@ -573,11 +573,11 @@ kernel void kernel_mul_mm_id_w64(
+             // int, not short: the AMD Metal compiler miscompiles device address math
+             // built from short indices with ids-derived dynamic bases
+             const int ide = id % args.ne20;
+             const int idt = id / args.ne20;
+ 
+-            device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
++            device float  * D  = (device float  *) dst + r0 + (int64_t) ide*args.ne0 + (int64_t) idt*args.ne1*args.ne0;
+             device float4 * D4 = (device float4 *) D;
+ 
+             threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
+             threadgroup float4 * C4 = (threadgroup float4 *) C;
+ 

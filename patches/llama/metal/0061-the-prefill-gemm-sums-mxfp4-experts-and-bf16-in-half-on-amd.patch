@@ -1,0 +1,90 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index e49737a39..9b1fc0ccc 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1223,10 +1223,11 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+                 TOSH_ENV("TOSH_MM_WIDE_DISABLE") == nullptr;
+     if (wide) {
+         // it needs 64 accumulators, so only where the dequant leaves the registers
+         switch (tsrc0) {
+             case GGML_TYPE_F16:
++            case GGML_TYPE_BF16:
+             case GGML_TYPE_Q8_0:
+             case GGML_TYPE_Q5_0:
+             case GGML_TYPE_Q5_1:
+             case GGML_TYPE_Q2_K:
+             case GGML_TYPE_Q3_K:
+@@ -1251,19 +1252,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+             case GGML_TYPE_IQ2_XS:
+             case GGML_TYPE_IQ3_XXS:
+                 // third floor, for the types whose dequant leaves less room: it was picked
+                 // against the 32-lane tile too, so TOSH_MM_WIDE_EXT_FLOOR opens it for sweeping
+                 wide = op->ne[0] >= wide_ext_floor && TOSH_ENV("TOSH_MM_WIDE_EXT_DISABLE") == nullptr; break;
+-            // f32 and bf16 have never been through this gate; the override opens them so the
+-            // exclusion can be measured instead of inherited
++            // f32 has never been through this gate; the override opens it so the exclusion can
++            // be measured instead of inherited
+             default: wide = TOSH_ENV("TOSH_MM_WIDE_ALL") != nullptr && op->ne[0] >= wide_ext_floor; break;
+         }
+     }
+ 
+     // attention matmuls read a permuted KV cache view and can exceed half range in the packed
+-    // accumulator; bfloat has no native arithmetic here, so float is faster for it too
+-    const bool acc_f32 = use_mm_manual && (!ggml_is_contiguous(op->src[0]) || tsrc0 == GGML_TYPE_BF16) &&
++    // accumulator. bf16 weights already reach the tile as half, so they sum like f16.
++    const bool acc_f32 = use_mm_manual &&
++                         (!ggml_is_contiguous(op->src[0]) ||
++                          (tsrc0 == GGML_TYPE_BF16 && TOSH_ENV("TOSH_MM_BF16_ACC_F32") != nullptr)) &&
+                          TOSH_ENV("TOSH_MM_ACC_F32_DISABLE") == nullptr;
+ 
+     // the 64-lane GEMM lives in mul_mm_w64.metal: one wave is one tile there, so it needs the
+     // dispatch to hand it whole waves instead of the 32-thread groups the shared kernel expects
+     // iq4_nl is the one type this kernel does not suit at every batch: it costs 3.9% at 256
+@@ -2187,11 +2190,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+     // the 64-lane twin lives in mul_mm_w64.metal, beside the dense one; it has no src1 rescale
+     const int simd_width_id = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
+     const bool w64 = simd_width_id == 64 && use_mm_manual && !amax &&
+                      TOSH_ENV("TOSH_MMID_W64_DISABLE") == nullptr;
+ 
+-    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "");
++    // the narrow mxfp4 kernel is bfloat when the device has the type, and the manual path keeps
++    // its packed sums in that type; the wide and 64-lane variants are already half, and so is the
++    // narrow one without bfloat
++    const bool half_id = use_mm_manual && !wide && !w64 && tsrc0 == GGML_TYPE_MXFP4 && tsrc1 == GGML_TYPE_F32 &&
++                         ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_bfloat &&
++                         TOSH_ENV("TOSH_MMID_HALF_DISABLE") == nullptr;
++
++    snprintf(base, 256, "kernel_mul_mm_id_%s_%s%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), wide ? "_w" : "", w64 ? "_w64" : "", half_id ? "_h" : "");
+     snprintf(name, 256, "%s_bci=%d_mm=%d_af=%d_amax=%d", base, bc_inp, use_mm_manual, acc_f32, amax);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+index f5ed223d1..d40ac63d0 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
+@@ -1223,10 +1223,11 @@ template [[host_name("kernel_mul_mm_id_map0_ne20_6" )]] kernel kernel_mul_mm_id_
+ template [[host_name("kernel_mul_mm_id_map0_ne20_8" )]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<8>;
+ template [[host_name("kernel_mul_mm_id_map0_ne20_10")]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<10>;
+ template [[host_name("kernel_mul_mm_id_map0_ne20_16")]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<16>;
+ template [[host_name("kernel_mul_mm_id_map0_ne20_22")]] kernel kernel_mul_mm_id_map0_t kernel_mul_mm_id_map0<22>;
+ template [[host_name("kernel_mul_mm_f16_f32_w")]]     kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   half4x4,       1,     dequantize_f16,     half,   half4x4,   float, float2x4, 8>;
++template [[host_name("kernel_mul_mm_bf16e_f32_w")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   bf16e4x4,      1,     dequantize_bf16e,   float,  float4x4,  float, float2x4, 8>;
+ template [[host_name("kernel_mul_mm_q5_0_f32_w")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_0,    2,     dequantize_q5_0,    float,  float4x4,  float, float2x4, 8>;
+ template [[host_name("kernel_mul_mm_q5_1_f32_w")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_1,    2,     dequantize_q5_1,    float,  float4x4,  float, float2x4, 8>;
+ template [[host_name("kernel_mul_mm_q8_0_f32_w")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q8_0,    2,     dequantize_q8_0,    float,  float4x4,  float, float2x4, 8>;
+ template [[host_name("kernel_mul_mm_q2_K_f32_w")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  float, float2x4, 8>;
+ template [[host_name("kernel_mul_mm_q3_K_f32_w")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  float, float2x4, 8>;
+@@ -1320,10 +1321,11 @@ template [[host_name("kernel_mul_mm_id_q4_1_f32")]]    kernel mul_mm_id kernel_m
+ template [[host_name("kernel_mul_mm_id_q5_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_0,    2,     dequantize_q5_0,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q5_1_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q5_1,    2,     dequantize_q5_1,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q8_0_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q8_0,    2,     dequantize_q8_0,    float,  float4x4,  float, float2x4>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mm_id_mxfp4_f32")]]   kernel mul_mm_id kernel_mul_mm_id<bfloat, bfloat4x4, simdgroup_bfloat8x8, bfloat, bfloat2x4, simdgroup_bfloat8x8, block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  float, float2x4>;
++template [[host_name("kernel_mul_mm_id_mxfp4_f32_h")]] kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  float, float2x4>;
+ #else
+ template [[host_name("kernel_mul_mm_id_mxfp4_f32")]]   kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  float, float2x4>;
+ #endif
+ template [[host_name("kernel_mul_mm_id_q2_K_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_id_q3_K_f32")]]    kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  float, float2x4>;

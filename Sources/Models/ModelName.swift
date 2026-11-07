@@ -307,14 +307,14 @@ struct ModelTitleLabel: View {
             Text(model.title).font(titleFont).lineLimit(1)
             ForEach(model.badges, id: \.self) { badge in
                 Text(badge)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Color.appAccent.opacity(0.18), in: Capsule())
                     .foregroundStyle(Color.appAccent)
             }
             if !model.quant.isEmpty {
                 Text(model.quant)
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced))
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(.quaternary.opacity(0.6), in: Capsule())
                     .foregroundStyle(.secondary)
