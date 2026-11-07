@@ -113,9 +113,12 @@ struct ServerLogView: View {
                         .font(.title3.bold()).lineLimit(1)
                     statusPill
                 }
-                // on a narrow window the card's own details give way before the essentials are cut
-                ViewThatFits(in: .horizontal) {
+                // on a narrow window the card's own details give way before the essentials are cut.
+                // Upstream wrote this with ViewThatFits, which needs the Layout protocol (macOS 13):
+                // the same conversion every other adaptive container in this app already made.
+                ToshAdaptive(minWidth: 460) {
                     summaryValues(full: true)
+                } narrow: {
                     summaryValues(full: false)
                 }
             }
