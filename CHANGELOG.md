@@ -8,6 +8,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - **LLMs: a model whose file declares an MTP head it does not carry loads without it instead of failing (#160).** Some quantized uploads keep the head's entry and drop its weights; the engine takes upstream llama.cpp's fix for these files, and the app no longer asks it to draft from a head that is not there.
+- **LLMs: "Start server on app launch" starts the server with the app, not when the chat window first appears.** A login item that opens the app with its window minimized or hidden starts the server too.
 
 ## [0.87.33] - 2026-11-04
 

@@ -136,11 +136,6 @@ struct ChatMainView: View {
             if !onboardingDone && models.models.isEmpty {
                 showOnboarding = true
             }
-            if UserDefaults.standard.bool(forKey: SettingsKeys.autoStart),
-               server.state == .stopped,
-               !(UserDefaults.standard.string(forKey: SettingsKeys.modelPath) ?? "").isEmpty {
-                server.start(.fromDefaults())
-            }
         }
         .sheet(isPresented: $showOnboarding) {
             OnboardingSheet {

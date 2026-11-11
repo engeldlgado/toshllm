@@ -1790,6 +1790,13 @@ final class ServerController: ObservableObject {
         availableGPUs().contains { $0.isExternal }
     }
 
+    func startOnLaunchIfEnabled() {
+        let settings = ServerSettings.fromDefaults()
+        guard UserDefaults.standard.bool(forKey: SettingsKeys.autoStart), state == .stopped,
+              settings.routerMode || !settings.modelPath.isEmpty else { return }
+        start(settings)
+    }
+
     func start(_ settings: ServerSettings) {
         guard state == .stopped || isFailed else { return }
         guard FileManager.default.fileExists(atPath: settings.serverBinary) else {
