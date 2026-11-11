@@ -1,0 +1,151 @@
+diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
+index 9774673188..e0f41b969e 100644
+--- a/common/tosh-plan.cpp
++++ b/common/tosh-plan.cpp
+@@ -661,38 +661,44 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+                             kv_env == "turbo4" ? GGML_TYPE_TURBO4_0 : GGML_TYPE_COUNT;
+         if (t == GGML_TYPE_COUNT) {
+             LOG_WRN("%s: unknown TOSH_AUTO_KV=%s, using auto\n", __func__, kv_env.c_str());
+             kvs = { GGML_TYPE_F16, GGML_TYPE_Q8_0 };
+         } else {
+             kvs = { t };
+         }
+     }
++    // turbo4 costs some quality, so auto reaches for it only where F16 and Q8_0 leave the experts on
++    // the host; the caller says whether the model and the GPU support it
++    const char * turbo_env = getenv("TOSH_AUTO_KV_TURBO4");
++    const bool turbo_fallback = kv_env == "auto" && turbo_env != nullptr && strcmp(turbo_env, "0") != 0;
+ 
+     // measured, not estimated: each configuration is loaded without allocating. The probe with the
+     // experts in host memory places ops as the real run does; the full model is that plus the bank,
+     // since a probe of the full model puts the expert ops on the CPU and overstates compute.
+     const int ubs[3] = { 512, 1024, 2048 };
+     const int ub_full = params.n_ubatch;
+     probe dm[4][4];
+     bool dmoe_built = false;
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+     dmoe_built = true;
+ #endif
+     std::vector<std::pair<ggml_type, probe>> full;
+-    for (size_t k = 0; k < kvs.size(); ++k) {
++    auto probe_kv = [&](size_t k) {
+         for (int u = 0; u < 3; ++u) dm[k][u] = run_probe(params, p.n_ctx, kvs[k], ubs[u], true, 0);
+         int uf = -1;
+         for (int u = 0; u < 3; ++u) if (ubs[u] == ub_full) uf = u;
+         const probe pf = uf >= 0 ? dm[k][uf] : (dm[k][3] = run_probe(params, p.n_ctx, kvs[k], ub_full, true, 0));
+         probe f = pf;
+         f.model += mi.bank_mib;
+         f.host_model = std::max(0.0, f.host_model - mi.bank_mib);
+         full.push_back({ kvs[k], f });
+-    }
++    };
++    for (size_t k = 0; k < kvs.size(); ++k) probe_kv(k);
++    bool turbo_probed = false;
+     if (!read_vram(p.vram_free_mib, p.vram_total_mib)) {
+         LOG_WRN("%s: no GPU memory reading, planning off\n", __func__);
+         return false;
+     }
+     // every weight the probe left in host memory besides the bank and what is read lazily
+     p.host_weights_mib = dm[0][0].ok ? std::max(mi.embd_mib, dm[0][0].host_model - mi.bank_mib - mi.lazy_mib) : mi.embd_mib;
+     p.host_lazy_mib = mi.lazy_mib;
+     const bool runtime = host_policy_runtime() && dmoe_built;
+@@ -902,30 +908,42 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+     const size_t n_with_head = reserves.size();
+     if (mtp_mib > 0) {
+         reserves.push_back(reserve_pref - mtp_mib);
+         reserves.push_back(std::max(512.0, reserve_pref - mtp_mib - 256.0));
+     }
+     p.mtp_head_dropped = false;
+     p.mtp_head_arena   = false;
+     // experts on the host lose more than the head gains: every reserve, the head's last, is
+-    // tried for the GPU modes before any of them settles for whole layers on the host
+-    for (size_t pass = 0; pass < 2 && sel == nullptr; ++pass)
++    // tried for the GPU modes before any of them settles for whole layers on the host.
++    // Pass 0 tries the GPU modes, pass 1 the same with turbo4 where allowed, pass 2 adds the host.
++    for (size_t pass = 0; pass < 3 && sel == nullptr; ++pass) {
++    const bool turbo = pass == 1;
++    if (turbo) {
++        if (!turbo_fallback || force == "legacy") continue;
++        if (!turbo_probed) {
++            kvs.push_back(GGML_TYPE_TURBO4_0);
++            probe_kv(kvs.size() - 1);
++            turbo_probed = true;
++        }
++    }
++    const ggml_type ka = turbo ? GGML_TYPE_TURBO4_0 : kvs[0];
++    const ggml_type kb = !turbo && kvs.size() > 1 ? kvs[1] : GGML_TYPE_COUNT;
+     for (size_t ri = 0; ri < reserves.size(); ++ri) {
+         const double R = reserves[ri];
+         evaluate(R);
+-        const tosh_plan_candidate * f16 = find("full_gpu", kvs[0], 0);
+-        const tosh_plan_candidate * q8  = kvs.size() > 1 ? find("full_gpu", kvs[1], 0) : nullptr;
++        const tosh_plan_candidate * f16 = find("full_gpu", ka, 0);
++        const tosh_plan_candidate * q8  = kb != GGML_TYPE_COUNT ? find("full_gpu", kb, 0) : nullptr;
+         if (force.empty() || force == "full") {
+             if (f16 && f16->valid) { sel = f16; p.reason = "the model and the requested context fit with the reserve"; }
+             else if (q8 && q8->valid) { sel = q8; p.reason = "q8_0 cache makes the full model fit with the reserve"; }
+         }
+         auto pick_dmoe = [&]() -> const tosh_plan_candidate * {
+-            tosh_plan_candidate * a = pick_ub(kvs[0]);
+-            tosh_plan_candidate * b = kvs.size() > 1 ? pick_ub(kvs[1]) : nullptr;
++            tosh_plan_candidate * a = pick_ub(ka);
++            tosh_plan_candidate * b = kb != GGML_TYPE_COUNT ? pick_ub(kb) : nullptr;
+             // while the bank does not fit, every MiB the q8_0 cache saves holds experts the CPU would compute
+             if (a && b && a->arena_mib < mi.bank_mib && b->arena_mib - a->arena_mib >= std::max(512.0, 0.08*a->arena_mib)) {
+                 p.reason = "q8_0 cache gives the expert arena a material share of the bank";
+                 return b;
+             }
+             if (a) {
+                 p.reason = "the requested context and the reserve fit; experts take what is left";
+                 return a;
+@@ -953,29 +971,31 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+                 if (arena_bare > 0 && sel->arena_mib < (1.0 - max_share)*arena_bare) {
+                     evaluate(reserves[n_with_head]);
+                     sel = pick_dmoe();
+                     head_off = sel != nullptr;
+                     p.mtp_head_arena = head_off;
+                 }
+             }
+         }
+-        if (sel == nullptr && (pass == 1 || force == "legacy") && (force.empty() || force == "legacy")) {
++        if (sel == nullptr && (pass == 2 || force == "legacy") && (force.empty() || force == "legacy")) {
+             const tosh_plan_candidate * l16 = find("legacy_offload", kvs[0], 0);
+             const tosh_plan_candidate * l8  = kvs.size() > 1 ? find("legacy_offload", kvs[1], 0) : nullptr;
+             if (l16 && l16->valid) sel = l16; else if (l8 && l8->valid) sel = l8;
+             if (sel) p.reason = "mixed execution is not available here; expert layers go to the host";
+         }
+         if (sel) {
++            if (turbo) p.reason = "only a turbo4 cache keeps the experts on the GPU: faster than on the host, at some quality cost";
+             p.mtp_head_dropped = head_off;
+             const double R_used = p.mtp_head_arena ? reserves[n_with_head] : R;
+             if (R_used < reserves[p.mtp_head_dropped ? n_with_head : 0]) p.fallback = string_format("reserve lowered to %.1f GiB", R_used/1024);
+             break;
+         }
+     }
++    }
+ 
+     if (sel == nullptr) {
+         p.state  = TOSH_PLAN_UNSUPPORTED;
+         p.mode   = "none";
+         p.code   = "PLAN_UNSUPPORTED";
+         p.reason = "no configuration fits the requested context with the minimum reserve";
+     } else {
+         p.mode = sel->mode; p.kv = sel->kv; p.ubatch = sel->ubatch; p.ncmoe = sel->ncmoe;
+@@ -1095,16 +1115,17 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+     }
+     if (sel && params.cache_ram_mib != 0) {
+         const double want = params.cache_ram_mib > 0 ? params.cache_ram_mib : std::max(0.0, left);
+         p.prompt_cache_mib = std::clamp(std::floor(left), 0.0, want);
+         if (p.prompt_cache_mib < want) p.warnings.push_back("PROMPT_CACHE_REDUCED");
+         p.projected_rss_mib += p.prompt_cache_mib;
+     }
+     if (p.fallback.rfind("reserve lowered", 0) == 0) p.warnings.push_back("RESERVE_LOWERED");
++    if (sel && turbo_fallback && sel->kv == GGML_TYPE_TURBO4_0) p.warnings.push_back("KV_TURBO4_AUTO");
+     if (runtime && p.host_pressure == "ELEVATED") p.warnings.push_back("HOST_MEMORY_PRESSURE_ELEVATED");
+     if (runtime && hi.swap_growing) p.warnings.push_back("SWAP_GROWING");
+     if (hi.simulated) p.warnings.push_back("SIMULATED_HOST");
+     return sel;
+     };
+ 
+     const tosh_plan_candidate * sel = decide(hi0);
+     // the probes take seconds: if memory went elsewhere meanwhile, the plan is made again, once

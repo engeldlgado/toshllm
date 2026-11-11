@@ -652,8 +652,8 @@ struct SettingsView: View {
                         ], width: 200)
                     }
                     .settingsGlyph("key")
-                    .infoTip(loc.t("Auto usa F16 y pasa a Q8 solo cuando libera memoria que de verdad importa (Q8 no cambia la calidad de forma medible). Turbo4 ahorra más memoria a cambio de algo de velocidad y calidad; nunca se elige solo.",
-                                "Auto uses F16 and moves to Q8 only when that frees memory that really matters (Q8 has no measurable quality cost). Turbo4 saves more memory at some speed and quality cost; it is never chosen automatically."))
+                    .infoTip(loc.t("Auto usa F16 y pasa a Q8 solo cuando libera memoria que de verdad importa (Q8 no cambia la calidad de forma medible). Turbo4 ahorra más memoria a cambio de algo de calidad: Auto solo lo elige, si el modelo lo admite, cuando ni F16 ni Q8 dejan los expertos en la GPU, y en ese caso puede ir bastante más rápido. Elige F16 o Q8 para no usarlo nunca.",
+                                "Auto uses F16 and moves to Q8 only when that frees memory that really matters (Q8 has no measurable quality cost). Turbo4 saves more memory at some quality cost: Auto picks it, when the model supports it, only if neither F16 nor Q8 keeps the experts on the GPU, and then it can be much faster. Pick F16 or Q8 to never use it."))
                     Toggle(loc.t("Ahorrar RAM", "Save RAM"), isOn: $dynamicMoeLeanRAM)
                         .settingsGlyph("memorychip")
                         .infoTip(loc.t("Apagado: si caben, todos los expertos se quedan en RAM, también los que ya están en VRAM. Encendido: la RAM guarda solo los que no están en VRAM y deja libre el resto para otras apps; genera más lento (entre un 11 y un 17% en un modelo de 35B) y el primer prompt tras cargar tarda más.",

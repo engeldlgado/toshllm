@@ -90,6 +90,8 @@ struct AutoMemoryPlan: Decodable, Equatable {
     var usesDynamicMoE: Bool { mode == "dmoe" || mode == "dmoe_bounded" }
     /// The user asked for RAM to hold only the experts that are not in VRAM.
     var savesHostRAM: Bool { product?.reason == "HOST_RAM_SAVING" }
+    /// Auto took turbo4 because F16 and Q8 left the experts on the CPU.
+    var autoPickedTurbo4: Bool { product?.warnings.contains("KV_TURBO4_AUTO") == true }
 
     var productState: ProductState {
         switch product?.mode ?? "" {
@@ -238,7 +240,10 @@ enum AutoMemoryText {
         parts.append(t("contexto \(plan.nCtx / 1024)K", "\(plan.nCtx / 1024)K context"))
         // a plan that found no configuration chose no cache type either
         if !plan.isUnsupported {
-            parts.append("KV \(kvLabel(plan.kv))")
+            parts.append(plan.autoPickedTurbo4
+                         ? t("KV Turbo4 (Auto: puede ir más rápido, con algo menos de calidad)",
+                             "KV Turbo4 (Auto: can be faster, at some quality cost)")
+                         : "KV \(kvLabel(plan.kv))")
             parts.append(t("\(gib(plan.projectedFreeMib)) de VRAM libre", "\(gib(plan.projectedFreeMib)) VRAM headroom"))
         }
         return parts.joined(separator: " · ")
@@ -282,6 +287,10 @@ enum AutoMemoryText {
         if plan.kv == "q8_0" {
             s += " " + t("KV Q8: reduce la memoria del contexto lo suficiente para mantener una caché de expertos útil.",
                          "KV Q8: shrinks context memory enough to keep a useful expert cache.")
+        }
+        if plan.autoPickedTurbo4 {
+            s += " " + t("KV Turbo4, elegido por Auto: ni F16 ni Q8 dejaban los expertos en la GPU. Puede ir bastante más rápido que con los expertos en la CPU, con algo de pérdida de calidad; fija la caché KV en F16 o Q8 para evitarlo.",
+                         "KV Turbo4, picked by Auto: neither F16 nor Q8 kept the experts on the GPU. It can be much faster than experts on the CPU, at some quality cost; set the KV cache to F16 or Q8 to avoid it.")
         }
         if !plan.fallback.isEmpty { s += " (\(plan.fallback))" }
         return s

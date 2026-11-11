@@ -601,8 +601,8 @@ private struct ServerConfigurationWorkspace: View {
                 ServerSettingRow(icon: "key", title: loc.t("Caché KV", "KV cache"),
                                  detail: loc.t("Para el plan de Dynamic MoE", "For the Dynamic MoE plan")) {
                     ToshDropdown(selection: autoKV(settings), options: autoKVOptions(settings, facts), width: 200)
-                        .help(loc.t("Auto usa F16 y pasa a Q8 solo cuando libera memoria que de verdad importa. Turbo4 ahorra más memoria a cambio de algo de velocidad y calidad; nunca se elige solo.",
-                                    "Auto uses F16 and moves to Q8 only when that frees memory that really matters. Turbo4 saves more memory at some speed and quality cost; it is never chosen automatically."))
+                        .help(loc.t("Auto usa F16 y pasa a Q8 solo cuando libera memoria que de verdad importa. Turbo4 ahorra más memoria a cambio de algo de calidad: Auto solo lo elige, si el modelo lo admite, cuando ni F16 ni Q8 dejan los expertos en la GPU, y en ese caso puede ir bastante más rápido. Elige F16 o Q8 para no usarlo nunca.",
+                                    "Auto uses F16 and moves to Q8 only when that frees memory that really matters. Turbo4 saves more memory at some quality cost: Auto picks it, when the model supports it, only if neither F16 nor Q8 keeps the experts on the GPU, and then it can be much faster. Pick F16 or Q8 to never use it."))
                 }
             } else {
                 let kvTypes = ServerSettings.kvTypeChoices(supportsTurbo: facts.supportsTurboKV,

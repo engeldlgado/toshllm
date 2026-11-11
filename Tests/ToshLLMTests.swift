@@ -1009,7 +1009,7 @@ final class ServerSettingsTests: XCTestCase {
                        cacheTypeK: "f16", cacheTypeV: "f16", mlock: false)
     }
 
-    private func writeMinimalMoEGGUF(_ url: URL) throws {
+    private func writeMinimalMoEGGUF(_ url: URL, extra: [(String, UInt32)] = []) throws {
         var data = Data("GGUF".utf8)
         func u32(_ value: UInt32) {
             withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
@@ -1024,7 +1024,7 @@ final class ServerSettingsTests: XCTestCase {
             ("qwen35moe.block_count", 40),
             ("qwen35moe.expert_count", 256),
             ("qwen35moe.expert_used_count", 8),
-        ]
+        ] + extra
         u32(3); u64(0); u64(UInt64(values.count))
         for (key, value) in values {
             string(key); u32(4); u32(value)
@@ -1081,6 +1081,7 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--dynamic-moe")! + 1], "on")
         XCTAssertNil(s.environment["TOSH_AUTO"], "the switch is the flag; TOSH_AUTO stays a developer override")
         XCTAssertEqual(s.environment["TOSH_AUTO_KV"], "auto")
+        XCTAssertNil(s.environment["TOSH_AUTO_KV_TURBO4"], "no head size to tell whether turbo4 fits")
         XCTAssertNil(s.environment["TOSH_AUTO_HOST_BANK"], "the whole bank stays in RAM unless asked")
         s.dynamicMoeLeanRAM = true
         XCTAssertEqual(s.environment["TOSH_AUTO_HOST_BANK"], "lean")
@@ -1105,6 +1106,34 @@ final class ServerSettingsTests: XCTestCase {
         s.executionMode = "legacy"
         XCTAssertFalse(s.usesAutoPlan)
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--n-cpu-moe")! + 1], "24")
+    }
+
+    func testAutoKVMayFallBackToTurbo4OnlyWhereTheModelSupportsIt() throws {
+        let model = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tosh-auto-turbo-\(UUID().uuidString).gguf")
+        try writeMinimalMoEGGUF(model, extra: [("qwen35moe.embedding_length", 2048),
+                                               ("qwen35moe.attention.head_count", 16)])
+        defer { try? FileManager.default.removeItem(at: model) }
+        var s = makeSettings()
+        s.modelPath = model.path
+        s.dynamicMoeEnabled = true
+        XCTAssertEqual(s.environment["TOSH_AUTO_KV_TURBO4"], ServerSettings.isAppleSilicon ? nil : "1")
+        s.autoKVMode = "q8_0"
+        XCTAssertNil(s.environment["TOSH_AUTO_KV_TURBO4"], "a cache chosen by hand is kept")
+    }
+
+    func testPlanSaysWhenAutoPickedTurbo4() throws {
+        func plan(_ warnings: String) throws -> AutoMemoryPlan {
+            let json = #"{"plan_schema_version": 1, "product": {"mode": "PLAN_BOUNDED_DMOE", "mode_label_key": "plan.mode.x", "reason": "CURRENT_RAM_LIMIT", "warnings": [\#(warnings)], "limits": [], "limiting_resource": "HOST_RAM", "memory": {"physical_bytes": 1, "reclaimable_bytes": 1, "projected_rss_bytes": 1, "projected_vram_bytes": 1}, "dmoe": {"expert_bank_bytes": 1, "hot_bytes": 1, "warm_bytes": 1, "coverage": 1.07, "coverage_state": "CONSTRAINED"}, "runtime": {"context": 8192, "kv_type": "turbo4", "kv_bytes": 1, "ubatch": 1024, "ncmoe_layers": 0}}, "state": "DMOE_BOUNDED_HOST", "mode": "dmoe_bounded", "reason": "r", "fallback": "", "kv": "turbo4", "n_ctx": 8192, "ubatch": 1024, "ncmoe": 0, "reserve_mib": 975, "arena_mib": 1200, "min_arena_mib": 546, "projected_private_mib": 1, "projected_free_mib": 800, "vram_total_mib": 8192, "vram_free_mib": 7000, "host_required_mib": 1, "host_ram_mib": 40960, "host_available_mib": 1, "host_reserve_mib": 1, "bank_mib": 17000, "mlock": "required", "dispersion": "normal", "candidates": []}"#
+            return try XCTUnwrap(AutoMemoryPlan.decode(Data(json.utf8)))
+        }
+        let picked = try plan(#""KV_TURBO4_AUTO""#)
+        let chosen = try plan("")
+        XCTAssertTrue(picked.autoPickedTurbo4)
+        XCTAssertFalse(chosen.autoPickedTurbo4, "turbo4 set by hand needs no warning")
+        XCTAssertNotEqual(AutoMemoryText.summary(picked, runtime: nil), AutoMemoryText.summary(chosen, runtime: nil))
+        XCTAssertTrue(AutoMemoryText.reason(picked).hasPrefix(AutoMemoryText.reason(chosen)))
+        XCTAssertNotEqual(AutoMemoryText.reason(picked), AutoMemoryText.reason(chosen))
     }
 
     func testAutoMemoryPlanDecodesTheEnginePlan() throws {

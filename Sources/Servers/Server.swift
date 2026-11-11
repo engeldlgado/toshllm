@@ -771,6 +771,10 @@ struct ServerSettings {
             // --dynamic-moe runs the plan; a forced mode or the retry without it rides on TOSH_AUTO
             if planWithoutDMoE { env["TOSH_AUTO"] = "nodmoe" } else if executionMode == "dmoe" { env["TOSH_AUTO"] = "dmoe" }
             env["TOSH_AUTO_KV"] = autoKVMode
+            // Auto falls back to turbo4 only where F16 and Q8 leave the experts on the CPU
+            if autoKVMode == "auto", !Self.isAppleSilicon, Self.modelSupportsTurboKV(at: modelPath) {
+                env["TOSH_AUTO_KV_TURBO4"] = "1"
+            }
             if dynamicMoeLeanRAM { env["TOSH_AUTO_HOST_BANK"] = "lean" }
             env["TOSH_AUTO_PLAN_FILE"] = AutoMemoryPlan.planURL(port: port).path
         } else if prefetchExperts && ((ncmoe > 0 && !manualFullGPU) || routerMode) {
@@ -1985,7 +1989,7 @@ final class ServerController: ObservableObject {
                 : " · peer group \($0.peerGroupID) (\($0.peerCount) GPUs)"
             return "    [\($0.index)] \($0.name) · \($0.vramGB) GB\(peer)\($0.isExternal ? " · EXTERNAL/eGPU" : "")\($0.isIntegrated ? " · iGPU (not auto-selected)" : "")"
         }.joined(separator: "\n")
-        let envKeys = ["TOSH_AUTO", "TOSH_AUTO_KV", "TOSH_AUTO_HOST_BANK", "GGML_METAL_VRAM_RESERVE_MB",
+        let envKeys = ["TOSH_AUTO", "TOSH_AUTO_KV", "TOSH_AUTO_KV_TURBO4", "TOSH_AUTO_HOST_BANK", "GGML_METAL_VRAM_RESERVE_MB",
                        "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES", "GGML_METAL_DEVICE_LIST",
                        "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD",
                        "GGML_SCHED_PREFETCH_EXPERTS", "GGML_CPU_NO_REPACK",

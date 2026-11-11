@@ -5,6 +5,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Improved
+
+- **LLMs: with Dynamic MoE, Auto tries a Turbo4 cache before leaving the experts on the CPU (#155).** It can be much faster at some quality cost, as the memory plan says; F16 or Q8 set by hand never use it. On an RX 6700 XT with 3 GB of VRAM free, OLMoE-1B-7B goes from 36 to 180 tokens a second, perplexity 1.3% higher.
+
 ### Fixed
 
 - **LLMs: a model whose file declares an MTP head it does not carry loads without it instead of failing (#160).** Some quantized uploads keep the head's entry and drop its weights; the engine takes upstream llama.cpp's fix for these files, and the app no longer asks it to draft from a head that is not there.
