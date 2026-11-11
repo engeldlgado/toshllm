@@ -9,11 +9,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: with Dynamic MoE, Auto tries a Turbo4 cache before leaving the experts on the CPU (#155).** It can be much faster at some quality cost, as the memory plan says; F16 or Q8 set by hand never use it. On an RX 6700 XT with 3 GB of VRAM free, OLMoE-1B-7B goes from 36 to 180 tokens a second, perplexity 1.3% higher.
 - **LLMs: GPU layers has an Auto setting, one step below 0 (#154).** The engine loads as many layers as fit in free VRAM and keeps the VRAM reserve, counting what the display and other apps already hold, so a model slightly too big for the card no longer overflows it.
+- **LLMs: in a Hugging Face repo's file list, a line separates each file,** so on a wide window the buttons on the right stay with their quantization. Contributed by [andruwa13](https://github.com/andruwa13) in [#157](https://github.com/engeldlgado/toshllm/pull/157).
 
 ### Fixed
 
 - **LLMs: a model whose file declares an MTP head it does not carry loads without it instead of failing (#160).** Some quantized uploads keep the head's entry and drop its weights; the engine takes upstream llama.cpp's fix for these files, and the app no longer asks it to draft from a head that is not there.
 - **LLMs: "Start server on app launch" starts the server with the app, not when the chat window first appears.** A login item that opens the app with its window minimized or hidden starts the server too.
+- **Chat: the Attachments settings show again under Agents and attachments (#161).** PDF as images for vision models, the maximum image size and pasting long text as a file had no place in the window. Contributed by [andruwa13](https://github.com/andruwa13) in [#162](https://github.com/engeldlgado/toshllm/pull/162).
 
 ## [0.87.33] - 2026-11-04
 
