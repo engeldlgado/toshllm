@@ -330,6 +330,7 @@ struct ChatAdvancedSettingsSection: View {
                 }
                 .onAppear { blockedToolModels = ToolSupport.blockedModels }
             }
+            }
 
             if destination == .agents {
                 ChatSettingsGroup(title: loc.t("Memoria", "Memory")) {
@@ -401,7 +402,7 @@ struct ChatAdvancedSettingsSection: View {
                 }
             }
 
-            if destination == .general {
+            if destination == .agents {
                 ChatSettingsGroup(title: loc.t("Adjuntos", "Attachments")) {
                     integerStepper(loc.t("Texto pegado a archivo", "Paste text to file"),
                                    value: $pasteLongTextLength, range: 0...100_000, step: 500,
@@ -426,7 +427,6 @@ struct ChatAdvancedSettingsSection: View {
                         SettingsToggle(isOn: $pdfAsImages)
                     }
                 }
-            }
             }
 
             if destination == .advanced {
