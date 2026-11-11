@@ -1629,13 +1629,25 @@ final class ServerSettingsTests: XCTestCase {
     }
 
     func testMTPDetectionReadsKeyValueAndTensors() {
-        // Key present decides by value: 1 = MTP, 0 = stripped head (the common
-        // quantizer case that used to false-positive on a bare "nextn" grep).
-        XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 1, tensorName: "blk.0.attn_q.weight").path))
+        XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 1, tensorName: "blk.32.nextn.eh_proj.weight").path))
         XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 0, tensorName: "blk.0.attn_q.weight").path))
-        // No key: the .nextn. tensor names decide.
+        // a quantizer dropped the head's tensors and kept the key
+        XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 1, tensorName: "blk.0.attn_q.weight").path))
         XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: nil, tensorName: "blk.0.nextn.eh_proj.weight").path))
         XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: nil, tensorName: "blk.0.attn_q.weight").path))
+    }
+
+    func testMTPHeadInALaterPartOfASplitModelIsFound() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-split-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let first = dir.appendingPathComponent("Qwen3.6-27B-Q8_0-00001-of-00002.gguf")
+        let second = dir.appendingPathComponent("Qwen3.6-27B-Q8_0-00002-of-00002.gguf")
+        try FileManager.default.moveItem(at: makeGGUF(nextnLayers: 1, tensorName: "blk.0.attn_q.weight"), to: first)
+        try FileManager.default.moveItem(at: makeGGUF(nextnLayers: nil, tensorName: "blk.64.nextn.eh_proj.weight"), to: second)
+
+        XCTAssertTrue(ServerSettings.modelHasMTP(at: first.path))
     }
 
     func testSeparateMTPAssistantIsHiddenPairedAndPassedAsDraft() throws {
@@ -1713,6 +1725,7 @@ final class ServerSettingsTests: XCTestCase {
             u32(3); u64(tensors); u64(2)
             str("qwen35moe.block_count"); u32(4); u32(blocks)
             str("qwen35moe.nextn_predict_layers"); u32(4); u32(1)
+            str("blk.\(blocks - 1).nextn.eh_proj.weight"); u32(1); u64(8); u32(0); u64(0)
             return d
         }
         let dir = FileManager.default.temporaryDirectory

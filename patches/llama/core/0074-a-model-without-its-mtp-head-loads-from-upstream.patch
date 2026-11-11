@@ -1,0 +1,543 @@
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 7357042458..0013512d88 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -3766,16 +3766,37 @@ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
+         layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight", bid), {n_embd_, n_embd_k_}, flags);
+         layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight", bid), {n_embd_, n_embd_v_}, flags);
+         layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q, "bias", bid), {n_embd_q_}, TENSOR_NOT_REQUIRED);
+         layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K, "bias", bid), {n_embd_k_}, TENSOR_NOT_REQUIRED);
+         layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V, "bias", bid), {n_embd_v_}, TENSOR_NOT_REQUIRED);
+     }
+ }
+ 
++llama_model_base::nextn_flags_t llama_model_base::nextn_flags(llama_model_loader & ml, llm_tensor trunk_probe) const {
++    int trunk = 0;
++    int mtp   = 0;
++
++    // a file without the first trunk layer is MTP-only, a file without the first NextN layer is trunk-only
++    if (hparams.n_layer_nextn > 0) {
++        if (ml.get_weight(tn(trunk_probe, "weight", 0).str().c_str()) == nullptr) {
++            trunk = TENSOR_NOT_REQUIRED;
++        }
++        if (ml.get_weight(tn(LLM_TENSOR_NEXTN_EH_PROJ, "weight", hparams.n_layer()).str().c_str()) == nullptr) {
++            mtp = TENSOR_NOT_REQUIRED;
++        }
++    }
++
++    if (!ml.load_mtp) {
++        mtp |= TENSOR_SKIP;
++    }
++
++    return { trunk, mtp };
++}
++
+ void llama_model_base::load_swa_pattern(llama_model_loader & ml, uint32_t n_pattern, bool dense_first) {
+     if (ml.get_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, false)) {
+         return;
+     }
+ 
+     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, n_pattern, false);
+     hparams.set_swa_pattern(n_pattern, dense_first);
+ }
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 1846e663b5..d15cb6d733 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -859,16 +859,23 @@ struct llama_model_base : public llama_model {
+     void create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_,
+                 int64_t n_ff_, int64_t n_expert_, int flags);
+ 
+     // helper: try to load merged qkv first, fall back to separate q, k, v
+     void create_tensor_qkv(llama_layer & layer, int bid,
+                 int64_t n_embd_, int64_t n_embd_q_, int64_t n_embd_k_, int64_t n_embd_v_,
+                 int flags);
+ 
++    // helper: tensor flags for a file that holds the trunk, the NextN layers, or both
++    struct nextn_flags_t {
++        int trunk; // TENSOR_NOT_REQUIRED when the file holds only the NextN layers
++        int mtp;   // TENSOR_NOT_REQUIRED when the file holds only the trunk, TENSOR_SKIP when MTP is not loaded
++    };
++    nextn_flags_t nextn_flags(llama_model_loader & ml, llm_tensor trunk_probe = LLM_TENSOR_ATTN_NORM) const;
++
+     // helper: read the SWA pattern as one flag per layer, or as a period expanded by set_swa_pattern
+     void load_swa_pattern(llama_model_loader & ml, uint32_t n_pattern, bool dense_first = false);
+ 
+     void load_stats  (llama_model_loader & ml) override;
+     void load_hparams(llama_model_loader & ml) override;
+     void load_vocab  (llama_model_loader & ml) override;
+     bool load_tensors(llama_model_loader & ml) override;
+ 
+diff --git a/src/models/bailingmoe3.cpp b/src/models/bailingmoe3.cpp
+index 907b25c67c..193a08a5b1 100644
+--- a/src/models/bailingmoe3.cpp
++++ b/src/models/bailingmoe3.cpp
+@@ -59,25 +59,19 @@ void llama_model_bailingmoe3::load_arch_tensors(llama_model_loader & ml) {
+     const int64_t d_inner = head_dim * n_head;
+     const int64_t d_conv = hparams.ssm_d_conv;
+     const int64_t kv_lora_rank = hparams.n_lora_kv;
+     const int64_t q_lora_rank  = hparams.n_lora_q;
+     const int64_t qk_rope_head_dim = hparams.n_rot();
+     const int64_t qk_head_dim = hparams.n_embd_head_k_mla();
+     const int64_t v_head_dim = hparams.n_embd_head_v_mla();
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+-    int       mtp_flags   = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     for (int il = 0; il < n_layer; ++il) {
+         auto & layer = layers[il];
+ 
+         layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", il), { n_embd }, trunk_flags);
+ 
+         if (hparams.is_recr(il)) {
+             layer.ssm_q_conv = create_tensor(tn(LLM_TENSOR_SSM_CONV1D_Q, "weight", il), { d_conv, 1, d_inner, 1 }, trunk_flags);
+diff --git a/src/models/cohere2moe.cpp b/src/models/cohere2moe.cpp
+index 4c369a6842..5856f55405 100644
+--- a/src/models/cohere2moe.cpp
++++ b/src/models/cohere2moe.cpp
+@@ -35,28 +35,19 @@ void llama_model_cohere2moe::load_arch_hparams(llama_model_loader & ml) {
+         case 49: type = LLM_TYPE_30B_A3B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_cohere2moe::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    // Trunk-only: the GGUF declares MTP layers in metadata but the actual MTP
+-    // tensors live in a separate file. Mark MTP tensors NOT_REQUIRED so the
+-    // trunk loads cleanly.
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only  ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags         = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
+     output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
+ 
+     // if output is NULL, init from the input tok embed
+diff --git a/src/models/deepseek2.cpp b/src/models/deepseek2.cpp
+index 6d217ea0c9..98beb195ed 100644
+--- a/src/models/deepseek2.cpp
++++ b/src/models/deepseek2.cpp
+@@ -51,25 +51,19 @@ void llama_model_deepseek2::load_arch_hparams(llama_model_loader & ml) {
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_deepseek2::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+     const int64_t n_expert_shared = hparams.n_expert_shared;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only  ? TENSOR_NOT_REQUIRED : 0;
+-    int       mtp_flags   = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     const bool is_mla = hparams.is_mla();
+ 
+     // note: these are the actual head sizes you get when treating as MHA or after "decompression" using wv_b for MLA
+     const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
+     const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla();
+ 
+     const int64_t n_embd_head_qk_rope = hparams.n_rot();
+diff --git a/src/models/deepseek32.cpp b/src/models/deepseek32.cpp
+index 849c7a9a00..aefaf271ac 100644
+--- a/src/models/deepseek32.cpp
++++ b/src/models/deepseek32.cpp
+@@ -41,25 +41,19 @@ void llama_model_deepseek32::load_arch_hparams(llama_model_loader & ml) {
+         case 61: type = LLM_TYPE_685B_A37B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_deepseek32::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only   ? TENSOR_NOT_REQUIRED : 0;
+-    int       mtp_flags   = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     const bool is_mla = hparams.is_mla();
+     if (!is_mla) {
+         throw std::runtime_error("DEEPSEEK32 architecture requires MLA");
+     }
+ 
+     // note: these are the actual head sizes you get when treating as MHA or after "decompression" using wv_b for MLA
+     const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
+diff --git a/src/models/deepseek4.cpp b/src/models/deepseek4.cpp
+index 223336d49e..e5200371ca 100644
+--- a/src/models/deepseek4.cpp
++++ b/src/models/deepseek4.cpp
+@@ -88,19 +88,19 @@ void llama_model_deepseek4::load_arch_tensors(llama_model_loader & ml) {
+ 
+     const int64_t n_embd_head = hparams.n_embd_head_k();
+     const int64_t o_groups    = hparams.dsv4_o_group_count;
+     const int64_t o_lora_rank = hparams.dsv4_o_lora_rank;
+     const int64_t hc_mult     = hparams.dsv4_hc_mult;
+     const int64_t hc_dim      = hc_mult * n_embd;
+     const int64_t hc_mix_dim  = (2 + hc_mult) * hc_mult;
+ 
+-    const bool mtp_only = (n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const int trunk_flags = mtp_only    ? TENSOR_NOT_REQUIRED : 0;
+-    const int mtp_flags   = ml.load_mtp ? 0 : TENSOR_SKIP;
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+ 
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+     output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
+ 
+     hc_head_fn    = create_tensor(tn(LLM_TENSOR_HC_HEAD_FN, "weight"),    {hc_dim, hc_mult}, 0);
+     hc_head_base  = create_tensor(tn(LLM_TENSOR_HC_HEAD_BASE, "weight"),  {hc_mult}, 0);
+diff --git a/src/models/glm-dsa.cpp b/src/models/glm-dsa.cpp
+index 6a5132cf63..6beac924e8 100644
+--- a/src/models/glm-dsa.cpp
++++ b/src/models/glm-dsa.cpp
+@@ -70,29 +70,19 @@ void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_glm_dsa::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+     const int64_t n_expert_shared = hparams.n_expert_shared;
+ 
+-    // MTP-only: the GGUF carries only the NextN/MTP block(s) (user split target/draft).
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    // Trunk-only: the GGUF declares MTP layers in metadata but the actual MTP
+-    // tensors live in a separate file (or were stripped at conversion). Mark
+-    // MTP tensors NOT_REQUIRED so the trunk loads cleanly.
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only   ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags         = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     const bool is_mla = hparams.is_mla();
+     if (!is_mla) {
+         throw std::runtime_error("GLM_DSA architecture requires MLA");
+     }
+ 
+     // note: these are the actual head sizes you get when treating as MHA or after "decompression" using wv_b for MLA
+     const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
+diff --git a/src/models/glm4-moe.cpp b/src/models/glm4-moe.cpp
+index 8cdbe10ad3..23b0ac0ede 100644
+--- a/src/models/glm4-moe.cpp
++++ b/src/models/glm4-moe.cpp
+@@ -24,25 +24,19 @@ void llama_model_glm4_moe::load_arch_hparams(llama_model_loader & ml) {
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_glm4_moe::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+     const int64_t n_expert_shared = hparams.n_expert_shared;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only  ? TENSOR_NOT_REQUIRED : 0;
+-    int       mtp_flags   = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     GGML_ASSERT(hparams.n_expert > 0 && "n_expert must be > 0 for GLM4_MOE MoE layers");
+     GGML_ASSERT(hparams.n_expert_used() > 0 && "n_expert_used must be > 0 for GLM4_MOE MoE layers");
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
+diff --git a/src/models/hy-v3.cpp b/src/models/hy-v3.cpp
+index e4929ec842..d162f64a58 100644
+--- a/src/models/hy-v3.cpp
++++ b/src/models/hy-v3.cpp
+@@ -17,28 +17,19 @@ void llama_model_hy_v3::load_arch_hparams(llama_model_loader & ml) {
+         case 48: type = LLM_TYPE_30B_A3B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_hy_v3::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    // Trunk-only: the GGUF declares MTP layers in metadata but the actual MTP
+-    // tensors live in a separate file (e.g. user split target/draft). Mark
+-    // MTP tensors NOT_REQUIRED so the trunk loads cleanly.
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only   ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags         = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+ 
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+     output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+     if (output == NULL) {
+         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+     }
+diff --git a/src/models/mimo2.cpp b/src/models/mimo2.cpp
+index ce315f956a..e51d277888 100644
+--- a/src/models/mimo2.cpp
++++ b/src/models/mimo2.cpp
+@@ -20,25 +20,19 @@ void llama_model_mimo2::load_arch_hparams(llama_model_loader & ml) {
+         case 48: type = LLM_TYPE_310B_A15B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_mimo2::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags         = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+     output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
+ 
+     for (int i = 0; i < n_layer_all; ++i) {
+diff --git a/src/models/nemotron-h.cpp b/src/models/nemotron-h.cpp
+index be27650b06..9134457e0c 100644
+--- a/src/models/nemotron-h.cpp
++++ b/src/models/nemotron-h.cpp
+@@ -44,19 +44,19 @@ void llama_model_nemotron_h::load_arch_hparams(llama_model_loader & ml) {
+             } break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_nemotron_h::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only    = hparams.n_layer_nextn > 0 && ml.get_weight("blk.0.attn_norm.weight") == nullptr;
+-    const int  trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+-    const int  mtp_flags   = !ml.load_mtp ? TENSOR_SKIP : 0;
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     // mamba2 Mixer SSM params
+     // NOTE: int64_t for tensor dimensions
+     const int64_t d_conv     = hparams.ssm_d_conv;
+     const int64_t d_inner    = hparams.ssm_d_inner;
+     const int64_t d_state    = hparams.ssm_d_state;
+     const int64_t n_ssm_head = hparams.ssm_dt_rank;
+     const int64_t n_group    = hparams.ssm_n_group;
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index a200cbb776..20dd82ba60 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -30,19 +30,19 @@ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
+         case 64: type = LLM_TYPE_27B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags = !ml.load_mtp ? TENSOR_SKIP : 0;
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
+     output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
+ 
+     // optional projection of the embeddings output
+diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
+index 25846071a0..4b28ff8fd3 100644
+--- a/src/models/qwen35moe.cpp
++++ b/src/models/qwen35moe.cpp
+@@ -33,19 +33,19 @@ void llama_model_qwen35moe::load_arch_hparams(llama_model_loader & ml) {
+         case 60: type = LLM_TYPE_397B_A17B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags = !ml.load_mtp ? TENSOR_SKIP : 0;
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
+     output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
+ 
+     // if output is NULL, init from the input tok embed
+diff --git a/src/models/qwen3next.cpp b/src/models/qwen3next.cpp
+index 0a71ce8ed9..273d9b43e1 100644
+--- a/src/models/qwen3next.cpp
++++ b/src/models/qwen3next.cpp
+@@ -30,19 +30,19 @@ void llama_model_qwen3next::load_arch_hparams(llama_model_loader & ml) {
+ 
+ void llama_model_qwen3next::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+     if (n_expert == 0) {
+         throw std::runtime_error(arch_name() + " model cannot have zero experts");
+     }
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags = !ml.load_mtp ? TENSOR_SKIP : 0;
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), { n_embd }, 0);
+     output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
+ 
+     // if output is NULL, init from the input tok embed
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index a4881eb557..b14df4c1a6 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -176,20 +176,19 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
+ 
+ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+     const int64_t hc     = hparams.dsv4_hc_mult;
+     const int64_t hc_dim = hc * n_embd;
+     const int64_t hc_lr  = hparams.hc_low_rank;
+ 
+-    // an MTP-only file carries the MTP block, the embeddings and the LM head, but no trunk
+-    const bool mtp_only    = n_layer_nextn > 0 && ml.get_weight(tn(LLM_TENSOR_HC_ATTN_NORM, "weight", 0).str().c_str()) == nullptr;
+-    const int  trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+-    const int  mtp_flags   = ml.load_mtp ? 0 : TENSOR_SKIP;
++    const auto nf = nextn_flags(ml, LLM_TENSOR_HC_ATTN_NORM);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     // a head shared with its target may leave the embeddings and the LM head to it
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, trunk_flags);
+ 
+     // there is no output_norm: the final hyper-connection mixer carries it
+     // the gammas load as [n_embd, hc] so the grouped norm multiplies them without a graph reshape
+     hc_head_norm = create_tensor(tn(LLM_TENSOR_HC_HEAD_NORM, "weight"), { n_embd, hc }, trunk_flags | TENSOR_ALLOW_RESHAPE);
+     hc_head_down = create_tensor(tn(LLM_TENSOR_HC_HEAD_DOWN, "weight"), { hc_dim, hc_lr }, trunk_flags);
+diff --git a/src/models/step35.cpp b/src/models/step35.cpp
+index 8ebc76dbfc..7aa7bf4b96 100644
+--- a/src/models/step35.cpp
++++ b/src/models/step35.cpp
+@@ -32,28 +32,19 @@ void llama_model_step35::load_arch_hparams(llama_model_loader & ml) {
+         case 45: type = LLM_TYPE_196B_A11B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+ void llama_model_step35::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+ 
+-    const bool mtp_only = (hparams.n_layer_nextn > 0) && (ml.get_weight("blk.0.attn_norm.weight") == nullptr);
+-    // Trunk-only: the GGUF declares MTP layers in metadata but the actual MTP
+-    // tensors live in a separate file (e.g. user split target/draft). Mark
+-    // MTP tensors NOT_REQUIRED so the trunk loads cleanly.
+-    const std::string mtp_probe = "blk." + std::to_string(n_layer) + ".nextn.eh_proj.weight";
+-    const bool trunk_only = (hparams.n_layer_nextn > 0) && (ml.get_weight(mtp_probe.c_str()) == nullptr);
+-    const int trunk_flags = mtp_only  ? TENSOR_NOT_REQUIRED : 0;
+-    int mtp_flags         = trunk_only ? TENSOR_NOT_REQUIRED : 0;
+-
+-    if (!ml.load_mtp) {
+-        mtp_flags |= TENSOR_SKIP;
+-    }
++    const auto nf = nextn_flags(ml);
++    const int trunk_flags = nf.trunk;
++    const int mtp_flags   = nf.mtp;
+ 
+     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+     output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, trunk_flags);
+ 
+     // STEP35 supports per-layer partial RoPE dims; rope factors are stored as a single shared tensor

@@ -189,7 +189,9 @@ enum GGUFMetadataCache {
         }
         lock.unlock()
 
-        let found = scanForNextNTensor(at: key.path)
+        // the head is the last block, so in a split model it sits in a later part
+        let parts = splitSiblings(of: key.path)
+        let found = (parts.count > 1 ? parts : [key.path]).contains { scanForNextNTensor(at: $0) }
         lock.lock()
         removeStaleEntries(for: key.path, keeping: key)
         nextNEntries[key] = found

@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **LLMs: a model whose file declares an MTP head it does not carry loads without it instead of failing (#160).** Some quantized uploads keep the head's entry and drop its weights; the engine takes upstream llama.cpp's fix for these files, and the app no longer asks it to draft from a head that is not there.
+
 ## [0.87.33] - 2026-11-04
 
 ### Fixed

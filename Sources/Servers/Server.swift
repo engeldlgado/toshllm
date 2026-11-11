@@ -1091,13 +1091,11 @@ struct ServerSettings {
         }
     }
 
-    /// Whether a GGUF ships the MTP (multi-token prediction) head. Quantizers often
-    /// strip it but leave the key at 0, and the server aborts on the missing tensors,
-    /// so trust the value and fall back to the tensor names.
+    /// Whether a GGUF ships the MTP (multi-token prediction) head. Quantizers often strip
+    /// the head and keep `nextn_predict_layers`, at 0 or at its original count, so the
+    /// tensors decide: the server cannot draft from a head the file does not carry.
     nonisolated static func modelHasMTP(at path: String) -> Bool {
-        if let layers = ggufUInt32("nextn_predict_layers", at: path) {
-            return layers >= 1
-        }
+        if ggufUInt32("nextn_predict_layers", at: path) == 0 { return false }
         return GGUFMetadataCache.hasNextNTensor(at: path)
     }
 
