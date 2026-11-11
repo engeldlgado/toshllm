@@ -1044,6 +1044,33 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertFalse(s.arguments.contains("--kv-unified"), "one slot has nothing to share")
     }
 
+    func testAutoGPULayersAreFittedByTheEngineWithTheVRAMReserve() {
+        var s = makeSettings()
+        s.ngl = -1
+        s.ncmoe = 0
+        var args = s.arguments
+        XCTAssertEqual(args[args.firstIndex(of: "-ngl")! + 1], "auto")
+        XCTAssertEqual(args[args.firstIndex(of: "--fit-target")! + 1], "1024")
+        args = s.benchmarkArguments
+        XCTAssertFalse(args.contains("-ngl"), "llama-bench fits only when it gets no layer count")
+        XCTAssertEqual(args[args.firstIndex(of: "--fit-target")! + 1], "1024")
+        // the server's fit leaves the layers alone once experts are on the CPU, so all of them load
+        s.ncmoe = 24
+        args = s.benchmarkArguments
+        XCTAssertEqual(args[args.firstIndex(of: "-ngl")! + 1], "99")
+        XCTAssertFalse(args.contains("--fit-target"))
+
+        s.dynamicMoeEnabled = true
+        s.executionMode = "full"
+        args = s.arguments
+        XCTAssertEqual(args[args.firstIndex(of: "-ngl")! + 1], "all", "Full GPU by hand keeps every layer")
+        XCTAssertFalse(args.contains("--fit-target"))
+
+        s = makeSettings()
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-ngl")! + 1], "99")
+        XCTAssertFalse(s.arguments.contains("--fit-target"))
+    }
+
     func testBaseArguments() {
         let args = makeSettings().arguments
         XCTAssertEqual(args[args.firstIndex(of: "--load-mode")! + 1], "none")
@@ -2928,6 +2955,16 @@ final class RouterModeTests: XCTestCase {
         let denseSection = ini.components(separatedBy: "\n\n").first { $0.contains("dense-4b") } ?? ""
         XCTAssertFalse(denseSection.contains("n-cpu-moe"))
         XCTAssertTrue(ini.contains("--host") == false, "el router no repite --host/--port por modelo")
+    }
+
+    func testRouterPresetPassesAutoGPULayersWithTheVRAMReserve() {
+        var s = makeSettings()
+        s.ngl = -1
+        let ini = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+        XCTAssertTrue(ini.contains("n-gpu-layers = auto"))
+        XCTAssertTrue(ini.contains("fit-target = 1024"))
+        XCTAssertTrue(makeSettings().routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+            .contains("n-gpu-layers = 99"))
     }
 
     func testRouterPresetAliasCollisionIsDisambiguated() {

@@ -774,11 +774,12 @@ struct SettingsView: View {
                         .infoTip(loc.t("El motor Metal usa memoria compartida (del sistema) en GPUs externas, lo que transfiere los pesos por Thunderbolt en cada operación y desploma la velocidad (~0.8 t/s). Esto fuerza buffers privados en VRAM. Si fijas una eGPU en el selector de arriba ya se activa solo; usa esto cuando dejas 'Predeterminada' y macOS elige la eGPU.",
                                     "The Metal backend uses shared (system) memory on external GPUs, which streams weights over Thunderbolt every op and tanks speed (~0.8 t/s). This forces private VRAM buffers. If you pin an eGPU in the picker above it's automatic; use this when you leave 'Default' and macOS picks the eGPU."))
                 }
-                Stepper(loc.t("Capas en GPU (-ngl): %@", "GPU layers (-ngl): %@", "\(ngl)"),
-                        value: $ngl, in: 0...99)
+                Stepper(ngl < 0 ? loc.t("Capas en GPU (-ngl): Auto", "GPU layers (-ngl): Auto")
+                                : loc.t("Capas en GPU (-ngl): %@", "GPU layers (-ngl): %@", "\(ngl)"),
+                        value: $ngl, in: -1...99)
                     .settingsGlyph("square.3.layers.3d")
-                    .infoTip(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM); bájalo solo si la VRAM se desborda.",
-                                "How many model layers go to the GPU. 99 = all (recommended if they fit in VRAM); lower it only if VRAM overflows."))
+                    .infoTip(loc.t("Cuántas capas del modelo van a la GPU. 99 = todas (recomendado si caben en VRAM). Auto, por debajo de 0, sube las que caben en la VRAM libre sin tocar la reserva de VRAM; con Dynamic MoE o expertos en CPU sube todas.",
+                                "How many model layers go to the GPU. 99 = all (recommended if they fit in VRAM). Auto, below 0, loads as many as fit in free VRAM and keeps the VRAM reserve; with Dynamic MoE or experts on the CPU it loads them all."))
                 let modelIsMoE = modelPath.isEmpty || ServerSettings.modelIsMoE(at: modelPath)
                 Stepper(modelIsMoE
                             ? loc.t("Expertos MoE en CPU: %@", "MoE experts on CPU: %@", "\(ncmoe)")
@@ -796,8 +797,8 @@ struct SettingsView: View {
                             : loc.t("Reserva de VRAM: %@ MB", "VRAM reserve: %@ MB", "\(vramReserve)"),
                         value: $vramReserve, in: 0...4096, step: 256)
                     .settingsGlyph("gauge.with.needle")
-                    .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. La respetan el plan de Dynamic MoE, el modo router y DFlash en Auto. Automática deja un 8% de la tarjeta, entre 768 y 1536 MB.",
-                                "VRAM left free for the system and UI. The Dynamic MoE plan, router mode and DFlash in Auto keep it. Automatic leaves 8% of the card, between 768 and 1536 MB."))
+                    .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. La respetan el plan de Dynamic MoE, el modo router, DFlash en Auto y las capas en GPU en Auto. Automática deja un 8% de la tarjeta, entre 768 y 1536 MB.",
+                                "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card, between 768 and 1536 MB."))
                 Toggle(loc.t("Copiar pesos a VRAM (--no-mmap, recomendado)",
                              "Copy weights to VRAM (--no-mmap, recommended)"), isOn: $noMmap)
                     .settingsGlyph("arrow.down.to.line")

@@ -8,6 +8,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ### Improved
 
 - **LLMs: with Dynamic MoE, Auto tries a Turbo4 cache before leaving the experts on the CPU (#155).** It can be much faster at some quality cost, as the memory plan says; F16 or Q8 set by hand never use it. On an RX 6700 XT with 3 GB of VRAM free, OLMoE-1B-7B goes from 36 to 180 tokens a second, perplexity 1.3% higher.
+- **LLMs: GPU layers has an Auto setting, one step below 0 (#154).** The engine loads as many layers as fit in free VRAM and keeps the VRAM reserve, counting what the display and other apps already hold, so a model slightly too big for the card no longer overflows it.
 
 ### Fixed
 

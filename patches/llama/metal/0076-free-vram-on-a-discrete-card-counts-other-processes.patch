@@ -1,0 +1,28 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 5686988cf7..ed524519c6 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -2462,16 +2462,23 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
+ 
+ 
+ void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t * total) {
+     if (@available(macOS 10.12, iOS 16.0, *)) {
+         *total     = dev->mtl_device.recommendedMaxWorkingSetSize;
+         size_t cur = dev->mtl_device.currentAllocatedSize;
+         // it's possible to allocate more than `recommendedMaxWorkingSetSize`
+         *free      = *total > cur ? *total - cur : 0;
++        // on a discrete card the display and other processes hold VRAM too, which only the
++        // driver's counters see; --fit would otherwise place layers in memory that is taken
++        int64_t vfree = 0;
++        int64_t vused = 0;
++        if (!dev->props.has_unified_memory && ggml_metal_vram_stats(dev->mtl_device, &vfree, &vused) && vfree >= 0) {
++            *free = MIN(*free, (size_t) vfree);
++        }
+     } else {
+         *free = 0;
+         *total = 0;
+     }
+ }
+ 
+ static bool ggml_metal_supports_mul_mat_op(
+         bool has_simdgroup_reduction,

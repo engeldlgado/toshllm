@@ -97,7 +97,7 @@ El interruptor **Chat / Imágenes** en la parte superior de la ventana cambia al
 **Instancias paralelas**: en Macs con varias GPUs puedes añadir instancias adicionales, cada una con su propio modelo, GPU y configuración, y generar varias variaciones a la vez desde un solo botón Generar. Dos instancias en la misma GPU muestran una advertencia (puede colgar la tarjeta en GPUs AMD).
 """),
         DocSection(title: "Parámetros explicados", icon: "slider.horizontal.3", body: """
-**Capas en GPU (-ngl)** — Cuántas capas suben a la VRAM. 99 = todas (recomendado). Valores mayores al número de capas del modelo equivalen a "todas".
+**Capas en GPU (-ngl)** — Cuántas capas suben a la VRAM. 99 = todas (recomendado). Valores mayores al número de capas del modelo equivalen a "todas". Auto, por debajo de 0, sube las que caben en la VRAM libre sin tocar la reserva de VRAM.
 
 **Expertos MoE en CPU** — Ver sección de modelos MoE.
 
@@ -364,7 +364,7 @@ The **Chat / Images** toggle at the top of the window switches to the image stud
 **Parallel instances**: on Macs with several GPUs you can add extra instances, each with its own model, GPU and settings, and generate multiple variations at once from a single Generate button. Two instances on the same GPU show a warning (can hang the card on AMD GPUs).
 """),
         DocSection(title: "Parameters explained", icon: "slider.horizontal.3", body: """
-**GPU layers (-ngl)** — How many layers go to VRAM. 99 = all (recommended). Any value above the model's layer count means "all".
+**GPU layers (-ngl)** — How many layers go to VRAM. 99 = all (recommended). Any value above the model's layer count means "all". Auto, below 0, loads as many as fit in free VRAM and keeps the VRAM reserve.
 
 **MoE experts on CPU** — See the MoE section.
 

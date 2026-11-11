@@ -296,13 +296,13 @@ struct ServerSettings {
         let faValue = kvNeedsFlashAttention ? "1" : (effectiveFaAmd ? "auto" : flashAttn)
         var args = [
             "-m", modelPath,
-            "-ngl", String(ngl),
+            "-ngl", nglArgument,
             "-c", String(ctx),
             "-t", String(threads),
             "-fa", faValue,
             "--host", localNetworkDiscovery ? "0.0.0.0" : "127.0.0.1",
             "--port", String(port),
-        ]
+        ] + fitTargetArguments
         // under the plan the engine picks offload and batch; by hand, Full GPU offloads nothing
         let planOwnsMemory = usesAutoPlan || manualFullGPU
         if ncmoe > 0 && !planOwnsMemory { args += ["--n-cpu-moe", String(ncmoe)] }
@@ -382,6 +382,28 @@ struct ServerSettings {
         args += Self.chatUIArgs
         args += extraArgTokens.cli
         return args
+    }
+
+    /// `-ngl` as the engine takes it. Auto (below 0) leaves the layers to the engine's fit,
+    /// except under Full GPU chosen by hand.
+    var nglArgument: String {
+        guard ngl < 0 else { return String(ngl) }
+        return manualFullGPU ? "all" : "auto"
+    }
+
+    /// Under Auto the fit keeps free the same VRAM reserve as the memory plan.
+    var fitTargetArguments: [String] {
+        guard nglArgument == "auto" else { return [] }
+        let indices = selectedGPUIndices
+        let vramMB = ServerController.availableGPUs().filter { indices.contains($0.index) }.map(\.vramMB).max() ?? 0
+        return ["--fit-target", String(Self.effectiveVramReserveMB(vramReserveMB, vramMB: vramMB))]
+    }
+
+    /// llama-bench takes no `-ngl auto`, but fits with a target. The server's fit leaves the
+    /// layers alone once experts are placed on the CPU, so that case loads them all.
+    private var benchmarkLayerArguments: [String] {
+        guard ngl < 0 else { return ["-ngl", String(ngl)] }
+        return nglArgument == "auto" && ncmoe == 0 ? fitTargetArguments : ["-ngl", "99"]
     }
 
     /// Router writes one entry per model with the same context, but a multi-head model
@@ -478,8 +500,9 @@ struct ServerSettings {
             let modelCtx = Self.routerCtx(forModel: path, requested: ctx, ncmoe: ncmoeByPath[path] ?? 0,
                                           kvScale: Estimator.kvTypeScale(cacheTypeK),
                                           reserveMB: vramReserveMB)
-            var lines = ["[\(alias)]", "model = \(path)", "n-gpu-layers = \(ngl)",
+            var lines = ["[\(alias)]", "model = \(path)", "n-gpu-layers = \(nglArgument)",
                          "ctx-size = \(modelCtx)", "threads = \(threads)", "flash-attn = \(faValue)"]
+            if let target = fitTargetArguments.last { lines.append("fit-target = \(target)") }
             if let ncmoe = ncmoeByPath[path], ncmoe > 0 { lines.append("n-cpu-moe = \(ncmoe)") }
             if let mode = Self.loadMode(noMmap: noMmap, mlock: mlock) { lines.append("load-mode = \(mode)") }
             let mmproj = loadVision ? Self.mmprojPath(forModel: path) : nil
@@ -560,7 +583,7 @@ struct ServerSettings {
         // Same load mode as the server, or the numbers are not the ones the app
         // delivers: with experts on the CPU, locking the model is worth most of
         // the prompt speed.
-        var args = ["-m", modelPath, "-ngl", String(ngl), "-r", "2",
+        var args = ["-m", modelPath] + benchmarkLayerArguments + ["-r", "2",
                     "-p", String(benchPPClamped), "-n", String(benchTGClamped)]
         let mode = Self.loadMode(noMmap: noMmap, mlock: mlock)
         if let mode { args += ["--load-mode", mode] }
@@ -2020,7 +2043,7 @@ final class ServerController: ObservableObject {
          GPUs detected:
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
-         settings: ngl=\(settings.ngl) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn)\(kvLine) cacheRAM=\(settings.cacheRAM)
+         settings: ngl=\(settings.nglArgument) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn)\(kvLine) cacheRAM=\(settings.cacheRAM)
          dflash : \(settings.routerMode ? "per-model router plan" : settings.dflashPlanSummary)
          env: \(envLine)
          args: \(redact(settings.arguments).joined(separator: " "))
