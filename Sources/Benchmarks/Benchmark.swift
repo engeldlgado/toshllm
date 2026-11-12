@@ -145,7 +145,10 @@ final class BenchmarkOutputBuffer: ObservableObject {
 
 @MainActor
 final class BenchmarkController: ObservableObject {
-    @Published var running = false
+    @Published var running = false {
+        didSet { keepAwake = KeepAwake.update(keepAwake, active: running, reason: "Running a benchmark") }
+    }
+    private var keepAwake: KeepAwake?
     private(set) var output = ""
     @Published private(set) var hasOutput = false
     let outputBuffer = BenchmarkOutputBuffer()

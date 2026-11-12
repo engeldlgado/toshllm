@@ -27,7 +27,13 @@ final class AudioStudioController: ObservableObject {
     @Published private(set) var fileSize = 0
     @Published private(set) var player: AVPlayer?
     @Published private(set) var isPlaying = false
-    @Published private(set) var stage: AudioStudioStage = .idle
+    @Published private(set) var stage: AudioStudioStage = .idle {
+        didSet {
+            let working = [.preparing, .analyzingVAD, .transcribing, .translating].contains(stage)
+            keepAwake = KeepAwake.update(keepAwake, active: working, reason: "Transcribing audio")
+        }
+    }
+    private var keepAwake: KeepAwake?
     @Published private(set) var progress = 0.0
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var cues: [SubtitleCue] = []

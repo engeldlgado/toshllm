@@ -19,7 +19,10 @@ final class NeedleTest: ObservableObject {
     }
 
     @Published private(set) var cells: [Cell] = []
-    @Published private(set) var running = false
+    @Published private(set) var running = false {
+        didSet { keepAwake = KeepAwake.update(keepAwake, active: running, reason: "Running a context test") }
+    }
+    private var keepAwake: KeepAwake?
     @Published private(set) var contextTokens: Int?
     @Published var error: String?
     private var task: Task<Void, Never>?

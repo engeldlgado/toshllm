@@ -749,3 +749,21 @@ enum ToolSupport {
         UserDefaults.standard.set(blocked, forKey: SettingsKeys.toolsUnsupportedModels)
     }
 }
+
+/// Keeps the Mac from idle-sleeping for as long as it is held, so a long generation is not
+/// suspended halfway. The display may still sleep.
+final class KeepAwake {
+    private let activity: NSObjectProtocol
+
+    init(_ reason: String) {
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
+                                                         reason: reason)
+    }
+
+    deinit { ProcessInfo.processInfo.endActivity(activity) }
+
+    /// The held instance while `active`, nil otherwise, keeping one that is already held.
+    static func update(_ held: KeepAwake?, active: Bool, reason: @autoclosure () -> String) -> KeepAwake? {
+        active ? held ?? KeepAwake(reason()) : nil
+    }
+}

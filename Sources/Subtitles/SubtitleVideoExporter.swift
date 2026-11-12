@@ -8,7 +8,10 @@ import QuartzCore
 
 @MainActor
 final class SubtitleVideoExporter: ObservableObject {
-    @Published private(set) var isExporting = false
+    @Published private(set) var isExporting = false {
+        didSet { keepAwake = KeepAwake.update(keepAwake, active: isExporting, reason: "Exporting a subtitled video") }
+    }
+    private var keepAwake: KeepAwake?
     @Published private(set) var progress = 0.0
     @Published private(set) var error: String?
     @Published private(set) var completedURL: URL?

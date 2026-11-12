@@ -5,6 +5,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Improved
+
+- **The Mac no longer idle-sleeps in the middle of a generation (#163).** While an answer, an image, a video, an upscale, a transcription, a subtitled export or a benchmark runs, ToshLLM keeps the system awake; the display can still turn off.
+
 ### Fixed
 
 - **Chat: Maximum image size under Attachments lines up with the rows around it,** with its icon and its ⓘ where the others have them.

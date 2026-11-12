@@ -4,6 +4,7 @@
 
 import AppKit
 import CoreText
+import IOKit.pwr_mgt
 import PDFKit
 import XCTest
 @testable import ToshLLM
@@ -3196,5 +3197,46 @@ extension ServerSettingsTests {
         let hint = ServerController.diagnose(log, exitCode: 1)
         XCTAssertTrue(hint.contains("por capas"), hint)
         XCTAssertTrue(hint.contains("by layers"), hint)
+    }
+}
+
+@MainActor
+final class KeepAwakeTests: XCTestCase {
+    /// Idle-sleep assertions this process holds under `reason`.
+    private func idleSleepAssertions(_ reason: String) -> Int {
+        var raw: Unmanaged<CFDictionary>?
+        guard IOPMCopyAssertionsByProcess(&raw) == kIOReturnSuccess,
+              let all = raw?.takeRetainedValue() as NSDictionary?,
+              let mine = all[NSNumber(value: getpid())] as? [[String: Any]] else { return 0 }
+        return mine.filter {
+            $0[kIOPMAssertionTypeKey] as? String == kIOPMAssertionTypePreventUserIdleSystemSleep &&
+            $0[kIOPMAssertionNameKey] as? String == reason
+        }.count
+    }
+
+    func testHoldsIdleSleepOffOnlyWhileHeld() {
+        var held: KeepAwake? = KeepAwake.update(nil, active: true, reason: "keep-awake test")
+        XCTAssertEqual(idleSleepAssertions("keep-awake test"), 1)
+        XCTAssertTrue(KeepAwake.update(held, active: true, reason: "keep-awake test") === held,
+                      "an active job keeps the assertion it already holds")
+        held = KeepAwake.update(held, active: false, reason: "keep-awake test")
+        XCTAssertNil(held)
+        XCTAssertEqual(idleSleepAssertions("keep-awake test"), 0)
+    }
+
+    func testGeneratorsKeepTheMacAwakeOnlyWhileWorking() {
+        let video = VideoGenerator()
+        video.state = .generating
+        XCTAssertEqual(idleSleepAssertions("Generating a video"), 1)
+        video.state = .generating
+        XCTAssertEqual(idleSleepAssertions("Generating a video"), 1)
+        video.state = .failed("stopped")
+        XCTAssertEqual(idleSleepAssertions("Generating a video"), 0)
+
+        let upscaler = ImageUpscaler()
+        upscaler.state = .running
+        XCTAssertEqual(idleSleepAssertions("Upscaling an image"), 1)
+        upscaler.state = .done
+        XCTAssertEqual(idleSleepAssertions("Upscaling an image"), 0)
     }
 }

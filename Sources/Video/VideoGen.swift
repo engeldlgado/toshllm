@@ -278,7 +278,10 @@ final class VideoGenerator: ObservableObject {
     enum State: Equatable { case idle, generating, done, failed(String) }
     enum Stage { case loading, sampling, decoding }
 
-    @Published var state: State = .idle
+    @Published var state: State = .idle {
+        didSet { keepAwake = KeepAwake.update(keepAwake, active: state == .generating, reason: "Generating a video") }
+    }
+    private var keepAwake: KeepAwake?
     @Published var stage: Stage = .loading
     @Published var progress: Double = 0
     @Published var stepText: String = ""
