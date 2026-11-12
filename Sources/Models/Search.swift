@@ -91,7 +91,7 @@ final class SearchStore: ObservableObject {
                 URLQueryItem(name: "limit", value: String(requestLimit)),
             ]
             guard let url = comps.url,
-                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let (data, _) = try? await HubEndpoint.data(from: url),
                   let repos = try? Self.decoder.decode([HFRepo].self, from: data) else { continue }
             let kept = usable(repos)
             if !kept.isEmpty { trending = kept; return }
@@ -113,7 +113,7 @@ final class SearchStore: ObservableObject {
             URLQueryItem(name: "limit", value: String(requestLimit)),
         ]
         guard let url = comps.url,
-              let (data, _) = try? await URLSession.shared.data(from: url) else {
+              let (data, _) = try? await HubEndpoint.data(from: url) else {
             results = []
             return
         }
@@ -142,7 +142,7 @@ final class SearchStore: ObservableObject {
         guard files[repo] == nil else { return }
 
         guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/main"),
-              let (data, _) = try? await URLSession.shared.data(from: url),
+              let (data, _) = try? await HubEndpoint.data(from: url),
               let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
 
         let ggufEntries = entries.compactMap { entry -> GGUFFileEntry? in
@@ -172,7 +172,7 @@ final class SearchStore: ObservableObject {
         guard base.count >= 4,
               let q = "\(base) DFlash".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "https://huggingface.co/api/models?search=\(q)&limit=12"),
-              let (data, _) = try? await URLSession.shared.data(from: url),
+              let (data, _) = try? await HubEndpoint.data(from: url),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
         let baseKey = Self.alnum(base)
         for m in arr {
@@ -187,7 +187,7 @@ final class SearchStore: ObservableObject {
 
     private func bestDraftFile(repo: String) async -> DraftInfo? {
         guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/main"),
-              let (data, _) = try? await URLSession.shared.data(from: url),
+              let (data, _) = try? await HubEndpoint.data(from: url),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
         let ggufs: [(String, Int64)] = arr.compactMap { e in
             guard let p = e["path"] as? String, p.lowercased().hasSuffix(".gguf") else { return nil }
@@ -208,7 +208,7 @@ final class SearchStore: ObservableObject {
         guard let url = URL(string: urlString) else { return false }
         var request = URLRequest(url: url)
         request.setValue("bytes=0-\(headerProbeBytes - 1)", forHTTPHeaderField: "Range")
-        guard let (data, _) = try? await URLSession.shared.data(for: request) else { return false }
+        guard let (data, _) = try? await HubEndpoint.data(for: request) else { return false }
         return data.range(of: Data(key.utf8)) != nil
     }
 
@@ -267,7 +267,7 @@ final class SearchStore: ObservableObject {
         for limit in [1 << 20, 32 << 20] {
             var request = URLRequest(url: url)
             request.setValue("bytes=0-\(limit - 1)", forHTTPHeaderField: "Range")
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
+            guard let (data, response) = try? await HubEndpoint.data(for: request),
                   let range = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Range"),
                   let slash = range.lastIndex(of: "/"),
                   let fileSize = UInt64(range[range.index(after: slash)...]) else { return nil }
@@ -282,7 +282,7 @@ final class SearchStore: ObservableObject {
         guard let url = URL(string: urlString) else { return nil }
         var request = URLRequest(url: url)
         request.setValue("bytes=0-\(headerProbeBytes - 1)", forHTTPHeaderField: "Range")
-        guard let (data, _) = try? await URLSession.shared.data(for: request),
+        guard let (data, _) = try? await HubEndpoint.data(for: request),
               let metadata = GGUFMetadataCache.parse(from: data) else { return nil }
         return metadata.isMoE
     }

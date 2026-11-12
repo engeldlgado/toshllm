@@ -210,7 +210,8 @@ final class DownloadItem: NSObject, ObservableObject, Identifiable, URLSessionDa
 
     private func startTask() {
         requestedOffset = sink.size()
-        let t = session.dataTask(with: ResumableDownload.request(remote: remote, partialBytes: requestedOffset))
+        let t = session.dataTask(with: ResumableDownload.request(remote: HubEndpoint.resolve(remote),
+                                                                   partialBytes: requestedOffset))
         task = t
         phase = .downloading
         receivedMB = Double(requestedOffset) / 1_048_576
@@ -593,14 +594,15 @@ final class ModelStore: ObservableObject {
     /// projector pairing deterministic and avoids cross-repo filename clashes.
     func download(urlString: String, preferredName: String? = nil,
                   fetchVisionProjector: Bool = true) {
-        guard let remote = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
-              remote.scheme?.hasPrefix("http") == true else { return }
+        guard let pasted = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
+              pasted.scheme?.hasPrefix("http") == true else { return }
+        let remote = HubEndpoint.canonical(pasted)
         let fileName = preferredName ?? remote.lastPathComponent
         let dest = directory.appendingPathComponent(fileName)
         let item = DownloadItem(remote: remote, destination: dest)
         item.onFinish = { [weak self] in self?.refresh() }
         downloads.append(item)
-        Self.recordSource(urlString, forFile: fileName)
+        Self.recordSource(remote.absoluteString, forFile: fileName)
         // Vision models ship a separate projector (mmproj). When downloading the
         // model, fetch its sibling mmproj too so vision works without manual steps.
         if fetchVisionProjector && !fileName.lowercased().contains("mmproj") {
@@ -618,7 +620,7 @@ final class ModelStore: ObservableObject {
         let repo = comps[r - 2] + "/" + comps[r - 1]
         let branch = comps[r + 1]
         guard let api = URL(string: "https://huggingface.co/api/models/\(repo)/tree/\(branch)"),
-              let (data, _) = try? await URLSession.shared.data(from: api),
+              let (data, _) = try? await HubEndpoint.data(from: api),
               let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
         let projectors = entries.compactMap { $0["path"] as? String }
             .filter { $0.lowercased().contains("mmproj") && $0.lowercased().hasSuffix(".gguf") }

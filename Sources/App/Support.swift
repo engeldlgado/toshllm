@@ -42,6 +42,9 @@ enum SettingsKeys {
     static let serverBinary = "serverBinary"
     static let modelPath = "modelPath"
     static let modelsDir = "modelsDir"
+    /// "huggingface", "hf-mirror" or "custom"; see `HubEndpoint`.
+    static let hubEndpoint = "hubEndpoint"
+    static let hubEndpointCustom = "hubEndpointCustom"
     static let whisperModel = "whisperModel"
     static let speechInputMethod = "speechInputMethod"
     static let whisperLoadPolicy = "whisperLoadPolicy"

@@ -5,6 +5,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Models can download from a mirror such as hf-mirror.com (#156).** Settings › General › Download source picks Hugging Face, hf-mirror.com or an address of your own, and downloads, search and update checks all go there; the SHA-256 checksum is still verified. HF_ENDPOINT is honored when the app is opened with it.
+
 ### Improved
 
 - **The Mac no longer idle-sleeps in the middle of a generation (#163).** While an answer, an image, a video, an upscale, a transcription, a subtitled export or a benchmark runs, ToshLLM keeps the system awake; the display can still turn off.

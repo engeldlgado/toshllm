@@ -21,7 +21,7 @@ enum HuggingFaceAPI {
         let dir = filePath.contains("/") ? "/" + filePath.split(separator: "/").dropLast().joined(separator: "/") : ""
 
         guard let api = URL(string: "https://huggingface.co/api/models/\(repo)/tree/\(rev)\(dir)"),
-              let (data, _) = try? await URLSession.shared.data(from: api),
+              let (data, _) = try? await HubEndpoint.data(from: api),
               let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
 
         guard let entry = entries.first(where: { ($0["path"] as? String) == filePath }) else { return nil }
