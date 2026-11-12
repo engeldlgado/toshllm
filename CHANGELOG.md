@@ -3,6 +3,12 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Chat: Maximum image size under Attachments lines up with the rows around it,** with its icon and its ⓘ where the others have them.
+
 ## [0.87.34] - 2026-11-11
 
 ### Improved
