@@ -3138,6 +3138,38 @@ final class ModelNameTests: XCTestCase {
         XCTAssertEqual(ModelName("Qwen3.5-122B-A10B-UD-Q8_K_XL-00001-of-00005.gguf").title, "Qwen3.5 122B-A10B")
     }
 
+    func testRepoNameAndAuthorDisplay() {
+        let m = ModelName("Qwen3.8-35B-A3B-Distill", author: "empero-ai")
+        XCTAssertEqual(m.title, "Qwen3.8 35B-A3B")
+        XCTAssertEqual(m.author, "empero-ai")
+        XCTAssertEqual(m.family, "Qwen")
+        XCTAssertTrue(m.badges.contains("Distill"))
+        XCTAssertTrue(m.badges.contains("MoE"))
+        XCTAssertTrue(m.display.contains("empero-ai"))
+
+        let qatModel = ModelName("Qwen3.8-35B-A3B-QAT", author: "empero-ai")
+        XCTAssertEqual(qatModel.title, "Qwen3.8 35B-A3B")
+        XCTAssertTrue(qatModel.badges.contains("QAT"))
+        XCTAssertTrue(qatModel.display.contains("QAT"))
+    }
+
+    func testHuggingFaceURLParsing() {
+        let resolveURL = "https://huggingface.co/empero-ai/Qwen3.8-35B-A3B-Distill-GGUF/resolve/main/Qwen3.8-35B-A3B-Q4_K_M.gguf"
+        let parsedResolve = ModelName.parseHuggingFaceURL(resolveURL)
+        XCTAssertEqual(parsedResolve?.author, "empero-ai")
+        XCTAssertEqual(parsedResolve?.repo, "Qwen3.8-35B-A3B-Distill")
+
+        let blobURL = "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/blob/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+        let parsedBlob = ModelName.parseHuggingFaceURL(blobURL)
+        XCTAssertEqual(parsedBlob?.author, "bartowski")
+        XCTAssertEqual(parsedBlob?.repo, "Meta-Llama-3.1-8B-Instruct")
+
+        let repoURL = "https://huggingface.co/Qwen/Qwen3.6-35B-A3B"
+        let parsedRepo = ModelName.parseHuggingFaceURL(repoURL)
+        XCTAssertEqual(parsedRepo?.author, "Qwen")
+        XCTAssertEqual(parsedRepo?.repo, "Qwen3.6-35B-A3B")
+    }
+
     // MARK: engine check
 
     private var engineCheckSample: String {

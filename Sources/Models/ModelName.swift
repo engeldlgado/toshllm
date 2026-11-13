@@ -4,6 +4,7 @@
 
 import Foundation
 import SwiftUI
+import Darwin
 
 /// Readable model name parsed from the GGUF filename convention
 /// (BaseName-SizeLabel-FineTune-Version-Encoding), or from `general.name`.
@@ -11,10 +12,13 @@ struct ModelName {
     let title: String
     let quant: String
     let badges: [String]
+    let author: String?
+    let explicitFamily: String?
     private let sizeToken: String
 
     var display: String {
         var s = title
+        if let author, !author.isEmpty { s += " · " + author }
         if !badges.isEmpty { s += " · " + badges.joined(separator: " · ") }
         if !quant.isEmpty { s += " · " + quant }
         return s
@@ -34,12 +38,13 @@ struct ModelName {
         ("thinking", "Thinking"), ("reasoning", "Reasoning"),
         ("instruct", "Instruct"), ("coder", "Coder"), ("chat", "Chat"),
         ("distill", "Distill"), ("reap", "REAP"), ("base", "Base"),
+        ("qat", "QAT"),
     ]
     private static let stripFromBase: Set<String> = [
-        "uncensored", "abliterated", "distill", "reap", "thinking", "reasoning",
+        "uncensored", "abliterated", "distill", "reap", "thinking", "reasoning", "qat",
     ]
     private static let acronyms = ["gpt": "GPT", "oss": "OSS", "vl": "VL",
-                                   "glm": "GLM", "qwq": "QwQ", "moe": "MoE"]
+                                   "glm": "GLM", "qwq": "QwQ", "moe": "MoE", "qat": "QAT"]
 
     private static func cap(_ token: String) -> String {
         if let a = acronyms[token.lowercased()] { return a }
@@ -51,14 +56,18 @@ struct ModelName {
         s.range(of: "(?i)(^|\(sep))\(token)($|\(sep))", options: .regularExpression) != nil
     }
 
-    private init(title: String, quant: String, badges: [String], sizeToken: String) {
+    private init(title: String, quant: String, badges: [String], sizeToken: String, author: String? = nil, explicitFamily: String? = nil) {
         self.title = title
         self.quant = quant
         self.badges = badges
         self.sizeToken = sizeToken
+        self.author = author
+        self.explicitFamily = explicitFamily
     }
 
-    init(_ rawName: String) {
+    init(_ rawName: String, author: String? = nil, explicitFamily: String? = nil) {
+        self.author = author
+        self.explicitFamily = explicitFamily
         var s = rawName
         for ext in [".gguf", ".safetensors"] where s.lowercased().hasSuffix(ext) {
             s = String(s.dropLast(ext.count))
@@ -150,7 +159,14 @@ struct ModelName {
     /// Family the picker groups under. Merges a maker's generations and its
     /// architecture spellings, so Qwen3, Qwen2.5 and QwQ all land together.
     var family: String {
-        let tokens = title.lowercased()
+        if let explicitFamily, explicitFamily != Self.otherFamily {
+            return explicitFamily
+        }
+        return Self.family(forText: title)
+    }
+
+    static func family(forText text: String) -> String {
+        let tokens = text.lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
         // The name splits into "gpt" + "oss", so the pair has to be read together.
@@ -246,49 +262,196 @@ struct ModelName {
     /// calls per model and the name never changes while the file does not.
     static func forgetCachedNames() { cacheLock.withLock { cache.removeAll() } }
 
+    /// Extracts Hugging Face URL from macOS extended attribute if downloaded via browser.
+    private static func whereFromsURL(forPath path: String) -> String? {
+        let length = getxattr(path, "com.apple.metadata:kMDItemWhereFroms", nil, 0, 0, 0)
+        guard length > 0 else { return nil }
+        var data = Data(count: length)
+        let read = data.withUnsafeMutableBytes {
+            getxattr(path, "com.apple.metadata:kMDItemWhereFroms", $0.baseAddress, length, 0, 0)
+        }
+        guard read == length,
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String] else {
+            return nil
+        }
+        return plist.first(where: { $0.contains("huggingface.co") })
+    }
+
+    /// Parses author and cleaned repository name from a Hugging Face URL.
+    static func parseHuggingFaceURL(_ urlString: String) -> (author: String, repo: String)? {
+        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
+              url.host?.contains("huggingface.co") == true else { return nil }
+        let components = url.pathComponents.filter { $0 != "/" }
+        var author: String? = nil
+        var rawRepo: String? = nil
+
+        if let resolveIndex = components.firstIndex(of: "resolve") ?? components.firstIndex(of: "blob"), resolveIndex >= 2 {
+            author = components[resolveIndex - 2]
+            rawRepo = components[resolveIndex - 1]
+        } else if components.count >= 2 {
+            author = components[0]
+            rawRepo = components[1]
+        }
+
+        guard let author, let rawRepo, !author.isEmpty, !rawRepo.isEmpty else { return nil }
+        let cleaned = rawRepo.replacingOccurrences(of: "(?i)[-_.]*gguf.*$", with: "", options: .regularExpression)
+        return (author, cleaned.isEmpty ? rawRepo : cleaned)
+    }
+
     private static func resolve(_ path: String) -> ModelName {
-        let byFile = ModelName(URL(fileURLWithPath: path).lastPathComponent)
+        let fileURL = URL(fileURLWithPath: path)
+        let fileName = fileURL.lastPathComponent
+        let byFile = ModelName(fileName)
         guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return byFile }
         let metadata = GGUFMetadataCache.metadata(at: path)
         let headerQuant = metadata?.fileTypeLabel
-        guard
-              let meta = metadata?.string(for: "general.name")?
-                  .trimmingCharacters(in: .whitespaces),
-              !meta.isEmpty else {
-            guard let headerQuant else { return byFile }
-            return ModelName(title: byFile.title, quant: headerQuant,
-                             badges: byFile.badges, sizeToken: byFile.sizeToken)
+
+        var repoAuthor: String? = nil
+        var repoModelName: ModelName? = nil
+
+        // 1. Try recorded download source from ToshLLM
+        if let sourceURLString = ModelStore.source(forFile: fileName),
+           let parsed = parseHuggingFaceURL(sourceURLString) {
+            repoAuthor = parsed.author
+            repoModelName = ModelName(parsed.repo, author: repoAuthor)
         }
-        // Some converters preserve the Hugging Face repository as owner/model.
-        // Only the model component belongs in the title.
-        let metadataName = meta.split(separator: "/").last.map(String.init) ?? meta
-        let byMeta = ModelName(metadataName)
-        let genericMetadataNames = ["model", "original model", "converted model", "untitled"]
-        let metadataIsGeneric = genericMetadataNames.contains(byMeta.title.lowercased())
-            || genericMetadataNames.contains(metadataName.lowercased())
-        guard !byMeta.title.isEmpty, !metadataIsGeneric else {
-            return ModelName(title: byFile.title,
-                             quant: byFile.quant.hasPrefix("UD-") ? byFile.quant : (headerQuant ?? byFile.quant),
-                             badges: byFile.badges, sizeToken: byFile.sizeToken)
+
+        // 2. Try macOS browser download origin extended attribute (kMDItemWhereFroms)
+        if repoAuthor == nil || repoModelName == nil,
+           let whereFroms = whereFromsURL(forPath: path),
+           let parsed = parseHuggingFaceURL(whereFroms) {
+            if repoAuthor == nil { repoAuthor = parsed.author }
+            if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor) }
+            ModelStore.recordSource(whereFroms, forFile: fileName)
         }
-        var title = byMeta.sizeToken.isEmpty && !byFile.sizeToken.isEmpty
-            ? "\(byMeta.title) \(byFile.sizeToken)" : byMeta.title
-        if byFile.sizeToken.contains("-A"), !byMeta.sizeToken.contains("-A") {
-            let suffix = " \(byMeta.sizeToken)"
-            let base = title.hasSuffix(suffix) ? String(title.dropLast(suffix.count)) : title
-            title = "\(base) \(byFile.sizeToken)"
+
+        // 3. Try GGUF URL metadata keys (e.g. general.base_model.0.repo_url, general.source.url)
+        let urlKeys = [
+            "general.base_model.0.repo_url",
+            "general.source.url",
+            "general.repo_url",
+            "general.url"
+        ]
+        for key in urlKeys where repoAuthor == nil || repoModelName == nil {
+            if let urlStr = metadata?.string(for: key),
+               let parsed = parseHuggingFaceURL(urlStr) {
+                if repoAuthor == nil { repoAuthor = parsed.author }
+                if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor) }
+            }
         }
+
+        let genericMetadataNames: Set<String> = [
+            "model", "original model", "converted model", "untitled",
+            "ours", "hf", "huggingface", "gguf", "base", "default"
+        ]
+
+        // 4. Try general.name with "owner/model" format (e.g. "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF")
+        if let meta = metadata?.string(for: "general.name")?.trimmingCharacters(in: .whitespaces),
+           meta.contains("/") {
+            let parts = meta.split(separator: "/")
+            if parts.count >= 2 {
+                let owner = String(parts[0])
+                if repoAuthor == nil && !genericMetadataNames.contains(owner.lowercased()) {
+                    repoAuthor = owner
+                }
+                let rawRepo = String(parts[1])
+                let cleaned = rawRepo.replacingOccurrences(of: "(?i)[-_.]*gguf.*$", with: "", options: .regularExpression)
+                if repoModelName == nil && !cleaned.isEmpty && !genericMetadataNames.contains(cleaned.lowercased()) {
+                    repoModelName = ModelName(cleaned, author: repoAuthor)
+                }
+            }
+        }
+
+        // 5. Try GGUF organization and author metadata
+        let orgKeys = [
+            "general.base_model.0.organization",
+            "general.organization",
+            "general.base_model.0.author",
+            "general.author"
+        ]
+        for key in orgKeys where repoAuthor == nil {
+            if let org = metadata?.string(for: key)?.trimmingCharacters(in: .whitespaces),
+               !org.isEmpty, !genericMetadataNames.contains(org.lowercased()) {
+                repoAuthor = org
+            }
+        }
+
+        // 6. Try filename prefix if formatted as "author_model" (e.g. "google_gemma-4-E4B-it-Q4_K_M.gguf")
+        if repoAuthor == nil, fileName.contains("_") {
+            let prefix = String(fileName.split(separator: "_")[0])
+            let knownCreators: Set<String> = [
+                "google", "unsloth", "bartowski", "meta", "mistralai", "mistral",
+                "deepseek", "qwen", "openbmb", "microsoft", "maziyarpanahi",
+                "davidau", "thebloke", "empero-ai"
+            ]
+            if knownCreators.contains(prefix.lowercased()) {
+                repoAuthor = prefix
+            }
+        }
+
+        // 7. Determine the base candidate
+        var primary: ModelName? = repoModelName
+
+        if primary == nil, let meta = metadata?.string(for: "general.name")?.trimmingCharacters(in: .whitespaces), !meta.isEmpty {
+            let metadataName = meta.split(separator: "/").last.map(String.init) ?? meta
+            let byMeta = ModelName(metadataName, author: repoAuthor)
+            let isGeneric = genericMetadataNames.contains(byMeta.title.lowercased())
+                || genericMetadataNames.contains(metadataName.lowercased())
+            if !byMeta.title.isEmpty && !isGeneric {
+                primary = byMeta
+            }
+        }
+
+        if primary == nil, let baseName = metadata?.string(for: "general.base_model.0.name")?.trimmingCharacters(in: .whitespaces), !baseName.isEmpty {
+            let byBase = ModelName(baseName, author: repoAuthor)
+            if !genericMetadataNames.contains(byBase.title.lowercased()) {
+                primary = byBase
+            }
+        }
+
+        let chosen = primary ?? byFile
+
+        var title = chosen.title
+        if chosen.sizeToken.isEmpty && !byFile.sizeToken.isEmpty {
+            title = "\(title) \(byFile.sizeToken)"
+        } else if byFile.sizeToken.contains("-A"), !chosen.sizeToken.contains("-A") {
+            if !chosen.sizeToken.isEmpty {
+                let suffix = " \(chosen.sizeToken)"
+                if title.hasSuffix(suffix) {
+                    title = String(title.dropLast(suffix.count))
+                }
+            }
+            if !title.hasSuffix(byFile.sizeToken) {
+                title = "\(title) \(byFile.sizeToken)"
+            }
+        }
+
         var badges: [String] = []
-        for badge in byFile.badges + byMeta.badges where !badges.contains(badge) {
+        for badge in byFile.badges + chosen.badges where !badges.contains(badge) {
             badges.append(badge)
         }
         let quant = byFile.quant.hasPrefix("UD-")
             ? byFile.quant
-            : (headerQuant ?? (byFile.quant.isEmpty ? byMeta.quant : byFile.quant))
+            : (headerQuant ?? (byFile.quant.isEmpty ? chosen.quant : byFile.quant))
+
+        // Determine family with robust fallbacks:
+        var determinedFamily = Self.family(forText: title)
+        if determinedFamily == Self.otherFamily {
+            determinedFamily = Self.family(forText: byFile.title)
+        }
+        if determinedFamily == Self.otherFamily, let arch = metadata?.string(for: "general.architecture") {
+            determinedFamily = Self.family(forText: arch)
+        }
+        if determinedFamily == Self.otherFamily, let baseName = metadata?.string(for: "general.base_model.0.name") {
+            determinedFamily = Self.family(forText: baseName)
+        }
+
         return ModelName(title: title,
                          quant: quant,
                          badges: badges,
-                         sizeToken: byMeta.sizeToken.isEmpty ? byFile.sizeToken : byMeta.sizeToken)
+                         sizeToken: chosen.sizeToken.isEmpty ? byFile.sizeToken : byFile.sizeToken,
+                         author: repoAuthor,
+                         explicitFamily: determinedFamily)
     }
 }
 
@@ -305,6 +468,13 @@ struct ModelTitleLabel: View {
     var body: some View {
         HStack(spacing: 5) {
             Text(model.title).font(titleFont).lineLimit(1)
+            if let author = model.author, !author.isEmpty {
+                Text(author)
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .foregroundStyle(.secondary)
+            }
             ForEach(model.badges, id: \.self) { badge in
                 Text(badge)
                     .font(.system(size: 10, weight: .semibold))

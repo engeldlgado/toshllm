@@ -137,9 +137,11 @@ enum ChatRoadRoute {
     }
 
     private static func mapItem(_ coordinate: CLLocationCoordinate2D) -> MKMapItem {
+        #if compiler(>=6.2)
         if #available(macOS 26, *) {
             return MKMapItem(location: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude), address: nil)
         }
+        #endif
         return MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
     }
 
