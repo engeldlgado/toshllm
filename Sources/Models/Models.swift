@@ -646,13 +646,13 @@ final class ModelStore: ObservableObject {
         downloads.removeAll { $0.finished || $0.error != nil }
     }
 
-    static func recordSource(_ urlString: String, forFile fileName: String) {
+    nonisolated static func recordSource(_ urlString: String, forFile fileName: String) {
         var map = UserDefaults.standard.dictionary(forKey: SettingsKeys.modelSource) as? [String: String] ?? [:]
         map[fileName] = urlString
         UserDefaults.standard.set(map, forKey: SettingsKeys.modelSource)
     }
 
-    static func source(forFile fileName: String) -> String? {
+    nonisolated static func source(forFile fileName: String) -> String? {
         (UserDefaults.standard.dictionary(forKey: SettingsKeys.modelSource) as? [String: String])?[fileName]
     }
 

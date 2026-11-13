@@ -11,10 +11,13 @@ struct ModelName {
     let title: String
     let quant: String
     let badges: [String]
+    let author: String?
+    let explicitFamily: String?
     private let sizeToken: String
 
     var display: String {
         var s = title
+        if let author, !author.isEmpty { s += " · " + author }
         if !badges.isEmpty { s += " · " + badges.joined(separator: " · ") }
         if !quant.isEmpty { s += " · " + quant }
         return s
@@ -34,12 +37,13 @@ struct ModelName {
         ("thinking", "Thinking"), ("reasoning", "Reasoning"),
         ("instruct", "Instruct"), ("coder", "Coder"), ("chat", "Chat"),
         ("distill", "Distill"), ("reap", "REAP"), ("base", "Base"),
+        ("qat", "QAT"),
     ]
     private static let stripFromBase: Set<String> = [
-        "uncensored", "abliterated", "distill", "reap", "thinking", "reasoning",
+        "uncensored", "abliterated", "distill", "reap", "thinking", "reasoning", "qat",
     ]
     private static let acronyms = ["gpt": "GPT", "oss": "OSS", "vl": "VL",
-                                   "glm": "GLM", "qwq": "QwQ", "moe": "MoE"]
+                                   "glm": "GLM", "qwq": "QwQ", "moe": "MoE", "qat": "QAT"]
 
     private static func cap(_ token: String) -> String {
         if let a = acronyms[token.lowercased()] { return a }
@@ -51,14 +55,18 @@ struct ModelName {
         s.range(of: "(?i)(^|\(sep))\(token)($|\(sep))", options: .regularExpression) != nil
     }
 
-    private init(title: String, quant: String, badges: [String], sizeToken: String) {
+    private init(title: String, quant: String, badges: [String], sizeToken: String, author: String? = nil, explicitFamily: String? = nil) {
         self.title = title
         self.quant = quant
         self.badges = badges
         self.sizeToken = sizeToken
+        self.author = author
+        self.explicitFamily = explicitFamily
     }
 
-    init(_ rawName: String) {
+    init(_ rawName: String, author: String? = nil, explicitFamily: String? = nil) {
+        self.author = author
+        self.explicitFamily = explicitFamily
         var s = rawName
         for ext in [".gguf", ".safetensors"] where s.lowercased().hasSuffix(ext) {
             s = String(s.dropLast(ext.count))
@@ -150,7 +158,14 @@ struct ModelName {
     /// Family the picker groups under. Merges a maker's generations and its
     /// architecture spellings, so Qwen3, Qwen2.5 and QwQ all land together.
     var family: String {
-        let tokens = title.lowercased()
+        if let explicitFamily, explicitFamily != Self.otherFamily {
+            return explicitFamily
+        }
+        return Self.family(forText: title)
+    }
+
+    static func family(forText text: String) -> String {
+        let tokens = text.lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
         // The name splits into "gpt" + "oss", so the pair has to be read together.
@@ -247,48 +262,107 @@ struct ModelName {
     static func forgetCachedNames() { cacheLock.withLock { cache.removeAll() } }
 
     private static func resolve(_ path: String) -> ModelName {
-        let byFile = ModelName(URL(fileURLWithPath: path).lastPathComponent)
+        let fileURL = URL(fileURLWithPath: path)
+        let fileName = fileURL.lastPathComponent
+        let byFile = ModelName(fileName)
         guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return byFile }
         let metadata = GGUFMetadataCache.metadata(at: path)
         let headerQuant = metadata?.fileTypeLabel
-        guard
-              let meta = metadata?.string(for: "general.name")?
-                  .trimmingCharacters(in: .whitespaces),
-              !meta.isEmpty else {
-            guard let headerQuant else { return byFile }
-            return ModelName(title: byFile.title, quant: headerQuant,
-                             badges: byFile.badges, sizeToken: byFile.sizeToken)
+
+        // 1. Try to extract author and repository name from recorded download source
+        var repoAuthor: String? = nil
+        var repoModelName: ModelName? = nil
+
+        if let sourceURLString = ModelStore.source(forFile: fileName),
+           let sourceURL = URL(string: sourceURLString),
+           sourceURL.host?.contains("huggingface.co") == true {
+            let components = sourceURL.pathComponents.filter { $0 != "/" }
+            let resolveIndex = components.firstIndex(of: "resolve") ?? components.firstIndex(of: "blob")
+            if let index = resolveIndex, index >= 2 {
+                repoAuthor = components[index - 2]
+                let rawRepo = components[index - 1]
+                let cleaned = rawRepo.replacingOccurrences(of: "(?i)[-_.]*gguf.*$", with: "", options: .regularExpression)
+                if !cleaned.isEmpty {
+                    repoModelName = ModelName(cleaned, author: repoAuthor)
+                }
+            }
         }
-        // Some converters preserve the Hugging Face repository as owner/model.
-        // Only the model component belongs in the title.
-        let metadataName = meta.split(separator: "/").last.map(String.init) ?? meta
-        let byMeta = ModelName(metadataName)
-        let genericMetadataNames = ["model", "original model", "converted model", "untitled"]
-        let metadataIsGeneric = genericMetadataNames.contains(byMeta.title.lowercased())
-            || genericMetadataNames.contains(metadataName.lowercased())
-        guard !byMeta.title.isEmpty, !metadataIsGeneric else {
-            return ModelName(title: byFile.title,
-                             quant: byFile.quant.hasPrefix("UD-") ? byFile.quant : (headerQuant ?? byFile.quant),
-                             badges: byFile.badges, sizeToken: byFile.sizeToken)
+
+        // 2. Check general.base_model metadata if author is still unknown
+        if repoAuthor == nil {
+            if let baseOrg = metadata?.string(for: "general.base_model.0.organization"), !baseOrg.isEmpty {
+                repoAuthor = baseOrg
+            }
         }
-        var title = byMeta.sizeToken.isEmpty && !byFile.sizeToken.isEmpty
-            ? "\(byMeta.title) \(byFile.sizeToken)" : byMeta.title
-        if byFile.sizeToken.contains("-A"), !byMeta.sizeToken.contains("-A") {
-            let suffix = " \(byMeta.sizeToken)"
-            let base = title.hasSuffix(suffix) ? String(title.dropLast(suffix.count)) : title
-            title = "\(base) \(byFile.sizeToken)"
+
+        // 3. Determine the base candidate
+        let genericMetadataNames: Set<String> = [
+            "model", "original model", "converted model", "untitled",
+            "ours", "hf", "huggingface", "gguf", "base", "default"
+        ]
+
+        var primary: ModelName? = repoModelName
+
+        if primary == nil, let meta = metadata?.string(for: "general.name")?.trimmingCharacters(in: .whitespaces), !meta.isEmpty {
+            let metadataName = meta.split(separator: "/").last.map(String.init) ?? meta
+            let byMeta = ModelName(metadataName, author: repoAuthor)
+            let isGeneric = genericMetadataNames.contains(byMeta.title.lowercased())
+                || genericMetadataNames.contains(metadataName.lowercased())
+            if !byMeta.title.isEmpty && !isGeneric {
+                primary = byMeta
+            }
         }
+
+        if primary == nil, let baseName = metadata?.string(for: "general.base_model.0.name")?.trimmingCharacters(in: .whitespaces), !baseName.isEmpty {
+            let byBase = ModelName(baseName, author: repoAuthor)
+            if !genericMetadataNames.contains(byBase.title.lowercased()) {
+                primary = byBase
+            }
+        }
+
+        let chosen = primary ?? byFile
+
+        var title = chosen.title
+        if chosen.sizeToken.isEmpty && !byFile.sizeToken.isEmpty {
+            title = "\(title) \(byFile.sizeToken)"
+        } else if byFile.sizeToken.contains("-A"), !chosen.sizeToken.contains("-A") {
+            if !chosen.sizeToken.isEmpty {
+                let suffix = " \(chosen.sizeToken)"
+                if title.hasSuffix(suffix) {
+                    title = String(title.dropLast(suffix.count))
+                }
+            }
+            if !title.hasSuffix(byFile.sizeToken) {
+                title = "\(title) \(byFile.sizeToken)"
+            }
+        }
+
         var badges: [String] = []
-        for badge in byFile.badges + byMeta.badges where !badges.contains(badge) {
+        for badge in byFile.badges + chosen.badges where !badges.contains(badge) {
             badges.append(badge)
         }
         let quant = byFile.quant.hasPrefix("UD-")
             ? byFile.quant
-            : (headerQuant ?? (byFile.quant.isEmpty ? byMeta.quant : byFile.quant))
+            : (headerQuant ?? (byFile.quant.isEmpty ? chosen.quant : byFile.quant))
+
+        // Determine family with robust fallbacks:
+        var determinedFamily = Self.family(forText: title)
+        if determinedFamily == Self.otherFamily {
+            determinedFamily = Self.family(forText: byFile.title)
+        }
+        if determinedFamily == Self.otherFamily, let arch = metadata?.string(for: "general.architecture") {
+            determinedFamily = Self.family(forText: arch)
+        }
+        if determinedFamily == Self.otherFamily, let baseName = metadata?.string(for: "general.base_model.0.name") {
+            determinedFamily = Self.family(forText: baseName)
+        }
+
         return ModelName(title: title,
                          quant: quant,
                          badges: badges,
-                         sizeToken: byMeta.sizeToken.isEmpty ? byFile.sizeToken : byMeta.sizeToken)
+                         sizeToken: chosen.sizeToken.isEmpty ? byFile.sizeToken : byFile.sizeToken,
+                         author: repoAuthor,
+                         explicitFamily: determinedFamily)
     }
 }
 
@@ -305,6 +379,13 @@ struct ModelTitleLabel: View {
     var body: some View {
         HStack(spacing: 5) {
             Text(model.title).font(titleFont).lineLimit(1)
+            if let author = model.author, !author.isEmpty {
+                Text(author)
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .foregroundStyle(.secondary)
+            }
             ForEach(model.badges, id: \.self) { badge in
                 Text(badge)
                     .font(.system(size: 10, weight: .semibold))
