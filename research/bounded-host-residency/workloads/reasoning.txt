@@ -1,5 +1,0 @@
-A train leaves city A at 9:00 at 80 km/h. Another leaves city B, 300 km away, at 10:00 at 100 km/h towards A. At what time and where do they meet? Reason step by step.
-=====
-Prove that the square root of 2 is irrational, and then explain whether the same argument works for the square root of 4 and why.
-=====
-I have 3 boxes, one with two gold coins, one with two silver coins, one with one of each. I pick a box at random and draw a gold coin. What is the probability the other coin in that box is gold? Explain carefully.

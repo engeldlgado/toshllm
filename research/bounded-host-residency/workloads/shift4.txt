@@ -1,7 +1,0 @@
-Write a Python class implementing an LRU cache with O(1) get and put, using a dict and a doubly linked list. Include type hints and a short docstring.
-=====
-Escribe un poema en francés de cuatro estrofas sobre el otoño en un pueblo de montaña, y luego explica en español las imágenes principales que usaste.
-=====
-Prove that there are infinitely many prime numbers, then prove that the square root of 3 is irrational. Be rigorous and number each step.
-=====
-Go back to the LRU cache class from the first answer: add a method that resizes the capacity at runtime and write pytest tests for it.

@@ -1,5 +1,0 @@
-Write a Python class implementing an LRU cache with O(1) get and put, using a dict and a doubly linked list. Include type hints and docstrings.
-=====
-Now write pytest unit tests for it, covering eviction order, updates of existing keys and capacity 1.
-=====
-Port the same class to Rust with generics, and explain the ownership choices you made.
