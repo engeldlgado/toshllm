@@ -13,8 +13,14 @@ struct ModelName {
     let quant: String
     let badges: [String]
     let author: String?
+    let repository: String?
     let explicitFamily: String?
     private let sizeToken: String
+
+    var repositoryURL: URL? {
+        guard let repository, !repository.isEmpty else { return nil }
+        return URL(string: "https://huggingface.co/\(repository)")
+    }
 
     var display: String {
         var s = title
@@ -56,17 +62,19 @@ struct ModelName {
         s.range(of: "(?i)(^|\(sep))\(token)($|\(sep))", options: .regularExpression) != nil
     }
 
-    private init(title: String, quant: String, badges: [String], sizeToken: String, author: String? = nil, explicitFamily: String? = nil) {
+    private init(title: String, quant: String, badges: [String], sizeToken: String, author: String? = nil, repository: String? = nil, explicitFamily: String? = nil) {
         self.title = title
         self.quant = quant
         self.badges = badges
         self.sizeToken = sizeToken
         self.author = author
+        self.repository = repository
         self.explicitFamily = explicitFamily
     }
 
-    init(_ rawName: String, author: String? = nil, explicitFamily: String? = nil) {
+    init(_ rawName: String, author: String? = nil, repository: String? = nil, explicitFamily: String? = nil) {
         self.author = author
+        self.repository = repository
         self.explicitFamily = explicitFamily
         var s = rawName
         for ext in [".gguf", ".safetensors"] where s.lowercased().hasSuffix(ext) {
@@ -263,7 +271,7 @@ struct ModelName {
     static func forgetCachedNames() { cacheLock.withLock { cache.removeAll() } }
 
     /// Extracts Hugging Face URL from macOS extended attribute if downloaded via browser.
-    private static func whereFromsURL(forPath path: String) -> String? {
+    static func whereFromsURL(forPath path: String) -> String? {
         let length = getxattr(path, "com.apple.metadata:kMDItemWhereFroms", nil, 0, 0, 0)
         guard length > 0 else { return nil }
         var data = Data(count: length)
@@ -307,13 +315,15 @@ struct ModelName {
         let headerQuant = metadata?.fileTypeLabel
 
         var repoAuthor: String? = nil
+        var fullRepo: String? = nil
         var repoModelName: ModelName? = nil
 
         // 1. Try recorded download source from ToshLLM
         if let sourceURLString = ModelStore.source(forFile: fileName),
            let parsed = parseHuggingFaceURL(sourceURLString) {
             repoAuthor = parsed.author
-            repoModelName = ModelName(parsed.repo, author: repoAuthor)
+            fullRepo = "\(parsed.author)/\(parsed.repo)"
+            repoModelName = ModelName(parsed.repo, author: repoAuthor, repository: fullRepo)
         }
 
         // 2. Try macOS browser download origin extended attribute (kMDItemWhereFroms)
@@ -321,7 +331,8 @@ struct ModelName {
            let whereFroms = whereFromsURL(forPath: path),
            let parsed = parseHuggingFaceURL(whereFroms) {
             if repoAuthor == nil { repoAuthor = parsed.author }
-            if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor) }
+            if fullRepo == nil { fullRepo = "\(parsed.author)/\(parsed.repo)" }
+            if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor, repository: fullRepo) }
             ModelStore.recordSource(whereFroms, forFile: fileName)
         }
 
@@ -336,7 +347,8 @@ struct ModelName {
             if let urlStr = metadata?.string(for: key),
                let parsed = parseHuggingFaceURL(urlStr) {
                 if repoAuthor == nil { repoAuthor = parsed.author }
-                if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor) }
+                if fullRepo == nil { fullRepo = "\(parsed.author)/\(parsed.repo)" }
+                if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor, repository: fullRepo) }
             }
         }
 
@@ -356,8 +368,11 @@ struct ModelName {
                 }
                 let rawRepo = String(parts[1])
                 let cleaned = rawRepo.replacingOccurrences(of: "(?i)[-_.]*gguf.*$", with: "", options: .regularExpression)
+                if fullRepo == nil && !genericMetadataNames.contains(owner.lowercased()) {
+                    fullRepo = "\(owner)/\(rawRepo)"
+                }
                 if repoModelName == nil && !cleaned.isEmpty && !genericMetadataNames.contains(cleaned.lowercased()) {
-                    repoModelName = ModelName(cleaned, author: repoAuthor)
+                    repoModelName = ModelName(cleaned, author: repoAuthor, repository: fullRepo)
                 }
             }
         }
@@ -446,11 +461,21 @@ struct ModelName {
             determinedFamily = Self.family(forText: baseName)
         }
 
+        // Backfill recorded download source in ToshLLM if missing
+        if ModelStore.source(forFile: fileName) == nil {
+            if let whereFroms = whereFromsURL(forPath: path) {
+                ModelStore.recordSource(whereFroms, forFile: fileName)
+            } else if let repo = fullRepo {
+                ModelStore.recordSource("https://huggingface.co/\(repo)/resolve/main/\(fileName)", forFile: fileName)
+            }
+        }
+
         return ModelName(title: title,
                          quant: quant,
                          badges: badges,
                          sizeToken: chosen.sizeToken.isEmpty ? byFile.sizeToken : byFile.sizeToken,
                          author: repoAuthor,
+                         repository: fullRepo ?? chosen.repository,
                          explicitFamily: determinedFamily)
     }
 }

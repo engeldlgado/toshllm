@@ -14,6 +14,7 @@ struct LocalModelCard: View {
     @EnvironmentObject var modelUpdates: ModelUpdateChecker
     @AppStorage(SettingsKeys.modelPath) private var modelPath = ""
     @State private var showingSettings = false
+    @State private var showingDetails = false
 
     var body: some View {
         let path = model.url.path
@@ -38,6 +39,9 @@ struct LocalModelCard: View {
         .padding(.horizontal, 15).padding(.vertical, 12)
         .frame(minHeight: 60)
         .background(active ? Color.green.opacity(0.055) : WorkspaceStyle.surface)
+        .sheet(isPresented: $showingDetails) {
+            LocalModelDetailsSheet(model: model)
+        }
     }
 
     private func identity(parsed: ModelName, traits: ModelTraits, active: Bool) -> some View {
@@ -46,6 +50,13 @@ struct LocalModelCard: View {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 7) {
                     Text(parsed.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    if let author = parsed.author, !author.isEmpty {
+                        Text(author)
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                            .foregroundStyle(.secondary)
+                    }
                     if active {
                         Label(loc.t("Activo", "Active"), systemImage: "checkmark.circle.fill")
                             .font(.caption).foregroundStyle(.green)
@@ -92,7 +103,8 @@ struct LocalModelCard: View {
                 UseModelButton(path: path, modelName: model.name).controlSize(.small)
             }
             LocalModelMenu(model: model, traits: traits, updatable: updatable,
-                           pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate)
+                           pendingDelete: $pendingDelete, pendingUpdate: $pendingUpdate,
+                           showingDetails: $showingDetails)
         }
         .fixedSize()
     }
@@ -104,11 +116,15 @@ private struct LocalModelMenu: View {
     let updatable: Bool
     @Binding var pendingDelete: LocalModel?
     @Binding var pendingUpdate: LocalModel?
+    @Binding var showingDetails: Bool
     @EnvironmentObject var loc: Localizer
     @EnvironmentObject var models: ModelStore
 
     var body: some View {
         Menu(loc.t("Más acciones", "More actions"), systemImage: "ellipsis") {
+            Button(loc.t("Ver detalles del modelo", "View model details"), systemImage: "info.circle") {
+                showingDetails = true
+            }
             Button(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder") {
                 NSWorkspace.shared.activateFileViewerSelecting([model.url])
             }

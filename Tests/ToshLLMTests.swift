@@ -3139,9 +3139,11 @@ final class ModelNameTests: XCTestCase {
     }
 
     func testRepoNameAndAuthorDisplay() {
-        let m = ModelName("Qwen3.8-35B-A3B-Distill", author: "empero-ai")
+        let m = ModelName("Qwen3.8-35B-A3B-Distill", author: "empero-ai", repository: "empero-ai/Qwen3.8-35B-A3B-Distill")
         XCTAssertEqual(m.title, "Qwen3.8 35B-A3B")
         XCTAssertEqual(m.author, "empero-ai")
+        XCTAssertEqual(m.repository, "empero-ai/Qwen3.8-35B-A3B-Distill")
+        XCTAssertEqual(m.repositoryURL?.absoluteString, "https://huggingface.co/empero-ai/Qwen3.8-35B-A3B-Distill")
         XCTAssertEqual(m.family, "Qwen")
         XCTAssertTrue(m.badges.contains("Distill"))
         XCTAssertTrue(m.badges.contains("MoE"))

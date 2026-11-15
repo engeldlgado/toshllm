@@ -498,9 +498,14 @@ private struct CatalogModelInspector: View {
         let path = url.pathComponents[1..<resolve].joined(separator: "/")
         return URL(string: "https://huggingface.co/\(path)")
     }
-    private var repositoryOwner: String { repositoryURL?.pathComponents.dropFirst().first ?? "—" }
+    private var repositoryOwner: String {
+        if let owner = repositoryURL?.pathComponents.dropFirst().first, !owner.isEmpty {
+            return owner
+        }
+        return ModelName.forPath(model.fileName).author ?? "—"
+    }
     private var quantization: String { ModelName.forPath(model.fileName).quant }
-    private var modelFamily: String { ModelName(model.name).title.split(separator: " ").first.map(String.init) ?? model.name }
+    private var modelFamily: String { ModelName.forPath(model.fileName).family }
     private func openRepository() { if let repositoryURL { NSWorkspace.shared.open(repositoryURL) } }
 }
 
