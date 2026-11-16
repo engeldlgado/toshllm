@@ -1,20 +1,24 @@
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 11e869430..17562a498 100644
+index 8b459e0720..279ac0569a 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
-@@ -430,16 +430,20 @@ extern "C" {
+@@ -427,20 +427,24 @@ extern "C" {
+         // GGML_TYPE_IQ4_NL_4_8 = 37,
+         // GGML_TYPE_IQ4_NL_8_8 = 38,
+         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
          GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
          GGML_TYPE_Q1_0    = 41,
          GGML_TYPE_Q2_0    = 42,
-         GGML_TYPE_TURBO2_0 = 43, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
-         GGML_TYPE_TURBO3_0 = 44, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
-         GGML_TYPE_TURBO4_0 = 45, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
          GGML_TYPE_TQ3_1S  = 46, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
          GGML_TYPE_TQ4_1S  = 47, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
 +        // Prism ML types; the ids match the published GGUFs, and 48..141 are unused
 +        GGML_TYPE_PQ2_0   = 142, // Q2_0 codec at group 128
 +        GGML_TYPE_PTQ1_0  = 143, // ternary at group 128
-+        GGML_TYPE_COUNT   = 144,
+         // KV cache only, never written to a file, so they stay clear of the ids upstream hands out
+         GGML_TYPE_TURBO2_0 = 144, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
+         GGML_TYPE_TURBO3_0 = 145, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
+         GGML_TYPE_TURBO4_0 = 146, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
++        GGML_TYPE_COUNT   = 147,
      };
  
      // [TAG_GGML_PREC]
@@ -23,7 +27,7 @@ index 11e869430..17562a498 100644
      //  - result accumulation type
      //  - source tensor data representation type
      //  - etc.
-@@ -485,16 +489,18 @@ extern "C" {
+@@ -486,16 +490,18 @@ extern "C" {
          GGML_FTYPE_MOSTLY_IQ2_S   = 21, // except 1d tensors
          GGML_FTYPE_MOSTLY_IQ4_XS  = 22, // except 1d tensors
          GGML_FTYPE_MOSTLY_IQ1_M   = 23, // except 1d tensors
@@ -42,7 +46,7 @@ index 11e869430..17562a498 100644
  
          GGML_OP_DUP,
          GGML_OP_ADD,
-@@ -2659,16 +2665,24 @@ extern "C" {
+@@ -2660,16 +2666,24 @@ extern "C" {
              struct ggml_tensor  * q,
              struct ggml_tensor  * k,
              struct ggml_tensor  * v,
@@ -68,7 +72,7 @@ index 11e869430..17562a498 100644
              int                   direction,
              int                   group_size,    // 0 = auto (64 or 128 from ne[0])
 diff --git a/ggml/src/ggml-common.h b/ggml/src/ggml-common.h
-index e9c0754eb..1aca5d7e8 100644
+index e9c0754eb7..1aca5d7e88 100644
 --- a/ggml/src/ggml-common.h
 +++ b/ggml/src/ggml-common.h
 @@ -94,16 +94,21 @@ typedef sycl::half2 ggml_half2;
@@ -128,7 +132,7 @@ index e9c0754eb..1aca5d7e8 100644
  
  #define QK4_1 32
 diff --git a/ggml/src/ggml-cpu/arch-fallback.h b/ggml/src/ggml-cpu/arch-fallback.h
-index e4882984a..2f9707f82 100644
+index e4882984a2..2f9707f829 100644
 --- a/ggml/src/ggml-cpu/arch-fallback.h
 +++ b/ggml/src/ggml-cpu/arch-fallback.h
 @@ -1,11 +1,14 @@
@@ -147,7 +151,7 @@ index e4882984a..2f9707f82 100644
  #define quantize_row_q8_1_generic quantize_row_q8_1
  #define quantize_row_q8_K_generic quantize_row_q8_K
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index c5dfa3705..7fa420409 100644
+index c5dfa37057..7fa4204090 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -249,16 +249,28 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
@@ -180,7 +184,7 @@ index c5dfa3705..7fa420409 100644
  #else
          .nrows                    = 1,
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
-index b53d968c5..e29879992 100644
+index b53d968c5e..e298799927 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
 @@ -10,16 +10,17 @@
@@ -418,7 +422,7 @@ index b53d968c5..e29879992 100644
                  delta[j] = (v_d[j] - sum) * beta_val;
              }
 diff --git a/ggml/src/ggml-cpu/quants.c b/ggml/src/ggml-cpu/quants.c
-index 5e36459f8..7a9b27a41 100644
+index 5e36459f8c..7a9b27a412 100644
 --- a/ggml/src/ggml-cpu/quants.c
 +++ b/ggml/src/ggml-cpu/quants.c
 @@ -25,16 +25,24 @@
@@ -576,7 +580,7 @@ index 5e36459f8..7a9b27a41 100644
      UNUSED(nrc);
      UNUSED(bx);
 diff --git a/ggml/src/ggml-cpu/quants.h b/ggml/src/ggml-cpu/quants.h
-index 93ea7eeff..3164323c4 100644
+index 93ea7eeffe..3164323c41 100644
 --- a/ggml/src/ggml-cpu/quants.h
 +++ b/ggml/src/ggml-cpu/quants.h
 @@ -9,16 +9,18 @@
@@ -637,7 +641,7 @@ index 93ea7eeff..3164323c4 100644
  void ggml_vec_dot_mxfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_nvfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 477c83b9c..6ce1051fe 100644
+index 477c83b9cc..6ce1051fe9 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -791,51 +791,66 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rwkv(ggml_metal_
@@ -977,7 +981,7 @@ index 477c83b9c..6ce1051fe 100644
  
      // note: the top_k kernel is always descending order
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index 17f272fac..aa51ce537 100644
+index 17f272fac6..aa51ce537b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -132,17 +132,17 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_lightning
@@ -1021,7 +1025,7 @@ index 17f272fac..aa51ce537 100644
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin               (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t n_fuse);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one           (ggml_metal_library_t lib, enum ggml_op op);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index e7a5b3922..88b7e69b9 100644
+index e7a5b39226..88b7e69b90 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -2375,16 +2375,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
@@ -1100,7 +1104,7 @@ index e7a5b3922..88b7e69b9 100644
                          switch (op->type) {
                              case GGML_TYPE_F32:
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index 49592b393..d8d24af5e 100644
+index 49592b393f..d8d24af5ed 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
 @@ -24,16 +24,27 @@
@@ -1229,7 +1233,7 @@ index 49592b393..d8d24af5e 100644
  typedef struct {
      int64_t val;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 431b1b71a..d94c3babe 100644
+index 431b1b71ac..d94c3babe0 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -78,16 +78,20 @@ struct ggml_metal_op {
@@ -2039,7 +2043,7 @@ index 431b1b71a..d94c3babe 100644
      GGML_ASSERT(!op->src[3] || op->src[3]->ne[1] >= op->src[0]->ne[1] &&
              "the Flash-Attention Metal kernel requires the mask to be at least n_queries big");
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
-index 18a43e20b..62d339cb8 100644
+index 18a43e20bc..62d339cb81 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.h
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.h
 @@ -67,16 +67,17 @@ int ggml_metal_op_ssm_scan          (ggml_metal_op_t ctx, int idx);
@@ -2061,7 +2065,7 @@ index 18a43e20b..62d339cb8 100644
  int ggml_metal_op_l2_norm           (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_group_norm        (ggml_metal_op_t ctx, int idx);
 diff --git a/ggml/src/ggml-metal/kernels/dequantize.h b/ggml/src/ggml-metal/kernels/dequantize.h
-index b083e9a25..a888c478f 100644
+index b083e9a259..a888c478f2 100644
 --- a/ggml/src/ggml-metal/kernels/dequantize.h
 +++ b/ggml/src/ggml-metal/kernels/dequantize.h
 @@ -33,16 +33,17 @@ void dequantize_bf16e(device const bf16e4x4 * src, short il, thread type4x4 & re
@@ -2189,7 +2193,7 @@ index b083e9a25..a888c478f 100644
      const float md = -8.h * xb->d;
      const ushort mask0 = il ? 0x00F0 : 0x000F;
 diff --git a/ggml/src/ggml-metal/kernels/gated_delta_net.metal b/ggml/src/ggml-metal/kernels/gated_delta_net.metal
-index 6a631cd78..57bd3e74d 100644
+index 6a631cd78f..57bd3e74de 100644
 --- a/ggml/src/ggml-metal/kernels/gated_delta_net.metal
 +++ b/ggml/src/ggml-metal/kernels/gated_delta_net.metal
 @@ -1,34 +1,47 @@
@@ -2570,7 +2574,7 @@ index 6a631cd78..57bd3e74d 100644
  #else
  // a simplified version of the above
 diff --git a/ggml/src/ggml-metal/kernels/misc.metal b/ggml/src/ggml-metal/kernels/misc.metal
-index c37c0a63d..3fbf0a480 100644
+index c37c0a63d6..3fbf0a480e 100644
 --- a/ggml/src/ggml-metal/kernels/misc.metal
 +++ b/ggml/src/ggml-metal/kernels/misc.metal
 @@ -411,17 +411,16 @@ kernel void kernel_fwht(
@@ -2887,7 +2891,7 @@ index c37c0a63d..3fbf0a480 100644
 +template [[host_name("kernel_fwht_f16_4096_w64")]] kernel kernel_fwht_f16_t kernel_fwht_tg<4096, GGML_METAL_FWHT_TG_NT, half, 64>;
 +template [[host_name("kernel_fwht_f16_8192_w64")]] kernel kernel_fwht_f16_t kernel_fwht_tg<8192, GGML_METAL_FWHT_TG_NT, half, 64>;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
-index 462200c0a..96e00fa29 100644
+index 462200c0ae..96e00fa295 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
 @@ -1233,25 +1233,29 @@ template [[host_name("kernel_mul_mm_iq4_nl_f32_w")]]  kernel mul_mm_t kernel_mul
@@ -2991,7 +2995,7 @@ index 462200c0a..96e00fa29 100644
  #endif
  
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
-index 1c368efe5..4064360b5 100644
+index 1c368efe50..4064360b5a 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
 @@ -596,16 +596,18 @@ kernel void kernel_mul_mm_id_w64(
@@ -3090,7 +3094,7 @@ index 1c368efe5..4064360b5 100644
  template [[host_name("kernel_mul_mm_id_q2_K_f16_w64")]]    kernel mul_mm_id_w64_t kernel_mul_mm_id_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  half, half2x4>;
  template [[host_name("kernel_mul_mm_id_q3_K_f16_w64")]]    kernel mul_mm_id_w64_t kernel_mul_mm_id_w64<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  half, half2x4>;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index be2e88aa8..937052a71 100644
+index be2e88aa88..937052a716 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
 @@ -767,587 +767,753 @@ kernel void kernel_mul_mv_q2_0_f32(
@@ -4296,7 +4300,7 @@ index be2e88aa8..937052a71 100644
          device const char * src0,
          device const char * src1,
 diff --git a/ggml/src/ggml-metal/kernels/quantize.h b/ggml/src/ggml-metal/kernels/quantize.h
-index 0741b2225..8c0442be4 100644
+index 0741b22253..8c0442be46 100644
 --- a/ggml/src/ggml-metal/kernels/quantize.h
 +++ b/ggml/src/ggml-metal/kernels/quantize.h
 @@ -35,16 +35,35 @@ void quantize_q2_0(device const float * src, device block_q2_0 & dst) {
@@ -4336,7 +4340,7 @@ index 0741b2225..8c0442be4 100644
          const float v = src[j];
          if (amax < fabs(v)) {
 diff --git a/ggml/src/ggml-metal/kernels/quantize.metal b/ggml/src/ggml-metal/kernels/quantize.metal
-index cbb6b1694..b427c99eb 100644
+index cbb6b16948..b427c99ebb 100644
 --- a/ggml/src/ggml-metal/kernels/quantize.metal
 +++ b/ggml/src/ggml-metal/kernels/quantize.metal
 @@ -134,16 +134,17 @@ kernel void kernel_cpy_f32_q(
@@ -4408,7 +4412,7 @@ index cbb6b1694..b427c99eb 100644
  template [[host_name("kernel_get_rows_q2_K")]]    kernel get_rows_q_t kernel_get_rows_q<block_q2_K,    QK_NL, dequantize_q2_K>;
  template [[host_name("kernel_get_rows_q3_K")]]    kernel get_rows_q_t kernel_get_rows_q<block_q3_K,    QK_NL, dequantize_q3_K>;
 diff --git a/ggml/src/ggml-quants.c b/ggml/src/ggml-quants.c
-index 230e28834..eecb9016d 100644
+index 230e28834f..eecb9016d0 100644
 --- a/ggml/src/ggml-quants.c
 +++ b/ggml/src/ggml-quants.c
 @@ -104,16 +104,51 @@ void quantize_row_q2_0_ref(const float * GGML_RESTRICT x, block_q2_0 * GGML_REST
@@ -4655,7 +4659,7 @@ index 230e28834..eecb9016d 100644
                  VALIDATE_ROW_DATA_DM_F16_IMPL(block_q4_1, data, nb, d, m);
              } break;
 diff --git a/ggml/src/ggml-quants.h b/ggml/src/ggml-quants.h
-index a13385c27..d65f85434 100644
+index a13385c270..d65f85434f 100644
 --- a/ggml/src/ggml-quants.h
 +++ b/ggml/src/ggml-quants.h
 @@ -11,16 +11,18 @@
@@ -4716,7 +4720,7 @@ index a13385c27..d65f85434 100644
  // TurboQuant KV cache compression (arXiv 2504.19874)
  GGML_API void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * GGML_RESTRICT y, int64_t k);
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index 53dd8eee3..1e38b7c01 100644
+index 53dd8eee3f..1e38b7c01e 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -685,16 +685,32 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
@@ -4844,7 +4848,7 @@ index 53dd8eee3..1e38b7c01 100644
          case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_Q2_K:    result = quantize_q2_K   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
 diff --git a/include/llama.h b/include/llama.h
-index 9bca8ee10..19a50437b 100644
+index 9bca8ee106..19a50437b5 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -152,16 +152,19 @@ extern "C" {
@@ -4868,7 +4872,7 @@ index 9bca8ee10..19a50437b 100644
  
      enum llama_rope_scaling_type {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index d196b0d65..d623eec73 100644
+index d196b0d657..d623eec73b 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -20,16 +20,72 @@
@@ -4987,7 +4991,7 @@ index d196b0d65..d623eec73 100644
  
  ggml_status llama_context::graph_compute(
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 95b722628..951d49853 100644
+index 95b7226288..951d49853c 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -376,16 +376,19 @@ private:
@@ -5011,7 +5015,7 @@ index 95b722628..951d49853 100644
      bool has_evaluated_once = false;
  
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index f44263284..80cb40906 100644
+index f442632848..80cb409065 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -1519,16 +1519,18 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
@@ -5155,7 +5159,7 @@ index f44263284..80cb40906 100644
              }
  
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 5cf74c997..568ca7a0a 100644
+index 5cf74c997e..568ca7a0a0 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -7,21 +7,34 @@
@@ -5265,7 +5269,7 @@ index 5cf74c997..568ca7a0a 100644
      // do mat_mul_id, while optionally apply lora and per-expert scale
      ggml_tensor * build_lora_mm_id(
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index d9e9e4714..1575fff13 100644
+index d9e9e47149..1575fff13a 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -34,16 +34,19 @@ const char * llama_ftype_name(llama_ftype ftype) {
@@ -5350,7 +5354,7 @@ index d9e9e4714..1575fff13 100644
  
          // this is a way to mark that we have "guessed" the file type
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 639ae3a46..aa8299c61 100644
+index 639ae3a468..aa8299c612 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -1306,16 +1306,18 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
@@ -5704,7 +5708,7 @@ index 639ae3a46..aa8299c61 100644
      return ml.create_tensor(
          hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, buft_list_layer,
 diff --git a/src/llama-model.h b/src/llama-model.h
-index 11e43eafc..c3a978da1 100644
+index 11e43eafca..c3a978da1e 100644
 --- a/src/llama-model.h
 +++ b/src/llama-model.h
 @@ -732,16 +732,25 @@ struct llama_model {
@@ -5754,7 +5758,7 @@ index 11e43eafc..c3a978da1 100644
  const char * llm_type_name(llm_type type);
  
 diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
-index 821b4798c..de6cee729 100644
+index 821b4798c2..de6cee7298 100644
 --- a/src/llama-quant.cpp
 +++ b/src/llama-quant.cpp
 @@ -404,16 +404,18 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
@@ -5815,7 +5819,7 @@ index 821b4798c..de6cee729 100644
          case LLAMA_FTYPE_MOSTLY_IQ3_XS:  return GGML_TYPE_IQ3_S;
          case LLAMA_FTYPE_MOSTLY_Q3_K_S:
 diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
-index 9a1f11812..fee5ff4b0 100644
+index 9a1f11812f..fee5ff4b05 100644
 --- a/src/models/delta-net-base.cpp
 +++ b/src/models/delta-net-base.cpp
 @@ -394,17 +394,17 @@ std::pair<ggml_tensor *, ggml_tensor *> llm_build_delta_net_base::build_delta_ne
@@ -5890,7 +5894,7 @@ index 9a1f11812..fee5ff4b0 100644
      const int64_t attn_score_elems    = S_v * H_v * n_seq_tokens * n_seqs;
      const int64_t state_size_per_snap = S_v * S_v * H_v * n_seqs;
 diff --git a/src/models/dflash.cpp b/src/models/dflash.cpp
-index c8c2895b6..58e62f46d 100644
+index c8c2895b6c..58e62f46d7 100644
 --- a/src/models/dflash.cpp
 +++ b/src/models/dflash.cpp
 @@ -672,33 +672,37 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
@@ -6004,7 +6008,7 @@ index c8c2895b6..58e62f46d 100644
      ggml_build_forward_expand(gf, cur);
  
 diff --git a/src/models/eagle3.cpp b/src/models/eagle3.cpp
-index bfde35e43..f588eccdf 100644
+index bfde35e43b..f588eccdf6 100644
 --- a/src/models/eagle3.cpp
 +++ b/src/models/eagle3.cpp
 @@ -157,33 +157,36 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
@@ -6063,7 +6067,7 @@ index bfde35e43..f588eccdf 100644
          const int64_t n_vocab       = (int64_t) model.vocab.n_tokens();
  
 diff --git a/src/models/models.h b/src/models/models.h
-index 387a4adcb..fa8aef65f 100644
+index 387a4adcb2..fa8aef65ff 100644
 --- a/src/models/models.h
 +++ b/src/models/models.h
 @@ -31,16 +31,34 @@ struct llm_build_mamba_base : public llm_graph_context {
@@ -6102,7 +6106,7 @@ index 387a4adcb..fa8aef65f 100644
                  ggml_tensor * b,
                  ggml_tensor * s,
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index ab98744a5..d42798103 100644
+index ab98744a53..d42798103a 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
 @@ -1,14 +1,16 @@
@@ -6224,7 +6228,7 @@ index ab98744a5..d42798103 100644
      ggml_set_input(inp->h);
      ggml_set_name(inp->h, "mtp_h_input");
 diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
-index f0f917af7..e4c415642 100644
+index f0f917af72..e4c415642d 100644
 --- a/src/models/qwen35moe.cpp
 +++ b/src/models/qwen35moe.cpp
 @@ -1,17 +1,19 @@
@@ -6349,7 +6353,7 @@ index f0f917af7..e4c415642 100644
      ggml_set_input(inp->h);
      ggml_set_name(inp->h, "mtp_h_input");
 diff --git a/src/models/qwen3next.cpp b/src/models/qwen3next.cpp
-index 340ef28f7..0a71ce8ed 100644
+index 340ef28f70..0a71ce8ed9 100644
 --- a/src/models/qwen3next.cpp
 +++ b/src/models/qwen3next.cpp
 @@ -653,16 +653,17 @@ llama_model_qwen3next::graph_mtp::graph_mtp(const llama_model & model, const llm
@@ -6371,7 +6375,7 @@ index 340ef28f7..0a71ce8ed 100644
      ggml_set_input(inp->h);
      ggml_set_name(inp->h, "mtp_h_input");
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index ad00f39ec..8b4741e62 100644
+index ad00f39ecf..8b4741e627 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -4752,26 +4752,27 @@ struct test_gated_delta_net : public test_case {

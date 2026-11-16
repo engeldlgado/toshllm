@@ -2,7 +2,10 @@ diff --git a/ggml/src/ggml-metal/ggml-metal-fusion.cpp b/ggml/src/ggml-metal/ggm
 index d4f03feb1..ae32ec239 100644
 --- a/ggml/src/ggml-metal/ggml-metal-fusion.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-fusion.cpp
-@@ -664,10 +664,15 @@ static bool ggml_metal_fusion_check_moe_reduce(
+@@ -661,16 +661,21 @@ static bool ggml_metal_fusion_check_moe_reduce(
+     if (node_idxs[idx + (int) fusion->ops.size() - 1] != raw_end) {
+         return false;
+     }
  
      if (mode == GGML_METAL_FUSION_FULL) {
          if (!match.experts->data || !match.weights->data || !match.dst->data) {
@@ -18,11 +21,17 @@ index d4f03feb1..ae32ec239 100644
      return true;
  }
  
+ // true if t is or views a tensor in a buffer marked as weights, such as a bias; the model loader marks its buffers before
+ // any graph is optimized, and tensors in unmarked or not yet allocated buffers count as non-weights in both phases
+ static bool ggml_metal_tensor_is_weight(const struct ggml_tensor * t) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 index bfe3021bd..192624551 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3103,11 +3103,12 @@ static int ggml_metal_op_mul_mat_mma(ggml_metal_op_t ctx, int idx) {
+@@ -3100,17 +3100,18 @@ static int ggml_metal_op_mul_mat_mma(ggml_metal_op_t ctx, int idx) {
+     const int  n_fuse   = ggml_metal_op_try_fusion(ctx, idx, GGML_METAL_FUSION_MUL_MAT_ADD);
+     const bool fuse_add = n_fuse > 1;
+ 
      const ggml_tensor * dst = op;
      const ggml_tensor * res = dst;
  
@@ -36,11 +45,17 @@ index bfe3021bd..192624551 100644
      auto pipeline = ggml_metal_library_get_pipeline_mul_mv_mma_auto(lib, op, fuse_add);
  
      ggml_metal_kargs_mul_mv_ext args = {
+         /*.ne00  =*/ ne00,
+         /*.ne01  =*/ ne01,
+         /*.ne02  =*/ ne02,
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
 index 96e00fa29..2ec7bc6bb 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
-@@ -501,14 +501,14 @@ kernel void kernel_mul_mm(
+@@ -498,35 +498,35 @@ kernel void kernel_mul_mm(
+                 if (row < args.ne0 && col < args.ne1) {
+                     Dbase[row + (int64_t)col*args.ne0] = acc[rr][cc];
+                 }
              }
          }
      } else if (!FC_mul_mm_bc_out || (r0 + NR0 <= args.ne0 && r1 + NR1 <= args.ne1)) {
@@ -57,7 +72,10 @@ index 96e00fa29..2ec7bc6bb 100644
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
          threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
-@@ -519,11 +519,11 @@ kernel void kernel_mul_mm(
+ 
+         for (short i = 0; i < 8; i++) {
+             simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
+         }
  
          threadgroup_barrier(mem_flags::mem_threadgroup);
  
@@ -70,7 +88,13 @@ index 96e00fa29..2ec7bc6bb 100644
                  threadgroup float  * C  = temp_str + (j*NR0);
                  threadgroup float4 * C4 = (threadgroup float4 *) C;
  
-@@ -1172,11 +1172,11 @@ kernel void kernel_mul_mm_id(
+                 int i = 0;
+                 for (; i < nr0/4; i++) {
+                     *(D4 + i) = *(C4 + i);
+@@ -1169,17 +1169,17 @@ kernel void kernel_mul_mm_id(
+         for (short j = vsg; j < 32 && j + 32*p < nr1; j += 4) {
+             const int id = ids_i32[im*args.ne21 + r1 + 32*p + j];
+ 
              // int, not short: the AMD Metal compiler miscompiles device address math
              // built from short indices with ids-derived dynamic bases
              const int ide = id % args.ne20;
@@ -83,11 +107,17 @@ index 96e00fa29..2ec7bc6bb 100644
              threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
              threadgroup float4 * C4 = (threadgroup float4 *) C;
  
+             int i = lane;
+             for (; i < nr0/4; i += 32) {
+                 *(D4 + i) = *(C4 + i) * s1_scale;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
 index 4064360b5..3251bb605 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
-@@ -573,11 +573,11 @@ kernel void kernel_mul_mm_id_w64(
+@@ -570,17 +570,17 @@ kernel void kernel_mul_mm_id_w64(
+         for (short j = sgitg; j < 32 && j + 32*p < nr1; j += 2) {
+             const int id = ids_i32[im*args.ne21 + r1 + 32*p + j];
+ 
              // int, not short: the AMD Metal compiler miscompiles device address math
              // built from short indices with ids-derived dynamic bases
              const int ide = id % args.ne20;
@@ -100,3 +130,52 @@ index 4064360b5..3251bb605 100644
              threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
              threadgroup float4 * C4 = (threadgroup float4 *) C;
  
+             int i = lane;
+             for (; i < nr0/4; i += 64) {
+                 *(D4 + i) = *(C4 + i);
+diff --git a/ggml/src/ggml-metal/kernels/solve_tri.metal b/ggml/src/ggml-metal/kernels/solve_tri.metal
+index 10526fb21..d818f228b 100644
+--- a/ggml/src/ggml-metal/kernels/solve_tri.metal
++++ b/ggml/src/ggml-metal/kernels/solve_tri.metal
+@@ -37,17 +37,19 @@ kernel void kernel_solve_tri_f32(
+     for (short rr = 0; rr < N; rr += NSG) {
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+         {
+             threadgroup float * sh0_cur = sh0 + sgitg*NP;
+ 
+             for (short t = 0; t*NW < N; ++t) {
+                 const short idx = t*NW + tiisg;
+-                sh0_cur[idx] = src0_ptr[idx];
++                if (rr + sgitg < N && idx < N) {
++                    sh0_cur[idx] = src0_ptr[idx];
++                }
+             }
+ 
+             src0_ptr += NSG*N;
+         }
+ 
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+         if (i01 >= args.ne10) {
+@@ -58,17 +60,19 @@ kernel void kernel_solve_tri_f32(
+             const short r = rr + ir;
+ 
+             threadgroup float * sh0_cur = sh0 + ir*NP;
+ 
+             float sum = 0.0f;
+ 
+             for (short t = 0; t*NW < r; ++t) {
+                 const short idx = t*NW + tiisg;
+-                sum += sh0_cur[idx] * dst_ptr[idx*K] * (idx < r);
++                if (idx < r) {
++                    sum += sh0_cur[idx] * dst_ptr[idx*K];
++                }
+             }
+ 
+             sum = simd_sum(sum);
+ 
+             if (tiisg == 0) {
+                 const float diag = sh0_cur[r];
+ 
+                 dst_ptr[r*K] = (src1_ptr[r*K] - sum) / diag;

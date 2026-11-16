@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 14d82f695..1e21f1ed5 100644
+index 14d82f695c..1e21f1ed54 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -256,16 +256,17 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
@@ -41,10 +41,10 @@ index 14d82f695..1e21f1ed5 100644
          }
      }
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 224bdef92..11e869430 100644
+index 224bdef927..8b459e0720 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
-@@ -425,17 +425,21 @@ extern "C" {
+@@ -425,17 +425,22 @@ extern "C" {
          GGML_TYPE_TQ2_0   = 35,
          // GGML_TYPE_IQ4_NL_4_4 = 36,
          // GGML_TYPE_IQ4_NL_4_8 = 37,
@@ -54,11 +54,12 @@ index 224bdef92..11e869430 100644
          GGML_TYPE_Q1_0    = 41,
          GGML_TYPE_Q2_0    = 42,
 -        GGML_TYPE_COUNT   = 43,
-+        GGML_TYPE_TURBO2_0 = 43, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
-+        GGML_TYPE_TURBO3_0 = 44, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
-+        GGML_TYPE_TURBO4_0 = 45, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
 +        GGML_TYPE_TQ3_1S  = 46, // TurboQuant 3-bit weight: WHT-rotated 8-level Lloyd-Max, block_size=32
 +        GGML_TYPE_TQ4_1S  = 47, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
++        // KV cache only, never written to a file, so they stay clear of the ids upstream hands out
++        GGML_TYPE_TURBO2_0 = 144, // TurboQuant 2-bit KV cache: WHT + 2-bit PolarQuant
++        GGML_TYPE_TURBO3_0 = 145, // TurboQuant 3-bit KV cache: WHT + 3-bit PolarQuant
++        GGML_TYPE_TURBO4_0 = 146, // TurboQuant 4-bit KV cache: WHT + 4-bit PolarQuant
      };
  
      // [TAG_GGML_PREC]
@@ -67,7 +68,7 @@ index 224bdef92..11e869430 100644
      //  - result accumulation type
      //  - source tensor data representation type
      //  - etc.
-@@ -580,16 +584,17 @@ extern "C" {
+@@ -580,16 +585,17 @@ extern "C" {
          GGML_OP_GATED_LINEAR_ATTN,
          GGML_OP_RWKV_WKV7,
          GGML_OP_SOLVE_TRI,
@@ -85,7 +86,7 @@ index 224bdef92..11e869430 100644
          GGML_OP_MAP_CUSTOM3,
  
          GGML_OP_CUSTOM,
-@@ -2654,16 +2659,26 @@ extern "C" {
+@@ -2654,16 +2660,26 @@ extern "C" {
              struct ggml_tensor  * q,
              struct ggml_tensor  * k,
              struct ggml_tensor  * v,
@@ -113,7 +114,7 @@ index 224bdef92..11e869430 100644
      // res:     [n_kv,       n_batch,    1,       ne3 ]
      //
 diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
-index 947732000..56466ce7b 100644
+index 9477320002..56466ce7b2 100644
 --- a/ggml/src/CMakeLists.txt
 +++ b/ggml/src/CMakeLists.txt
 @@ -201,16 +201,17 @@ add_library(ggml-base
@@ -135,7 +136,7 @@ index 947732000..56466ce7b 100644
  
  configure_file(ggml-version.h.in ${CMAKE_CURRENT_BINARY_DIR}/ggml-version.h @ONLY)
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index 0394433c0..757b28d51 100644
+index 0394433c08..757b28d519 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
 @@ -1031,16 +1031,21 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
@@ -182,7 +183,7 @@ index 0394433c0..757b28d51 100644
          if (init_buf) {
              // the backend that owns the buffer will set .extra
 diff --git a/ggml/src/ggml-common.h b/ggml/src/ggml-common.h
-index 1dbbe326d..e9c0754eb 100644
+index 1dbbe326d0..e9c0754eb7 100644
 --- a/ggml/src/ggml-common.h
 +++ b/ggml/src/ggml-common.h
 @@ -282,16 +282,105 @@ static_assert(sizeof(block_tq1_0) == sizeof(ggml_half) + QK_K / 64 + (QK_K - 4 *
@@ -292,7 +293,7 @@ index 1dbbe326d..e9c0754eb 100644
  // 16 blocks of 16 elements each
  // Effectively 2.625 bits per weight
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index 7c274c03b..c5dfa3705 100644
+index 7c274c03b7..c5dfa37057 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -2,16 +2,17 @@
@@ -548,7 +549,7 @@ index 7c274c03b..c5dfa3705 100644
  #if defined(__F16C__)
  #if defined(__AVX512F__)
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
-index 16a916d20..b53d968c5 100644
+index 16a916d20a..b53d968c5e 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
 @@ -7,16 +7,19 @@
@@ -700,7 +701,7 @@ index 16a916d20..b53d968c5 100644
          case GGML_TYPE_F32:
              {
 diff --git a/ggml/src/ggml-cpu/ops.h b/ggml/src/ggml-cpu/ops.h
-index 2728b08b6..7d41b8b3a 100644
+index 2728b08b6c..7d41b8b3a9 100644
 --- a/ggml/src/ggml-cpu/ops.h
 +++ b/ggml/src/ggml-cpu/ops.h
 @@ -99,16 +99,17 @@ void ggml_compute_forward_unary(const struct ggml_compute_params * params, struc
@@ -722,7 +723,7 @@ index 2728b08b6..7d41b8b3a 100644
  void ggml_compute_forward_map_custom3(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_custom(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 264547668..477c83b9c 100644
+index 2645476688..477c83b9cc 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -187,25 +187,34 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_get_rows(ggml_me
@@ -792,7 +793,7 @@ index 264547668..477c83b9c 100644
      char name[256];
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index cd0aca4d8..17f272fac 100644
+index cd0aca4d84..17f272fac6 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -110,17 +110,17 @@ ggml_metal_device_t ggml_metal_library_get_device(ggml_metal_library_t lib);
@@ -833,7 +834,7 @@ index cd0aca4d8..17f272fac 100644
  
  // rows per simdgroup of the few-column mat-vec for this type, lane width and column count,
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 629f95464..e7a5b3922 100644
+index 629f95464d..e7a5b39226 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -2157,17 +2157,21 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
@@ -1010,7 +1011,7 @@ index 629f95464..e7a5b3922 100644
              return true;
          case GGML_OP_OPT_STEP_ADAMW:
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index 325c11d14..49592b393 100644
+index 325c11d142..49592b393f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
 @@ -509,16 +509,17 @@ typedef struct {
@@ -1082,7 +1083,7 @@ index 325c11d14..49592b393 100644
      uint64_t nb01;
      uint64_t nb02;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index e4d7404a8..431b1b71a 100644
+index e4d7404a83..431b1b71ac 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -383,16 +383,20 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
@@ -1589,7 +1590,7 @@ index e4d7404a8..431b1b71a 100644
          }
          // the simdgroup count per head was never swept on either width; the pipeline caps it,
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
-index 583d1156b..18a43e20b 100644
+index 583d1156bf..18a43e20bc 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.h
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.h
 @@ -57,16 +57,17 @@ int ggml_metal_op_sum_rows          (ggml_metal_op_t ctx, int idx);
@@ -1611,7 +1612,7 @@ index 583d1156b..18a43e20b 100644
  int ggml_metal_op_pool_1d           (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_pool_2d           (ggml_metal_op_t ctx, int idx);
 diff --git a/ggml/src/ggml-metal/kernels/common.h b/ggml/src/ggml-metal/kernels/common.h
-index 31f9db425..dd2bf1c4f 100644
+index 31f9db4254..dd2bf1c4fc 100644
 --- a/ggml/src/ggml-metal/kernels/common.h
 +++ b/ggml/src/ggml-metal/kernels/common.h
 @@ -144,8 +144,99 @@ template<> inline float4 elu_approx<float4>(float4 x) {
@@ -1715,7 +1716,7 @@ index 31f9db425..dd2bf1c4f 100644
 +
 +// ===== END turbo-wht.h =====
 diff --git a/ggml/src/ggml-metal/kernels/dequantize.h b/ggml/src/ggml-metal/kernels/dequantize.h
-index ea88cc37e..b083e9a25 100644
+index ea88cc37ec..b083e9a259 100644
 --- a/ggml/src/ggml-metal/kernels/dequantize.h
 +++ b/ggml/src/ggml-metal/kernels/dequantize.h
 @@ -524,17 +524,16 @@ void dequantize_q4_K_impl(device const block_q4_K * xb, short il, bool lo, threa
@@ -1931,7 +1932,7 @@ index ea88cc37e..b083e9a25 100644
 +}
 +
 diff --git a/ggml/src/ggml-metal/kernels/fa.metal b/ggml/src/ggml-metal/kernels/fa.metal
-index a38bfb471..3e722b40c 100644
+index a38bfb4714..770f2dfc45 100644
 --- a/ggml/src/ggml-metal/kernels/fa.metal
 +++ b/ggml/src/ggml-metal/kernels/fa.metal
 @@ -1,37 +1,45 @@
@@ -2132,7 +2133,13 @@ index a38bfb471..3e722b40c 100644
  
  // sh_acc needs about 33 KB on 64 lanes, over the 32 KB a GCN 1.0 threadgroup gets; these
  // twins halve the simdgroups and the host falls back to them when the full one is refused
-@@ -310,16 +357,17 @@ FA_AMD_PAIR_W64_LDS("kq8_0_vq4_0", block_q8_0, 8, dequantize_q8_0_t4_h2, block_q
+@@ -304,22 +351,23 @@ FA_AMD_PAIR_W64_LDS("kq8_0_vq8_0", block_q8_0, 8, dequantize_q8_0_t4_h2, block_q
+ FA_AMD_PAIR_W64_LDS("kq8_0_vf16",  block_q8_0, 8, dequantize_q8_0_t4_h2, half4,      1, dequantize_f16_t4)
+ FA_AMD_PAIR_W64_LDS("kq4_0_vf16",  block_q4_0, 8, dequantize_q4_0_t4, half4,      1, dequantize_f16_t4)
+ FA_AMD_PAIR_W64_LDS("kq4_0_vq4_0", block_q4_0, 8, dequantize_q4_0_t4, block_q4_0, 8, dequantize_q4_0_t4)
+ FA_AMD_PAIR_W64_LDS("kf16_vq8_0",  half4,      1, dequantize_f16_t4,  block_q8_0, 8, dequantize_q8_0_t4_h2)
+ FA_AMD_PAIR_W64_LDS("kf16_vq4_0",  half4,      1, dequantize_f16_t4,  block_q4_0, 8, dequantize_q4_0_t4)
+ FA_AMD_PAIR_W64_LDS("kq8_0_vq4_0", block_q8_0, 8, dequantize_q8_0_t4_h2, block_q4_0, 8, dequantize_q4_0_t4)
  FA_AMD_PAIR_W64_LDS("kq4_0_vq8_0", block_q4_0, 8, dequantize_q4_0_t4, block_q8_0, 8, dequantize_q8_0_t4_h2)
  #undef FA_AMD_PAIR_W64_LDS
 -#undef FA_AMD_INST_W64_LDS
@@ -2584,7 +2591,7 @@ index a38bfb471..3e722b40c 100644
  // head 512 has no PF variant and falls to the tile kernel, ~21% worse at depth; BK=32 keeps
  // the shared memory at 54 KB, the same league as dk256
 diff --git a/ggml/src/ggml-metal/kernels/fa_aux.metal b/ggml/src/ggml-metal/kernels/fa_aux.metal
-index 222545763..1ddd4e280 100644
+index 2225457634..1ddd4e2806 100644
 --- a/ggml/src/ggml-metal/kernels/fa_aux.metal
 +++ b/ggml/src/ggml-metal/kernels/fa_aux.metal
 @@ -288,42 +288,49 @@ constant int32_t FC_flash_attn_ext_vec_reduce_DV  [[function_constant(FC_FLASH_A
@@ -2643,7 +2650,7 @@ index 222545763..1ddd4e280 100644
  #undef NWG
  #undef DV
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index f139fb8c9..be2e88aa8 100644
+index f139fb8c9c..be2e88aa88 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
 @@ -1619,103 +1619,82 @@ kernel void kernel_mul_mv_q8_0_f32(
@@ -3042,7 +3049,7 @@ index f139fb8c9..be2e88aa8 100644
          uint3  tgpig[[threadgroup_position_in_grid]],
 diff --git a/ggml/src/ggml-metal/kernels/turbo.metal b/ggml/src/ggml-metal/kernels/turbo.metal
 new file mode 100644
-index 000000000..7e8aab76e
+index 0000000000..7e8aab76e8
 --- /dev/null
 +++ b/ggml/src/ggml-metal/kernels/turbo.metal
 @@ -0,0 +1,928 @@
@@ -3975,7 +3982,7 @@ index 000000000..7e8aab76e
 +template [[host_name("kernel_set_rows_turbo4_i64_w64")]] kernel set_rows_turbo4_w64_t kernel_set_rows_turbo4_coop_w64<int64_t>;
 +template [[host_name("kernel_set_rows_turbo4_i32_w64")]] kernel set_rows_turbo4_w64_t kernel_set_rows_turbo4_coop_w64<int32_t>;
 diff --git a/ggml/src/ggml-quants.c b/ggml/src/ggml-quants.c
-index 7750a72ce..230e28834 100644
+index 7750a72ce6..230e28834f 100644
 --- a/ggml/src/ggml-quants.c
 +++ b/ggml/src/ggml-quants.c
 @@ -5623,16 +5623,23 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
@@ -4003,7 +4010,7 @@ index 7750a72ce..230e28834 100644
  
      return true;
 diff --git a/ggml/src/ggml-quants.h b/ggml/src/ggml-quants.h
-index 75188f1af..a13385c27 100644
+index 75188f1af1..a13385c270 100644
 --- a/ggml/src/ggml-quants.h
 +++ b/ggml/src/ggml-quants.h
 @@ -97,16 +97,37 @@ GGML_API size_t quantize_q6_K(const float * GGML_RESTRICT src, void * GGML_RESTR
@@ -4046,7 +4053,7 @@ index 75188f1af..a13385c27 100644
  
 diff --git a/ggml/src/ggml-turbo-quant.c b/ggml/src/ggml-turbo-quant.c
 new file mode 100644
-index 000000000..c10b750d1
+index 0000000000..c10b750d13
 --- /dev/null
 +++ b/ggml/src/ggml-turbo-quant.c
 @@ -0,0 +1,1030 @@
@@ -5081,7 +5088,7 @@ index 000000000..c10b750d1
 +    return nrows * row_size;
 +}
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index 9bcabdbd3..53dd8eee3 100644
+index 9bcabdbd34..53dd8eee3f 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -760,16 +760,56 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
@@ -5246,7 +5253,7 @@ index 9bcabdbd3..53dd8eee3 100644
          case GGML_TYPE_BF16:
              {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 07b4c6148..d196b0d65 100644
+index 07b4c6148e..d196b0d657 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -3848,29 +3848,42 @@ llama_context * llama_init_from_model(
@@ -5295,7 +5302,7 @@ index 07b4c6148..d196b0d65 100644
  
      if (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED &&
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index e5f589668..f44263284 100644
+index e5f5896687..f442632848 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -2694,16 +2694,27 @@ ggml_tensor * llm_graph_context::build_attn_mha(
@@ -5447,7 +5454,7 @@ index e5f589668..f44263284 100644
      }
  
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 02ceb5244..4804d838b 100644
+index 02ceb5244b..4804d838b6 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -13,16 +13,25 @@
@@ -5815,7 +5822,7 @@ index 02ceb5244..4804d838b 100644
      res->add_input(std::move(inp));
  
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index c44189ceb..ae4de8d5e 100644
+index c44189cebd..ae4de8d5e1 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -303,16 +303,18 @@ set_tests_properties(test-state-restore-fragmented PROPERTIES FIXTURES_REQUIRED
@@ -5838,7 +5845,7 @@ index c44189ceb..ae4de8d5e 100644
  # libmtmd
  set(LLAMA_TEST_NAME test-mtmd-c-api)
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 3e5a883ce..ad00f39ec 100644
+index 3e5a883ce2..ad00f39ecf 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -2575,16 +2575,19 @@ struct test_set_rows : public test_case {
@@ -5965,7 +5972,7 @@ index 3e5a883ce..ad00f39ec 100644
  
      // FLASH_ATTN_EXT MMA: non-pow2 head size and MLA K/V view.
 diff --git a/tests/test-quantize-fns.cpp b/tests/test-quantize-fns.cpp
-index 1930a09b2..0629124ea 100644
+index 1930a09b2c..0629124ea3 100644
 --- a/tests/test-quantize-fns.cpp
 +++ b/tests/test-quantize-fns.cpp
 @@ -180,45 +180,54 @@ static int test_vec_dot_q(bool verbose) {
@@ -6026,7 +6033,7 @@ index 1930a09b2..0629124ea 100644
                  : MAX_DOT_PRODUCT_ERROR;
 diff --git a/tests/test-turbo-quant.c b/tests/test-turbo-quant.c
 new file mode 100644
-index 000000000..789bdfb6d
+index 0000000000..789bdfb6d0
 --- /dev/null
 +++ b/tests/test-turbo-quant.c
 @@ -0,0 +1,125 @@
@@ -6156,7 +6163,7 @@ index 000000000..789bdfb6d
 +    return 0;
 +}
 diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
-index eeae18dfe..35d101eda 100644
+index eeae18dfe9..35d101eda8 100644
 --- a/tools/llama-bench/llama-bench.cpp
 +++ b/tools/llama-bench/llama-bench.cpp
 @@ -513,16 +513,25 @@ static ggml_type ggml_type_from_name(const std::string & s) {

@@ -1,0 +1,185 @@
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index db94f09b88..3c9288387b 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -855,16 +855,89 @@ llama_model_loader::llama_model_loader(
+ std::string llama_model_loader::get_arch_name() const {
+     return arch_name;
+ }
+ 
+ enum llm_arch llama_model_loader::get_arch() const {
+     return llm_kv.arch;
+ }
+ 
++// pairs of weights that read the same input, which newer converters write as one tensor:
++// the rows of the first, then the rows of the second
++static const struct { const char * a; const char * b; const char * merged; } k_merged_weights[] = {
++    { "attn_qkv",     "attn_gate",      "attn_qkv_gate"       },
++    { "ssm_beta",     "ssm_alpha",      "ssm_beta_alpha"      },
++    { "hc_attn_down", "hc_attn_inject", "hc_attn_down_inject" },
++    { "hc_ffn_down",  "hc_ffn_inject",  "hc_ffn_down_inject"  },
++};
++
++static bool merged_weight_for(const std::string & name, std::string & merged, bool & tail) {
++    int il = -1;
++    int n  = 0;
++    if (sscanf(name.c_str(), "blk.%d.%n", &il, &n) != 1 || n == 0) {
++        return false;
++    }
++    const std::string part = name.substr(n);
++    for (const auto & m : k_merged_weights) {
++        for (int half = 0; half < 2; ++half) {
++            if (part == std::string(half ? m.b : m.a) + ".weight") {
++                merged = name.substr(0, n) + m.merged + ".weight";
++                tail   = half == 1;
++                return true;
++            }
++        }
++    }
++    return false;
++}
++
++void llama_model_loader::add_merged_half(const std::string & name, const std::initializer_list<int64_t> & ne) {
++    std::string merged_name;
++    bool tail = false;
++    if (ne.size() != 2 || !merged_weight_for(name, merged_name, tail)) {
++        return;
++    }
++    const llama_tensor_weight * w = get_weight(merged_name.c_str());
++    if (w == nullptr) {
++        return;
++    }
++    const ggml_tensor * m = w->tensor;
++    const int64_t rows = ne.begin()[1];
++    if (m->ne[0] != ne.begin()[0] || m->ne[2] != 1 || m->ne[3] != 1 || rows <= 0 || rows >= m->ne[1]) {
++        return;
++    }
++
++    auto taken = merged_halves.find(merged_name);
++    if (taken != merged_halves.end() && taken->second + rows != m->ne[1]) {
++        throw std::runtime_error(format("%s: the halves of '%s' do not add up to its %" PRId64 " rows",
++                                        __func__, merged_name.c_str(), m->ne[1]));
++    }
++
++    if (!ctx_halves) {
++        size_t n_merged = 0;
++        for (const auto & it : weights_map) {
++            for (const auto & mw : k_merged_weights) {
++                n_merged += it.first.find(std::string(".") + mw.merged + ".") != std::string::npos;
++            }
++        }
++        ggml_init_params params = { (2*n_merged + 1)*ggml_tensor_overhead(), nullptr, true };
++        ctx_halves.reset(ggml_init(params));
++    }
++
++    ggml_tensor * half = ggml_new_tensor_2d(ctx_halves.get(), m->type, m->ne[0], rows);
++    ggml_set_name(half, name.c_str());
++    const size_t offs = w->offs + (tail ? (size_t) (m->ne[1] - rows)*m->nb[1] : 0);
++    weights_map.emplace(name, llama_tensor_weight(files.at(w->idx).get(), w->idx, offs, half));
++
++    // one file tensor gives two created ones
++    if (taken == merged_halves.end()) {
++        merged_halves.emplace(merged_name, rows);
++        n_tensors++;
++    }
++}
++
+ const llama_model_loader::llama_tensor_weight * llama_model_loader::get_weight(const char * name) const {
+     auto pos = weights_map.find(name);
+     if (pos != weights_map.end()) {
+         return &pos->second;
+     }
+ 
+     return nullptr;
+ }
+@@ -1306,17 +1379,24 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+         return buft;
+     };
+ 
+     if (files.empty()) {
+         if (flags & TENSOR_SKIP_IF_VIRTUAL) {
+             return nullptr;
+         }
+         ggml_type type = GGML_TYPE_F32;
+-        const int64_t tid = gguf_find_tensor(metadata, tn.str().c_str());
++        int64_t tid = gguf_find_tensor(metadata, tn.str().c_str());
++        if (tid == -1) {
++            std::string merged;
++            bool tail = false;
++            if (merged_weight_for(tn.str(), merged, tail)) {
++                tid = gguf_find_tensor(metadata, merged.c_str());
++            }
++        }
+         if (tid != -1) {
+             type = gguf_get_tensor_type(metadata, tid);
+         }
+ 
+         // for tensors that are not required some of the dimensions can be invalid:
+         if (flags & TENSOR_NOT_REQUIRED) {
+             for (size_t dim = 0; dim < ne.size(); dim++) {
+                 if (ne.begin()[dim] <= 0) {
+@@ -1405,16 +1485,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+         fused_map.emplace(fused_name, llama_tensor_fused {
+                 wa->idx, wa->offs, wb->offs, ggml_nbytes(ta)/(size_t) n_exp_a, n_exp_a });
+ 
+         n_created += 2;   // both file tensors are consumed here
+ 
+         return fused;
+     }
+ 
++    if (get_weight(tn.str().c_str()) == nullptr) {
++        add_merged_half(tn.str(), ne);
++    }
++
+     const struct ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags & TENSOR_NOT_REQUIRED), flags & TENSOR_ALLOW_RESHAPE);
+     if (cur == NULL) {
+         return NULL;
+     }
+ 
+     if (flags & TENSOR_READ_LAZY) {
+         // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
+         is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
+index a42c929320..fd5ac89eea 100644
+--- a/src/llama-model-loader.h
++++ b/src/llama-model-loader.h
+@@ -137,16 +137,20 @@ struct llama_model_loader {
+     struct llama_tensor_fused {
+         uint16_t idx;      // source file
+         size_t   offs_a;   // first source (gate), start of its data
+         size_t   offs_b;   // second source (up)
+         size_t   stride;   // bytes of one expert in a source
+         int64_t  n_expert;
+     };
+     std::map<std::string, llama_tensor_fused> fused_map;
++
++    // weights newer converters write as one [a | b] tensor, read back as their two halves
++    ggml_context_ptr ctx_halves;
++    std::map<std::string, int64_t> merged_halves; // merged tensor -> rows of the half already taken
+     std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
+     const llama_model_tensor_buft_override * tensor_buft_overrides;
+ 
+     gguf_context_ptr metadata_ptr;
+     struct gguf_context * metadata; // either metadata_ptr.get() or externally set
+     llama_model_set_tensor_data_t set_tensor_data;
+     void * set_tensor_data_ud;
+     std::vector<ggml_context_ptr> contexts;
+@@ -235,16 +239,18 @@ struct llama_model_loader {
+     bool get_key_or_arr(enum llm_kv kid, uint32_t & result, bool required = true);
+ 
+     std::string get_arch_name() const;
+ 
+     enum llm_arch get_arch() const;
+ 
+     const llama_tensor_weight * get_weight(const char * name) const;
+ 
++    void add_merged_half(const std::string & name, const std::initializer_list<int64_t> & ne);
++
+     const llama_tensor_weight & require_weight(const char * name) const;
+ 
+     struct ggml_tensor * get_tensor_meta(const char * name) const;
+ 
+     struct ggml_tensor * require_tensor_meta(const std::string & name) const;
+ 
+     const struct ggml_tensor * check_tensor_dims(
+             const std::string & name,

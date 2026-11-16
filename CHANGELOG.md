@@ -16,6 +16,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **LLMs: Qwen3.5 and Qwen3.8 Flash-Next files from newer converters load instead of failing with "tensor not found".**
+- **LLMs: a GGUF with FP8 weights is refused when it loads instead of being read as another type.**
 - **LLMs on Radeon RX 400/500, Vega, Radeon VII and Radeon Pro Vega/WX: models with BF16 weights, such as Gemma 4 E4B, no longer stop the engine on prompts of 448 tokens or more.** Reported by [andruwa13](https://github.com/andruwa13) in [#149](https://github.com/engeldlgado/toshllm/pull/149).
 - **Chat: Maximum image size under Attachments lines up with the rows around it,** with its icon and its ⓘ where the others have them.
 
