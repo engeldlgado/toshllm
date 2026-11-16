@@ -274,14 +274,15 @@ fi
 
 # a binary built for a newer macOS than the app's floor fails to launch on the testers'
 # systems with a dyld symbol error, and only there, so refuse to package it
+setopt local_options null_glob
 for exe in "$APP/Contents/Resources/bin/"* "$APP/Contents/Resources/bin-image/"* "$APP/Contents/Resources/bin-audio/"* \
            "$APP/Contents/Resources/tosh-sympy/python/bin/python3" \
-           "$APP/Contents/Resources/tosh-sympy/"**/*.(so|dylib)(.N); do
+           "$APP/Contents/Resources/tosh-sympy/"**/*.(so|dylib); do
     [ -f "$exe" ] || continue
     case "$exe" in *.metallib) continue;; esac
     minos=$(otool -l "$exe" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/^ *minos/{print $2; exit}')
     [ -z "$minos" ] && continue
-    if [ "${minos%%.*}" -gt 14 ]; then
+    if [ -z "${TOSH_ALLOW_MINOS:-}" ] && [ "${minos%%.*}" -gt 14 ]; then
         echo "ERROR: $(basename "$exe") targets macOS $minos but the app runs on 14.0+; rebuild with ./scripts/build-engines.sh" >&2
         exit 1
     fi
