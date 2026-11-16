@@ -355,6 +355,7 @@ struct ServerSettings {
             args += sympyArguments
         }
         if uiMcpProxy { args.append("--ui-mcp-proxy") }
+        args += unauthenticatedToolsArguments(toolsEnabled: agentToolsEnabled || !sympyArguments.isEmpty || uiMcpProxy)
         if persistCache && effectiveFaAmd {
             args += ["--slot-save-path", Self.slotCacheDir(port: port).path]
         }
@@ -432,6 +433,12 @@ struct ServerSettings {
         return value
     }
 
+    /// The engine refuses tools on the network without an API key; the key stays optional
+    /// here, and the engine still logs its warning once at startup.
+    func unauthenticatedToolsArguments(toolsEnabled: Bool) -> [String] {
+        localNetworkDiscovery && !apiKeyEnabled && toolsEnabled ? ["--allow-unauthenticated-tools"] : []
+    }
+
     /// Router-mode CLI args: no `-m`, the preset file lists every model. Per-model
     /// flags (mmproj, ncmoe, MTP...) live in that INI instead, see `routerPresetINI`.
     private var routerArguments: [String] {
@@ -455,6 +462,7 @@ struct ServerSettings {
             args += sympyArguments
         }
         if uiMcpProxy { args.append("--ui-mcp-proxy") }
+        args += unauthenticatedToolsArguments(toolsEnabled: agentToolsEnabled || !sympyArguments.isEmpty || uiMcpProxy)
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         args += Self.chatUIArgs
         args += extraArgTokens.cli

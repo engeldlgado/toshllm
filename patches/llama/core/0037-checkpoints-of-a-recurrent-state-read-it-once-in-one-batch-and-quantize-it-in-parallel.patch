@@ -1,16 +1,16 @@
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 5785065dc..6bd5b41aa 100644
+index 45367829c..a142dc106 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -14,22 +14,24 @@ static inline size_t tosh_dmoe_private_bytes(void) { return 0; }
- #include "llama-io.h"
- #include "llama-memory.h"
+@@ -16,22 +16,24 @@ static inline size_t tosh_dmoe_private_bytes(void) { return 0; }
  #include "llama-mmap.h"
  #include "llama-model.h"
+ #include "llama-moe-cache.h"
  #include "llama-ext.h"
  #include "llama-sampler.h"
  #include "llama.h"
  
+ #include <algorithm>
 +#include <atomic>
  #include <cinttypes>
  #include <cmath>
@@ -25,9 +25,9 @@ index 5785065dc..6bd5b41aa 100644
  // llama_context
  //
  
- // Every Hadamard-folded weight in the graph must consume its activation transform, and every
- // row read from a latent table must get the inverse; otherwise the model loads and computes
-@@ -2894,16 +2896,20 @@ public:
+ // check that each folded weight in the graph gets its Hadamard transform, and each latent lookup gets the inverse
+ // without this check, an arch that skips the transform helpers loads and computes wrong results
+@@ -3430,33 +3432,37 @@ public:
      void write_tensor(ggml_tensor * /* tensor */, size_t /* offset */, size_t size) override {
          if (skip_tensors) {
              return;
@@ -48,15 +48,35 @@ index 5785065dc..6bd5b41aa 100644
      const bool skip_tensors;
  
      size_t size_written = 0;
-@@ -2920,21 +2926,30 @@ public:
+ };
+ 
+ class llama_io_write_host : public llama_io_write_i {
+ public:
+     llama_io_write_host(
+-            uint8_t * p, size_t len) : ptr(p), base_ptr(p), buf_size(len) {}
++            uint8_t * p, size_t len, const std::vector<ggml_backend_ptr> * backends = nullptr) : ptr(p), base_ptr(p), buf_size(len), backends(backends) {}
+ 
+     ~llama_io_write_host() {
+-        if (winfos.empty()) {
++        if (winfos.empty() && qinfos.empty()) {
+             return;
+         }
+ 
+         // on a discrete GPU each read is a round trip over the bus; batching them leaves one
+         // wait per staging buffer instead of one per tensor
          if (backends) {
              for (const auto & b : *backends) {
                  ggml_backend_read_batch_begin(b.get());
-             }
+@@ -3476,21 +3482,31 @@ public:
+             tensors.push_back(winfo.tensor);
+             offsets.push_back(winfo.offset);
+             sizes.push_back(winfo.size);
+             data_offsets.push_back(winfo.data_offset);
          }
-         for (const auto & winfo : winfos) {
-             ggml_backend_tensor_get(winfo.tensor, winfo.ptr, winfo.offset, winfo.size);
-         }
+ 
+         std::vector<const ggml_tensor *> const_tensors(tensors.begin(), tensors.end());
+         ggml_backend_tensor_get_n(const_tensors.data(), base_ptr, offsets.data(), sizes.data(), data_offsets.data(), winfos.size());
++
 +        // kept between checkpoints: a fresh buffer the size of a recurrent state pays its page faults every time
 +        static thread_local std::vector<float> f32;
 +        if (f32.size() < n_quant_floats) {
@@ -79,9 +99,9 @@ index 5785065dc..6bd5b41aa 100644
          }
          memcpy(ptr, src, size);
          ptr += size;
-@@ -2950,32 +2965,83 @@ public:
+@@ -3506,33 +3522,84 @@ public:
          // save the write for later during destruction
-         winfos.push_back({tensor, ptr, size, offset});
+         winfos.push_back({tensor, (size_t) (ptr - base_ptr), size, offset});
  
          ptr += size;
          size_written += size;
@@ -143,13 +163,14 @@ index 5785065dc..6bd5b41aa 100644
 +    }
 +
      uint8_t * ptr;
+     uint8_t * base_ptr;
      size_t buf_size = 0;
      size_t size_written = 0;
 +    size_t n_quant_floats = 0;
  
      struct write_info {
          ggml_tensor * tensor;
-         uint8_t * ptr;
+         size_t data_offset;
          size_t size;
          size_t offset;
      };
@@ -160,7 +181,7 @@ index 5785065dc..6bd5b41aa 100644
  
  class llama_io_read_host : public llama_io_read_i {
  public:
-     llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
+     llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), base_ptr(p), buf_size(len) {}
  
      ~llama_io_read_host() {
 diff --git a/src/llama-io.cpp b/src/llama-io.cpp
@@ -225,10 +246,10 @@ index 0aca73310..79b4108c4 100644
  class llama_io_read_i {
  public:
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index b8df4cabb..00f0773f7 100644
+index a7fe2f199..f4a3ba7e8 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
-@@ -921,23 +921,17 @@ static ggml_type rs_save_type() {
+@@ -920,16 +920,17 @@ static ggml_type rs_save_type() {
      return t;
  }
  
@@ -237,13 +258,6 @@ index b8df4cabb..00f0773f7 100644
  }
  
  static void rs_write_small(llama_io_write_i & io, ggml_tensor * t, size_t offset, size_t size, int64_t n_per_row) {
--    const ggml_type type = rs_save_type();
--    std::vector<float> f(size/sizeof(float));
--    ggml_backend_tensor_get(t, f.data(), offset, size);
--    const int64_t nrows = (int64_t) f.size()/n_per_row;
--    std::vector<uint8_t> q(ggml_row_size(type, n_per_row)*nrows);
--    ggml_quantize_chunk(type, f.data(), q.data(), 0, nrows, n_per_row, nullptr);
--    io.write(q.data(), q.size());
 +    io.write_tensor_quantized(t, offset, size, rs_save_type(), n_per_row);
  }
  

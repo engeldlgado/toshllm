@@ -1,8 +1,11 @@
 diff --git a/tools/server/server-mcp.cpp b/tools/server/server-mcp.cpp
-index ee9cc31aa..93c950a60 100644
+index 4d8f305e0..f2d88362d 100644
 --- a/tools/server/server-mcp.cpp
 +++ b/tools/server/server-mcp.cpp
-@@ -587,16 +587,14 @@ bool server_mcp_stdio::start() {
+@@ -586,22 +586,20 @@ server_mcp_stdio::~server_mcp_stdio() {
+ }
+ 
+ bool server_mcp_stdio::start() {
      std::vector<std::string> argv_s;
      argv_s.push_back(mcp_resolve_command(config.command));
      argv_s.insert(argv_s.end(), config.args.begin(), config.args.end());
@@ -23,3 +26,6 @@ index ee9cc31aa..93c950a60 100644
      bool ok = handle->sp.create(argv_s, options, envp_s, config.cwd.empty() ? nullptr : config.cwd.c_str());
      if (!ok) {
          SRV_WRN("MCP '%s': failed to spawn '%s'\n", config.name.c_str(), config.command.c_str());
+         return false;
+     }
+     handle->in  = handle->sp.stdin_file();

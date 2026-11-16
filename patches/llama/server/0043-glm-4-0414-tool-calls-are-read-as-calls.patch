@@ -1,18 +1,21 @@
 diff --git a/common/chat.cpp b/common/chat.cpp
-index 0550ae2be..2e44f14df 100644
+index b2476cc0c..db3ec01be 100644
 --- a/common/chat.cpp
 +++ b/common/chat.cpp
-@@ -1136,10 +1136,17 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
+@@ -1335,16 +1335,23 @@ static common_chat_params_init_fn common_chat_template_detect_params_init(const
+ 
+     // Functionary v3.2 - uses recipient-based format with >>>recipient\n{content}
+     // Detection: template has ">>>all" for content and ">>>" prefix for tool calls
      if (src.find(">>>all") != std::string::npos && src.find(">>>${recipient}") != std::string::npos) {
          LOG_DBG("Using specialized template: Functionary v3.2\n");
-         return common_chat_params_init_functionary_v3_2(tmpl, params);
+         return common_chat_params_init_functionary_v3_2;
      }
  
 +    // GLM-4-0414 - calls in the assistant header ("<|assistant|>name") and results as <|observation|> turns
 +    if (src.find("<|observation|>") != std::string::npos && src.find("[gMASK]<sop>") != std::string::npos &&
 +        src.find("message.get(\"metadata\"") != std::string::npos) {
 +        LOG_DBG("Using specialized template: GLM-4-0414\n");
-+        return common_chat_params_init_glm4(tmpl, params);
++        return common_chat_params_init_glm4;
 +    }
 +
      // Kimi K2 Thinking - uses unique tool call ID format: functions.<name>:<index>
@@ -20,9 +23,12 @@ index 0550ae2be..2e44f14df 100644
      if (src.find("<|tool_calls_section_begin|>") != std::string::npos &&
          src.find("<|tool_call_begin|>") != std::string::npos) {
          LOG_DBG("Using specialized template: Kimi K2 Thinking\n");
+         return common_chat_params_init_kimi_k2;
+     }
+ 
 diff --git a/common/parsers/glm4.cpp b/common/parsers/glm4.cpp
 new file mode 100644
-index 000000000..f4618a1ae
+index 000000000..413bd1160
 --- /dev/null
 +++ b/common/parsers/glm4.cpp
 @@ -0,0 +1,140 @@
@@ -103,7 +109,7 @@ index 000000000..f4618a1ae
 +
 +    if (inputs.has_continuation()) {
 +        data.generation_prompt = GEN_PROMPT + "\n" + inputs.continue_msg.render_content();
-+        data.prompt += data.generation_prompt;
++        data.prompt.append(data.generation_prompt);
 +    }
 +
 +    std::vector<std::string> names;
@@ -116,7 +122,7 @@ index 000000000..f4618a1ae
 +        }
 +
 +        auto tool_choice = p.choice();
-+        foreach_function(inputs.tools, [&](const json & tool) {
++        foreach_function(inputs.tools, [&](size_t /*tool_index*/, const json & tool) {
 +            const auto & function = tool.at("function");
 +            std::string  name     = function.at("name");
 +            const auto   schema   = common_chat_tool_parameters(function);
@@ -138,7 +144,7 @@ index 000000000..f4618a1ae
 +        return generation_prompt + p.choice({ tools, text_then_call, content }) + p.end();
 +    });
 +
-+    data.parser = parser.save();
++    data.parser = parser;
 +
 +    if (include_grammar) {
 +        data.grammar_lazy = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_AUTO;
@@ -167,10 +173,13 @@ index 000000000..f4618a1ae
 +    return data;
 +}
 diff --git a/common/parsers/parsers.h b/common/parsers/parsers.h
-index 506b9ab2e..4156184bf 100644
+index 124d5de4d..2e1c03ac0 100644
 --- a/common/parsers/parsers.h
 +++ b/common/parsers/parsers.h
-@@ -51,10 +51,11 @@ void convert_tool_responses_gemma4(json & messages);
+@@ -42,16 +42,17 @@ std::string common_chat_template_generation_prompt_impl(
+ bool is_llama4_template(const std::string & src);
+ bool is_lfm2_template(const std::string & src);
+ 
  common_chat_params common_chat_params_init_cohere2moe(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
  
  common_chat_params common_chat_params_init_deepseek_v3_2(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
@@ -182,11 +191,17 @@ index 506b9ab2e..4156184bf 100644
  
  common_chat_params common_chat_params_init_gigachat_v3(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
  
+ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_harmony_xml(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
 diff --git a/common/parsers/sources.cmake b/common/parsers/sources.cmake
-index eae1b77d7..e254916f7 100644
+index c4b39c5e3..86eadea1b 100644
 --- a/common/parsers/sources.cmake
 +++ b/common/parsers/sources.cmake
-@@ -6,10 +6,11 @@ set(LLAMA_CHAT_PARSERS_SOURCES
+@@ -3,16 +3,17 @@
+ set(LLAMA_CHAT_PARSERS_SOURCES
+     ${CMAKE_CURRENT_LIST_DIR}/parsers.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/parsers.h
      ${CMAKE_CURRENT_LIST_DIR}/cohere2moe.cpp
      ${CMAKE_CURRENT_LIST_DIR}/deepseek.cpp
      ${CMAKE_CURRENT_LIST_DIR}/functionary-v3-2.cpp
@@ -194,7 +209,10 @@ index eae1b77d7..e254916f7 100644
      ${CMAKE_CURRENT_LIST_DIR}/gigachat-v3.cpp
 +    ${CMAKE_CURRENT_LIST_DIR}/glm4.cpp
      ${CMAKE_CURRENT_LIST_DIR}/gpt-oss.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/harmony-xml.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/k2-horizon.cpp
      ${CMAKE_CURRENT_LIST_DIR}/kimi-k2.cpp
      ${CMAKE_CURRENT_LIST_DIR}/kimi-k3.cpp
      ${CMAKE_CURRENT_LIST_DIR}/ling3.cpp
      ${CMAKE_CURRENT_LIST_DIR}/lfm2.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/llama4.cpp

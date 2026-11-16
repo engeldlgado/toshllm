@@ -15,7 +15,7 @@ moving a file.
 
 ## `llama/`
 
-The port to upstream `d81235049` (v0.6.0), one patch per feature, in a folder per area:
+The port to upstream `b1b770d90d` (v1.0.0), one patch per feature, in a folder per area:
 
 | folder | what lives there |
 |---|---|

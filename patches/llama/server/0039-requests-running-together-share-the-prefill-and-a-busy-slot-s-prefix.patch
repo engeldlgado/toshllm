@@ -1,9 +1,12 @@
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 49363af64..81e85834c 100644
+index 03c25eb01..93997447a 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -7,10 +7,28 @@
+@@ -8,16 +8,34 @@
+ #include "server-http.h"
+ #include "server-task.h"
  #include "server-queue.h"
+ #include "server-realtime.h"
  #include "server-schema.h"
  #include "server-stream.h"
  
@@ -31,7 +34,13 @@ index 49363af64..81e85834c 100644
  #include "llama.h"
  #include "log.h"
  #include "sampling.h"
-@@ -1777,10 +1795,12 @@ private:
+ #include "speculative.h"
+ #include "mtmd.h"
+ #include "mtmd-helper.h"
+@@ -1889,29 +1907,83 @@ private:
+ 
+             if (update_cache) {
+                 SRV_TRC("%s", "updating prompt cache\n");
  
                  const int64_t t_start = ggml_time_us();
  
@@ -44,7 +53,9 @@ index 49363af64..81e85834c 100644
                  }
  
                  prompt_cache->update();
-@@ -1790,10 +1810,62 @@ private:
+ 
+                 SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
+             }
          }
  
          return ret;
@@ -85,8 +96,8 @@ index 49363af64..81e85834c 100644
 +            if (needs_ckpt) {
 +                usable = 0;
 +                for (const auto & ckpt : slot.prompt.checkpoints) {
-+                    if ((size_t) ckpt.n_tokens <= lcp) {
-+                        usable = std::max(usable, (size_t) ckpt.n_tokens);
++                    if ((size_t) ckpt->n_tokens <= lcp) {
++                        usable = std::max(usable, (size_t) ckpt->n_tokens);
 +                    }
 +                }
 +            }
@@ -107,7 +118,13 @@ index 49363af64..81e85834c 100644
      //       - smarter decision which slot to clear (LRU or longest prompt?)
      //       - move slot to level 2 cache instead of removing?
      //       - instead of purging, try to store and resume later?
-@@ -3330,23 +3402,50 @@ private:
+     bool try_clear_idle_slots() {
+         bool res = false;
+ 
+@@ -4004,29 +4076,56 @@ private:
+ 
+         // process in chunks of params.n_batch
+         int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
          auto & alora_scale       = batch.alora_scale;
@@ -144,7 +161,7 @@ index 49363af64..81e85834c 100644
                      return; // batch is full, skip remaining slots
                  }
  
-                 if (!slot.is_processing()) {
+                 if (!slot.is_processing() || slot.task->type == SERVER_TASK_TYPE_TTS || slot.task->type == SERVER_TASK_TYPE_REALTIME) {
                      return;
                  }
  
@@ -159,7 +176,13 @@ index 49363af64..81e85834c 100644
                      return;
                  }
  
-@@ -3790,11 +3889,11 @@ private:
+                 // check if this is a child slot
+                 if (slot.state == SLOT_STATE_WAIT_OTHER) {
+                     SLT_DBG(slot, "%s", "waiting for parent slot to complete\n");
+@@ -4496,17 +4595,17 @@ private:
+                     }
+ 
+                     const auto & spans = slot.task->params.message_spans;
                      const auto last_user_pos = spans.last_user_message_pos();
  
                      const int32_t n_decision_first = slot.task->type == SERVER_TASK_TYPE_DECISION ? slot.task->decision.pos_first() : -1;
@@ -172,3 +195,6 @@ index 49363af64..81e85834c 100644
                          if (cur_tok == LLAMA_TOKEN_NULL) {
                              break; // end of text chunk
                          }
+ 
+                         // stop at the end of the shared prefix, the children are started from this state
+                         if (wait_shared && slot.prompt.n_tokens() == slot.task->n_tokens_shared) {

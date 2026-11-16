@@ -1,9 +1,9 @@
 diff --git a/ggml/src/ggml-metal/CMakeLists.txt b/ggml/src/ggml-metal/CMakeLists.txt
-index af7d3107f..89057c41e 100644
+index 2d339362b..f5c8a1a65 100644
 --- a/ggml/src/ggml-metal/CMakeLists.txt
 +++ b/ggml/src/ggml-metal/CMakeLists.txt
-@@ -47,16 +47,17 @@ set(METALLIB_KERNEL_SOURCES
-     kernels/fa_q8_0.metal
+@@ -48,16 +48,17 @@ set(METALLIB_KERNEL_SOURCES
+     kernels/fa_tensor.metal
      kernels/fa_vec_f16.metal
      kernels/fa_vec_f32.metal
      kernels/fa_vec_q4_0.metal
@@ -21,11 +21,11 @@ index af7d3107f..89057c41e 100644
      kernels/softmax.metal
      kernels/norm.metal
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index a19dccd70..da30462f4 100644
+index 8773f14d7..cff6be5c7 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -125,16 +125,17 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
-     X(FA_Q8_0,         fa_q8_0)        \
+@@ -126,16 +126,17 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
+     X(FA_TENSOR,       fa_tensor)      \
      X(FA_VEC_F16,      fa_vec_f16)     \
      X(FA_VEC_F32,      fa_vec_f32)     \
      X(FA_VEC_Q4_0,     fa_vec_q4_0)    \
@@ -43,10 +43,10 @@ index a19dccd70..da30462f4 100644
      X(SOFTMAX,         softmax)        \
      X(NORM,            norm)           \
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 72f5f7d76..44519f5aa 100644
+index ea6b2a85b..14e57b0e9 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3863,42 +3863,109 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4033,42 +4033,109 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
          // MLA keeps K wider than V; the tile kernel it used to fall back to measures ~26% slower
          static const bool pfmla = TOSH_ENV("TOSH_FA_PF_MLA_DISABLE") == nullptr;
          const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;

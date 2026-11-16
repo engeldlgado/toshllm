@@ -1,8 +1,8 @@
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
-index 0993fb253..76b97763f 100644
+index 5fbde71f0..26e03cbe2 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
-@@ -82,16 +82,19 @@ extern "C" {
+@@ -83,16 +83,19 @@ extern "C" {
  
      GGML_API ggml_backend_buffer_type_t ggml_backend_get_default_buffer_type(ggml_backend_t backend);
      GGML_API ggml_backend_buffer_t      ggml_backend_alloc_buffer(ggml_backend_t backend, size_t size);
@@ -23,10 +23,10 @@ index 0993fb253..76b97763f 100644
      GGML_API void ggml_backend_tensor_set_2d(      struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
      GGML_API void ggml_backend_tensor_get_2d(const struct ggml_tensor * tensor,       void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index db8f7b43b..34691d875 100644
+index 99b48e4ca..4ffa44406 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -428,16 +428,28 @@ void ggml_backend_tensor_set_async(ggml_backend_t backend, struct ggml_tensor *
+@@ -484,16 +484,28 @@ void ggml_backend_tensor_set_async(ggml_backend_t backend, struct ggml_tensor *
      if (backend->iface.set_tensor_async == NULL) {
          ggml_backend_synchronize(backend);
          ggml_backend_tensor_set(tensor, data, offset, size);
@@ -55,7 +55,7 @@ index db8f7b43b..34691d875 100644
  
      if (backend->iface.get_tensor_async == NULL) {
          ggml_backend_synchronize(backend);
-@@ -1920,16 +1932,37 @@ static bool ggml_backend_sched_prefetch_init(ggml_backend_sched_t sched, ggml_ba
+@@ -2230,16 +2242,18 @@ static bool ggml_backend_sched_prefetch_init(ggml_backend_sched_t sched, ggml_ba
                  GGML_LOG_INFO("%s: expert prefetch active: %d slots of %.2f MiB\n",
                          __func__, sched->prefetch_n_slots, size / 1024.0 / 1024.0);
              }
@@ -66,85 +66,48 @@ index db8f7b43b..34691d875 100644
      return true;
 +}
 +
-+// whether a node that will be computed reads the tensor, directly or through a view
-+static bool ggml_backend_sched_input_is_read(const ggml_cgraph * graph, const ggml_tensor * t) {
-+    for (int i = 0; i < graph->n_nodes; i++) {
-+        const ggml_tensor * node = graph->nodes[i];
-+        if (!(node->flags & GGML_TENSOR_FLAG_COMPUTE)) {
-+            continue;
-+        }
-+        if (node->view_src == t) {
-+            return true;
-+        }
-+        for (int j = 0; j < GGML_MAX_SRC; j++) {
-+            if (node->src[j] == t) {
-+                return true;
-+            }
-+        }
-+    }
-+    return false;
-+}
-+
- static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
-     GGML_ASSERT(sched);
-     struct ggml_backend_sched_split * splits = sched->splits;
+ static bool ggml_backend_sched_is_host_weight(const struct ggml_tensor * t) {
+     return t->buffer != NULL &&
+         ggml_backend_buffer_get_usage(t->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
+         ggml_backend_buffer_is_host(t->buffer);
+ }
  
-     ggml_tensor * prev_ids_tensor = nullptr;
-     std::vector<int32_t> ids;
-     std::vector<ggml_bitset_t> used_ids;
-     std::vector<int32_t> chunk_ids;
-@@ -1975,32 +2008,40 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
-             for (int i = 0; i < split->n_inputs; i++) {
-                 ggml_backend_t b = ggml_backend_sched_get_tensor_backend(sched, split->inputs[i]);
-                 if (b != split_backend && b->iface.read_batch_begin) {
-                     read_batch_backend = b;
-                     b->iface.read_batch_begin(b);
-                     break;
-                 }
-             }
-+        }
-+
-         // ensure the previous split's async work has completed before we start
-         // this split, the allocator may have reused buffer regions across splits
-         if (split->n_inputs == 0 && prev_backend_id >= 0 && prev_backend_id != split_backend_id) {
-             if (sched->events[prev_backend_id][sched->cur_copy] != NULL) {
-                 ggml_backend_event_synchronize(sched->events[prev_backend_id][sched->cur_copy]);
-             } else {
-                 ggml_backend_synchronize(sched->backends[prev_backend_id]);
-             }
+ // the routing ids of an expert matmul, read from the source of the split input they come from when they are one,
+ // so that reading them does not wait for the split backend
+@@ -2268,16 +2282,19 @@ static void ggml_backend_sched_prefetch_expert(ggml_backend_sched_t sched, struc
+     for (int i = 0; i < split->n_inputs; i++) {
+         if (input_cpy == tensor_copy(split->inputs[i], split->backend_id, sched->cur_copy)) {
+             input = split->inputs[i];
+             break;
          }
- 
-         // copy the input tensors to the split backend
-         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
-             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
-             struct ggml_tensor * input = split->inputs[input_id];
-             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
- 
-+            // a tensor that only feeds a branch ggml_build_forward_select left out is never read
-+            // here; on a discrete GPU each of these copies is a synchronous upload
-+            if (!ggml_backend_sched_input_is_read(&split->graph, input_cpy)) {
-+                continue;
-+            }
+     }
+     if (input == NULL || !ggml_backend_sched_is_host_weight(input) || !sched->hv_tensor_requires_copy[hash_id(input)]) {
+         return;
++    }
 +
-             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
-                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
-                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
-                     ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
-                 } else {
-                     ggml_backend_synchronize(split_backend);
-                 }
-                 ggml_backend_tensor_copy(input, input_cpy);
++    ggml_backend_t split_backend = sched->backends[split->backend_id];
+     const ggml_tensor * ids = node->src[2];
+     const int64_t n_expert = input->ne[2];
+     const bool compact = tosh_dmoe_compact();
+     if (!(compact || ids->ne[0]*ids->ne[1] >= 2*n_expert) ||
+         !ggml_backend_sched_prefetch_init(sched, split_backend, ggml_nbytes(input))) {
+         return;
+     }
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 3fe87e824..6c6835640 100644
+index 9a6e7a415..c9a32318e 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -3855,30 +3855,47 @@ void ggml_metal_device_read_batch_begin(ggml_metal_device_t dev) {
+@@ -3916,32 +3916,50 @@ void ggml_metal_device_read_batch_begin(ggml_metal_device_t dev) {
+     if (dev->props.use_shared_buffers) {
+         return;
      }
      [dev->stage_lock lock];   // held until read_batch_end
  
  void ggml_metal_device_read_batch_end(ggml_metal_device_t dev) {
      if (dev->props.use_shared_buffers) {
          return;
++    ggml_metal_device_stage_batch_flush(dev);
      [dev->stage_lock unlock];
  }
 +
@@ -187,23 +150,18 @@ index 3fe87e824..6c6835640 100644
              (typeof(dev->stage_batch_items[0])) { data, dev->stage_batch_used, size };
          dev->stage_batch_used += size;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index fe8f0a562..0fe22f2f4 100644
+index 4a49f265c..07d676470 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -2906,23 +2906,34 @@ private:
-     const bool skip_tensors;
- 
-     size_t size_written = 0;
- };
- 
- class llama_io_write_host : public llama_io_write_i {
- public:
+@@ -3449,16 +3449,24 @@ public:
      llama_io_write_host(
--            uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
-+            uint8_t * p, size_t len, const std::vector<ggml_backend_ptr> * backends = nullptr) : ptr(p), buf_size(len), backends(backends) {}
+             uint8_t * p, size_t len) : ptr(p), base_ptr(p), buf_size(len) {}
  
      ~llama_io_write_host() {
--        // TODO: add backend support to batch tensor_get? or some other way to speed this up
+         if (winfos.empty()) {
+             return;
+         }
+ 
 +        // on a discrete GPU each read is a round trip over the bus; batching them leaves one
 +        // wait per staging buffer instead of one per tensor
 +        if (backends) {
@@ -211,9 +169,24 @@ index fe8f0a562..0fe22f2f4 100644
 +                ggml_backend_read_batch_begin(b.get());
 +            }
 +        }
-         for (const auto & winfo : winfos) {
-             ggml_backend_tensor_get(winfo.tensor, winfo.ptr, winfo.offset, winfo.size);
++
+         std::vector<ggml_tensor *> tensors;
+         std::vector<size_t> offsets;
+         std::vector<size_t> sizes;
+         std::vector<size_t> data_offsets;
+         tensors.reserve(winfos.size());
+         offsets.reserve(winfos.size());
+         sizes.reserve(winfos.size());
+         data_offsets.reserve(winfos.size());
+@@ -3467,16 +3475,21 @@ public:
+             tensors.push_back(winfo.tensor);
+             offsets.push_back(winfo.offset);
+             sizes.push_back(winfo.size);
+             data_offsets.push_back(winfo.data_offset);
          }
+ 
+         std::vector<const ggml_tensor *> const_tensors(tensors.begin(), tensors.end());
+         ggml_backend_tensor_get_n(const_tensors.data(), base_ptr, offsets.data(), sizes.data(), data_offsets.data(), winfos.size());
 +        if (backends) {
 +            for (const auto & b : *backends) {
 +                ggml_backend_read_batch_end(b.get());
@@ -227,11 +200,11 @@ index fe8f0a562..0fe22f2f4 100644
          }
          memcpy(ptr, src, size);
          ptr += size;
-@@ -2954,16 +2965,17 @@ private:
+@@ -3509,16 +3522,17 @@ private:
  
      struct write_info {
          ggml_tensor * tensor;
-         uint8_t * ptr;
+         size_t data_offset;
          size_t size;
          size_t offset;
      };
@@ -241,11 +214,11 @@ index fe8f0a562..0fe22f2f4 100644
  
  class llama_io_read_host : public llama_io_read_i {
  public:
-     llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
+     llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), base_ptr(p), buf_size(len) {}
  
      ~llama_io_read_host() {
-         // flush the reads
-@@ -3380,17 +3392,17 @@ size_t llama_context::state_get_size() {
+         if (rinfos.empty()) {
+@@ -3963,17 +3977,17 @@ size_t llama_context::state_get_size() {
          return state_write_data(io);
      } catch (const std::exception & err) {
          LLAMA_LOG_ERROR("%s: error getting state size: %s\n", __func__, err.what());
@@ -264,7 +237,7 @@ index fe8f0a562..0fe22f2f4 100644
      }
  }
  
-@@ -3420,17 +3432,17 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
+@@ -4003,17 +4017,17 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
      }
  }
  
@@ -284,10 +257,10 @@ index fe8f0a562..0fe22f2f4 100644
          return state_seq_write_data(*io, seq_id, flags);
      } catch (const std::exception & err) {
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index b60ff6660..ffad54935 100644
+index b5fb9e17b..d5807a08b 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -3906,23 +3906,27 @@ llm_graph_input_rs * llm_graph_context::build_rs_inp() const {
+@@ -4346,23 +4346,27 @@ llm_graph_input_rs * llm_graph_context::build_rs_inp() const {
  ggml_tensor * llm_graph_context::build_rs(
          llm_graph_input_rs * inp,
          ggml_tensor * s,
@@ -311,17 +284,17 @@ index b60ff6660..ffad54935 100644
 +                    getter);
  }
  
- ggml_tensor * llm_graph_context::build_rwkv_token_shift_load(
-     llm_graph_input_rs * inp,
-     const llama_ubatch & ubatch,
-                    int   il) const {
-     const auto * mctx_cur = static_cast<const llama_memory_recurrent_context *>(mctx);
- 
+ void llm_graph_context::build_conv_state_store(
+         llm_graph_input_rs * inp,
+         ggml_tensor * s,
+         ggml_tensor * conv_x,
+             int64_t   n_cols,
+              size_t   offs) const {
 diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
-index 045489df7..8de54df64 100644
+index 9688a7ed4..78378eed0 100644
 --- a/src/llama-mmap.cpp
 +++ b/src/llama-mmap.cpp
-@@ -673,23 +673,57 @@ struct llama_mmap::impl {
+@@ -903,23 +903,57 @@ struct llama_mmap::impl {
  #endif
  
      void * addr;
@@ -415,10 +388,10 @@ index 6c6393d57..d28af9a6d 100644
      void init(void * ptr);
      void grow_to(size_t target_size);
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index c5280d77d..db94f09b8 100644
+index 24df2d223..0be60bf31 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -1919,23 +1919,39 @@ bool llama_model_loader::load_all_data(
+@@ -2095,23 +2095,39 @@ bool llama_model_loader::load_all_data(
      if (validation_failed) {
          throw std::runtime_error("found tensors with invalid data");
      }

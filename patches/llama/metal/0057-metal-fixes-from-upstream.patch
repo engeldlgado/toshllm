@@ -1,97 +1,8 @@
-diff --git a/ggml/src/ggml-metal/ggml-metal-fusion.cpp b/ggml/src/ggml-metal/ggml-metal-fusion.cpp
-index d4f03feb1..ae32ec239 100644
---- a/ggml/src/ggml-metal/ggml-metal-fusion.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-fusion.cpp
-@@ -661,16 +661,21 @@ static bool ggml_metal_fusion_check_moe_reduce(
-     if (node_idxs[idx + (int) fusion->ops.size() - 1] != raw_end) {
-         return false;
-     }
- 
-     if (mode == GGML_METAL_FUSION_FULL) {
-         if (!match.experts->data || !match.weights->data || !match.dst->data) {
-             return false;
-         }
-+
-+        // the fused kernel reads experts and weights while writing dst, so dst must not overlap either input
-+        if (ggml_metal_fusion_overlap(match.dst, match.experts) || ggml_metal_fusion_overlap(match.dst, match.weights)) {
-+            return false;
-+        }
-     }
- 
-     return true;
- }
- 
- // true if t is or views a tensor in a buffer marked as weights, such as a bias; the model loader marks its buffers before
- // any graph is optimized, and tensors in unmarked or not yet allocated buffers count as non-weights in both phases
- static bool ggml_metal_tensor_is_weight(const struct ggml_tensor * t) {
-diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index bfe3021bd..192624551 100644
---- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3100,17 +3100,18 @@ static int ggml_metal_op_mul_mat_mma(ggml_metal_op_t ctx, int idx) {
-     const int  n_fuse   = ggml_metal_op_try_fusion(ctx, idx, GGML_METAL_FUSION_MUL_MAT_ADD);
-     const bool fuse_add = n_fuse > 1;
- 
-     const ggml_tensor * dst = op;
-     const ggml_tensor * res = dst;
- 
-     if (fuse_add) {
-         dst = ctx->node(idx + n_fuse - 1);
--        res = dst->src[0]->op == GGML_OP_MUL_MAT ? dst->src[1] : dst->src[0];
-+        // the residual is the other operand of the ADD, by identity: it can itself be a MUL_MAT output
-+        res = dst->src[0] == op ? dst->src[1] : dst->src[0];
-     }
- 
-     auto pipeline = ggml_metal_library_get_pipeline_mul_mv_mma_auto(lib, op, fuse_add);
- 
-     ggml_metal_kargs_mul_mv_ext args = {
-         /*.ne00  =*/ ne00,
-         /*.ne01  =*/ ne01,
-         /*.ne02  =*/ ne02,
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
-index 96e00fa29..2ec7bc6bb 100644
+index b116681f4..f125e8592 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
-@@ -498,35 +498,35 @@ kernel void kernel_mul_mm(
-                 if (row < args.ne0 && col < args.ne1) {
-                     Dbase[row + (int64_t)col*args.ne0] = acc[rr][cc];
-                 }
-             }
-         }
-     } else if (!FC_mul_mm_bc_out || (r0 + NR0 <= args.ne0 && r1 + NR1 <= args.ne1)) {
-         device float * C = (device float *) dst +
-             (r0 + 32*(sgitg &  1)) +
--            (r1 + 16*(sgitg >> 1)) * args.ne0 + im*args.ne1*args.ne0;
-+            (int64_t) (r1 + 16*(sgitg >> 1))*args.ne0 + (int64_t) im*args.ne1*args.ne0;
- 
-         for (short i = 0; i < 8; i++) {
--            simdgroup_store(mc[i], C + 8*(i%4) + 8*args.ne0*(i/4), args.ne0, 0, false);
-+            simdgroup_store(mc[i], C + 8*(i%4) + (int64_t) 8*args.ne0*(i/4), args.ne0, 0, false);
-         }
-     } else {
-         threadgroup_barrier(mem_flags::mem_threadgroup);
- 
-         threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
- 
-         for (short i = 0; i < 8; i++) {
-             simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
-         }
- 
-         threadgroup_barrier(mem_flags::mem_threadgroup);
- 
-         if (sgitg == 0) {
-             for (int j = tiitg; j < nr1; j += NR1) {
--                device float  * D  = (device float  *) dst + r0 + (r1 + j)*args.ne0 + im*args.ne1*args.ne0;
-+                device float  * D  = (device float  *) dst + r0 + (int64_t) (r1 + j)*args.ne0 + (int64_t) im*args.ne1*args.ne0;
-                 device float4 * D4 = (device float4 *) D;
- 
-                 threadgroup float  * C  = temp_str + (j*NR0);
-                 threadgroup float4 * C4 = (threadgroup float4 *) C;
- 
-                 int i = 0;
-                 for (; i < nr0/4; i++) {
-                     *(D4 + i) = *(C4 + i);
-@@ -1169,17 +1169,17 @@ kernel void kernel_mul_mm_id(
+@@ -1112,17 +1112,21 @@ kernel void kernel_mul_mm_id(
          for (short j = vsg; j < 32 && j + 32*p < nr1; j += 4) {
              const int id = ids_i32[im*args.ne21 + r1 + 32*p + j];
  
@@ -100,21 +11,24 @@ index 96e00fa29..2ec7bc6bb 100644
              const int ide = id % args.ne20;
              const int idt = id / args.ne20;
  
--            device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
 +            device float  * D  = (device float  *) dst + r0 + (int64_t) ide*args.ne0 + (int64_t) idt*args.ne1*args.ne0;
-             device float4 * D4 = (device float4 *) D;
++            device float4 * D4 = (device float4 *) D;
  
-             threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
-             threadgroup float4 * C4 = (threadgroup float4 *) C;
++            threadgroup float  * C  = (threadgroup float  *) shmem + j*NR0;
++            threadgroup float4 * C4 = (threadgroup float4 *) C;
  
              int i = lane;
              for (; i < nr0/4; i += 32) {
                  *(D4 + i) = *(C4 + i) * s1_scale;
+             }
+ 
+             i = (4*(nr0/4)) + lane;
+             for (; i < nr0; i += 32) {
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
-index 4064360b5..3251bb605 100644
+index 7db8d9fd4..3251bb605 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
-@@ -570,17 +570,17 @@ kernel void kernel_mul_mm_id_w64(
+@@ -570,16 +570,17 @@ kernel void kernel_mul_mm_id_w64(
          for (short j = sgitg; j < 32 && j + 32*p < nr1; j += 2) {
              const int id = ids_i32[im*args.ne21 + r1 + 32*p + j];
  
@@ -123,7 +37,6 @@ index 4064360b5..3251bb605 100644
              const int ide = id % args.ne20;
              const int idt = id / args.ne20;
  
--            device float  * D  = (device float  *) dst + r0 + ide*args.ne0 + idt*args.ne1*args.ne0;
 +            device float  * D  = (device float  *) dst + r0 + (int64_t) ide*args.ne0 + (int64_t) idt*args.ne1*args.ne0;
              device float4 * D4 = (device float4 *) D;
  
@@ -133,49 +46,26 @@ index 4064360b5..3251bb605 100644
              int i = lane;
              for (; i < nr0/4; i += 64) {
                  *(D4 + i) = *(C4 + i);
-diff --git a/ggml/src/ggml-metal/kernels/solve_tri.metal b/ggml/src/ggml-metal/kernels/solve_tri.metal
-index 10526fb21..d818f228b 100644
---- a/ggml/src/ggml-metal/kernels/solve_tri.metal
-+++ b/ggml/src/ggml-metal/kernels/solve_tri.metal
-@@ -37,17 +37,19 @@ kernel void kernel_solve_tri_f32(
-     for (short rr = 0; rr < N; rr += NSG) {
-         threadgroup_barrier(mem_flags::mem_threadgroup);
- 
-         {
-             threadgroup float * sh0_cur = sh0 + sgitg*NP;
- 
-             for (short t = 0; t*NW < N; ++t) {
-                 const short idx = t*NW + tiisg;
--                sh0_cur[idx] = src0_ptr[idx];
-+                if (rr + sgitg < N && idx < N) {
-+                    sh0_cur[idx] = src0_ptr[idx];
-+                }
-             }
- 
-             src0_ptr += NSG*N;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index 53e44b2ff..dfa44a857 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -397,17 +397,17 @@ void mul_vec_q_n_f32_impl(
+         FOR_UNROLL (short row = 0; row < NR0; row++) {
+             sumf[row] += block_q_n_dot_y(ax[row] + ib, sumy[0] + sumy[1], yl, il);
          }
  
-         threadgroup_barrier(mem_flags::mem_threadgroup);
+         yb += QK4_0 * NQ;
+         //yb += NSG*NQ*QK4_0;
+     }
  
-         if (i01 >= args.ne10) {
-@@ -58,17 +60,19 @@ kernel void kernel_solve_tri_f32(
-             const short r = rr + ir;
+-    device float * dst_f32 = (device float *) dst + im*args.ne0*args.ne1 + r1*args.ne0;
++    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
  
-             threadgroup float * sh0_cur = sh0 + ir*NP;
+     //helper_mv_reduce_and_write<NR0>(dst_f32, sumf, r0, args.ne01, tiisg, sgitg, shmem);
  
-             float sum = 0.0f;
+     for (int row = 0; row < NR0; ++row) {
+         const float tot = simd_sum(sumf[row]);
  
-             for (short t = 0; t*NW < r; ++t) {
-                 const short idx = t*NW + tiisg;
--                sum += sh0_cur[idx] * dst_ptr[idx*K] * (idx < r);
-+                if (idx < r) {
-+                    sum += sh0_cur[idx] * dst_ptr[idx*K];
-+                }
-             }
- 
-             sum = simd_sum(sum);
- 
-             if (tiisg == 0) {
-                 const float diag = sh0_cur[r];
- 
-                 dst_ptr[r*K] = (src1_ptr[r*K] - sum) / diag;
+         if (tiisg == 0 && r0 + row < args.ne01) {
+             dst_f32[r0 + row] = tot;

@@ -1,8 +1,8 @@
 diff --git a/common/common.h b/common/common.h
-index 470eba20b..909f7f9e7 100644
+index 82f3da648..31cc73f19 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -396,17 +396,21 @@ struct common_params_speculative {
+@@ -412,17 +412,21 @@ struct common_params_speculative {
          return synth_len != -1.0 || !synth_rates.empty();
      }
  
@@ -26,28 +26,28 @@ index 470eba20b..909f7f9e7 100644
  
      float   eps           = 0;        // epsilon for timesteps
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 97c3df0a0..1785afe6d 100644
+index 78aa09a9a..c04f45576 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -8,16 +8,17 @@
+@@ -6,16 +6,17 @@
+ #include "llama.h"
+ #include "log.h"
  #include "ngram-cache.h"
  #include "ngram-map.h"
  #include "ngram-mod.h"
  #include "sampling.h"
- 
- #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
  
  #include <algorithm>
 +#include <array>
  #include <cassert>
  #include <cmath>
  #include <cstring>
+ #include <fstream>
  #include <iomanip>
  #include <map>
+ #include <random>
  #include <cinttypes>
- 
- #define SPC_DBG(fmt, ...) LOG_DBG("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
-@@ -1431,22 +1432,263 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1566,22 +1567,263 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
          static const float alpha = getenv("TOSH_DFLASH_EWMA") ? (float) atof(getenv("TOSH_DFLASH_EWMA")) : 0.5f;
          const float acc = std::min(1.0f, (float) n_accepted / (float) n_last_draft[seq_id]);
          const float a = acc > acc_ewma[seq_id] ? 0.2f : alpha;  // rise fast, fall at alpha
@@ -311,7 +311,7 @@ index 97c3df0a0..1785afe6d 100644
  
      std::vector<common_params_sampling> smpls_cfg;
  
-@@ -1556,16 +1798,23 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1698,16 +1940,23 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              this->params.n_max = std::min(this->params.n_max, n_mtp_layers);
  
              chain_h.assign(n_seq, {});
@@ -335,7 +335,7 @@ index 97c3df0a0..1785afe6d 100644
  
          cold_defer = getenv("TOSH_MTP_COLD_DEFER_DISABLE") == nullptr;
          // 0.65 sat above the acceptance real content reaches, so it backed off where drafting
-@@ -1655,16 +1904,28 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1814,16 +2063,28 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          const int32_t N = (int32_t) prompt.size();
          if (N <= 0) {
              return;
@@ -364,26 +364,7 @@ index 97c3df0a0..1785afe6d 100644
                      "process() hook may not have run on every prefill ubatch "
                      "(need_embd / output flag on every prompt position?). "
                      "Drafts may degrade.\n",
-@@ -1726,18 +1987,16 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
-             // i.e. we cannot have seq_id like this: [0, 0, 0, 1, 1, 0, 1, 1]
-             //                                                       ^--- this is a problem
-             // TODO:this is generally true, but would be nice to assert it
-             const float * h_tgt = llama_get_embeddings_nextn(ctx_tgt);
- 
-             for (int k = 0; k < n_tokens; ++k) {
-                 const llama_seq_id seq_id = batch_in.tokens[k].seq_id;
- 
--                const int32_t idx = batch.add(batch_in.tokens[k].id, batch_in.tokens[k].pos[0], seq_id, false);
--
-                 const float * h_row = k == i_batch_beg[seq_id]
-                     ? pending_h[seq_id].data()
-                     : h_tgt + (size_t) (k - 1) * n_embd;
- 
-                 // stash the rows of backed-off sequences instead of decoding them
-                 if (can_defer && cold_step(seq_id) && cold_rows[seq_id].size() < cold_max) {
-                     cold_rows[seq_id].push_back({ batch_in.tokens[k].id, batch_in.tokens[k].pos[0] });
-                     cold_h[seq_id].insert(cold_h[seq_id].end(), h_row, h_row + n_embd);
-@@ -1827,16 +2086,54 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -2022,16 +2283,53 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
  
          if ((int) acc_ewma.size() != (int) n_seq) {
              acc_ewma.assign(n_seq, 1.0f);
@@ -429,7 +410,7 @@ index 97c3df0a0..1785afe6d 100644
 +                }
 +            }
 +        }
-+
+ 
          for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
              auto & dp = dparams[seq_id];
  
@@ -437,8 +418,7 @@ index 97c3df0a0..1785afe6d 100644
                  continue;
              }
  
-             // while backed off, probe every probe_gap steps and double the gap on a failed probe,
-@@ -1996,34 +2293,76 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -2192,34 +2490,76 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
              auto & dp = dparams[seq_id];
              if (!dp.drafting) {
@@ -513,9 +493,9 @@ index 97c3df0a0..1785afe6d 100644
          }
  
          const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
-         const size_t row_bytes = (size_t) n_embd * sizeof(float);
-         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
-@@ -2596,19 +2935,23 @@ static uint32_t common_get_enabled_speculative_configs(const std::vector<common_
+         if (dev_rows) {
+             // process() already fetched the last row
+@@ -2823,19 +3163,23 @@ static uint32_t common_get_enabled_speculative_configs(const std::vector<common_
      return result;
  }
  
@@ -541,7 +521,7 @@ index 97c3df0a0..1785afe6d 100644
                  break;
              case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K:
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index ffad54935..08f8585aa 100644
+index d5807a08b..879fec064 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -1,9 +1,11 @@
@@ -555,8 +535,8 @@ index ffad54935..08f8585aa 100644
  #include "llama-impl.h"
  #include "llama-model.h"
  #include "llama-tosh-dmoe.h"
- #include "llama-batch.h"
-@@ -1608,16 +1610,46 @@ ggml_tensor * llm_graph_context::build_hadamard_lookup(
+ #include "llama-moe-cache.h"
+@@ -1674,16 +1676,44 @@ ggml_tensor * llm_graph_context::build_hadamard_lookup(
      // latent rows back to the primal basis: h = s * (H z)
      rows = llama_mul_mat_hadamard(ctx0, rows, it->second.rot);
      if (it->second.signs) {
@@ -566,7 +546,6 @@ index ffad54935..08f8585aa 100644
  }
  
 +ggml_tensor * llm_graph_context::build_mtp_head(
-+        const llama_vocab & vocab,
 +              ggml_tensor * head_w,
 +              ggml_tensor * head_s,
 +              ggml_tensor * cur) const {
@@ -582,7 +561,6 @@ index ffad54935..08f8585aa 100644
 +        }
 +        return n_vocab;
 +    }();
-+    if (rows <= 0 || n_vocab <= 200000 || rows >= n_vocab || head_s != nullptr || n_vocab - tail > 4096) {
 +        return build_lora_mm(head_w, cur, head_s);
 +    }
 +    ggml_tensor * head = ggml_mul_mat(ctx0, ggml_view_2d(ctx0, head_w, head_w->ne[0], rows, head_w->nb[1], 0), cur);
@@ -595,15 +573,15 @@ index ffad54935..08f8585aa 100644
 +    return head;
 +}
 +
- ggml_tensor * llm_graph_context::build_lora_mm(
-           ggml_tensor * w,
-           ggml_tensor * cur,
-           ggml_tensor * w_s) const {
-     ggml_tensor * res = ggml_mul_mat(ctx0, w, build_hadamard_input(w, cur));
+ static ggml_tensor * build_rope_impl(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * pos, const llama_hparams & hparams, const llama_rope_params & rp) {
+     if (rp.n_rot == 0) {
+         return cur;
+     }
  
-     if (prec_policy) {
-         prec_policy->apply(res);
-@@ -3042,16 +3074,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+     if (rp.type & GGML_ROPE_TYPE_MROPE) {
+         int sections[GGML_MROPE_SECTIONS];
+         std::copy(hparams.rope_sections.begin(), hparams.rope_sections.end(), sections);
+@@ -3399,16 +3429,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
              }
          }
  
@@ -621,7 +599,7 @@ index ffad54935..08f8585aa 100644
  
          cur = ggml_permute(ctx0, kqv, 0, 2, 1, 3);
  
-@@ -3259,16 +3292,83 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -3666,16 +3697,83 @@ ggml_tensor * llm_graph_context::build_attn(
  
      if (wo_b) {
          cur = ggml_add(ctx0, cur, wo_b);
@@ -641,12 +619,12 @@ index ffad54935..08f8585aa 100644
 +        ggml_tensor * k_cur,
 +        ggml_tensor * v_cur,
 +                int   il) const {
-+    if (inp->self_k_rot) {
-+        k_cur = llama_mul_mat_hadamard(ctx0, k_cur, inp->self_k_rot);
++    if (inp->self_k_rot[il]) {
++        k_cur = llama_mul_mat_hadamard(ctx0, k_cur, inp->self_k_rot[il]);
 +    }
 +
-+    if (inp->self_v_rot) {
-+        v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot);
++    if (inp->self_v_rot[il]) {
++        v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot[il]);
 +    }
 +
 +    ggml_build_forward_expand(gf, v_cur);
@@ -668,8 +646,8 @@ index ffad54935..08f8585aa 100644
 +                int   il) const {
 +    const bool is_swa = hparams.is_swa(il);
 +
-+    auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
-+    auto * v_rot = is_swa ? inp->self_v_rot_swa : inp->self_v_rot;
++    auto * k_rot = is_swa ? inp->self_k_rot_swa[il] : inp->self_k_rot[il];
++    auto * v_rot = is_swa ? inp->self_v_rot_swa[il] : inp->self_v_rot[il];
 +
 +    if (k_rot && k_cur) {
 +        k_cur = llama_mul_mat_hadamard(ctx0, k_cur, k_rot);
@@ -706,28 +684,28 @@ index ffad54935..08f8585aa 100644
      const llama_kv_cache_context * mctx_cur) {
  
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 568ca7a0a..6ec5c4c48 100644
+index d34711d7e..8e97fc139 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
-@@ -26,16 +26,17 @@ struct llama_hadamard_transform {
-     // perm_rep > 1: the activation arrives as [hd, nk, rep] and the fold expects [hd, rep, nk]
-     int64_t perm_hd  = 0;
-     int64_t perm_nk  = 0;
-     int64_t perm_rep = 0;
- };
+@@ -17,16 +17,17 @@
+ struct ggml_cgraph;
+ struct ggml_context;
+ struct ggml_tensor;
+ 
+ struct llama_hadamard_transform;
  using llama_hadamard_rotations = std::unordered_map<const ggml_tensor *, llama_hadamard_transform>;
  
  struct llama_cparams;
 +struct llama_vocab;
  struct llama_layer;
+ struct llama_model;
  struct llama_prec_policy;
+ struct llama_hadamard;
+ 
+ class llama_moe_cache;
  
  struct llama_memory_context_i;
- 
- class llama_kv_cache_context;
- class llama_kv_cache_dsa_context;
- class llama_kv_cache_dsa_iswa_context;
-@@ -1095,16 +1096,24 @@ struct llm_graph_context {
+@@ -1142,16 +1143,23 @@ struct llm_graph_context {
                const llama_hadamard_rotations * inverses = nullptr) const;
  
      // do mat_mul, while optionally apply lora and per-tensor scale
@@ -739,20 +717,19 @@ index 568ca7a0a..6ec5c4c48 100644
 +    // logits of a draft head over the frequent prefix of a large vocabulary plus the control
 +    // tokens at its end; the rest stay 0, which a top candidate always beats
 +    ggml_tensor * build_mtp_head(
-+        const llama_vocab & vocab,
 +              ggml_tensor * head_w,
 +              ggml_tensor * head_s,
 +              ggml_tensor * cur) const;
 +
      // do mat_mul_id, while optionally apply lora and per-expert scale
+     // if slots is set, the experts are selected by slots instead of ids, from the MoE cache if cached (see build_moe_cache_slots)
      ggml_tensor * build_lora_mm_id(
                ggml_tensor * w,   // ggml_tensor * as
                ggml_tensor * cur, // ggml_tensor * b
                ggml_tensor * ids,
-               ggml_tensor * w_s = nullptr) const;
- 
-     ggml_tensor * build_norm(
-@@ -1262,16 +1271,32 @@ struct llm_graph_context {
+               ggml_tensor * w_s    = nullptr,
+               ggml_tensor * slots  = nullptr,
+@@ -1344,16 +1352,32 @@ struct llm_graph_context {
              ggml_tensor * k_cur, // [n_embd_head_k, n_head_k, n_tokens]
              ggml_tensor * v_cur, // [n_embd_head_v, n_head_v, n_tokens]
              ggml_tensor * kq_b,
@@ -786,13 +763,13 @@ index 568ca7a0a..6ec5c4c48 100644
              ggml_tensor * wo_s,
              ggml_tensor * q_cur, // [n_embd_head_q, n_head_q, n_tokens]
 diff --git a/src/models/cohere2moe.cpp b/src/models/cohere2moe.cpp
-index cf2af012d..4c369a684 100644
+index 52b959672..1918a56ca 100644
 --- a/src/models/cohere2moe.cpp
 +++ b/src/models/cohere2moe.cpp
-@@ -329,18 +329,20 @@ llama_model_cohere2moe::graph_mtp::graph_mtp(const llama_model & model, const ll
-     inp->h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
-     ggml_set_input(inp->h);
-     ggml_set_name(inp->h, "mtp_h_input");
+@@ -317,18 +317,20 @@ llama_model_cohere2moe::graph_mtp::graph_mtp(const llm_graph_params & params) :
+     cb(tok_embd, "mtp_tok_embd", il);
+ 
+     inp->h = build_inp_embd_state(inp.get(), hparams.n_embd);
  
      ggml_tensor * h_embd = inp->h;
  
@@ -811,10 +788,10 @@ index cf2af012d..4c369a684 100644
      ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, cohere2moe_norm_type, il);
      cb(e_norm, "mtp_enorm", il);
  
-@@ -366,16 +368,21 @@ llama_model_cohere2moe::graph_mtp::graph_mtp(const llama_model & model, const ll
-             ctx0, Kcur, inp_pos, rope_factors,
-             n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-             ext_factor, attn_factor, beta_fast, beta_slow);
+@@ -347,16 +349,21 @@ llama_model_cohere2moe::graph_mtp::graph_mtp(const llm_graph_params & params) :
+     auto [Qcur, Kcur, Vcur] = build_qkv(layer, cur, n_embd_head, n_head, n_head_kv, il);
+     Qcur = build_rope(Qcur, inp_pos, il);
+     Kcur = build_rope(Kcur, inp_pos, il);
  
      cb(Qcur, "mtp_Qcur", il);
      cb(Kcur, "mtp_Kcur", il);
@@ -834,14 +811,14 @@ index cf2af012d..4c369a684 100644
      ggml_tensor * attn_out = cur;
  
 diff --git a/src/models/hy-v3.cpp b/src/models/hy-v3.cpp
-index f6b72d843..e4929ec84 100644
+index c47c373f8..dc324cb1d 100644
 --- a/src/models/hy-v3.cpp
 +++ b/src/models/hy-v3.cpp
-@@ -266,18 +266,20 @@ llama_model_hy_v3::graph_mtp::graph_mtp(const llama_model & model, const llm_gra
+@@ -251,18 +251,20 @@ llama_model_hy_v3::graph_mtp::graph_mtp(const llm_graph_params & params)
      ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
  
-     ggml_tensor * h_input  = inp->embd;
-     ggml_tensor * tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+     ggml_tensor * h_input  = inp->h;
+     ggml_tensor * tok_embd = ubatch.token ? ggml_get_rows(ctx0, tok_embd_w, inp->tokens) : inp->embd;
      cb(tok_embd, "mtp_tok_embd", il);
  
      res->add_input(std::move(inp));
@@ -859,14 +836,14 @@ index f6b72d843..e4929ec84 100644
      ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
      cb(e_norm, "mtp_enorm", il);
  
-@@ -303,16 +305,21 @@ llama_model_hy_v3::graph_mtp::graph_mtp(const llama_model & model, const llm_gra
+@@ -283,16 +285,21 @@ llama_model_hy_v3::graph_mtp::graph_mtp(const llm_graph_params & params)
+         auto [Qcur, Kcur, Vcur] = build_qkv(layer, cur, n_embd_head, n_head, n_head_kv, il);
  
-         Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, rope_factors,
-                 n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                 ext_factor, attn_factor, beta_fast, beta_slow);
-         Kcur = ggml_rope_ext(ctx0, Kcur, inp_pos, rope_factors,
-                 n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                 ext_factor, attn_factor, beta_fast, beta_slow);
+         Qcur = build_norm(Qcur, layer.attn_q_norm, nullptr, LLM_NORM_RMS, il);
+         Kcur = build_norm(Kcur, layer.attn_k_norm, nullptr, LLM_NORM_RMS, il);
+ 
+         Qcur = build_rope(Qcur, inp_pos, il);
+         Kcur = build_rope(Kcur, inp_pos, il);
  
 +        if (kv_only) {
 +            build_attn_kv_store(inp_attn, Kcur, Vcur, il);
@@ -882,13 +859,13 @@ index f6b72d843..e4929ec84 100644
      }
  
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index d42798103..7dbaa9b51 100644
+index 459fc137b..975432de5 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
-@@ -554,18 +554,20 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
-     inp->h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
-     ggml_set_input(inp->h);
-     ggml_set_name(inp->h, "mtp_h_input");
+@@ -568,18 +568,20 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llm_graph_params & params)
+     cb(tok_embd, "mtp_tok_embd", il);
+ 
+     inp->h = build_inp_embd_state(inp.get(), hparams.n_embd);
  
      ggml_tensor * h_embd = inp->h;
  
@@ -907,14 +884,14 @@ index d42798103..7dbaa9b51 100644
  
      ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
      cb(e_norm, "mtp_enorm", il);
-@@ -613,16 +615,21 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
+@@ -623,16 +625,21 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llm_graph_params & params)
+     cb(Kcur, "mtp_Kcur_normed", il);
  
-     Qcur = ggml_rope_multi(ctx0, Qcur, inp_pos, nullptr,
-             n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-             ext_factor, attn_factor, beta_fast, beta_slow);
-     Kcur = ggml_rope_multi(ctx0, Kcur, inp_pos, nullptr,
-             n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-             ext_factor, attn_factor, beta_fast, beta_slow);
+     Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
+     cb(Vcur, "mtp_Vcur", il);
+ 
+     Qcur = build_rope(Qcur, inp_pos, il);
+     Kcur = build_rope(Kcur, inp_pos, il);
  
 +    if (kv_only) {
 +        build_attn_kv_store(inp_attn, Kcur, Vcur, il);
@@ -929,7 +906,7 @@ index d42798103..7dbaa9b51 100644
              Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
      cb(cur, "mtp_attn_pregate", il);
  
-@@ -658,14 +665,14 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
+@@ -668,13 +675,12 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llm_graph_params & params)
      res->t_h_nextn = cur;
  
      cur = ggml_get_rows(ctx0, cur, inp_out_ids);
@@ -939,20 +916,18 @@ index d42798103..7dbaa9b51 100644
      ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
      GGML_ASSERT(head_w && "QWEN35 MTP: missing LM head (nextn.shared_head_head or model.output)");
 -    cur = build_lora_mm(head_w, cur, head_s);
-+    cur = build_mtp_head(model.vocab, head_w, head_s, cur);
      cb(cur, "result_output", -1);
  
      res->t_logits = cur;
-     ggml_build_forward_expand(gf, cur);
  }
 diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
-index e4c415642..d85edbc1f 100644
+index 7aa9c897d..3683ec818 100644
 --- a/src/models/qwen35moe.cpp
 +++ b/src/models/qwen35moe.cpp
-@@ -604,18 +604,20 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
-     inp->h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
-     ggml_set_input(inp->h);
-     ggml_set_name(inp->h, "mtp_h_input");
+@@ -572,18 +572,20 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llm_graph_params & params)
+     cb(tok_embd, "mtp_tok_embd", il);
+ 
+     inp->h = build_inp_embd_state(inp.get(), hparams.n_embd);
  
      ggml_tensor * h_embd = inp->h;
  
@@ -971,14 +946,14 @@ index e4c415642..d85edbc1f 100644
  
      ggml_tensor * e_norm = build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
      cb(e_norm, "mtp_enorm", il);
-@@ -663,16 +665,21 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
+@@ -627,16 +629,21 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llm_graph_params & params)
+     cb(Kcur, "mtp_Kcur_normed", il);
  
-     Qcur = ggml_rope_multi(ctx0, Qcur, inp_pos, nullptr,
-             n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-             ext_factor, attn_factor, beta_fast, beta_slow);
-     Kcur = ggml_rope_multi(ctx0, Kcur, inp_pos, nullptr,
-             n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-             ext_factor, attn_factor, beta_fast, beta_slow);
+     Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
+     cb(Vcur, "mtp_Vcur", il);
+ 
+     Qcur = build_rope(Qcur, inp_pos, il);
+     Kcur = build_rope(Kcur, inp_pos, il);
  
 +    if (kv_only) {
 +        build_attn_kv_store(inp_attn, Kcur, Vcur, il);
@@ -993,7 +968,7 @@ index e4c415642..d85edbc1f 100644
              Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
      cb(cur, "mtp_attn_pregate", il);
  
-@@ -741,14 +748,14 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
+@@ -705,13 +712,12 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llm_graph_params & params)
      res->t_h_nextn= cur;
  
      cur = ggml_get_rows(ctx0, cur, inp_out_ids);
@@ -1003,22 +978,20 @@ index e4c415642..d85edbc1f 100644
      ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
      GGML_ASSERT(head_w && "QWEN35MOE MTP: missing LM head (nextn.shared_head_head or model.output)");
 -    cur = build_lora_mm(head_w, cur, head_s);
-+    cur = build_mtp_head(model.vocab, head_w, head_s, cur);
      cb(cur, "result_output", -1);
  
      res->t_logits = cur;
-     ggml_build_forward_expand(gf, cur);
  }
 diff --git a/src/models/step35.cpp b/src/models/step35.cpp
-index ca68855d8..8ebc76dbf 100644
+index 5bed70163..ba90eaedd 100644
 --- a/src/models/step35.cpp
 +++ b/src/models/step35.cpp
-@@ -459,16 +459,21 @@ llama_model_step35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
-         ext_factor, attn_factor, beta_fast, beta_slow);
-     Kcur = ggml_rope_ext(
-         ctx0, Kcur, inp_pos, rope_factors,
-         n_rot_l, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
-         ext_factor, attn_factor, beta_fast, beta_slow);
+@@ -432,16 +432,21 @@ llama_model_step35::graph_mtp::graph_mtp(const llm_graph_params & params)
+         cb(Kcur, "mtp_Kcur_normed", il);
+     }
+ 
+     Qcur = build_rope(Qcur, inp_pos, il);
+     Kcur = build_rope(Kcur, inp_pos, il);
      cb(Qcur, "mtp_Qcur_pos", il);
      cb(Kcur, "mtp_Kcur_pos", il);
  

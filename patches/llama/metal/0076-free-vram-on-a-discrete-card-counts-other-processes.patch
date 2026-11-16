@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 5686988cf7..ed524519c6 100644
+index a54d31767..2b6b99614 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -2462,16 +2462,23 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
+@@ -2463,16 +2463,23 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
  
  
  void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t * total) {
@@ -24,5 +24,5 @@ index 5686988cf7..ed524519c6 100644
      }
  }
  
- static bool ggml_metal_supports_mul_mat_op(
-         bool has_simdgroup_reduction,
+ static bool ggml_metal_supports_mul_mat_src1_prec(const struct ggml_tensor * op, bool has_tensor) {
+     const enum ggml_prec prec = ggml_prec_get_src(op, 1);

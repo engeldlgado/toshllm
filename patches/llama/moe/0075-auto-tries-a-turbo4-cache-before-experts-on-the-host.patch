@@ -1,8 +1,8 @@
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
-index 9774673188..e0f41b969e 100644
+index 0b75af0c6..97042f700 100644
 --- a/common/tosh-plan.cpp
 +++ b/common/tosh-plan.cpp
-@@ -661,38 +661,44 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -661,36 +661,44 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
                              kv_env == "turbo4" ? GGML_TYPE_TURBO4_0 : GGML_TYPE_COUNT;
          if (t == GGML_TYPE_COUNT) {
              LOG_WRN("%s: unknown TOSH_AUTO_KV=%s, using auto\n", __func__, kv_env.c_str());
@@ -27,7 +27,6 @@ index 9774673188..e0f41b969e 100644
      dmoe_built = true;
  #endif
      std::vector<std::pair<ggml_type, probe>> full;
--    for (size_t k = 0; k < kvs.size(); ++k) {
 +    auto probe_kv = [&](size_t k) {
          for (int u = 0; u < 3; ++u) dm[k][u] = run_probe(params, p.n_ctx, kvs[k], ubs[u], true, 0);
          int uf = -1;
@@ -37,7 +36,6 @@ index 9774673188..e0f41b969e 100644
          f.model += mi.bank_mib;
          f.host_model = std::max(0.0, f.host_model - mi.bank_mib);
          full.push_back({ kvs[k], f });
--    }
 +    };
 +    for (size_t k = 0; k < kvs.size(); ++k) probe_kv(k);
 +    bool turbo_probed = false;
@@ -49,7 +47,7 @@ index 9774673188..e0f41b969e 100644
      p.host_weights_mib = dm[0][0].ok ? std::max(mi.embd_mib, dm[0][0].host_model - mi.bank_mib - mi.lazy_mib) : mi.embd_mib;
      p.host_lazy_mib = mi.lazy_mib;
      const bool runtime = host_policy_runtime() && dmoe_built;
-@@ -902,30 +908,42 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -900,24 +908,42 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
      const size_t n_with_head = reserves.size();
      if (mtp_mib > 0) {
          reserves.push_back(reserve_pref - mtp_mib);
@@ -58,8 +56,6 @@ index 9774673188..e0f41b969e 100644
      p.mtp_head_dropped = false;
      p.mtp_head_arena   = false;
      // experts on the host lose more than the head gains: every reserve, the head's last, is
--    // tried for the GPU modes before any of them settles for whole layers on the host
--    for (size_t pass = 0; pass < 2 && sel == nullptr; ++pass)
 +    // tried for the GPU modes before any of them settles for whole layers on the host.
 +    // Pass 0 tries the GPU modes, pass 1 the same with turbo4 where allowed, pass 2 adds the host.
 +    for (size_t pass = 0; pass < 3 && sel == nullptr; ++pass) {
@@ -77,8 +73,6 @@ index 9774673188..e0f41b969e 100644
      for (size_t ri = 0; ri < reserves.size(); ++ri) {
          const double R = reserves[ri];
          evaluate(R);
--        const tosh_plan_candidate * f16 = find("full_gpu", kvs[0], 0);
--        const tosh_plan_candidate * q8  = kvs.size() > 1 ? find("full_gpu", kvs[1], 0) : nullptr;
 +        const tosh_plan_candidate * f16 = find("full_gpu", ka, 0);
 +        const tosh_plan_candidate * q8  = kb != GGML_TYPE_COUNT ? find("full_gpu", kb, 0) : nullptr;
          if (force.empty() || force == "full") {
@@ -86,8 +80,6 @@ index 9774673188..e0f41b969e 100644
              else if (q8 && q8->valid) { sel = q8; p.reason = "q8_0 cache makes the full model fit with the reserve"; }
          }
          auto pick_dmoe = [&]() -> const tosh_plan_candidate * {
--            tosh_plan_candidate * a = pick_ub(kvs[0]);
--            tosh_plan_candidate * b = kvs.size() > 1 ? pick_ub(kvs[1]) : nullptr;
 +            tosh_plan_candidate * a = pick_ub(ka);
 +            tosh_plan_candidate * b = kb != GGML_TYPE_COUNT ? pick_ub(kb) : nullptr;
              // while the bank does not fit, every MiB the q8_0 cache saves holds experts the CPU would compute
@@ -98,7 +90,7 @@ index 9774673188..e0f41b969e 100644
              if (a) {
                  p.reason = "the requested context and the reserve fit; experts take what is left";
                  return a;
-@@ -953,29 +971,31 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -945,28 +971,31 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
                  if (arena_bare > 0 && sel->arena_mib < (1.0 - max_share)*arena_bare) {
                      evaluate(reserves[n_with_head]);
                      sel = pick_dmoe();
@@ -107,7 +99,6 @@ index 9774673188..e0f41b969e 100644
                  }
              }
          }
--        if (sel == nullptr && (pass == 1 || force == "legacy") && (force.empty() || force == "legacy")) {
 +        if (sel == nullptr && (pass == 2 || force == "legacy") && (force.empty() || force == "legacy")) {
              const tosh_plan_candidate * l16 = find("legacy_offload", kvs[0], 0);
              const tosh_plan_candidate * l8  = kvs.size() > 1 ? find("legacy_offload", kvs[1], 0) : nullptr;
@@ -131,7 +122,7 @@ index 9774673188..e0f41b969e 100644
          p.reason = "no configuration fits the requested context with the minimum reserve";
      } else {
          p.mode = sel->mode; p.kv = sel->kv; p.ubatch = sel->ubatch; p.ncmoe = sel->ncmoe;
-@@ -1095,16 +1115,17 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -1086,16 +1115,17 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
      }
      if (sel && params.cache_ram_mib != 0) {
          const double want = params.cache_ram_mib > 0 ? params.cache_ram_mib : std::max(0.0, left);

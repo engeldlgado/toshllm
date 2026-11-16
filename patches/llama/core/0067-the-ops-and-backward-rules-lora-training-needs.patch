@@ -1,8 +1,8 @@
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index c4b6a5e..9295c7f 100644
+index 64f7a6d88..6137cdf86 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
-@@ -457,16 +457,17 @@ extern "C" {
+@@ -287,16 +287,17 @@ extern "C" {
          GGML_PREC_Q8        = 30,
          GGML_PREC_Q4        = 40,
      };
@@ -20,7 +20,7 @@ index c4b6a5e..9295c7f 100644
          GGML_FTYPE_ALL_F32        = 0,
          GGML_FTYPE_MOSTLY_F16     = 1,  // except 1d tensors
          GGML_FTYPE_MOSTLY_Q4_0    = 2,  // except 1d tensors
-@@ -611,16 +612,22 @@ extern "C" {
+@@ -440,16 +441,22 @@ extern "C" {
          GGML_OP_OPT_STEP_SGD,
  
          GGML_OP_GLU,
@@ -43,7 +43,7 @@ index c4b6a5e..9295c7f 100644
          GGML_UNARY_OP_SGN,
          GGML_UNARY_OP_NEG,
          GGML_UNARY_OP_STEP,
-@@ -1090,16 +1097,23 @@ extern "C" {
+@@ -904,16 +911,23 @@ extern "C" {
              struct ggml_tensor  * a);
  
      // count number of equal elements in a and b
@@ -67,7 +67,7 @@ index c4b6a5e..9295c7f 100644
              struct ggml_tensor  * b);
  
      // repeat a to the specified shape
-@@ -2570,16 +2584,38 @@ extern "C" {
+@@ -2342,16 +2356,38 @@ extern "C" {
      GGML_API struct ggml_tensor * ggml_flash_attn_back(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,
@@ -106,7 +106,7 @@ index c4b6a5e..9295c7f 100644
      GGML_API struct ggml_tensor * ggml_ssm_scan(
              struct ggml_context * ctx,
              struct ggml_tensor  * s,
-@@ -2711,16 +2747,23 @@ extern "C" {
+@@ -2484,16 +2520,23 @@ extern "C" {
              struct ggml_tensor  * g,
              struct ggml_tensor  * beta,
              struct ggml_tensor  * state,
@@ -130,7 +130,7 @@ index c4b6a5e..9295c7f 100644
      // TurboQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
      // Applies WHT rotation to 128-element groups along ne[0]: sign1 -> butterfly -> sign2 -> normalize
      // direction: 0 = forward (signs1 -> WHT -> signs2), 1 = inverse (signs2 -> WHT -> signs1)
-@@ -2887,16 +2930,35 @@ extern "C" {
+@@ -2680,16 +2723,35 @@ extern "C" {
              struct ggml_tensor  * b); // labels
  
      GGML_API struct ggml_tensor * ggml_cross_entropy_loss_back(
@@ -167,10 +167,10 @@ index c4b6a5e..9295c7f 100644
              struct ggml_tensor  * grad,
              struct ggml_tensor  * m,
 diff --git a/ggml/src/ggml-alloc.c b/ggml/src/ggml-alloc.c
-index 5670201..f5fec39 100644
+index 2db6cbbd8..a48814b1a 100644
 --- a/ggml/src/ggml-alloc.c
 +++ b/ggml/src/ggml-alloc.c
-@@ -1087,16 +1087,29 @@ static bool ggml_gallocr_needs_realloc(ggml_gallocr_t galloc, struct ggml_cgraph
+@@ -1084,16 +1084,29 @@ static bool ggml_gallocr_needs_realloc(ggml_gallocr_t galloc, struct ggml_cgraph
  #ifndef NDEBUG
                  GGML_LOG_DEBUG("%s: src %d (%s) of node %s is not valid\n", __func__, j, src->name, node->name);
  #endif
@@ -201,10 +201,10 @@ index 5670201..f5fec39 100644
  #ifndef NDEBUG
              GGML_LOG_DEBUG("%s: reallocating buffers automatically\n", __func__);
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index 34691d8..12a8980 100644
+index 4ffa44406..acff9692c 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -2630,16 +2630,18 @@ ggml_backend_t ggml_backend_sched_get_tensor_backend(ggml_backend_sched_t sched,
+@@ -3054,16 +3054,18 @@ ggml_backend_t ggml_backend_sched_get_tensor_backend(ggml_backend_sched_t sched,
  bool ggml_op_alloc_size_may_expand(enum ggml_op op) {
      switch (op) {
          case GGML_OP_FLASH_ATTN_EXT:
@@ -215,6 +215,7 @@ index 34691d8..12a8980 100644
          case GGML_OP_TOP_K:
 +        case GGML_OP_GATED_DELTA_NET_BACK:
 +        case GGML_OP_OUT_PROD:
+         case GGML_OP_ARGMAX:
              return true;
          default:
              return false;
@@ -222,12 +223,11 @@ index 34691d8..12a8980 100644
  }
  
  enum ggml_status ggml_backend_view_init(struct ggml_tensor * tensor) {
-     GGML_ASSERT(tensor);
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index 316e370..d27e094 100644
+index d49aad274..35f4a2adf 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
-@@ -1922,16 +1922,20 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+@@ -1938,16 +1938,20 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
          case GGML_OP_ARGMAX:
              {
                  ggml_compute_forward_argmax(params, tensor);
@@ -248,7 +248,7 @@ index 316e370..d27e094 100644
              {
                  ggml_compute_forward_repeat_back(params, tensor);
              } break;
-@@ -2185,16 +2189,20 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+@@ -2193,16 +2197,20 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
          case GGML_OP_SOLVE_TRI:
              {
                  ggml_compute_forward_solve_tri(params, tensor);
@@ -269,7 +269,7 @@ index 316e370..d27e094 100644
              {
                  ggml_compute_forward_lightning_indexer(params, tensor);
              } break;
-@@ -2235,16 +2243,30 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+@@ -2247,16 +2255,30 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                  ggml_compute_forward_cross_entropy_loss(params, tensor);
              }
              break;
@@ -300,7 +300,7 @@ index 316e370..d27e094 100644
          case GGML_OP_OPT_STEP_SGD:
              {
                  ggml_compute_forward_opt_step_sgd(params, tensor);
-@@ -2379,22 +2401,24 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+@@ -2390,22 +2412,24 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
          case GGML_OP_SQRT:
          case GGML_OP_LOG:
          case GGML_OP_SIN:
@@ -321,11 +321,11 @@ index 316e370..d27e094 100644
          case GGML_OP_DSV4_HC_COMB:
          case GGML_OP_DSV4_HC_PRE:
          case GGML_OP_DSV4_HC_POST:
+         case GGML_OP_TOP_K_MASK:
              {
                  n_tasks = n_threads;
              } break;
-         case GGML_OP_REPEAT:
-@@ -2527,16 +2551,17 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+@@ -2537,16 +2561,17 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
          case GGML_OP_PAD:
          case GGML_OP_PAD_REFLECT_1D:
          case GGML_OP_ROLL:
@@ -343,7 +343,7 @@ index 316e370..d27e094 100644
                  n_tasks = n_threads;
              } break;
          case GGML_OP_RWKV_WKV6:
-@@ -2589,16 +2614,18 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+@@ -2599,16 +2624,18 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                  if (p.n_tasks == GGML_N_TASKS_MAX) {
                      n_tasks = n_threads;
                  } else {
@@ -362,7 +362,7 @@ index 316e370..d27e094 100644
          case GGML_OP_NONE:
              {
                  n_tasks = 1;
-@@ -3123,23 +3150,40 @@ struct ggml_cplan ggml_graph_plan(
+@@ -3132,23 +3159,40 @@ struct ggml_cplan ggml_graph_plan(
                              cur += sizeof(float)*mxDn*n_tasks; // this is overestimated by x2
                          }
                      } break;
@@ -404,7 +404,7 @@ index 316e370..d27e094 100644
                          GGML_ABORT("fatal error");
                      }
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
-index e298799..0d7190b 100644
+index aadd63600..d149d4e43 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
 @@ -516,19 +516,27 @@ static void ggml_compute_forward_dup_from_q(
@@ -438,7 +438,7 @@ index e298799..0d7190b 100644
          ggml_tensor * dst) {
  
      const ggml_tensor * src0 = dst->src[0];
-@@ -563,17 +571,17 @@ void ggml_compute_forward_dup(
+@@ -573,17 +581,17 @@ void ggml_compute_forward_dup(
              } break;
          case GGML_TYPE_I32:
              {
@@ -457,7 +457,7 @@ index e298799..0d7190b 100644
      }
  }
  
-@@ -1698,16 +1706,43 @@ void ggml_compute_forward_count_equal(
+@@ -1728,16 +1736,43 @@ void ggml_compute_forward_count_equal(
              } break;
          default:
              {
@@ -501,7 +501,7 @@ index e298799..0d7190b 100644
  
      const ggml_tensor * src0 = dst->src[0];
  
-@@ -9944,16 +9979,214 @@ void ggml_compute_forward_flash_attn_back(
+@@ -9824,16 +9859,214 @@ void ggml_compute_forward_flash_attn_back(
              } break;
          default:
              {
@@ -716,7 +716,7 @@ index e298799..0d7190b 100644
      const ggml_tensor * src0 = dst->src[0]; // conv_x
      const ggml_tensor * src1 = dst->src[1]; // conv1d.weight
  
-@@ -11362,16 +11595,185 @@ void ggml_compute_forward_gated_delta_net(
+@@ -11242,16 +11475,185 @@ void ggml_compute_forward_gated_delta_net(
          default:
              {
                  GGML_ABORT("fatal error");
@@ -902,7 +902,7 @@ index e298799..0d7190b 100644
      for (int64_t idst = 0; idst < hc; ++idst) {
          float sum = eps;
          for (int64_t isrc = 0; isrc < hc; ++isrc) {
-@@ -12217,16 +12619,87 @@ void ggml_compute_forward_cross_entropy_loss_back(
+@@ -12183,16 +12585,87 @@ void ggml_compute_forward_cross_entropy_loss_back(
              } break;
          default:
              {
@@ -991,7 +991,7 @@ index e298799..0d7190b 100644
      const ggml_tensor * src0_grad_m  = dst->src[2];
      const ggml_tensor * src0_grad_v  = dst->src[3];
 diff --git a/ggml/src/ggml-cpu/ops.h b/ggml/src/ggml-cpu/ops.h
-index 7d41b8b..f05e9e6 100644
+index 052b88d27..e6a13655c 100644
 --- a/ggml/src/ggml-cpu/ops.h
 +++ b/ggml/src/ggml-cpu/ops.h
 @@ -32,16 +32,17 @@ void ggml_compute_forward_add_id(const struct ggml_compute_params * params, stru
@@ -1012,7 +1012,7 @@ index 7d41b8b..f05e9e6 100644
  void ggml_compute_forward_rms_norm(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_rms_norm_mul_fused(const struct ggml_compute_params * params, struct ggml_tensor * dst_rms_norm, struct ggml_tensor * dst_mul);
  void ggml_compute_forward_rms_norm_back(const struct ggml_compute_params * params, struct ggml_tensor * dst);
-@@ -99,26 +100,30 @@ void ggml_compute_forward_unary(const struct ggml_compute_params * params, struc
+@@ -97,27 +98,31 @@ void ggml_compute_forward_unary(const struct ggml_compute_params * params, struc
  void ggml_compute_forward_glu(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_get_rel_pos(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_add_rel_pos(const struct ggml_compute_params * params, struct ggml_tensor * dst);
@@ -1027,6 +1027,7 @@ index 7d41b8b..f05e9e6 100644
  void ggml_compute_forward_dsv4_hc_comb(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_dsv4_hc_pre(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_dsv4_hc_post(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_top_k_mask(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_map_custom1(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_map_custom2(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_map_custom3(const struct ggml_compute_params * params, struct ggml_tensor * dst);
@@ -1044,10 +1045,10 @@ index 7d41b8b..f05e9e6 100644
  }
  #endif
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index aa27acf..66e57df 100644
+index 0bde42853..9b4302144 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -1152,19 +1152,25 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+@@ -1168,19 +1168,25 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
      "OPT_STEP_ADAMW",
      "OPT_STEP_SGD",
  
@@ -1064,8 +1065,8 @@ index aa27acf..66e57df 100644
 +    "GATED_DELTA_NET_BACK",
  };
  
--static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");
-+static_assert(GGML_OP_COUNT == 110, "GGML_OP_COUNT != 110");
+-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
++static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
  
  static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "none",
@@ -1073,8 +1074,8 @@ index aa27acf..66e57df 100644
      "x",
      "x+y",
      "x[i]+y",
-     "x+y",
-@@ -1272,19 +1278,25 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "view(x,nb,offset)+=y->x",
+@@ -1286,19 +1292,25 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "adamw(x)",
      "sgd(x)",
  
@@ -1091,8 +1092,8 @@ index aa27acf..66e57df 100644
 +    "gated_delta_net_back(x)",
  };
  
--static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");
-+static_assert(GGML_OP_COUNT == 110, "GGML_OP_COUNT != 110");
+-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
++static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
  
  static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
  
@@ -1101,7 +1102,7 @@ index aa27acf..66e57df 100644
      "SGN",
      "NEG",
      "STEP",
-@@ -2635,16 +2647,36 @@ struct ggml_tensor * ggml_count_equal(
+@@ -2617,16 +2629,36 @@ struct ggml_tensor * ggml_count_equal(
  
      result->op     = GGML_OP_COUNT_EQUAL;
      result->src[0] = a;
@@ -1138,7 +1139,7 @@ index aa27acf..66e57df 100644
          struct ggml_tensor  * b) {
      GGML_ASSERT(ggml_can_repeat(a, b));
  
-@@ -5819,16 +5851,77 @@ struct ggml_tensor * ggml_flash_attn_back(
+@@ -5749,16 +5781,77 @@ struct ggml_tensor * ggml_flash_attn_back(
      result->src[0] = q;
      result->src[1] = k;
      result->src[2] = v;
@@ -1216,7 +1217,7 @@ index aa27acf..66e57df 100644
          struct ggml_tensor  * c) {
      GGML_ASSERT(ggml_is_3d(sx));
      GGML_ASSERT(ggml_is_matrix(c));
-@@ -6441,16 +6534,70 @@ struct ggml_tensor * ggml_cross_entropy_loss_back(
+@@ -6371,16 +6464,70 @@ struct ggml_tensor * ggml_cross_entropy_loss_back(
      result->op     = GGML_OP_CROSS_ENTROPY_LOSS_BACK;
      result->src[0] = a;
      result->src[1] = b;
@@ -1287,7 +1288,7 @@ index aa27acf..66e57df 100644
          struct ggml_tensor  * grad,
          struct ggml_tensor  * m,
          struct ggml_tensor  * v,
-@@ -6583,16 +6730,40 @@ struct ggml_tensor * ggml_gated_delta_net(
+@@ -6513,16 +6660,40 @@ struct ggml_tensor * ggml_gated_delta_net(
      result->src[2] = v;
      result->src[3] = g;
      result->src[4] = beta;
@@ -1328,7 +1329,7 @@ index aa27acf..66e57df 100644
      GGML_ASSERT(gdn->src[3]->ne[0] == 1);
  
      const int64_t H = gdn->src[2]->ne[1];
-@@ -6900,17 +7071,24 @@ static void ggml_hash_map_free(struct hash_map * map) {
+@@ -6872,17 +7043,24 @@ static void ggml_hash_map_free(struct hash_map * map) {
  static void ggml_add_or_set(
          struct ggml_context * ctx,
          struct ggml_cgraph  * cgraph,
@@ -1354,7 +1355,7 @@ index aa27acf..66e57df 100644
  }
  
  static void ggml_acc_or_set(
-@@ -6919,21 +7097,22 @@ static void ggml_acc_or_set(
+@@ -6891,51 +7069,64 @@ static void ggml_acc_or_set(
          size_t                isrc,
          struct ggml_tensor  * tensor,
          const  size_t         nb1,
@@ -1377,10 +1378,6 @@ index aa27acf..66e57df 100644
      ggml_build_forward_expand(cgraph, cgraph->grads[isrc]);
  }
  
- static void ggml_add1_or_set(
-         struct ggml_context * ctx,
-         struct ggml_cgraph  * cgraph,
-@@ -6953,33 +7132,45 @@ static void ggml_add1_or_set(
  static void ggml_sub_or_set(
          struct ggml_context * ctx,
          struct ggml_cgraph  * cgraph,
@@ -1427,7 +1424,7 @@ index aa27acf..66e57df 100644
      const size_t isrc1 = src1 ? ggml_hash_find(hash_set, src1) : (size_t) -1;
      const size_t isrc2 = src2 ? ggml_hash_find(hash_set, src2) : (size_t) -1;
      const bool src0_needs_grads = src0 && isrc0 != GGML_HASHSET_FULL && ggml_bitset_get(hash_set->used, isrc0) && grads_needed[isrc0];
-@@ -7029,17 +7220,17 @@ static void ggml_compute_backward(
+@@ -6977,17 +7168,17 @@ static void ggml_compute_backward(
                  ggml_add_or_set(ctx, cgraph, isrc1, ggml_reshape(ctx, ggml_cont(ctx, tensor_grad_view), src1));
              }
          } break;
@@ -1446,7 +1443,7 @@ index aa27acf..66e57df 100644
              }
              if (src1_needs_grads) {
                  struct ggml_tensor * tmp = ggml_mul(ctx, src0, grad);
-@@ -7049,17 +7240,18 @@ static void ggml_compute_backward(
+@@ -6997,17 +7188,18 @@ static void ggml_compute_backward(
                  ggml_add_or_set(ctx, cgraph, isrc1, tmp);
              }
          } break;
@@ -1466,7 +1463,7 @@ index aa27acf..66e57df 100644
              }
          } break;
          case GGML_OP_SQRT: {
-@@ -7106,17 +7298,19 @@ static void ggml_compute_backward(
+@@ -7054,17 +7246,19 @@ static void ggml_compute_backward(
              if (src0_needs_grads) {
                  ggml_add_or_set(ctx, cgraph, isrc0, ggml_repeat(ctx, grad, src0));
              }
@@ -1487,7 +1484,7 @@ index aa27acf..66e57df 100644
              // s0 = np.random.randn(5, 10)
              // s1 = np.random.randn(10, 3)
              // t = s0.dot(s1)
-@@ -7125,58 +7319,66 @@ static void ggml_compute_backward(
+@@ -7073,58 +7267,66 @@ static void ggml_compute_backward(
              // dt = np.random.randn(*t.shape) # same shape as t
              // ds0 = dt.dot(s1.T) #.T gives the transpose of the matrix
              // ds1 = t.T.dot(dt)
@@ -1572,7 +1569,27 @@ index aa27acf..66e57df 100644
              const size_t nb3    = ((const int32_t *) tensor->op_params)[2];
              const size_t offset = ((const int32_t *) tensor->op_params)[3];
  
-@@ -7403,45 +7605,185 @@ static void ggml_compute_backward(
+@@ -7229,17 +7431,18 @@ static void ggml_compute_backward(
+                 ggml_add_or_set(ctx, cgraph, isrc0, ggml_get_rows_back(ctx, grad, src1, src0));
+             }
+             if (src1_needs_grads) {
+                 // noop
+             }
+         } break;
+         case GGML_OP_TRI: {
+             if (src0_needs_grads) {
+-                ggml_add_or_set(ctx, cgraph, isrc0, ggml_tri(ctx, grad, (enum ggml_tri_type) ggml_get_op_params_i32(tensor, 0)));
++                // ggml_tri asserts a contiguous input
++                ggml_add_or_set(ctx, cgraph, isrc0, ggml_tri(ctx, ggml_cont(ctx, grad), (enum ggml_tri_type) ggml_get_op_params_i32(tensor, 0)));
+             }
+         } break;
+         case GGML_OP_SOFT_MAX: {
+             if (src0_needs_grads) {
+                 float scale    = 1.0f;
+                 float max_bias = 0.0f;
+ 
+                 memcpy(&scale,    (const float *) tensor->op_params + 0, sizeof(float));
+@@ -7342,45 +7545,179 @@ static void ggml_compute_backward(
                          ggml_add_or_set(ctx, cgraph, isrc0, ggml_mul(ctx, grad, ggml_exp(ctx, src0)));
                      }
                  } break;
@@ -1644,12 +1661,6 @@ index aa27acf..66e57df 100644
 +                struct ggml_tensor * g = ggml_cont(ctx, grad);
 +                ggml_add_or_set(ctx, cgraph, isrc0, ggml_add(ctx,
 +                    ggml_sub(ctx, ggml_repeat(ctx, ggml_sum_rows(ctx, g), g), ggml_cumsum(ctx, g)), g));
-+            }
-+        } break;
-+        case GGML_OP_TRI: {
-+            if (src0_needs_grads) {
-+                ggml_add_or_set(ctx, cgraph, isrc0,
-+                    ggml_tri(ctx, ggml_cont(ctx, grad), (enum ggml_tri_type) ggml_get_op_params_i32(tensor, 0)));
 +            }
 +        } break;
 +        case GGML_OP_PAD: {

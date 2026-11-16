@@ -1,34 +1,48 @@
 diff --git a/tools/server/server-mcp.cpp b/tools/server/server-mcp.cpp
-index 93c950a60..0e4c594de 100644
+index f2d88362d..f789ce152 100644
 --- a/tools/server/server-mcp.cpp
 +++ b/tools/server/server-mcp.cpp
-@@ -211,11 +211,11 @@ static json mcp_result_to_response(const json & result) {
+@@ -208,16 +208,18 @@ static json mcp_result_to_response(const json & result) {
+     }
+     if (result.is_object() && result.value("isError", false)) {
+         return {{"error", text.empty() ? "MCP tool returned an error" : text}};
      }
      return {{"plain_text_response", text}};
  }
  
  json server_mcp_transport::send_rpc(const json & request, const std::function<bool()> & should_stop,
--                                    const std::function<void(const json &)> & on_progress) {
 +                                    const std::function<void(const json &)> & on_progress, int deadline_ms) {
-     const bool has_id = request.contains("id");
++    const bool has_id = request.contains("id");
      const std::string key = has_id ? request.at("id").dump() : "";
      // nothing is sent for a caller that already went away
      if (has_id && should_stop && should_stop()) {
          return {{"error", {{"code", -32603}, {"message", "cancelled"}}}};
-@@ -233,11 +233,11 @@ json server_mcp_transport::send_rpc(const json & request, const std::function<bo
+     }
+     {
+         std::lock_guard<std::mutex> lk(demux_mutex);
+         if (demux_closed) {
+@@ -228,16 +230,17 @@ json server_mcp_transport::send_rpc(const json & request, const std::function<bo
+         }
+     }
+     if (!to_server.write(request.dump())) {
          std::lock_guard<std::mutex> lk(demux_mutex);
          demux_waiting.erase(key);
          return {{"error", {{"code", -32603}, {"message", "transport closed"}}}};
      }
  
--    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 +    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(deadline_ms > 0 ? deadline_ms : timeout_ms);
      auto stop = [&]() {
          return (should_stop && should_stop()) || std::chrono::steady_clock::now() >= deadline;
      };
  
      json reply;
-@@ -320,10 +320,11 @@ json server_mcp_transport::send_rpc(const json & request, const std::function<bo
+     bool got = false;
+     std::unique_lock<std::mutex> lk(demux_mutex);
+     while (true) {
+@@ -314,33 +317,38 @@ json server_mcp_transport::send_rpc(const json & request, const std::function<bo
+         }
+     }
+     demux_waiting.erase(key);
      demux_replies.erase(key);
      demux_progress.erase(key);
      const bool closed = demux_closed;
@@ -38,14 +52,17 @@ index 93c950a60..0e4c594de 100644
          return reply;
      }
  
-     // the server keeps working on a request nobody waits for unless it is told
-     auto cancel = [&](const char * reason) {
-@@ -336,16 +337,18 @@ json server_mcp_transport::send_rpc(const json & request, const std::function<bo
-         cancel("the caller went away");
+     if (should_stop && should_stop()) {
+         if (!closed) {
+             notify_cancelled(request, "cancelled");
+         }
          return {{"error", {{"code", -32603}, {"message", "cancelled"}}}};
      }
      if (std::chrono::steady_clock::now() >= deadline) {
-         cancel("request timed out");
+-        notify_cancelled(request, "request timed out");
++        if (!closed) {
++            notify_cancelled(request, "request timed out");
++        }
 +        timeouts++;
          return {{"error", {{"code", -32603}, {"message", "request timed out"}}}};
      }
@@ -55,11 +72,17 @@ index 93c950a60..0e4c594de 100644
  static constexpr int MCP_INIT_RETRY_SECONDS = 5;
 +static constexpr int MCP_PING_MS = 5000;
  
- bool server_mcp_transport::ensure_init(const std::function<bool()> & should_stop) {
-     {
-         std::unique_lock<std::mutex> lk(init_mutex);
-         while (!initialized && init_running) {
-@@ -442,10 +445,14 @@ json server_mcp_transport::call_tool(const std::string & tool_name,
+ // MCP cancellation: a notification that lets the server abandon work nobody waits for anymore
+ // (e.g. a slow tool call after the client dropped the connection). the spec forbids cancelling initialize.
+ void server_mcp_transport::notify_cancelled(const json & request, const std::string & reason) {
+     if (!request.contains("id") || request.value("method", "") == "initialize") {
+         return;
+     }
+     json notif = {
+@@ -445,16 +453,20 @@ json server_mcp_transport::call_tool(const std::string & tool_name,
+     std::unique_lock<std::timed_mutex> serial(call_mutex, std::defer_lock);
+     if (!concurrent) {
+         while (!serial.try_lock_for(std::chrono::milliseconds(100))) {
              if (should_stop && should_stop()) {
                  return {{"error", "cancelled"}};
              }
@@ -74,7 +97,13 @@ index 93c950a60..0e4c594de 100644
      {
          std::lock_guard<std::mutex> lock(rpc_mutex);
          if (!ready) {
-@@ -461,18 +468,44 @@ json server_mcp_transport::call_tool(const std::string & tool_name,
+             return {{"error", last_error}};
+         }
+         req = {
+@@ -464,27 +476,50 @@ json server_mcp_transport::call_tool(const std::string & tool_name,
+             {"params", {{"name", tool_name}, {"arguments", arguments}}},
+         };
+     }
      if (on_progress) {
          req["params"]["_meta"] = {{"progressToken", req.at("id")}};
      }
@@ -101,9 +130,9 @@ index 93c950a60..0e4c594de 100644
  }
  
 +bool server_mcp_transport::ping(int ms) {
-+    json req;
-+    {
-+        std::lock_guard<std::mutex> lock(rpc_mutex);
+     json req;
+     {
+         std::lock_guard<std::mutex> lock(rpc_mutex);
 +        req = {{"jsonrpc", "2.0"}, {"id", next_id++}, {"method", "ping"}};
 +    }
 +    const json resp = send_rpc(req, nullptr, nullptr, ms);
@@ -120,7 +149,13 @@ index 93c950a60..0e4c594de 100644
  //
  
  struct server_mcp_stdio::process_handle {
-@@ -764,10 +797,12 @@ void server_mcp_stdio::join_pumps() {
+     common_subproc sp;
+     FILE * in  = nullptr; // child stdin
+     FILE * out = nullptr; // child stdout
+@@ -763,28 +798,34 @@ void server_mcp_stdio::join_pumps() {
+ }
+ 
+ 
  //
  // server_mcp
  //
@@ -133,7 +168,8 @@ index 93c950a60..0e4c594de 100644
  server_mcp::~server_mcp() {
      shutdown();
  
-@@ -776,10 +811,14 @@ server_mcp::~server_mcp() {
+     std::vector<std::shared_ptr<server_mcp_transport>> to_close;
+     {
          std::lock_guard<std::mutex> lock(mutex);
          for (auto & [name, t] : transports) {
              to_close.push_back(std::move(t));
@@ -148,21 +184,29 @@ index 93c950a60..0e4c594de 100644
          t->close();
      }
  }
-@@ -876,19 +915,65 @@ std::vector<server_mcp_tool_def> server_mcp::list_tools() const {
+ 
+ std::shared_ptr<server_mcp_transport> server_mcp::create_transport(const server_mcp_server_config & cfg) {
+     return std::make_shared<server_mcp_stdio>(cfg);
+@@ -873,27 +914,73 @@ std::vector<std::string> server_mcp::server_names() const {
+ std::vector<server_mcp_tool_def> server_mcp::list_tools() const {
+     std::lock_guard<std::mutex> lock(mutex);
+     return registry;
+ }
+ 
  json server_mcp::call_tool(const std::string & server_name,
                             const std::string & tool_name,
                             const json & arguments,
-                            const std::function<bool()> & should_stop,
-                            const std::function<void(const json &)> & on_progress) {
+-                           const std::function<bool()> & should_stop) {
 -    auto transport = get_or_create(server_name);
 -    if (!transport) {
 -        return {{"error", "MCP server unavailable: " + server_name}};
 -    }
 -
+                            const std::function<bool()> & should_stop,
+                            const std::function<void(const json &)> & on_progress) {
      auto stop = [this, &should_stop]() {
          return stopping.load() || (should_stop && should_stop());
      };
--    return transport->call_tool(tool_name, arguments, stop, on_progress);
 +    // a call that was never sent because its transport was found hung goes once to the fresh process
 +    for (int attempt = 0; ; attempt++) {
 +        auto transport = get_or_create(server_name);
@@ -220,11 +264,17 @@ index 93c950a60..0e4c594de 100644
  std::shared_ptr<server_mcp_transport> server_mcp::get_or_create(const std::string & name) {
      std::vector<std::shared_ptr<server_mcp_transport>> to_close; // closed after unlock
      std::shared_ptr<server_mcp_transport> result;
+ 
+     {
+         std::lock_guard<std::mutex> lock(mutex);
 diff --git a/tools/server/server-mcp.h b/tools/server/server-mcp.h
-index ce2f45530..fb312b37d 100644
+index 0fdaf6cf1..cd03414ca 100644
 --- a/tools/server/server-mcp.h
 +++ b/tools/server/server-mcp.h
-@@ -79,10 +79,19 @@ struct server_mcp_transport {
+@@ -76,16 +76,24 @@ struct server_mcp_transport {
+     std::vector<server_mcp_tool_def> list_tools(const std::function<bool()> & should_stop);
+ 
+     // on_progress, when set, receives the params of every notifications/progress the call sends
      json call_tool(const std::string & tool_name,
                     const json & arguments,
                     const std::function<bool()> & should_stop,
@@ -238,27 +288,37 @@ index ce2f45530..fb312b37d 100644
 +    std::atomic<bool> pinging{false};
 +    std::atomic<bool> drain_noted{false}; // the manager has taken it out of service
 +    std::atomic<int>  in_flight{0};
-+
+ 
  protected:
      // per-transport: guards the tool list and the members below; a tool call holds it only to take its id,
      // so a long call (the Tosh agent's turn) does not stall the calls of other clients
      std::mutex rpc_mutex;
      std::timed_mutex call_mutex; // held across a whole call unless the server is concurrent; waited for cancellably
-@@ -107,11 +116,12 @@ protected:
+     uint64_t next_id = 1; // reset to 1 per (re)spawn
+     std::string last_error;
+@@ -105,16 +113,18 @@ protected:
+     std::mutex init_mutex;
+     std::condition_variable init_cv;
+     bool initialized  = false;
      bool init_running = false;
      std::chrono::steady_clock::time_point init_retry;
  
      bool ensure_init(const std::function<bool()> & should_stop); // initialize handshake, once; without rpc_mutex
      json send_rpc(const json & request, const std::function<bool()> & should_stop,
--                  const std::function<void(const json &)> & on_progress = nullptr); // returns the reply or an {"error": ...}
 +                  const std::function<void(const json &)> & on_progress = nullptr,
 +                  int deadline_ms = 0); // returns the reply or an {"error": ...}; 0 waits timeout_ms
+     void notify_cancelled(const json & request, const std::string & reason); // notifications/cancelled for an abandoned request
  };
  
  //
  // server_mcp_stdio: child process, NDJSON JSON-RPC over stdio (stderr drained to the debug log)
  //
-@@ -188,10 +198,12 @@ private:
+ 
+ struct server_mcp_stdio : server_mcp_transport {
+@@ -186,21 +196,26 @@ public:
+ private:
+     std::vector<server_mcp_server_config> configs;
+ 
      mutable std::mutex mutex; // guards transports, dead_servers, registry
  
      // shared_ptr: call_tool() hands a transport to the caller and drops the lock for the blocking RPC, so a concurrent evict/respawn must not destroy it mid-call
@@ -271,7 +331,8 @@ index ce2f45530..fb312b37d 100644
      std::atomic<bool> stopping{false};
      std::string agent_name; // --mcp-agent: its transport takes calls in parallel
  
-@@ -200,6 +212,9 @@ private:
+     const server_mcp_server_config * find_config(const std::string & name) const;
+ 
      // the only place that names a concrete transport
      std::shared_ptr<server_mcp_transport> create_transport(const server_mcp_server_config & cfg);
  

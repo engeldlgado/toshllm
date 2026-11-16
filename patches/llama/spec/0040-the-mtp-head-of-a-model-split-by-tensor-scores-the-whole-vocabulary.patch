@@ -1,14 +1,16 @@
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 08f8585aa..c853ca186 100644
+index 879fec064..d962c7509 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1614,14 +1614,15 @@ ggml_tensor * llm_graph_context::build_hadamard_lookup(
+@@ -1677,31 +1677,36 @@ ggml_tensor * llm_graph_context::build_hadamard_lookup(
+     rows = llama_mul_mat_hadamard(ctx0, rows, it->second.rot);
+     if (it->second.signs) {
+         rows = ggml_mul(ctx0, rows, it->second.signs);
      }
      return rows;
  }
  
  ggml_tensor * llm_graph_context::build_mtp_head(
--        const llama_vocab & vocab,
 +        const llama_model & model,
                ggml_tensor * head_w,
                ggml_tensor * head_s,
@@ -19,13 +21,13 @@ index 08f8585aa..c853ca186 100644
      // them are rarer scripts, which a draft seldom needs and every draft token pays to score
      static const int64_t rows = getenv("TOSH_MTP_HEAD_ROWS") ? atoll(getenv("TOSH_MTP_HEAD_ROWS")) : 151643;
      static const int64_t tail = [&] {
-@@ -1630,11 +1631,13 @@ ggml_tensor * llm_graph_context::build_mtp_head(
+         for (int64_t id = std::max<int64_t>(rows, 0); id < n_vocab; ++id) {
+             if (vocab.token_get_attr((llama_token) id) & (LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_USER_DEFINED)) {
                  return id;
              }
          }
          return n_vocab;
      }();
--    if (rows <= 0 || n_vocab <= 200000 || rows >= n_vocab || head_s != nullptr || n_vocab - tail > 4096) {
 +    // views of a head split across GPUs by tensor break the fused allreduce boundary
 +    if (rows <= 0 || n_vocab <= 200000 || rows >= n_vocab || head_s != nullptr || n_vocab - tail > 4096 ||
 +            model.split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
@@ -34,54 +36,64 @@ index 08f8585aa..c853ca186 100644
      ggml_tensor * head = ggml_mul_mat(ctx0, ggml_view_2d(ctx0, head_w, head_w->ne[0], rows, head_w->nb[1], 0), cur);
      head = ggml_pad(ctx0, head, (int) (tail - rows), 0, 0, 0);
      if (tail < n_vocab) {
+         ggml_tensor * special = ggml_mul_mat(ctx0,
+                 ggml_view_2d(ctx0, head_w, head_w->ne[0], n_vocab - tail, head_w->nb[1], tail*head_w->nb[1]), cur);
+         head = ggml_concat(ctx0, head, special, 0);
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 6ec5c4c48..b424517d9 100644
+index 8e97fc139..a7d2fb73a 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
-@@ -1102,11 +1102,11 @@ struct llm_graph_context {
+@@ -1146,16 +1146,17 @@ struct llm_graph_context {
+     ggml_tensor * build_lora_mm(
+               ggml_tensor * w,
+               ggml_tensor * cur,
                ggml_tensor * w_s = nullptr) const;
  
      // logits of a draft head over the frequent prefix of a large vocabulary plus the control
      // tokens at its end; the rest stay 0, which a top candidate always beats
      ggml_tensor * build_mtp_head(
--        const llama_vocab & vocab,
 +        const llama_model & model,
                ggml_tensor * head_w,
                ggml_tensor * head_s,
                ggml_tensor * cur) const;
  
      // do mat_mul_id, while optionally apply lora and per-expert scale
+     // if slots is set, the experts are selected by slots instead of ids, from the MoE cache if cached (see build_moe_cache_slots)
+     ggml_tensor * build_lora_mm_id(
+               ggml_tensor * w,   // ggml_tensor * as
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index 7dbaa9b51..a200cbb77 100644
+index 975432de5..dfddbf70c 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
-@@ -668,11 +668,11 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
+@@ -675,12 +675,13 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llm_graph_params & params)
+     res->t_h_nextn = cur;
+ 
+     cur = ggml_get_rows(ctx0, cur, inp_out_ids);
      cb(cur, "mtp_shared_head_norm", -1);
  
      ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
      ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
      GGML_ASSERT(head_w && "QWEN35 MTP: missing LM head (nextn.shared_head_head or model.output)");
--    cur = build_mtp_head(model.vocab, head_w, head_s, cur);
 +    cur = build_mtp_head(model, head_w, head_s, cur);
      cb(cur, "result_output", -1);
  
      res->t_logits = cur;
-     ggml_build_forward_expand(gf, cur);
  }
 diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
-index d85edbc1f..4e40a84d3 100644
+index 3683ec818..c595f6c28 100644
 --- a/src/models/qwen35moe.cpp
 +++ b/src/models/qwen35moe.cpp
-@@ -751,11 +751,11 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
+@@ -712,12 +712,13 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llm_graph_params & params)
+     res->t_h_nextn= cur;
+ 
+     cur = ggml_get_rows(ctx0, cur, inp_out_ids);
      cb(cur, "mtp_shared_head_norm", -1);
  
      ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
      ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
      GGML_ASSERT(head_w && "QWEN35MOE MTP: missing LM head (nextn.shared_head_head or model.output)");
--    cur = build_mtp_head(model.vocab, head_w, head_s, cur);
 +    cur = build_mtp_head(model, head_w, head_s, cur);
      cb(cur, "result_output", -1);
  
      res->t_logits = cur;
-     ggml_build_forward_expand(gf, cur);
  }

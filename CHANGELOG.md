@@ -11,13 +11,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
+- **LLMs: the engine moves to llama.cpp v1.0.0.** Upstream's fixes and model support since v0.6.0 come with it, and the AMD backend, Dynamic MoE and the rest of the engine work carry over.
 - **LLMs: a model's name comes from the Hugging Face repo it was downloaded from, with who published the file next to it (#164).** Placeholder header names such as "Hf" no longer replace the real one, and the server card shows the file with Reveal in Finder. Contributed by [andruwa13](https://github.com/andruwa13) in [#165](https://github.com/engeldlgado/toshllm/pull/165).
 - **The Mac no longer idle-sleeps in the middle of a generation (#163).** While an answer, an image, a video, an upscale, a transcription, a subtitled export or a benchmark runs, ToshLLM keeps the system awake; the display can still turn off.
 
 ### Fixed
 
 - **LLMs: Qwen3.5 and Qwen3.8 Flash-Next files from newer converters load instead of failing with "tensor not found".**
-- **LLMs: a GGUF with FP8 weights is refused when it loads instead of being read as another type.**
+- **LLMs: GGUFs with FP8 weights load instead of being read as another type;** their matrix products run on the CPU.
+- **LLMs on AMD cards: MoE models that choose experts by groups with softmax routing pick the right ones.**
+- **LLMs: Gemma 4 tool calls that start before the model closes its thinking are read as calls.**
+- **LLMs: a client that keeps its connection open after a streamed answer can send its next request on it.**
 - **LLMs on Radeon RX 400/500, Vega, Radeon VII and Radeon Pro Vega/WX: models with BF16 weights, such as Gemma 4 E4B, no longer stop the engine on prompts of 448 tokens or more.** Reported by [andruwa13](https://github.com/andruwa13) in [#149](https://github.com/engeldlgado/toshllm/pull/149).
 - **Chat: Maximum image size under Attachments lines up with the rows around it,** with its icon and its ⓘ where the others have them.
 

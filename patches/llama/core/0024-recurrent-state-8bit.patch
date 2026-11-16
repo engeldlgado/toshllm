@@ -1,34 +1,5 @@
-diff --git a/common/common.cpp b/common/common.cpp
-index 104e5e72b..494e237f8 100644
---- a/common/common.cpp
-+++ b/common/common.cpp
-@@ -1231,19 +1231,23 @@ common_decision_type common_get_decision_type(const std::string & fname) {
-     }
-     return common_decision_type_from_string(gguf_get_val_str(gguf_ctx.get(), type_id));
- }
- 
- common_init_result::common_init_result(common_params & params, bool model_only) :
-     pimpl(new impl{}) {
-     {
-         tosh_plan plan;
--        if (!tosh_plan_apply(params, &plan) && plan.state == TOSH_PLAN_NOT_PLANNED && !params.dynamic_moe && getenv("TOSH_AUTO") == nullptr) {
-+        const bool planned = tosh_plan_apply(params, &plan);
-+        if (!planned && plan.state == TOSH_PLAN_NOT_PLANNED && !params.dynamic_moe && getenv("TOSH_AUTO") == nullptr) {
-             LOG_INF("Tosh MoE: standard\n");
-         }
-+        if (!planned && plan.state != TOSH_PLAN_UNSUPPORTED) {
-+            tosh_plan_checkpoints(params);
-+        }
-         // no plan fits: loading with the defaults would hand memory to a layout nobody checked
-         if (plan.state == TOSH_PLAN_UNSUPPORTED && getenv("TOSH_AUTO_DRY_RUN") == nullptr) {
-             LOG_ERR("%s: TOSH_AUTO found no configuration that fits (%s), the model is not loaded\n", __func__, plan.primary_reason.c_str());
-             tosh_plan_report_load("PLAN_REFUSED", plan.primary_reason.c_str());
-             return;
-         }
-     }
- 
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
-index d8b286e93..5dda4ae07 100644
+index 715a281eb..2cf60106e 100644
 --- a/common/tosh-plan.cpp
 +++ b/common/tosh-plan.cpp
 @@ -57,16 +57,18 @@ struct moe_info {
@@ -50,7 +21,7 @@ index d8b286e93..5dda4ae07 100644
      double ram_mib        = 0;
      double wired_mib      = 0;
      double wire_limit_mib = 0;
-@@ -129,16 +131,27 @@ moe_info read_moe_info(const char * path) {
+@@ -128,16 +130,27 @@ double env_mib(const char * k, double d) {
              if (hid >= 0 && gguf_get_kv_type(g, hid) == GGUF_TYPE_ARRAY && il < (int) gguf_get_arr_n(g, hid)) {
                  heads = ((const int32_t *) gguf_get_arr_data(g, hid))[il];
              } else if (hid >= 0 && gguf_get_kv_type(g, hid) == GGUF_TYPE_UINT32) {
@@ -78,7 +49,7 @@ index d8b286e93..5dda4ae07 100644
          char prefix[PATH_MAX] = {}, shard[PATH_MAX] = {};
          if (llama_split_prefix(prefix, sizeof(prefix), path, 0, mi.n_split) == 0) {
              mi.error = string_format("SPLIT_GGUF_METADATA_ERROR: %s is not the first of %d shards", path, mi.n_split);
-@@ -530,16 +543,57 @@ static void plan_emit(const tosh_plan & p) {
+@@ -525,16 +538,57 @@ static void plan_emit(const tosh_plan & p) {
      if (dry != nullptr && strcmp(dry, "exit") == 0) {
          // a caller previews the plan of these exact arguments without loading anything
          printf("%s\n", tosh_plan_json(p).c_str());
@@ -136,9 +107,27 @@ index d8b286e93..5dda4ae07 100644
      if (mode_env == nullptr || strcmp(mode_env, "0") == 0 || strcmp(mode_env, "off") == 0) {
          return false;
      }
-@@ -962,17 +1016,30 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -543,16 +597,17 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+         return false;
+     }
+     std::string force = (strcmp(mode_env, "1") == 0 || strcmp(mode_env, "auto") == 0) ? "" : mode_env;
+     // nodmoe: auto without mixed execution, the retry after the expert bank could not be locked
+     const bool no_dmoe = force == "nodmoe";
+     if (no_dmoe) force.clear();
+ 
+     tosh_plan p;
++    const moe_info mi = read_moe_info(params.model.path.c_str(), params.lazy_mode);
+     p.n_split = mi.n_split; p.model_mib = mi.total_mib; p.warm_floor_mib = mi.warm_floor_mib;
+     if (!mi.error.empty()) {
+         p.state = TOSH_PLAN_UNSUPPORTED; p.mode = "none";
+         p.plan_mode = TOSH_PLAN_MODE_UNSUPPORTED; p.code = tosh_plan_mode_name(p.plan_mode);
+         p.primary_reason = "SPLIT_GGUF_METADATA_ERROR"; p.limiting_resource = "METADATA";
+         p.limits = { "SPLIT_GGUF_METADATA_ERROR", "NO_SAFE_FALLBACK" };
+         p.reason = mi.error;
+         plan_emit(p);
+@@ -931,17 +986,30 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+     if (sel) p.kv_mib = sel->kv_mib;
      if (p.plan_mode == TOSH_PLAN_MODE_FULL_HOST_DMOE || p.plan_mode == TOSH_PLAN_MODE_BOUNDED_DMOE) {
-         p.coverage_state = p.coverage >= BOUNDED_GOOD_COVERAGE ? "GOOD" : p.coverage >= BOUNDED_MIN_COVERAGE ? "CONSTRAINED" : "REJECT";
          if (p.coverage_state == "CONSTRAINED") p.warnings.push_back("COVERAGE_CONSTRAINED");
      }
      if (sel && sel->mode != "full_gpu" && p.projected_rss_mib == 0) p.projected_rss_mib = hi.self_rss_mib + p.host_required_mib;
@@ -189,10 +178,10 @@ index 430f53fa4..1ddde0698 100644
  // Written to <TOSH_AUTO_PLAN_FILE>.actual; no-op when nothing was planned.
  void tosh_plan_report_load(const char * result, const char * detail = nullptr);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 6c6835640..f35b55917 100644
+index c9a32318e..1862a5c83 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -1185,16 +1185,18 @@ struct ggml_metal_device {
+@@ -1186,16 +1186,18 @@ struct ggml_metal_device {
      // which on AMD accumulates across long runs until transfers crawl
      id<MTLBuffer> stage_buf;
      NSRecursiveLock * stage_lock;   // recursive: a read batch holds it across stage_get calls
@@ -211,7 +200,7 @@ index 6c6835640..f35b55917 100644
      // cached no-copy wraps of host memory regions used as blit sources, so
      // repeated uploads of the same weights don't churn kernel resources
      struct {
-@@ -3837,32 +3839,40 @@ static void ggml_metal_device_stage_batch_flush(ggml_metal_device_t dev) {
+@@ -3900,33 +3902,40 @@ static void ggml_metal_device_stage_batch_flush(ggml_metal_device_t dev) {
      [dev->stage_batch_enc endEncoding];
      [dev->stage_batch_cmd commit];
      [dev->stage_batch_cmd waitUntilCompleted];
@@ -242,7 +231,7 @@ index 6c6835640..f35b55917 100644
      if (dev->props.use_shared_buffers) {
          return;
 +    }
-+    ggml_metal_device_stage_batch_flush(dev);
+     ggml_metal_device_stage_batch_flush(dev);
 +    dev->stage_batch_open = false;
      [dev->stage_lock unlock];
  }
@@ -252,7 +241,7 @@ index 6c6835640..f35b55917 100644
  // a read batch drains every few MiB: larger batches wait less on a desktop host but copy out
  // of the staging buffer slower on a Xeon W one, and 4 MiB was the size that won on both
  static size_t ggml_metal_stage_batch_cap(void) {
-@@ -3877,25 +3887,31 @@ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buff
+@@ -3941,25 +3950,31 @@ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buff
          return false;
      }
  
@@ -285,10 +274,10 @@ index 6c6835640..f35b55917 100644
              (typeof(dev->stage_batch_items[0])) { data, dev->stage_batch_used, size };
          dev->stage_batch_used += size;
 diff --git a/include/llama.h b/include/llama.h
-index 19a50437b..2dc7f0d19 100644
+index a1fe18982..d69dd80de 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -926,16 +926,19 @@ extern "C" {
+@@ -900,16 +900,19 @@ extern "C" {
  
  // work only with partial states, such as SWA KV cache or recurrent cache (e.g. Mamba)
  #define LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY 1
@@ -309,10 +298,10 @@ index 19a50437b..2dc7f0d19 100644
  
      LLAMA_API size_t llama_state_seq_get_data_ext(
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
-index 53130e868..b8df4cabb 100644
+index 9213ac1dc..a7fe2f199 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
-@@ -777,17 +777,16 @@ size_t llama_memory_recurrent::size_p_bytes() const {
+@@ -776,17 +776,16 @@ size_t llama_memory_recurrent::size_p_bytes() const {
              size_p_bytes += ggml_nbytes(p);
          }
      }
@@ -330,7 +319,7 @@ index 53130e868..b8df4cabb 100644
      // Count the number of cells with the specified seq_id
      // Find all the ranges of cells with this seq id (or all, when -1)
      uint32_t cell_range_begin = size;
-@@ -854,17 +853,17 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
+@@ -853,17 +852,17 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
      for (const auto & range : cell_ranges_data) {
          cell_count_check += range.second - range.first;
      }
@@ -349,7 +338,7 @@ index 53130e868..b8df4cabb 100644
      uint32_t cell_count;
      io.read(&cell_count, sizeof(cell_count));
  
-@@ -907,43 +906,82 @@ void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::
+@@ -906,43 +905,75 @@ void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::
                  for (auto seq_id : cell.seq_id) {
                      io.write(&seq_id, sizeof(seq_id));
                  }
@@ -374,13 +363,6 @@ index 53130e868..b8df4cabb 100644
 +}
 +
 +static void rs_write_small(llama_io_write_i & io, ggml_tensor * t, size_t offset, size_t size, int64_t n_per_row) {
-+    const ggml_type type = rs_save_type();
-+    std::vector<float> f(size/sizeof(float));
-+    ggml_backend_tensor_get(t, f.data(), offset, size);
-+    const int64_t nrows = (int64_t) f.size()/n_per_row;
-+    std::vector<uint8_t> q(ggml_row_size(type, n_per_row)*nrows);
-+    ggml_quantize_chunk(type, f.data(), q.data(), 0, nrows, n_per_row, nullptr);
-+    io.write(q.data(), q.size());
 +}
 +
 +static void rs_read_small(llama_io_read_i & io, ggml_type type, ggml_tensor * t, size_t offset, size_t size, int64_t n_per_row) {
@@ -436,7 +418,7 @@ index 53130e868..b8df4cabb 100644
              io.write(&p_size_row, sizeof(p_size_row));
  
              for (const auto & range : cell_ranges) {
-@@ -953,30 +991,37 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
+@@ -952,30 +983,37 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
          }
      }
  
@@ -477,7 +459,7 @@ index 53130e868..b8df4cabb 100644
          for (uint32_t il = 0; il < n_layer; ++il) {
              // skip null layers (read_data will handle this by checking "r_l" and "s_l" for null)
              if (s_l[il] == nullptr) continue;
-@@ -1131,33 +1176,39 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
+@@ -1130,33 +1168,39 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
      for (uint32_t il = 0; il < n_layer; ++il) {
          // skip null layers
          if (r_l[il] == nullptr) continue;
@@ -521,7 +503,7 @@ index 53130e868..b8df4cabb 100644
              const size_t p_size_row = ggml_row_size(p_l[il]->type, hparams.ple_conv_state());
              if (p_size_row != p_size_row_ref) {
                  LLAMA_LOG_ERROR("%s: mismatched ple row size (%zu != %zu, layer %d)\n", __func__, p_size_row, (size_t) p_size_row_ref, il);
-@@ -1174,34 +1225,40 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
+@@ -1173,34 +1217,40 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
          for (uint32_t il = 0; il < n_layer; ++il) {
              // skip null layers
              if (s_l[il] == nullptr) continue;
@@ -567,10 +549,10 @@ index 53130e868..b8df4cabb 100644
              if (s_l[il] == nullptr) continue;
  
 diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
-index 08489a4be..d9a91c1a6 100644
+index 6442fc1c1..59356d2bc 100644
 --- a/src/llama-memory-recurrent.h
 +++ b/src/llama-memory-recurrent.h
-@@ -128,17 +128,17 @@ private:
+@@ -133,17 +133,17 @@ private:
  
      size_t total_size() const;
  
@@ -590,10 +572,10 @@ index 08489a4be..d9a91c1a6 100644
  
  class llama_memory_recurrent_context : public llama_memory_context_i {
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index d1af984e6..267536d4a 100644
+index a6059ab38..482495440 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -305,32 +305,32 @@ struct server_slot {
+@@ -340,31 +340,31 @@ struct server_slot {
  
      server_prompt prompt;
  
@@ -617,20 +599,19 @@ index d1af984e6..267536d4a 100644
              return false;
          }
  
--        llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
-+        llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_COMPACT);
-         if (ctx_dft) {
--            llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE);
-+            llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_COMPACT);
+-        const size_t n_tgt = llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
+-        const size_t n_dft = ctx_dft ? llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
++        const size_t n_tgt = llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_COMPACT);
++        const size_t n_dft = ctx_dft ? llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_COMPACT) : 0;
+         if (n_tgt != cur_size_tgt || n_dft != cur_size_dft) {
+             SLT_ERR(*this, "%s", "failed to save complete prompt state\n");
+             prompt_cache.states.pop_back();
+             return false;
          }
  
          return true;
      }
- 
-     bool prompt_load(server_prompt_cache & prompt_cache, const server_tokens & tokens) {
-         bool res = prompt_cache.load(prompt, tokens, ctx_tgt, ctx_dft, id);
-         if (!res) {
-@@ -2559,18 +2559,18 @@ private:
+@@ -2776,18 +2776,18 @@ private:
  
          cur.id_task = id_task;
  
@@ -646,8 +627,8 @@ index d1af984e6..267536d4a 100644
          // stash the draft's speculative state with the checkpoint
          common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
  
+         slot.prompt.checkpoints.push_back(std::move(ckpt));
+ 
          SLT_TRC(slot,
                  "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
                  (int) slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints, cur.pos_min,
-                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
-     }
