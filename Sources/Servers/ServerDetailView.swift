@@ -207,6 +207,8 @@ private struct ServerDetailHero: View {
                             Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
                         }
                         .buttonStyle(.plain).foregroundStyle(.secondary).font(.system(size: 12))
+                        .help(loc.t("Abre la carpeta del modelo en el Finder con el archivo seleccionado.",
+                                    "Opens the model's folder in Finder with the file selected."))
                     }
                 }
             }

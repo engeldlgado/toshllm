@@ -1177,6 +1177,7 @@
   "Opens the folder with each benchmark's full log (header + output), for sharing or debugging after a freeze. Kept ~30 days.": "Відкриває папку з повним журналом кожного бенчмарку (заголовок + вивід) для обміну або налагодження після зависання. Зберігається близько 30 днів.",
   "Opens the layer in its own viewer, in the browser.": "Відкриває шар у його власному переглядачі, у браузері.",
   "Opens the model catalog with estimates for your hardware.": "Відкриває каталог моделей з оцінками для вашого обладнання.",
+  "Opens the model's folder in Finder with the file selected.": "Відкриває теку моделі у Finder із виділеним файлом.",
   "Opens the specification on GitHub.": "Відкриває специфікацію на GitHub.",
   "Operation": "Операція",
   "Optimized for Apple Silicon and AMD GPUs.": "Оптимізовано для Apple Silicon та графічних процесорів AMD.",

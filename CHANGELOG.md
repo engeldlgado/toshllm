@@ -11,6 +11,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Improved
 
+- **LLMs: a model's name comes from the Hugging Face repo it was downloaded from, with who published the file next to it (#164).** Placeholder header names such as "Hf" no longer replace the real one, and the server card shows the file with Reveal in Finder. Contributed by [andruwa13](https://github.com/andruwa13) in [#165](https://github.com/engeldlgado/toshllm/pull/165).
 - **The Mac no longer idle-sleeps in the middle of a generation (#163).** While an answer, an image, a video, an upscale, a transcription, a subtitled export or a benchmark runs, ToshLLM keeps the system awake; the display can still turn off.
 
 ### Fixed

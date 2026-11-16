@@ -1177,6 +1177,7 @@
   "Opens the folder with each benchmark's full log (header + output), for sharing or debugging after a freeze. Kept ~30 days.": "",
   "Opens the layer in its own viewer, in the browser.": "",
   "Opens the model catalog with estimates for your hardware.": "",
+  "Opens the model's folder in Finder with the file selected.": "",
   "Opens the specification on GitHub.": "",
   "Operation": "",
   "Optimized for Apple Silicon and AMD GPUs.": "",

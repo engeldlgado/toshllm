@@ -200,7 +200,7 @@ struct ModelName {
         ("tinyllama", "Llama"), ("codellama", "Llama"), ("llama", "Llama"),
         ("codegemma", "Gemma"), ("gemma", "Gemma"),
         ("mixtral", "Mistral"), ("ministral", "Mistral"), ("magistral", "Mistral"),
-        ("devstral", "Mistral"), ("codestral", "Mistral"), ("mistral", "Mistral"),
+        ("devstral", "Mistral"), ("codestral", "Mistral"), ("pixtral", "Mistral"), ("mistral", "Mistral"),
         ("deepseek", "DeepSeek"), ("dflash", "DeepSeek"),
         ("phi", "Phi"), ("granite", "Granite"),
         ("gpt", "GPT"),
@@ -270,7 +270,7 @@ struct ModelName {
     /// calls per model and the name never changes while the file does not.
     static func forgetCachedNames() { cacheLock.withLock { cache.removeAll() } }
 
-    /// Extracts Hugging Face URL from macOS extended attribute if downloaded via browser.
+    /// The first Hugging Face model address macOS recorded for a file a browser downloaded.
     static func whereFromsURL(forPath path: String) -> String? {
         let length = getxattr(path, "com.apple.metadata:kMDItemWhereFroms", nil, 0, 0, 0)
         guard length > 0 else { return nil }
@@ -282,163 +282,79 @@ struct ModelName {
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String] else {
             return nil
         }
-        return plist.first(where: { $0.contains("huggingface.co") })
+        return plist.first { parseHuggingFaceURL($0) != nil }
     }
 
-    /// Parses author and cleaned repository name from a Hugging Face URL.
-    static func parseHuggingFaceURL(_ urlString: String) -> (author: String, repo: String)? {
-        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespaces)),
-              url.host?.contains("huggingface.co") == true else { return nil }
+    private static let reservedHubPaths: Set<String> = [
+        "api", "datasets", "spaces", "models", "docs", "blog", "collections", "papers",
+        "organizations", "settings", "join", "login", "pricing", "posts",
+    ]
+
+    /// Owner and repository of a model page or file on huggingface.co or the chosen mirror.
+    /// `repo` drops the GGUF suffix for titles; `rawRepo` is the real name for links.
+    static func parseHuggingFaceURL(_ urlString: String) -> (author: String, repo: String, rawRepo: String)? {
+        guard let parsed = URL(string: urlString.trimmingCharacters(in: .whitespaces)) else { return nil }
+        let url = HubEndpoint.canonical(parsed)
+        guard HubEndpoint.isHub(url) else { return nil }
         let components = url.pathComponents.filter { $0 != "/" }
-        var author: String? = nil
-        var rawRepo: String? = nil
-
-        if let resolveIndex = components.firstIndex(of: "resolve") ?? components.firstIndex(of: "blob"), resolveIndex >= 2 {
-            author = components[resolveIndex - 2]
-            rawRepo = components[resolveIndex - 1]
-        } else if components.count >= 2 {
-            author = components[0]
-            rawRepo = components[1]
+        if let marker = components.firstIndex(where: { ["resolve", "blob", "tree"].contains($0) }) {
+            guard marker == 2 else { return nil }
+        } else {
+            guard components.count == 2 else { return nil }
         }
-
-        guard let author, let rawRepo, !author.isEmpty, !rawRepo.isEmpty else { return nil }
+        let author = components[0], rawRepo = components[1]
+        guard !reservedHubPaths.contains(author.lowercased()) else { return nil }
         let cleaned = rawRepo.replacingOccurrences(of: "(?i)[-_.]*gguf.*$", with: "", options: .regularExpression)
-        return (author, cleaned.isEmpty ? rawRepo : cleaned)
+        return (author, cleaned.isEmpty ? rawRepo : cleaned, rawRepo)
     }
+
+    private static let genericMetadataNames: Set<String> = [
+        "model", "original model", "converted model", "untitled",
+        "ours", "hf", "huggingface", "gguf", "base", "default",
+    ]
 
     private static func resolve(_ path: String) -> ModelName {
-        let fileURL = URL(fileURLWithPath: path)
-        let fileName = fileURL.lastPathComponent
+        let fileName = URL(fileURLWithPath: path).lastPathComponent
         let byFile = ModelName(fileName)
         guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return byFile }
         let metadata = GGUFMetadataCache.metadata(at: path)
         let headerQuant = metadata?.fileTypeLabel
 
-        var repoAuthor: String? = nil
-        var fullRepo: String? = nil
-        var repoModelName: ModelName? = nil
-
-        // 1. Try recorded download source from ToshLLM
-        if let sourceURLString = ModelStore.source(forFile: fileName),
-           let parsed = parseHuggingFaceURL(sourceURLString) {
-            repoAuthor = parsed.author
-            fullRepo = "\(parsed.author)/\(parsed.repo)"
-            repoModelName = ModelName(parsed.repo, author: repoAuthor, repository: fullRepo)
+        // The author is whoever published this file. The base model's maker is not, so the
+        // header's base_model fields never name it; a header URL counts only for a GGUF repo.
+        var origin = ModelStore.source(forFile: fileName).flatMap(parseHuggingFaceURL)
+            ?? whereFromsURL(forPath: path).flatMap(parseHuggingFaceURL)
+        if origin == nil {
+            origin = ["general.url", "general.repo_url", "general.source.url"].lazy
+                .compactMap { metadata?.string(for: $0).flatMap(parseHuggingFaceURL) }
+                .first { $0.rawRepo.lowercased().contains("gguf") }
         }
+        let quantizer = metadata?.string(for: "general.quantized_by")?.trimmingCharacters(in: .whitespaces)
+        let author = origin?.author ?? (quantizer?.isEmpty == false ? quantizer : nil)
+        let repository = origin.map { "\($0.author)/\($0.rawRepo)" }
 
-        // 2. Try macOS browser download origin extended attribute (kMDItemWhereFroms)
-        if repoAuthor == nil || repoModelName == nil,
-           let whereFroms = whereFromsURL(forPath: path),
-           let parsed = parseHuggingFaceURL(whereFroms) {
-            if repoAuthor == nil { repoAuthor = parsed.author }
-            if fullRepo == nil { fullRepo = "\(parsed.author)/\(parsed.repo)" }
-            if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor, repository: fullRepo) }
-            ModelStore.recordSource(whereFroms, forFile: fileName)
+        var byMeta: ModelName?
+        if let meta = metadata?.string(for: "general.name")?.trimmingCharacters(in: .whitespaces), !meta.isEmpty {
+            // Some converters preserve the Hugging Face repository as owner/model.
+            // Only the model component belongs in the title.
+            let name = meta.split(separator: "/").last.map(String.init) ?? meta
+            let parsed = ModelName(name)
+            let generic = genericMetadataNames.contains(parsed.title.lowercased())
+                || genericMetadataNames.contains(name.lowercased())
+            // a header name of no known family on a file whose name has one is a placeholder
+            let placeholder = family(forText: parsed.title) == otherFamily
+                && family(forText: byFile.title) != otherFamily
+            if !parsed.title.isEmpty, !generic, !placeholder { byMeta = parsed }
         }
-
-        // 3. Try GGUF URL metadata keys (e.g. general.base_model.0.repo_url, general.source.url)
-        let urlKeys = [
-            "general.base_model.0.repo_url",
-            "general.source.url",
-            "general.repo_url",
-            "general.url"
-        ]
-        for key in urlKeys where repoAuthor == nil || repoModelName == nil {
-            if let urlStr = metadata?.string(for: key),
-               let parsed = parseHuggingFaceURL(urlStr) {
-                if repoAuthor == nil { repoAuthor = parsed.author }
-                if fullRepo == nil { fullRepo = "\(parsed.author)/\(parsed.repo)" }
-                if repoModelName == nil { repoModelName = ModelName(parsed.repo, author: repoAuthor, repository: fullRepo) }
-            }
-        }
-
-        let genericMetadataNames: Set<String> = [
-            "model", "original model", "converted model", "untitled",
-            "ours", "hf", "huggingface", "gguf", "base", "default"
-        ]
-
-        // 4. Try general.name with "owner/model" format (e.g. "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF")
-        if let meta = metadata?.string(for: "general.name")?.trimmingCharacters(in: .whitespaces),
-           meta.contains("/") {
-            let parts = meta.split(separator: "/")
-            if parts.count >= 2 {
-                let owner = String(parts[0])
-                if repoAuthor == nil && !genericMetadataNames.contains(owner.lowercased()) {
-                    repoAuthor = owner
-                }
-                let rawRepo = String(parts[1])
-                let cleaned = rawRepo.replacingOccurrences(of: "(?i)[-_.]*gguf.*$", with: "", options: .regularExpression)
-                if fullRepo == nil && !genericMetadataNames.contains(owner.lowercased()) {
-                    fullRepo = "\(owner)/\(rawRepo)"
-                }
-                if repoModelName == nil && !cleaned.isEmpty && !genericMetadataNames.contains(cleaned.lowercased()) {
-                    repoModelName = ModelName(cleaned, author: repoAuthor, repository: fullRepo)
-                }
-            }
-        }
-
-        // 5. Try GGUF organization and author metadata
-        let orgKeys = [
-            "general.base_model.0.organization",
-            "general.organization",
-            "general.base_model.0.author",
-            "general.author"
-        ]
-        for key in orgKeys where repoAuthor == nil {
-            if let org = metadata?.string(for: key)?.trimmingCharacters(in: .whitespaces),
-               !org.isEmpty, !genericMetadataNames.contains(org.lowercased()) {
-                repoAuthor = org
-            }
-        }
-
-        // 6. Try filename prefix if formatted as "author_model" (e.g. "google_gemma-4-E4B-it-Q4_K_M.gguf")
-        if repoAuthor == nil, fileName.contains("_") {
-            let prefix = String(fileName.split(separator: "_")[0])
-            let knownCreators: Set<String> = [
-                "google", "unsloth", "bartowski", "meta", "mistralai", "mistral",
-                "deepseek", "qwen", "openbmb", "microsoft", "maziyarpanahi",
-                "davidau", "thebloke", "empero-ai"
-            ]
-            if knownCreators.contains(prefix.lowercased()) {
-                repoAuthor = prefix
-            }
-        }
-
-        // 7. Determine the base candidate
-        var primary: ModelName? = repoModelName
-
-        if primary == nil, let meta = metadata?.string(for: "general.name")?.trimmingCharacters(in: .whitespaces), !meta.isEmpty {
-            let metadataName = meta.split(separator: "/").last.map(String.init) ?? meta
-            let byMeta = ModelName(metadataName, author: repoAuthor)
-            let isGeneric = genericMetadataNames.contains(byMeta.title.lowercased())
-                || genericMetadataNames.contains(metadataName.lowercased())
-            if !byMeta.title.isEmpty && !isGeneric {
-                primary = byMeta
-            }
-        }
-
-        if primary == nil, let baseName = metadata?.string(for: "general.base_model.0.name")?.trimmingCharacters(in: .whitespaces), !baseName.isEmpty {
-            let byBase = ModelName(baseName, author: repoAuthor)
-            if !genericMetadataNames.contains(byBase.title.lowercased()) {
-                primary = byBase
-            }
-        }
-
-        let chosen = primary ?? byFile
+        let chosen = origin.map { ModelName($0.repo) } ?? byMeta ?? byFile
 
         var title = chosen.title
         if chosen.sizeToken.isEmpty && !byFile.sizeToken.isEmpty {
             title = "\(title) \(byFile.sizeToken)"
         } else if byFile.sizeToken.contains("-A"), !chosen.sizeToken.contains("-A") {
-            if !chosen.sizeToken.isEmpty {
-                let suffix = " \(chosen.sizeToken)"
-                if title.hasSuffix(suffix) {
-                    title = String(title.dropLast(suffix.count))
-                }
-            }
-            if !title.hasSuffix(byFile.sizeToken) {
-                title = "\(title) \(byFile.sizeToken)"
-            }
+            let suffix = " \(chosen.sizeToken)"
+            if title.hasSuffix(suffix) { title = String(title.dropLast(suffix.count)) }
+            title = "\(title) \(byFile.sizeToken)"
         }
 
         var badges: [String] = []
@@ -449,34 +365,23 @@ struct ModelName {
             ? byFile.quant
             : (headerQuant ?? (byFile.quant.isEmpty ? chosen.quant : byFile.quant))
 
-        // Determine family with robust fallbacks:
-        var determinedFamily = Self.family(forText: title)
-        if determinedFamily == Self.otherFamily {
-            determinedFamily = Self.family(forText: byFile.title)
+        var group = family(forText: title)
+        if group == otherFamily { group = family(forText: byFile.title) }
+        if group == otherFamily, let base = metadata?.string(for: "general.base_model.0.name") {
+            group = family(forText: base)
         }
-        if determinedFamily == Self.otherFamily, let arch = metadata?.string(for: "general.architecture") {
-            determinedFamily = Self.family(forText: arch)
-        }
-        if determinedFamily == Self.otherFamily, let baseName = metadata?.string(for: "general.base_model.0.name") {
-            determinedFamily = Self.family(forText: baseName)
-        }
-
-        // Backfill recorded download source in ToshLLM if missing
-        if ModelStore.source(forFile: fileName) == nil {
-            if let whereFroms = whereFromsURL(forPath: path) {
-                ModelStore.recordSource(whereFroms, forFile: fileName)
-            } else if let repo = fullRepo {
-                ModelStore.recordSource("https://huggingface.co/\(repo)/resolve/main/\(fileName)", forFile: fileName)
-            }
+        // llama is also what Mistral models and many finetunes convert to, so it names no maker
+        if group == otherFamily, let arch = metadata?.string(for: "general.architecture"), arch != "llama" {
+            group = family(forText: arch)
         }
 
         return ModelName(title: title,
                          quant: quant,
                          badges: badges,
-                         sizeToken: chosen.sizeToken.isEmpty ? byFile.sizeToken : byFile.sizeToken,
-                         author: repoAuthor,
-                         repository: fullRepo ?? chosen.repository,
-                         explicitFamily: determinedFamily)
+                         sizeToken: chosen.sizeToken.isEmpty ? byFile.sizeToken : chosen.sizeToken,
+                         author: author,
+                         repository: repository,
+                         explicitFamily: group)
     }
 }
 
