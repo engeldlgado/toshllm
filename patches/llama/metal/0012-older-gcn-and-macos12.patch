@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 207a9d29c..34454e0c7 100644
+index 207a9d29c..c4b96496b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -77,25 +77,51 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_base(ggml
@@ -182,7 +182,7 @@ index 207a9d29c..34454e0c7 100644
  
          if (st != nullptr && strcmp(st, ggml_type_name(tsrc0)) == 0) {
              const char * snr = TOSH_ENV("TOSH_SWEEP_NR0");
-@@ -1828,31 +1889,35 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -1828,31 +1889,34 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
      }
  
      char sfx[64];
@@ -192,7 +192,6 @@ index 207a9d29c..34454e0c7 100644
      }
  
 +    snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
-+    snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d_al=%d", base, nsg, ne12, r2, r3, nw, row4, row8, align);
 +
      if (TOSH_ENV("TOSH_SWEEP_DEBUG") != nullptr) {
          fprintf(stderr, "SWEEP pipeline = %s (nsg=%d nr0=%d)\n", name, nsg, nr0);
@@ -218,7 +217,7 @@ index 207a9d29c..34454e0c7 100644
  
      res.nr0  = nr0;
      res.nr1  = nr1;
-@@ -2225,29 +2290,32 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2225,29 +2289,32 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                        TOSH_ENV("TOSH_MV_ROW4_DISABLE") == nullptr;
  
      // The expert kernels share the implementations of the dense path, so they can read the

@@ -214,7 +214,7 @@ index 4f0495055..764f8fa50 100644
          // created, dispatched and committed empty. Tensor split hits this on every subgraph.
          const bool encoded_by_main = ctx->n_nodes_1 == 0 && !use_capture;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 0b9ab5637..de3b1980f 100644
+index 98cbc2def..feea87f32 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -1647,16 +1647,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta

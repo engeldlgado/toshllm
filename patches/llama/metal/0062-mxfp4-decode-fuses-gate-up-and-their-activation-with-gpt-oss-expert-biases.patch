@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 283bfe305..39afdeab2 100644
+index 18ab3b48c..dca8445da 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -1424,16 +1424,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_dense_swi
@@ -300,10 +300,10 @@ index a20a17142..52df80584 100644
      GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
      GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index dfa44a857..9a2ed726f 100644
+index 47b8e4cb2..3a4181d4b 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -10100,20 +10100,119 @@ template [[host_name("kernel_mul_mv_id_iq3_xxs_f32")]] kernel kernel_mul_mv_id_t
+@@ -10102,20 +10102,119 @@ template [[host_name("kernel_mul_mv_id_iq3_xxs_f32")]] kernel kernel_mul_mv_id_t
  template [[host_name("kernel_mul_mv_id_iq3_s_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq3_s_f32_impl  <N_R0_IQ3_S>>>;
  template [[host_name("kernel_mul_mv_id_iq2_s_f32")]]   kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq2_s_f32_impl  <N_R0_IQ2_S>>>;
  template [[host_name("kernel_mul_mv_id_iq4_nl_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq4_nl_f32_impl <N_R0_IQ4_NL>>>;
@@ -423,7 +423,7 @@ index dfa44a857..9a2ed726f 100644
          constant ggml_metal_kargs_mul_mv & args,
          device const char * src0g,
          device const char * src0u,
-@@ -10319,29 +10418,97 @@ kernel void kernel_mul_mv_q4_0_swiglu_f32(
+@@ -10321,29 +10420,97 @@ kernel void kernel_mul_mv_q4_0_swiglu_f32(
          device const char * src1,
          device       char * dst,
          uint3  tgpig[[threadgroup_position_in_grid]],

@@ -1748,10 +1748,10 @@ index 15a137330..67c621567 100644
  
  void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 7d9e399a6..4f7759fea 100644
+index 39cc4eba1..4eeff4147 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -2023,26 +2023,20 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(g
+@@ -2022,26 +2022,20 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(g
      char base[256];
      char name[256];
  
@@ -1780,7 +1780,7 @@ index 7d9e399a6..4f7759fea 100644
  ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_zero(ggml_metal_library_t lib) {
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, "kernel_mul_mm_id_zero");
      if (!res.pipeline) {
-@@ -2397,30 +2391,35 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2396,30 +2390,34 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
      // The expert kernels share the implementations of the dense path, so they can read the
      // quant arrays a word at a time under the same conditions.
      const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
@@ -1793,7 +1793,6 @@ index 7d9e399a6..4f7759fea 100644
 +    const bool id_skip = op->src[2] != nullptr && op->src[2]->op == GGML_OP_TOSH_DMOE_PUBLISH;
 +
      snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, id_w64 ? "_w64" : "");
-+    snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d_al=%d_sk=%d", base, nsg, nw, row4, row8, align, id_skip);
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {

@@ -723,7 +723,7 @@ index aac527a64..052b88d27 100644
  void ggml_compute_forward_map_custom2(const struct ggml_compute_params * params, struct ggml_tensor * dst);
  void ggml_compute_forward_map_custom3(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 34454e0c7..2843581cb 100644
+index c4b96496b..fccc5554a 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -187,25 +187,34 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_get_rows(ggml_me

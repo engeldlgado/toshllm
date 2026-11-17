@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index c2356c32e..ffaecf1bb 100644
+index c31a74cd4..3384f163c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -2463,22 +2463,31 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2462,22 +2462,31 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                               tsrc0 == GGML_TYPE_IQ2_S || tsrc0 == GGML_TYPE_IQ1_S ||
                               tsrc0 == GGML_TYPE_IQ1_M);
          const bool lut = (tsrc0 == GGML_TYPE_MXFP4 || tsrc0 == GGML_TYPE_IQ4_NL || tsrc0 == GGML_TYPE_IQ4_XS);
@@ -35,10 +35,10 @@ index c2356c32e..ffaecf1bb 100644
                        (nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0)) &&
                        TOSH_ENV("TOSH_MV_ROW8_DISABLE") == nullptr;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 8d9336246..53e44b2ff 100644
+index b52df15c8..23ca83e65 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -11674,8 +11674,43 @@ void kernel_mul_mv_iq1_m_f32_v2_impl(
+@@ -11676,8 +11676,43 @@ void kernel_mul_mv_iq1_m_f32_v2_impl(
              }
          }
      }

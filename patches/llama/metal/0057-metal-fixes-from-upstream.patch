@@ -47,7 +47,7 @@ index 7db8d9fd4..3251bb605 100644
              for (; i < nr0/4; i += 64) {
                  *(D4 + i) = *(C4 + i);
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 53e44b2ff..dfa44a857 100644
+index 23ca83e65..47b8e4cb2 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
 @@ -397,17 +397,17 @@ void mul_vec_q_n_f32_impl(

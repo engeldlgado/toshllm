@@ -641,7 +641,7 @@ index f04be52f5..5738961f8 100644
  void ggml_vec_dot_mxfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_nvfp4_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 2843581cb..aa8cfe197 100644
+index fccc5554a..f648d3c4c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -840,51 +840,66 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rwkv(ggml_metal_
@@ -858,7 +858,7 @@ index 2843581cb..aa8cfe197 100644
          const bool lut = (tsrc0 == GGML_TYPE_MXFP4 || tsrc0 == GGML_TYPE_IQ4_NL || tsrc0 == GGML_TYPE_IQ4_XS);
          if (helper_reduce || simd_reduce || lut) {
              nw = (int16_t) props->simd_width;
-@@ -2085,16 +2156,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2084,16 +2155,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
      int nr1 = 1; // number of src1 rows per threadgroup
  
      size_t smem = 0; // shared memory
@@ -876,7 +876,7 @@ index 2843581cb..aa8cfe197 100644
          case GGML_TYPE_F32:
          case GGML_TYPE_F16:
          case GGML_TYPE_BF16:
-@@ -2110,16 +2182,27 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2109,16 +2181,27 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                  nsg = N_SG_Q1_0;
                  nr0 = N_R0_Q1_0;
              } break;
@@ -904,7 +904,7 @@ index 2843581cb..aa8cfe197 100644
          case GGML_TYPE_Q4_1:
              {
                  nsg = N_SG_Q4_1;
-@@ -2292,16 +2375,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2291,16 +2374,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
      if (props_id->wave64_decode) {
          const bool helper = (tsrc0 == GGML_TYPE_F16 || tsrc0 == GGML_TYPE_F32 ||
                               tsrc0 == GGML_TYPE_BF16 || tsrc0 == GGML_TYPE_Q8_0);
@@ -922,7 +922,7 @@ index 2843581cb..aa8cfe197 100644
          if (helper) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float)*nr0; }
          else if (sr) { nw = (int16_t) props_id->simd_width; }
          else if (lut) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float); }
-@@ -2455,27 +2539,52 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argsort_merge(gg
+@@ -2454,27 +2538,52 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argsort_merge(gg
  
      return res;
  }

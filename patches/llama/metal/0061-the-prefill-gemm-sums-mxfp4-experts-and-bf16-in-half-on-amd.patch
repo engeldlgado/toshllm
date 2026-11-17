@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index ffaecf1bb..283bfe305 100644
+index 3384f163c..18ab3b48c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -1270,16 +1270,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
@@ -49,7 +49,7 @@ index ffaecf1bb..283bfe305 100644
      // tokens and gains 1.0% at 512, so it takes a floor rather than lose the gain.
      static const int w64_floor_env = []() {
          const char * s = TOSH_ENV("TOSH_MM_W64_FLOOR");
-@@ -2193,16 +2201,24 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
+@@ -2192,16 +2200,24 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id(ggml_m
          }
      }
  

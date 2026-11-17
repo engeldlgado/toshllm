@@ -26,7 +26,7 @@ index 5ae5e8d79..78aa09a9a 100644
              this->params.n_max = std::min(this->params.n_max, n_mtp_layers);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 4f7759fea..e7dae69bc 100644
+index 4eeff4147..2612faae2 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -622,27 +622,37 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_mask(

@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index de3b1980f..c2356c32e 100644
+index feea87f32..c31a74cd4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -1989,28 +1989,45 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
@@ -48,7 +48,7 @@ index de3b1980f..c2356c32e 100644
              } else if (snr != nullptr) {
                  nr0 = atoi(snr);
                  snprintf(sweep_sfx, sizeof(sweep_sfx), "_r%d", nr0);
-@@ -2069,16 +2086,24 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -2068,16 +2085,24 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
          ggml_metal_cv_free(cv);
      }
  
@@ -73,7 +73,7 @@ index de3b1980f..c2356c32e 100644
      char name[256];
  
      snprintf(base, 256, "kernel_mul_mm_id_map0_ne20_%d", ne20);
-@@ -2438,16 +2463,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2437,16 +2462,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                               tsrc0 == GGML_TYPE_IQ2_S || tsrc0 == GGML_TYPE_IQ1_S ||
                               tsrc0 == GGML_TYPE_IQ1_M);
          const bool lut = (tsrc0 == GGML_TYPE_MXFP4 || tsrc0 == GGML_TYPE_IQ4_NL || tsrc0 == GGML_TYPE_IQ4_XS);
@@ -187,10 +187,29 @@ index 3cb7d65a6..294d3d955 100644
      static const bool disabled = TOSH_ENV("TOSH_QKV_FUSION_DISABLE") != nullptr;
  
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index c487daae6..8d9336246 100644
+index c487daae6..b52df15c8 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -10586,70 +10586,598 @@ kernel void kernel_mul_mv_q8_0_swiglu_f32(
+@@ -5069,16 +5069,18 @@ void kernel_mul_mv_mxfp4_f32_impl(
+     const int ns01 = args.nb01/args.nb00; // this can be larger than nb for permuted src0 tensors
+ 
+     // block groups by real simd width: 16 on wave32, 32 on wave64
+     const short NG = FC_mul_mv_nw/2;
+ 
+     const short ix = tiisg/2;  // 0...NG-1
+     const short it = tiisg%2;  // 0 or 1
+ 
++    }
++
+     float4 yl[4];
+     float sumf[NR0]={0.f};
+ 
+     device const float * yb = y + ix*QK_MXFP4 + it*8;
+ 
+     // note: just the check `ib < nb` is enough, but adding the redundant `&& ib < ns01` check makes the kernel a bit faster
+     //       no idea why that is - needs some deeper investigation [TAG_MUL_MV_WEIRD]
+     for (int ib = ix; ib < nb && ib < ns01; ib += NG) {
+@@ -10586,70 +10588,598 @@ kernel void kernel_mul_mv_q8_0_swiglu_f32(
          device       char * dst,
          threadgroup  char * shmem [[threadgroup(0)]],
          uint3  tgpig[[threadgroup_position_in_grid]],
@@ -789,7 +808,7 @@ index c487daae6..8d9336246 100644
      const int im = tgpig.z;
  
      const int first_row = (r0 * NSG + sgitg) * nr0;
-@@ -10671,72 +11199,483 @@ kernel void kernel_mul_mv_q8_0_swiglu_f32(
+@@ -10671,72 +11201,483 @@ kernel void kernel_mul_mv_q8_0_swiglu_f32(
      const short tid = tiisg%8;
      const short ix  = tiisg/8;
      const short iq  = tid/4;

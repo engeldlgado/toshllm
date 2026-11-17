@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 39afdeab2..5362b9abd 100644
+index dca8445da..6472a277e 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -1711,16 +1711,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
@@ -24,7 +24,7 @@ index 39afdeab2..5362b9abd 100644
                      w64 = true;
                  }
              } break;
-@@ -2337,16 +2342,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2336,16 +2341,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                  nsg = N_SG_Q5_1;
                  nr0 = N_R0_Q5_1;
              } break;
@@ -46,7 +46,7 @@ index 39afdeab2..5362b9abd 100644
              } break;
          case GGML_TYPE_Q2_K:
              {
-@@ -2518,16 +2528,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2517,16 +2527,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                     tsrc0 == GGML_TYPE_IQ1_M   || tsrc0 == GGML_TYPE_Q3_K   || tsrc0 == GGML_TYPE_Q2_K   ||
                     tsrc0 == GGML_TYPE_Q5_K)) {
              suffix = "_v2";
@@ -70,7 +70,7 @@ index 39afdeab2..5362b9abd 100644
      // quant arrays a word at a time under the same conditions.
      const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 9a2ed726f..5cec2e5bd 100644
+index 3a4181d4b..2e878ccb2 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
 @@ -2671,43 +2671,51 @@ kernel void kernel_mul_mv_q3_K_f32(
@@ -176,7 +176,7 @@ index 9a2ed726f..5cec2e5bd 100644
  // a few columns share one read of each block: the rows' quants and scales stay in registers
  // and the columns stream past them
  template<int NR0, int NC>
-@@ -10084,16 +10104,17 @@ kernel void kernel_mul_mv_mxfp4_f32_L4r8(
+@@ -10086,16 +10106,17 @@ kernel void kernel_mul_mv_mxfp4_f32_L4r8(
  template [[host_name("kernel_mul_mv_id_q4_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0>>>;
  template [[host_name("kernel_mul_mv_id_q4_1_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q4_1, N_R0_Q4_1>>>;
  template [[host_name("kernel_mul_mv_id_q5_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q5_0, N_R0_Q5_0>>>;

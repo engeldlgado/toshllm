@@ -1878,10 +1878,10 @@ index bd3d5e72d..1dc60717d 100644
      if (v < 0) {
          const char * s = TOSH_ENV("TOSH_MGPU_MERGE");
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index aa8cfe197..7d9e399a6 100644
+index f648d3c4c..39cc4eba1 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -3124,16 +3124,54 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one(ggml_met
+@@ -3123,16 +3123,54 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_bin_one(ggml_met
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
          ggml_metal_cv_free(cv);

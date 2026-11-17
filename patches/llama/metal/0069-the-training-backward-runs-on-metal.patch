@@ -46,7 +46,7 @@ index 77e565c25..ffa78f7e0 100644
      // number of nodes encoded by the main thread (empirically determined)
      // the split was tuned on unified memory; TOSH_N_MAIN overrides it to A/B the share here
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 5362b9abd..491e9f533 100644
+index 6472a277e..74c27cf44 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
 @@ -119,16 +119,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_cpy(ggml_metal_l
@@ -200,7 +200,7 @@ index 5362b9abd..491e9f533 100644
      snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d_us=%d",
               base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual + 2*narrow, use_mm_double_buffer, acc_f32, uniform_scale);
  
-@@ -3931,8 +4014,69 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_count_equal(ggml
+@@ -3929,8 +4012,69 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_count_equal(ggml
          ggml_metal_cv_free(cv);
      }
  

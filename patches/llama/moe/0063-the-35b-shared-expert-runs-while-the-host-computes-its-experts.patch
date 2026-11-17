@@ -135,10 +135,10 @@ index a7d2fb73a..d0a61bd32 100644
               ggml_tensor * gate_exps,
               ggml_tensor * down_exps,
 diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
-index c595f6c28..a0d6aee17 100644
+index c595f6c28..a744e5dbc 100644
 --- a/src/models/qwen35moe.cpp
 +++ b/src/models/qwen35moe.cpp
-@@ -474,44 +474,49 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn_linear(
+@@ -474,44 +474,51 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn_linear(
  
      return cur;
  }
@@ -176,7 +176,9 @@ index c595f6c28..a0d6aee17 100644
              model.layers[il].ffn_gate_exps_s,
 -            model.layers[il].ffn_down_exps_s);
 +            model.layers[il].ffn_down_exps_s,
-+            nullptr, ffn_shexp);
++            /* selected_experts_in */ nullptr,
++            /* post_exp_norm */ nullptr, 1e-5f,
++            /* overlap */ ffn_shexp);
      cb(moe_out, "ffn_moe_out", il);
  
      // Add shared experts if present - following Qwen3Next reference implementation
