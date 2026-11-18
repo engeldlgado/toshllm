@@ -23,6 +23,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **LLMs: Gemma 4 tool calls that start before the model closes its thinking are read as calls.**
 - **LLMs: a client that keeps its connection open after a streamed answer can send its next request on it.**
 - **LLMs on Radeon RX 400/500, Vega, Radeon VII and Radeon Pro Vega/WX: models with BF16 weights, such as Gemma 4 E4B, no longer stop the engine on prompts of 448 tokens or more.** Reported by [andruwa13](https://github.com/andruwa13) in [#149](https://github.com/engeldlgado/toshllm/pull/149).
+- **LLMs on Radeon RX 6000 cards: Gemma 4 26B describes the image it is shown instead of a jumble of coloured text (#166).** The step that lays the image features out on a grid before pooling scattered them; it has done so since 0.87.32.
 - **Chat: Maximum image size under Attachments lines up with the rows around it,** with its icon and its ⓘ where the others have them.
 
 ## [0.87.34] - 2026-11-11

@@ -3130,10 +3130,10 @@ index 983d9b5cb..a6260da57 100644
 +    }
 +}
 diff --git a/ggml/src/ggml-metal/kernels/quantize.metal b/ggml/src/ggml-metal/kernels/quantize.metal
-index aff978153..458381a80 100644
+index aff978153..5cd1df10a 100644
 --- a/ggml/src/ggml-metal/kernels/quantize.metal
 +++ b/ggml/src/ggml-metal/kernels/quantize.metal
-@@ -583,8 +583,53 @@ template [[host_name("kernel_set_rows_f32_i32_q5_1")]]   kernel set_rows_q32_t k
+@@ -583,8 +583,54 @@ template [[host_name("kernel_set_rows_f32_i32_q5_1")]]   kernel set_rows_q32_t k
  template [[host_name("kernel_set_rows_f32_i64_iq4_nl")]] kernel set_rows_q32_t kernel_set_rows_q32<float, int64_t, block_iq4_nl, quantize_iq4_nl>;
  template [[host_name("kernel_set_rows_f32_i32_iq4_nl")]] kernel set_rows_q32_t kernel_set_rows_q32<float, int32_t, block_iq4_nl, quantize_iq4_nl>;
  
@@ -3171,7 +3171,8 @@ index aff978153..458381a80 100644
 +        const int i0 = b0 + tx;
 +        const int i1 = b1 + ty + k;
 +        if (i0 < args.ne00 && i1 < args.ne01) {
-+            *(device float *) (dst + i3*args.nb3 + i2*args.nb2 + (uint64_t) i1*args.nb1 + (uint64_t) i0*args.nb0) = tile[tx*33 + ty + k];
++            // dst is contiguous but may have another shape, so the element goes to its linear index
++            ((device float *) dst)[(((int64_t) i3*args.ne02 + i2)*args.ne01 + i1)*args.ne00 + i0] = tile[tx*33 + ty + k];
 +        }
 +    }
 +}
@@ -3654,3 +3655,64 @@ index 86a3e925d..cc1d00e5d 100644
 +FA_BACK_INST(128, "f16", half)
 +FA_BACK_INST(256, "f16", half)
 +#undef FA_BACK_INST
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index a28deeb23..f7146a7d0 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -7366,16 +7366,37 @@ struct test_conv_3d : public test_case {
+ 
+         ggml_tensor * out = ggml_conv_3d_direct(ctx, kernel, input, s0, s1, s2, p0, p1, p2, d0, d1, d2, (int)IC, (int)N, (int)OC);
+         ggml_set_name(out, "out");
+         return out;
+     }
+ };
+ 
+ // GGML_OP_CONCAT
++// a transposed view copied into a grid of another shape, as vision patches before pooling
++struct test_cont_transpose_reshape : public test_case {
++    const std::array<int64_t, 3> ne; // {embd, patches x, patches y}
++
++    std::string vars() override {
++        return VARS_TO_STR1(ne);
++    }
++
++    test_cont_transpose_reshape(std::array<int64_t, 3> ne = {64, 6, 6}) : ne(ne) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne[0], ne[1]*ne[2]);
++        ggml_set_name(a, "a");
++
++        ggml_tensor * out = ggml_cont_4d(ctx, ggml_transpose(ctx, a), ne[1], ne[2], ne[0], 1);
++        ggml_set_name(out, "out");
++
++        return out;
++    }
++};
++
+ struct test_concat : public test_case {
+     const ggml_type type;
+     const std::array<int64_t, 4> ne_a;
+     const int64_t ne_b_d;
+     const int dim;
+     const int v; // view (1 << 0: non-cont a (first 3 dim), 1 << 1: non-cont b (first 3 dim), 1 << 2: non-cont a (last 2 dim), 1 << 3: non-cont b (last 2 dim), 1 << 4: transposed b)
+ 
+     std::string vars() override {
+@@ -12693,16 +12714,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     for (ggml_type type_a : { GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0 }) {
+         for (int v : { 0, 4, 8, 12 }) {
+             for (int dim : { 0, 1, 2, 3, }) {
+                 test_cases.emplace_back(new test_concat(type_a, {128, 12, 13, 14}, dim == 0 ? 256 : 7, dim, v));
+             }
+         }
+     }
+ 
++    test_cases.emplace_back(new test_cont_transpose_reshape({64, 6, 6}));
++    test_cases.emplace_back(new test_cont_transpose_reshape({1152, 48, 48}));
+     // few long rows, which backends may split across workgroups
+     for (int dim : { 0, 1 }) {
+         test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {98304, 8, 1, 1}, dim == 0 ? 288 : 2, dim, 0));
+         test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {20000, 3, 2, 1}, dim == 0 ? 333 : 1, dim, 1));
+         test_cases.emplace_back(new test_concat(GGML_TYPE_Q8_0, {8192, 2, 1, 1}, dim == 0 ? 4096 : 1, dim, 0));
+     }
+ 
+     // GDN conv_input
