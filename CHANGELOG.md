@@ -24,6 +24,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **LLMs: a client that keeps its connection open after a streamed answer can send its next request on it.**
 - **LLMs on Radeon RX 400/500, Vega, Radeon VII and Radeon Pro Vega/WX: models with BF16 weights, such as Gemma 4 E4B, no longer stop the engine on prompts of 448 tokens or more.** Reported by [andruwa13](https://github.com/andruwa13) in [#149](https://github.com/engeldlgado/toshllm/pull/149).
 - **LLMs on Radeon RX 6000 cards: Gemma 4 26B describes the image it is shown instead of a jumble of coloured text (#166).** The step that lays the image features out on a grid before pooling scattered them; it has done so since 0.87.32.
+- **LLMs: the agent's text search reads past its first 100 matches (#167).** It takes an offset and says which one gives the next page, so a model no longer gets the same 100 lines back each time. Proposed by [Sergey](https://github.com/SergeySlice) in [#167](https://github.com/engeldlgado/toshllm/issues/167).
 - **Chat: Maximum image size under Attachments lines up with the rows around it,** with its icon and its ⓘ where the others have them.
 
 ## [0.87.34] - 2026-11-11
