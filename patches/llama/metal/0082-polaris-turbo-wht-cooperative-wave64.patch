@@ -1,0 +1,114 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 050c6f1..cbb70e9 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1002,6 +1002,20 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_turbo_wht(ggml_m
+     return res;
+ }
+ 
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_turbo_wht_w64(ggml_metal_library_t lib) {
++    const char * name = "kernel_turbo_wht_coop_w64";
++
++    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline) {
++        res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
++    }
++
++    res.nsg = 1;
++    res.smem = 0;
++
++    return res;
++}
++
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_solve_tri(ggml_metal_library_t lib, const ggml_tensor * op) {
+     char base[256];
+     char name[256];
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index b58e7a2..4e1cbe1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -161,6 +161,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_ssm_scan_
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rwkv              (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net   (ggml_metal_library_t lib, const struct ggml_tensor * op, bool rows, bool fold, bool raw, bool l2q, bool l2k);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_turbo_wht         (ggml_metal_library_t lib);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_turbo_wht_w64     (ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_solve_tri         (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net_back(ggml_metal_library_t lib, const char * stage);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_ta(ggml_metal_library_t lib, const struct ggml_tensor * op, bool cs);
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index a20490b..ea6767b 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -2920,13 +2920,25 @@ int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
+     const int64_t n_elements = ggml_nelements(op->src[0]);
+     const int64_t n_groups = n_elements / 128;
+ 
+-    auto pipeline = ggml_metal_library_get_pipeline_turbo_wht(lib);
+-
+     ggml_metal_kargs_turbo_wht args = {
+         /*.n_elements =*/ n_elements,
+         /*.direction  =*/ direction,
+     };
+ 
++    const ggml_metal_device_props * props = ggml_metal_device_get_props(ctx->dev);
++    if (props->simd_width == 64) {
++        if (n_groups <= 0) return 1;
++        auto pipeline = ggml_metal_library_get_pipeline_turbo_wht_w64(lib);
++        ggml_metal_encoder_set_pipeline(enc, pipeline);
++        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
++        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
++        ggml_metal_encoder_dispatch_threadgroups(enc, n_groups, 1, 1, 64, 1, 1);
++        return 1;
++    }
++
++    auto pipeline = ggml_metal_library_get_pipeline_turbo_wht(lib);
++
+     ggml_metal_encoder_set_pipeline(enc, pipeline);
+     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+diff --git a/ggml/src/ggml-metal/kernels/turbo.metal b/ggml/src/ggml-metal/kernels/turbo.metal
+index 7e8aab7..95d36d1 100644
+--- a/ggml/src/ggml-metal/kernels/turbo.metal
++++ b/ggml/src/ggml-metal/kernels/turbo.metal
+@@ -65,6 +65,40 @@ kernel void kernel_turbo_wht(
+     }
+ }
+ 
++// Wave64 cooperative WHT rotation: each 128-element group is processed by 1 simdgroup (64 threads)
++// in registers without shared memory or barriers, using simd_shuffle_xor (ds_swizzle_b32 for d<=16, ds_bpermute_b32 for d==32 on AMD Polaris/Vega).
++[[max_total_threads_per_threadgroup(64)]]
++kernel void kernel_turbo_wht_coop_w64(
++        constant ggml_metal_kargs_turbo_wht & args [[buffer(0)]],
++        device const float * src [[buffer(1)]],
++        device       float * dst [[buffer(2)]],
++        uint tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    const int64_t group_idx = tgpig;
++    const int64_t n_groups = args.n_elements / 128;
++    if (group_idx >= n_groups) return;
++
++    const bool is_inverse = (args.direction == 1);
++    constant float * sfirst = is_inverse ? turbo_wht_signs2 : turbo_wht_signs1;
++    constant float * slast  = is_inverse ? turbo_wht_signs1 : turbo_wht_signs2;
++
++    const uint l = tiisg;
++    device const float2 * in2  = (device const float2 *)(src + group_idx * 128);
++    device float2       * out2 = (device float2       *)(dst + group_idx * 128);
++
++    float2 v = in2[l];
++    v *= float2(sfirst[2*l], sfirst[2*l + 1]);
++    v = float2(v.x + v.y, v.x - v.y);
++    #pragma unroll
++    for (uint d = 1; d <= 32; d <<= 1) {
++        const float2 p = simd_shuffle_xor(v, d);
++        v = (l & d) == 0 ? v + p : p - v;
++    }
++    constexpr float inv_sqrt128 = 0.08838834764831845f;
++    v *= float2(slast[2*l] * inv_sqrt128, slast[2*l + 1] * inv_sqrt128);
++    out2[l] = v;
++}
++
+ // TurboQuant requantize (f32 -> turbo) for the KV shift: WHT-rotate + PolarQuant the
+ // full 128-element group, byte-identical to kernel_set_rows_turbo. One block per thread.
+ kernel void kernel_cpy_f32_turbo3(
