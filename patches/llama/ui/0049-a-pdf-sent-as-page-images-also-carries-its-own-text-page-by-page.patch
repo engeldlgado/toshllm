@@ -1,8 +1,11 @@
 diff --git a/tools/ui/src/lib/services/chat.service.ts b/tools/ui/src/lib/services/chat.service.ts
-index 1b5de8e8c..4da104717 100644
+index 79dc9efdd..e2b3e493b 100644
 --- a/tools/ui/src/lib/services/chat.service.ts
 +++ b/tools/ui/src/lib/services/chat.service.ts
-@@ -278,10 +278,16 @@ export class ChatService {
+@@ -275,16 +275,22 @@ export class ChatService {
+ 		for (const pdfFile of pdfFiles) {
+ 			if (pdfFile.processedAsImages && pdfFile.images) {
+ 				for (let i = 0; i < pdfFile.images.length; i++) {
  					contentParts.push({
  						image_url: { url: pdfFile.images[i] },
  						type: ContentPartType.IMAGE_URL
@@ -19,11 +22,17 @@ index 1b5de8e8c..4da104717 100644
  					text: formatAttachmentText(AttachmentLabel.PDF_FILE, pdfFile.name, pdfFile.content),
  					type: ContentPartType.TEXT
  				});
+ 			}
+ 		}
+ 
 diff --git a/tools/ui/src/lib/types/database.d.ts b/tools/ui/src/lib/types/database.d.ts
-index ce53e99f8..f31f14784 100644
+index 9235dca5a..47756514d 100644
 --- a/tools/ui/src/lib/types/database.d.ts
 +++ b/tools/ui/src/lib/types/database.d.ts
-@@ -70,10 +70,12 @@ export interface DatabaseMessageExtraPdfFile {
+@@ -70,16 +70,18 @@ export interface DatabaseMessageExtraLegacyContext {
+ export interface DatabaseMessageExtraPdfFile {
+ 	type: AttachmentType.PDF;
+ 	base64Data: string;
  	name: string;
  	size?: number;
  	content: string;
@@ -36,11 +45,14 @@ index ce53e99f8..f31f14784 100644
  export interface DatabaseMessageExtraTextFile {
  	type: AttachmentType.TEXT;
  	name: string;
+ 	size?: number;
+ 	content: string;
+ }
 diff --git a/tools/ui/src/lib/utils/convert-files-to-extra.ts b/tools/ui/src/lib/utils/convert-files-to-extra.ts
-index 507e2bb28..d0290295a 100644
+index f9624e0d8..77087f60c 100644
 --- a/tools/ui/src/lib/utils/convert-files-to-extra.ts
 +++ b/tools/ui/src/lib/utils/convert-files-to-extra.ts
-@@ -1,6 +1,6 @@
+@@ -1,9 +1,9 @@
 -import { convertPDFToImage, convertPDFToText } from './pdf-processing';
 +import { convertPDFToImage, convertPDFToText, convertPDFToTextLayer } from './pdf-processing';
  import { isSvgMimeType, svgBase64UrlToPngDataURL } from './svg-to-png';
@@ -48,7 +60,13 @@ index 507e2bb28..d0290295a 100644
  import { isWebpMimeType, webpBase64UrlToPngDataURL } from './webp-to-png';
  import { SETTINGS_KEYS } from '$lib/constants';
  import { AttachmentType, FileTypeCategory, SpecialFileType } from '$lib/enums';
-@@ -153,17 +153,21 @@ export async function parseFilesToMessageExtras(
+ import { modelsStore } from '$lib/stores/models/index.svelte';
+ import { serverStore } from '$lib/stores/server.svelte';
+ import { settingsStore } from '$lib/stores/settings/index.svelte';
+@@ -152,23 +152,27 @@ export async function parseFilesToMessageExtras(
+ 						// Show success toast for PDF image processing
+ 						toast.success(
+ 							`PDF "${file.name}" processed as ${images.length} images for vision model.`,
  							{
  								duration: 3000
  							}
@@ -59,7 +77,7 @@ index 507e2bb28..d0290295a 100644
 +
  						extras.push({
  							base64Data: base64Data,
- 							content: `PDF file with ${images.length} pages`,
+ 							content,
  							images: images,
  							name: file.name,
  							processedAsImages: true,
@@ -70,11 +88,17 @@ index 507e2bb28..d0290295a 100644
  					} catch (imageError) {
  						console.warn(
  							`Failed to process PDF ${file.name} as images, falling back to text:`,
+ 							imageError
+ 						);
+ 
 diff --git a/tools/ui/src/lib/utils/pdf-processing.ts b/tools/ui/src/lib/utils/pdf-processing.ts
 index de1407708..49dede874 100644
 --- a/tools/ui/src/lib/utils/pdf-processing.ts
 +++ b/tools/ui/src/lib/utils/pdf-processing.ts
-@@ -45,10 +45,46 @@ async function getFileAsBuffer(file: File): Promise<ArrayBuffer> {
+@@ -42,16 +42,52 @@ async function getFileAsBuffer(file: File): Promise<ArrayBuffer> {
+ 		};
+ 		reader.onerror = () => {
+ 			reject(new Error('Failed to read file.'));
  		};
  		reader.readAsArrayBuffer(file);
  	});
@@ -121,6 +145,9 @@ index de1407708..49dede874 100644
   * @param file - The PDF file to process
   * @returns Promise resolving to the extracted text content
   */
+ export async function convertPDFToText(file: File): Promise<string> {
+ 	if (!browser) {
+ 		throw new Error('PDF processing is only available in the browser');
 diff --git a/tools/ui/tests/unit/pdf-text-layer.test.ts b/tools/ui/tests/unit/pdf-text-layer.test.ts
 new file mode 100644
 index 000000000..ced773268

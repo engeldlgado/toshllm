@@ -660,7 +660,10 @@ final class ImageGenerator: ObservableObject {
     /// Coarse stage so the UI can explain what the long wait is doing.
     enum Stage { case loading, sampling, decoding }
 
-    @Published var state: State = .idle
+    @Published var state: State = .idle {
+        didSet { keepAwake = KeepAwake.update(keepAwake, active: state == .generating, reason: "Generating an image") }
+    }
+    private var keepAwake: KeepAwake?
     @Published var stage: Stage = .loading
     /// 0...1 across the sampling steps, parsed from the engine's progress line.
     @Published var progress: Double = 0
@@ -1392,7 +1395,10 @@ struct UpscaleResult: Identifiable, Equatable {
 final class ImageUpscaler: ObservableObject {
     enum State: Equatable { case idle, running, done, failed(String) }
 
-    @Published var state: State = .idle
+    @Published var state: State = .idle {
+        didSet { keepAwake = KeepAwake.update(keepAwake, active: state == .running, reason: "Upscaling an image") }
+    }
+    private var keepAwake: KeepAwake?
     @Published var resultImage: NSImage?
     @Published var resultURL: URL?
     /// Kept so the canvas can show a before/after and the sidebar the file name.

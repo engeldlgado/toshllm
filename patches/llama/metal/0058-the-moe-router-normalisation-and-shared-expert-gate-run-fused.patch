@@ -1,8 +1,11 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 8a94acda9..09edfeea1 100644
+index 764f8fa50..77e565c25 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -2643,10 +2643,18 @@ static struct ggml_metal_fb_residual_state * ggml_metal_fb_residual_get(ggml_met
+@@ -2644,16 +2644,24 @@ static struct ggml_metal_fb_residual_state * ggml_metal_fb_residual_get(ggml_met
+             res = &g_fb_res[i];
+             break;
+         }
      }
      os_unfair_lock_unlock(&g_fb_res_lock);
      return res;
@@ -21,11 +24,17 @@ index 8a94acda9..09edfeea1 100644
          return false;
      }
      struct ggml_metal_fb_residual_state * st = ggml_metal_fb_residual_get(dev);
+     if (st == NULL || st->state != 2 || (st->t != t && st->alias != t)) {
+         return false;
+     }
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index 55a051425..14ca88ebb 100644
+index 48ccef458..781512448 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
-@@ -90,10 +90,12 @@ void ggml_metal_encoder_set_pipeline(ggml_metal_encoder_t encoder, struct ggml_m
+@@ -87,16 +87,18 @@ void ggml_metal_encoder_debug_group_pop (ggml_metal_encoder_t encoder);
+ void ggml_metal_encoder_set_pipeline(ggml_metal_encoder_t encoder, struct ggml_metal_pipeline_with_params pipeline);
+ 
+ // (a + b) + c over float4, compiled at runtime; the TP2 boundary's residual add
  struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3(ggml_metal_device_t dev);
  // the same sum followed by an RMS norm and its weight, one threadgroup per row
  struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3_rms_mul(ggml_metal_device_t dev);
@@ -38,11 +47,17 @@ index 55a051425..14ca88ebb 100644
  void ggml_metal_encoder_set_buffer(ggml_metal_encoder_t encoder, struct ggml_metal_buffer_id buffer, int idx);
  
  void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder, size_t size, int idx);
+ 
+ void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int tg0, int tg1, int tg2, int tptg0, int tptg1, int tptg2);
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 192624551..130d8728f 100644
+index eb01f993a..a20a17142 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -124,10 +124,14 @@ struct ggml_metal_op {
+@@ -121,16 +121,20 @@ struct ggml_metal_op {
+         assert(i >= 0 && i < (int) idxs.size());
+         return ggml_graph_node(gf, idxs[i]);
+     }
  
      const ggml_cgraph * graph() const {
          return gf;
@@ -57,7 +72,13 @@ index 192624551..130d8728f 100644
          return ggml_node_has_n_uses(gf, idxs[i], n);
      }
  
-@@ -437,11 +441,14 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+     // fixed op sequence starting at i0, for the fusions that are not in the table
+     bool can_fuse(int i0, const ggml_op * ops, int n_ops) const {
+         assert(use_fusion());
+@@ -434,17 +438,20 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+         case GGML_OP_LEAKY_RELU:
+         case GGML_OP_SQR:
+         case GGML_OP_SQRT:
          case GGML_OP_SIN:
          case GGML_OP_COS:
          case GGML_OP_LOG:
@@ -73,7 +94,13 @@ index 192624551..130d8728f 100644
              {
                  n_fuse = ggml_metal_op_silu_back(ctx, idx);
              } break;
-@@ -988,10 +995,110 @@ int ggml_metal_op_acc(ggml_metal_op_t ctx, int idx) {
+         case GGML_OP_GLU:
+             {
+                 n_fuse = ggml_metal_op_glu(ctx, idx);
+@@ -993,20 +1000,116 @@ int ggml_metal_op_acc(ggml_metal_op_t ctx, int idx) {
+         nth *= 2;
+     }
+ 
      ggml_metal_encoder_dispatch_threadgroups(enc, ne11, ne12, ne13, nth, 1, 1);
  
      return 1;
@@ -150,10 +177,10 @@ index 192624551..130d8728f 100644
 +    if (!pipeline.pipeline) {
 +        pipeline = ggml_metal_library_compile_pipeline(ctx->lib, "tosh_gate_add_f32", "tosh_gate_add_f32", nullptr);
 +    }
-+    if (!pipeline.pipeline) {
-+        return 0;
-+    }
-+
+     if (!pipeline.pipeline) {
+         return 0;
+     }
+ 
 +    struct {
 +        int32_t ne0_4;
 +        int32_t n_4;
@@ -182,20 +209,42 @@ index 192624551..130d8728f 100644
  int ggml_metal_op_unary(ggml_metal_op_t ctx, int idx) {
      ggml_tensor * op = ctx->node(idx);
  
+     // the sigmoid and sqrt(softplus) TOPK_MOE fusions anchor at the gating unary node
+     if (op->op == GGML_OP_UNARY && ctx->use_fusion() &&
+         (ggml_get_unary_op(op) == GGML_UNARY_OP_SOFTPLUS || ggml_get_unary_op(op) == GGML_UNARY_OP_SIGMOID)) {
+         int n = 1;
+         const ggml_metal_fusion * fusion = ctx->can_fuse(idx, GGML_METAL_FUSION_FULL, &n);
+@@ -4026,16 +4129,21 @@ size_t ggml_metal_op_mul_mat_id_extra_ids(const ggml_tensor * op) {
+     assert(op->op == GGML_OP_MUL_MAT_ID);
+ 
+     const int64_t ne02 = op->src[0]->ne[2]; // n_expert
+     const int64_t ne21 = op->src[2]->ne[1]; // n_token
+ 
+     // one entry per (expert used, token) pair of ids plus one padding slot per expert
+     // (see kernel_mul_mm_id_map0)
+     return ggml_type_size(GGML_TYPE_I32)*(ne20*ne21 + ne02);
++    };
++
++    ggml_metal_encoder_t enc = ctx->enc;
++    ggml_metal_encoder_set_pipeline(enc, pipeline);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+ }
+ 
+ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+     ggml_tensor * op = ctx->node(idx);
+ 
      ggml_metal_library_t lib = ctx->lib;
      ggml_metal_encoder_t enc = ctx->enc;
-@@ -7505,45 +7612,61 @@ static bool ggml_metal_tosh_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_m
+ 
+@@ -7844,37 +7952,68 @@ static bool ggml_metal_tosh_topk_moe_fusion(ggml_metal_op_t ctx, int idx, ggml_m
+         return false;
+     }
+ 
      if (!ggml_is_contiguous(softmax->src[0]) || !ggml_is_contiguous(softmax) ||
          !ggml_is_contiguous(argsort) || !ggml_is_contiguous(getrows)) {
          return false;
      }
  
--    // one use means no normalisation follows and get_rows already is the weights;
--    // the normalising router reads it twice, from sum_rows and from div
--    if (ctx->has_n_uses(idx + 2, 1)) {
--        plan.n_fuse  = 3;
--        plan.weights = getrows;
--    } else if (idx + 5 < ctx->n_nodes()) {
 +    // the normalising router reads get_rows twice, from sum_rows and from div, either directly or
 +    // through one reshape; without that chain get_rows already is the weights
 +    bool norm = false;
@@ -204,18 +253,9 @@ index 192624551..130d8728f 100644
          ggml_tensor * clamp   = ctx->node(idx + 4);
          ggml_tensor * div     = ctx->node(idx + 5);
  
--        if (sumrows->op != GGML_OP_SUM_ROWS || clamp->op != GGML_OP_CLAMP || div->op != GGML_OP_DIV ||
--            !ggml_metal_tosh_topk_moe_same(sumrows->src[0], getrows) ||
--            !ggml_metal_tosh_topk_moe_same(clamp->src[0], sumrows) ||
--            !ggml_metal_tosh_topk_moe_same(div->src[0], getrows) ||
--            !ggml_metal_tosh_topk_moe_same(div->src[1], clamp) ||
--            !ggml_is_contiguous(div) ||
--            !ctx->has_n_uses(idx + 3, 1) ||
--            !ctx->has_n_uses(idx + 4, 1)) {
--            return false;
 +        bool uses_ok = ctx->has_n_uses(idx + 2, 2);
 +        if (!uses_ok && ctx->has_n_uses(idx + 2, 1)) {
-+            const ggml_cgraph * gf = ctx->graph();
+             const ggml_cgraph * gf = ctx->graph();
 +            for (int j = ctx->graph_index(idx + 2) + 1; j < ctx->graph_index(idx + 3); ++j) {
 +                if (ggml_metal_view_base(gf->nodes[j]) == getrows) {
 +                    uses_ok = ggml_node_get_use_count(gf, j) == 2 &&
@@ -227,21 +267,11 @@ index 192624551..130d8728f 100644
  
          float cmin = 0.0f;
          float cmax = 0.0f;
--        memcpy(&cmin, ((const int32_t *) clamp->op_params) + 0, sizeof(float));
--        memcpy(&cmax, ((const int32_t *) clamp->op_params) + 1, sizeof(float));
--        if (!std::isinf(cmax) || cmax < 0.0f) {
--            return false;
 +        if (clamp->op == GGML_OP_CLAMP) {
-+            memcpy(&cmin, ((const int32_t *) clamp->op_params) + 0, sizeof(float));
-+            memcpy(&cmax, ((const int32_t *) clamp->op_params) + 1, sizeof(float));
+             memcpy(&cmin, ((const int32_t *) clamp->op_params) + 0, sizeof(float));
+             memcpy(&cmax, ((const int32_t *) clamp->op_params) + 1, sizeof(float));
          }
  
--        plan.n_fuse    = 6;
--        plan.with_norm = true;
--        plan.clamp     = cmin;
--        plan.weights   = div;
--    } else {
--        return false;
 +        norm = uses_ok &&
 +            sumrows->op == GGML_OP_SUM_ROWS && clamp->op == GGML_OP_CLAMP && div->op == GGML_OP_DIV &&
 +            ggml_metal_tosh_topk_moe_same(sumrows->src[0], getrows) &&
@@ -254,30 +284,35 @@ index 192624551..130d8728f 100644
 +            std::isinf(cmax) && cmax > 0.0f;
 +
 +        if (norm) {
-+            plan.n_fuse    = 6;
-+            plan.with_norm = true;
-+            plan.clamp     = cmin;
-+            plan.weights   = div;
+             plan.n_fuse    = 6;
+             plan.with_norm = true;
+             plan.clamp     = cmin;
+             plan.weights   = div;
 +        }
 +    }
 +    if (!norm) {
 +        if (!ctx->has_n_uses(idx + 2, 1)) {
-+            return false;
-+        }
-+        plan.n_fuse  = 3;
-+        plan.weights = getrows;
-     }
+             return false;
+         }
+         plan.n_fuse  = 3;
+         plan.weights = getrows;
++    }
  
      const int64_t n_expert = softmax->ne[0];
      if (n_expert > 512 || n_expert < 1) {
          return false;
-@@ -7627,12 +7750,13 @@ int ggml_metal_op_tosh_topk_moe(ggml_metal_op_t ctx, int idx) {
+     }
+ 
+     plan.logits = softmax->src[0];
+     plan.ids    = argsort;
+@@ -7958,16 +8097,18 @@ int ggml_metal_op_tosh_topk_moe(ggml_metal_op_t ctx, int idx) {
+ 
+     auto pipeline = ggml_metal_library_get_pipeline_tosh_topk_moe(lib);
      if (!pipeline.pipeline) {
          return 0;
      }
  
      const int32_t n_expert      = plan.logits->ne[0];
--    const int32_t n_expert_used = plan.delayed ? plan.weights->ne[0] : plan.weights->ne[1];
      const int32_t nrows         = ggml_nrows(plan.logits);
 +    // get_rows leaves [1, n_used, rows], div and the delayed softmax [n_used, rows]
 +    const int32_t n_expert_used = ggml_nelements(plan.weights)/nrows;
@@ -286,11 +321,17 @@ index 192624551..130d8728f 100644
      while (2*nth <= n_expert && 2*nth <= (int) ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {
          nth *= 2;
      }
+ 
+     const size_t smem_f = GGML_PAD((2*n_expert + nth)*sizeof(float), 16);
+     const size_t smem_i = GGML_PAD(nth*sizeof(int32_t), 16);
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
-index 01e4e92d4..5f22ec6d4 100644
+index c663d180d..f7d5ec00f 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.h
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.h
-@@ -102,10 +102,11 @@ int ggml_metal_op_pad_reflect_1d    (ggml_metal_op_t ctx, int idx);
+@@ -102,16 +102,17 @@ int ggml_metal_op_snake_fused       (ggml_metal_op_t ctx, int idx);
+ int ggml_metal_op_upscale           (ggml_metal_op_t ctx, int idx);
+ int ggml_metal_op_pad               (ggml_metal_op_t ctx, int idx);
+ int ggml_metal_op_pad_reflect_1d    (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_roll              (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_arange            (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_timestep_embedding(ggml_metal_op_t ctx, int idx);
@@ -302,11 +343,17 @@ index 01e4e92d4..5f22ec6d4 100644
  int ggml_metal_op_topk_moe          (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_moe_reduce        (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_tri               (ggml_metal_op_t ctx, int idx);
+ int ggml_metal_op_opt_step_adamw    (ggml_metal_op_t ctx, int idx);
+ int ggml_metal_op_opt_step_sgd      (ggml_metal_op_t ctx, int idx);
+ int ggml_metal_op_count_equal       (ggml_metal_op_t ctx, int idx);
 diff --git a/ggml/src/ggml-metal/kernels/softmax.metal b/ggml/src/ggml-metal/kernels/softmax.metal
-index 172e94478..8f3c749b4 100644
+index f969c39ee..86a3e925d 100644
 --- a/ggml/src/ggml-metal/kernels/softmax.metal
 +++ b/ggml/src/ggml-metal/kernels/softmax.metal
-@@ -232,10 +232,12 @@ kernel void kernel_tosh_topk_moe_f32(
+@@ -229,16 +229,18 @@ kernel void kernel_tosh_topk_moe_f32(
+         device const char * src_logits,
+         device const char * src_bias,
+         device       char * dst_weights,
          device       char * dst_ids,
          threadgroup float * sf [[threadgroup(0)]],
          threadgroup int   * si [[threadgroup(1)]],
@@ -319,7 +366,13 @@ index 172e94478..8f3c749b4 100644
      const int row = tgpig.x;
      if (row >= args.nrows) {
          return;
-@@ -349,27 +351,31 @@ kernel void kernel_tosh_topk_moe_f32(
+     }
+ 
+     const int ne = args.n_expert;
+@@ -346,22 +348,37 @@ kernel void kernel_tosh_topk_moe_f32(
+             const int e = si[0];
+             ids[k]     = e;
+             weights[k] = wt[e];
              sel[e]     = -INFINITY;
          }
          threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
@@ -328,15 +381,6 @@ index 172e94478..8f3c749b4 100644
 +    // the same arithmetic as sum_rows (one lane per element, float4 when it divides), clamp and div,
 +    // so the fused router gives the separate ops' weights bit for bit; the host keeps nu within a simdgroup
      if (args.with_norm != 0) {
--        float lsum = 0.0f;
--        for (int i = tiitg; i < nu; i += ntg) {
--            lsum += weights[i];
--        }
--        rv[tiitg] = lsum;
--        threadgroup_barrier(mem_flags::mem_threadgroup);
--        for (uint s = ntg/2; s > 0; s >>= 1) {
--            if (tiitg < s) {
--                rv[tiitg] += rv[tiitg + s];
 +        if (sgitg == 0) {
 +            float s;
 +            if (nu % 4 == 0) {
@@ -346,28 +390,49 @@ index 172e94478..8f3c749b4 100644
 +                s = sum(v);
 +            } else {
 +                s = simd_sum(tiisg < nu ? weights[tiisg] : 0.0f);
-+            }
+             }
 +            if (tiisg == 0) {
 +                rv[0] = s;
              }
--            threadgroup_barrier(mem_flags::mem_threadgroup);
          }
--        const float inv = 1.0f/max(rv[0], args.clamp);
          threadgroup_barrier(mem_flags::mem_threadgroup);
 +        const float s = clamp(rv[0], args.clamp, INFINITY);
          for (int i = tiitg; i < nu; i += ntg) {
--            weights[i] *= inv;
 +            weights[i] = weights[i] / s;
          }
          threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
      }
  
      if (args.delayed_softmax != 0) {
+         float lmax = -INFINITY;
+         for (int i = tiitg; i < nu; i += ntg) {
+             lmax = max(lmax, weights[i]);
+@@ -402,8 +419,17 @@ kernel void kernel_tosh_topk_moe_f32(
+     if (args.scale != 1.0f) {
+         for (int i = tiitg; i < nu; i += ntg) {
+             weights[i] *= args.scale;
+         }
+     }
+ }
+     }
+     threadgroup_barrier(mem_flags::mem_threadgroup);
++        ushort sgitg[[simdgroup_index_in_threadgroup]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]],
++        ushort tiisg[[thread_index_in_simdgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]],
++        ushort sgitg[[simdgroup_index_in_threadgroup]],
 diff --git a/ggml/src/ggml-metal/kernels/tosh_moe.metal b/ggml/src/ggml-metal/kernels/tosh_moe.metal
 index 89467c892..04ea02cca 100644
 --- a/ggml/src/ggml-metal/kernels/tosh_moe.metal
 +++ b/ggml/src/ggml-metal/kernels/tosh_moe.metal
-@@ -181,5 +181,32 @@ kernel void tosh_dmoe_observe(
+@@ -178,8 +178,35 @@ kernel void tosh_dmoe_observe(
+         device const char    * ids  [[buffer(1)]],
+         device       int32_t * ring [[buffer(2)]],
+         uint  t    [[threadgroup_position_in_grid]],
          uint  tpit [[thread_position_in_threadgroup]]) {
      for (int j = tpit; j < args.n_used; j += 32) {
          ring[t*args.n_used + j] = ((device const int32_t *) (ids + t*args.nb1))[j];

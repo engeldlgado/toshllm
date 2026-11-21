@@ -112,7 +112,8 @@ png256 = open(os.path.join(out, ".icon256.png"), "rb").read()
 os.remove(os.path.join(out, ".icon256.png"))
 bundle = glob.glob(os.path.join(out, "_app", "immutable", "bundle.*.js"))[0]
 js = open(bundle, encoding="utf-8").read()
-m = re.search(r'`<svg width="512" height="512" viewBox="0 0 512 512" fill="none".*?</svg>\s*`', js, re.S)
+# llama-brand draws it on a 600 box, the older in-tree logo on 512
+m = re.search(r'`<svg width="(\d+)" height="\1" viewBox="0 0 \1 \1" fill="none".*?</svg>\s*`', js, re.S)
 if not m:
     raise SystemExit("rebrand: inline logo svg not found in bundle")
 # the glyph asset is padded like an app icon, so crop to its opaque box and scale it

@@ -11,7 +11,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-LLAMA_COMMIT="${LLAMA_COMMIT:-d81235049384534c167caea52b85a694f6103d14}"   # llama.cpp commit validated against the patches
+LLAMA_COMMIT="${LLAMA_COMMIT:-b1b770d90d94cad9e9ea5b993bdbc383a522fb28}"   # llama.cpp commit validated against the patches
 WHISPER_COMMIT="${WHISPER_COMMIT:-371b5a7561823ab2bb32142d2751e35e7534727b}" # whisper.cpp v1.9.3
 SD_COMMIT="${SD_COMMIT:-2f88688}"         # stable-diffusion.cpp commit validated for image gen
 ARCH="${ARCH:-$(uname -m)}"

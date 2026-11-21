@@ -1,21 +1,19 @@
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-index 61825ed89..c8909c947 100644
+index 074c514a0..87d6030ac 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-@@ -1664,17 +1664,15 @@ void kernel_mul_mv_q2_K_f32_L16_w64_impl(
+@@ -1661,18 +1661,21 @@ void kernel_mul_mv_q2_K_f32_L16_w64_impl(
+         // widen to int before the pointer math: short offsets into a device base miscompile on AMD
+         device const uint8_t  * sc = (device const uint8_t  *)x[ib].scales + (8 * (int) iq + (int) is);
+         device const uint16_t * qs = (device const uint16_t *)x[ib].qs + (16 * (int) iq + 2 * (int) ir);
          device const half     * dh = &x[ib].d;
  
          for (short row = 0; row < nr0; row++) {
              float4 acc1 = {0.f, 0.f, 0.f, 0.f};
              float4 acc2 = {0.f, 0.f, 0.f, 0.f};
--            // the four shorts this lane reads are contiguous, so an aligned stride turns
--            // them into two words
 +            // the two shorts this lane reads are contiguous, so an aligned stride reads them as one word
              ushort qw[2];
              if (FC_mul_mv_row8) {
--                const uint2 t = *(device const uint2 *)qs;
--                qw[0] = (ushort)(t.x); qw[1] = (ushort)(t.x >> 16);
--                qw[2] = (ushort)(t.y); qw[3] = (ushort)(t.y >> 16);
 +                const uint t = *(device const uint *)qs;
 +                qw[0] = (ushort)(t); qw[1] = (ushort)(t >> 16);
              } else {
@@ -23,3 +21,6 @@ index 61825ed89..c8909c947 100644
              }
  
              for (short i = 0; i < 4; i += 2) {
+                 acc1[0] += yl[i+ 0] * (qw[i/2] & 0x0003);
+                 acc2[0] += yl[i+ 1] * (qw[i/2] & 0x0300);
+                 acc1[1] += yl[i+4] * (qw[i/2] & 0x000c);

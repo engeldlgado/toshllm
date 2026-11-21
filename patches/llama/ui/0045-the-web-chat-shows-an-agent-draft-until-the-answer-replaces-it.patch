@@ -1,8 +1,11 @@
 diff --git a/tools/ui/src/lib/services/chat.service.ts b/tools/ui/src/lib/services/chat.service.ts
-index 569a3e910..8bf7c2944 100644
+index 2e5867a02..62f1e1c1f 100644
 --- a/tools/ui/src/lib/services/chat.service.ts
 +++ b/tools/ui/src/lib/services/chat.service.ts
-@@ -477,10 +477,12 @@ export class ChatService {
+@@ -474,16 +474,18 @@ export class ChatService {
+ 		if (conversationId) {
+ 			ChatService.saveStreamState(conversationId, 0, streamModel);
+ 		}
  
  		onConnectionState?.(StreamConnectionState.STREAMING);
  
@@ -13,15 +16,33 @@ index 569a3e910..8bf7c2944 100644
  		let fullReasoningContent = '';
  		let aggregatedToolCalls: ApiChatCompletionToolCall[] = [];
  		let lastTimings: ChatMessageTimings | undefined;
+ 		// why the model stopped, length once the output limit cut the answer
+ 		let finishReason: string | undefined;
  		let streamFinished = false;
  		let modelEmitted = false;
-@@ -631,13 +633,28 @@ export class ChatService {
+ 		let idEmitted = false;
+@@ -627,21 +629,47 @@ export class ChatService {
+ 							if (data === SSE_DONE_MARKER) {
+ 								streamFinished = true;
+ 
+ 								continue;
+ 							}
+ 
  							try {
  								const parsed: ApiChatCompletionStreamChunk = JSON.parse(data);
++									if (drafted) {
++										drafted = false;
++
++										if (!abortSignal?.aborted) onTosh?.({ event: { type: 'retract' } });
++									}
++
++									streamFinished = true;
++
++									continue;
++								}
  
  								// the Tosh agent's progress and metadata; a retract drops the text streamed so far
  								if (parsed.tosh && typeof parsed.tosh === 'object') {
--									if (parsed.tosh.event?.type === 'retract') aggregatedContent = '';
 +									const event = parsed.tosh.event;
 +
 +									if (event?.type === 'retract') {
@@ -43,9 +64,15 @@ index 569a3e910..8bf7c2944 100644
  								}
  
  								const choice = parsed.choices?.[0];
+ 
+ 								if (choice?.finish_reason) finishReason = choice.finish_reason;
+ 
  								const content = choice?.delta?.content;
  								const reasoningContent = choice?.delta?.reasoning_content;
-@@ -665,10 +682,18 @@ export class ChatService {
+@@ -666,16 +694,24 @@ export class ChatService {
+ 
+ 								if (timings) {
+ 									ChatService.notifyTimings(timings, promptProgress, onTimings);
  									lastTimings = timings;
  								}
  
@@ -64,3 +91,6 @@ index 569a3e910..8bf7c2944 100644
  									if (!abortSignal?.aborted) {
  										onChunk?.(content);
  									}
+ 								}
+ 
+ 								if (reasoningContent) {

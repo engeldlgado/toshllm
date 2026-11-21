@@ -1,0 +1,189 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index dd41d4642..050c6f136 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1030,16 +1030,23 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_solve_tri(ggml_m
+     }
+ 
+     res.nsg  = nsg;
+     res.smem = GGML_PAD(GGML_PAD(n, nw)*nsg*sizeof(float), 16);
+ 
+     return res;
+ }
+ 
++// the mxfp4 mat-vec reads its values from a table on cards without unified memory
++static bool ggml_metal_mxfp4_lut(ggml_metal_library_t lib, ggml_type type) {
++    static const bool disabled = TOSH_ENV("TOSH_MXFP4_LUT_DISABLE") != nullptr;
++    return type == GGML_TYPE_MXFP4 && !disabled &&
++        !ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_unified_memory;
++}
++
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext(ggml_metal_library_t lib, const ggml_tensor * op, int nsg, int nxpsg, int r1ptg, int nr0) {
+     char base[256];
+     char name[256];
+ 
+     const ggml_type tsrc0 = op->src[0]->type;
+     const ggml_type tsrc1 = op->src[1]->type;
+     const int       ne12  = op->src[1]->ne[2];
+     const int       r2    = ne12 / op->src[0]->ne[2];
+@@ -2187,16 +2194,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+ 
+     char sfx[64];
+     if (w64) {
+         snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
+         suffix = sfx;
+     }
+ 
+     snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
++    const bool mxfp4_lut = ggml_metal_mxfp4_lut(lib, tsrc0);
++    snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d_al=%d_lut=%d", base, nsg, ne12, r2, r3, nw, row4, row8, align, mxfp4_lut);
+ 
+     if (TOSH_ENV("TOSH_SWEEP_DEBUG") != nullptr) {
+         fprintf(stderr, "SWEEP pipeline = %s (nsg=%d nr0=%d)\n", name, nsg, nr0);
+     }
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+@@ -2204,16 +2213,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         ggml_metal_cv_set_int16(cv, nsg,            FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, (int16_t) ne12, FC_MUL_MV + 2);
+         ggml_metal_cv_set_int16(cv, r2,             FC_MUL_MV + 3);
+         ggml_metal_cv_set_int16(cv, r3,             FC_MUL_MV + 4);
+         ggml_metal_cv_set_int16(cv, nw,             FC_MUL_MV + 5);
+         ggml_metal_cv_set_bool (cv, row4,           FC_MUL_MV + 6);
+         ggml_metal_cv_set_bool (cv, row8,           FC_MUL_MV + 7);
+         ggml_metal_cv_set_bool (cv, align,          FC_MUL_MV + 8);
++        ggml_metal_cv_set_bool (cv, mxfp4_lut,      FC_MUL_MV + 10);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+         ggml_metal_cv_free(cv);
+     }
+ 
+     res.nr0  = nr0;
+     res.nr1  = nr1;
+@@ -2442,16 +2452,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                     TOSH_ENV("TOSH_MV_Q8_0_NSG_DISABLE") == nullptr) {
+                     nsg = std::max(1, std::min(nsg, (ne00/32 + 7)/8));
+                 }
+             } break;
+         case GGML_TYPE_MXFP4:
+             {
+                 nsg = N_SG_MXFP4;
+                 nr0 = N_R0_MXFP4;
++                smem = ggml_metal_mxfp4_lut(lib, tsrc0) ? 32*sizeof(float) : 0;
+             } break;
+         case GGML_TYPE_Q2_K:
+             {
+                 nsg = N_SG_Q2_K;
+                 nr0 = N_R0_Q2_K;
+             } break;
+         case GGML_TYPE_Q3_K:
+             {
+@@ -2641,30 +2652,33 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                       TOSH_ENV("TOSH_MV_ROW8_DISABLE") == nullptr;
+ 
+     const bool align = props_id->needs_aligned_loads;
+ 
+     // only the ids a mixed expert layer publishes can be -1
+     const bool id_skip = op->src[2] != nullptr && op->src[2]->op == GGML_OP_TOSH_DMOE_PUBLISH;
+ 
+     snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, id_w64 ? "_w64" : "");
++    const bool mxfp4_lut = ggml_metal_mxfp4_lut(lib, tsrc0);
++    snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d_al=%d_sk=%d_lut=%d", base, nsg, nw, row4, row8, align, id_skip, mxfp4_lut);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_int16(cv, nsg, FC_MUL_MV + 0);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 2);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 3);
+         ggml_metal_cv_set_int16(cv, 1,   FC_MUL_MV + 4);
+         ggml_metal_cv_set_int16(cv, nw,  FC_MUL_MV + 5);
+         ggml_metal_cv_set_bool (cv, row4, FC_MUL_MV + 6);
+         ggml_metal_cv_set_bool (cv, row8, FC_MUL_MV + 7);
+         ggml_metal_cv_set_bool (cv, align, FC_MUL_MV + 8);
+         ggml_metal_cv_set_bool (cv, id_skip, FC_MUL_MV + 9);
++        ggml_metal_cv_set_bool (cv, mxfp4_lut, FC_MUL_MV + 10);
+ 
+         res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+ 
+         ggml_metal_cv_free(cv);
+     }
+ 
+     res.nr0  = nr0;
+     res.nr1  = nr1;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index 2e878ccb2..27b31bcfd 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -1,14 +1,17 @@
+ #include "common.h"
+ #include "dequantize.h"
+ 
+ constant bool  FC_mul_mv_align [[function_constant(FC_MUL_MV + 8)]];
+ // ids of a mixed expert layer mark host-run experts with -1
+ constant bool  FC_mul_mv_id_skip [[function_constant(FC_MUL_MV + 9)]];
++// AMD discrete cards decode mxfp4 faster through the value table than with the fp16 bit trick
++constant bool  FC_mul_mv_mxfp4_lut_def [[function_constant(FC_MUL_MV + 10)]];
++constant bool  FC_mul_mv_mxfp4_lut = is_function_constant_defined(FC_mul_mv_mxfp4_lut_def) && FC_mul_mv_mxfp4_lut_def;
+ 
+ // The 22-, 34-, 98-, 110- and 210-byte blocks leave every other one two bytes short of a word,
+ // and a dword read there is undefined on a card that requires natural alignment. The constant
+ // picks the pair of shorts for those cards, so every other one keeps the single read.
+ inline uint mv_ld_u32(device const void * p) {
+     if (FC_mul_mv_align) {
+         device const ushort * s = (device const ushort *) p;
+         return (uint) s[0] | ((uint) s[1] << 16);
+@@ -5089,16 +5092,20 @@ void kernel_mul_mv_mxfp4_f32_impl(
+     const int ns01 = args.nb01/args.nb00; // this can be larger than nb for permuted src0 tensors
+ 
+     // block groups by real simd width: 16 on wave32, 32 on wave64
+     const short NG = FC_mul_mv_nw/2;
+ 
+     const short ix = tiisg/2;  // 0...NG-1
+     const short it = tiisg%2;  // 0 or 1
+ 
++    threadgroup float * shmem_f32 = (threadgroup float *) shmem;
++    if (FC_mul_mv_mxfp4_lut) {
++        shmem_f32[tiisg] = kvalues_mxfp4_f[tiisg%16];
++        threadgroup_barrier(mem_flags::mem_threadgroup);
+     }
+ 
+     float4 yl[4];
+     float sumf[NR0]={0.f};
+ 
+     device const float * yb = y + ix*QK_MXFP4 + it*8;
+ 
+     // note: just the check `ib < nb` is enough, but adding the redundant `&& ib < ns01` check makes the kernel a bit faster
+@@ -5110,16 +5117,28 @@ void kernel_mul_mv_mxfp4_f32_impl(
+         yl[1] = y4[4];
+         yl[2] = y4[1];
+         yl[3] = y4[5];
+ 
+         FOR_UNROLL (short row = 0; row < NR0; row++) {
+             device const block_mxfp4 & xb = x[row*ns01 + ib];
+             device const uint8_t     * q2 = (device const uint8_t *)(xb.qs + 8*it);
+ 
++            if (FC_mul_mv_mxfp4_lut) {
++                float4 acc1 = yl[0]*float4(shmem_f32[q2[0] &  0x0F], shmem_f32[q2[1] &  0x0F], shmem_f32[q2[2] &  0x0F], shmem_f32[q2[3] &  0x0F]);
++                float4 acc2 = yl[1]*float4(shmem_f32[q2[0] >> 4   ], shmem_f32[q2[1] >> 4   ], shmem_f32[q2[2] >> 4   ], shmem_f32[q2[3] >> 4   ]);
++                float4 acc3 = yl[2]*float4(shmem_f32[q2[4] &  0x0F], shmem_f32[q2[5] &  0x0F], shmem_f32[q2[6] &  0x0F], shmem_f32[q2[7] &  0x0F]);
++                float4 acc4 = yl[3]*float4(shmem_f32[q2[4] >> 4   ], shmem_f32[q2[5] >> 4   ], shmem_f32[q2[6] >> 4   ], shmem_f32[q2[7] >> 4   ]);
++
++                acc1 = (acc1 + acc3) + (acc2 + acc4);
++
++                sumf[row] += e8m0_to_fp32(xb.e) * ((acc1[0] + acc1[1]) + (acc1[2] + acc1[3]));
++                continue;
++            }
++
+             // blocks are 17 bytes, so the 8 quant bytes are only byte aligned: read the aligned words that cover them
+             // and funnel-shift. the third word is read only when needed so no word past the block end is touched
+             device const uint32_t * pw = (device const uint32_t *)((ulong) q2 & ~3ul);
+             const uint sh = ((uint)(ulong) q2 & 3u)*8;
+             const uint32_t a = pw[0];
+             const uint32_t b = pw[1];
+             const uint32_t c = pw[sh ? 2 : 1];
+             const uint32_t w0 = (a >> sh) | ((b << 1) << (31 - sh));

@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index deb271ddb..fb2627614 100644
+index 74c27cf44..dd41d4642 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -122,16 +122,30 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_cpy(ggml_metal_l
+@@ -122,16 +122,24 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_cpy(ggml_metal_l
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
          res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
@@ -19,22 +19,16 @@ index deb271ddb..fb2627614 100644
 +
 +    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
 +    if (!res.pipeline) {
-+        res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
-+    }
-+
-+    return res;
-+}
-+
+         res = ggml_metal_library_compile_pipeline(lib, name, name, nullptr);
+     }
+ 
+     return res;
+ }
+ 
  ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_pool_1d(ggml_metal_library_t lib, const ggml_tensor * op, ggml_op_pool op_pool) {
      GGML_ASSERT(ggml_is_contiguous(op->src[0]));
-     GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32 && op->src[0]->type == op->type);
- 
-     const char * pool_str = "undefined";
-     switch (op_pool) {
-         case GGML_OP_POOL_AVG: pool_str = "avg"; break;
-         case GGML_OP_POOL_MAX: pool_str = "max"; break;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index c0e6bc139..366506db3 100644
+index 670cfdcc9..b58e7a263 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -122,16 +122,17 @@ void ggml_metal_library_free(ggml_metal_library_t lib);
@@ -56,10 +50,10 @@ index c0e6bc139..366506db3 100644
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_concat            (ggml_metal_library_t lib, enum ggml_type tsrc);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_unary             (ggml_metal_library_t lib, const struct ggml_tensor * op);
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 01f6454ed..25381e61d 100644
+index b420093a7..a20490b8c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -783,16 +783,46 @@ int ggml_metal_op_concat(ggml_metal_op_t ctx, int idx) {
+@@ -787,20 +787,46 @@ int ggml_metal_op_concat(ggml_metal_op_t ctx, int idx) {
      GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
      GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
      GGML_TENSOR_LOCALS(uint64_t, nb1, op->src[1], nb);
@@ -75,12 +69,12 @@ index 01f6454ed..25381e61d 100644
 +        nb0 == sizeof(float) && nb11 == sizeof(float) && nb10 > nb11 && ne00 <= 64 && ne10 >= 32 && ne1 >= 32 &&
 +        TOSH_ENV("TOSH_CONCAT_TRANSPOSE_DISABLE") == nullptr) {
 +        ggml_metal_kargs_concat args = {
-+            /*.ne00 =*/ ne00, /*.ne01 =*/ ne01, /*.ne02 =*/ ne02, /*.ne03 =*/ ne03,
-+            /*.nb00 =*/ nb00, /*.nb01 =*/ nb01, /*.nb02 =*/ nb02, /*.nb03 =*/ nb03,
+             /*.ne00 =*/ ne00, /*.ne01 =*/ ne01, /*.ne02 =*/ ne02, /*.ne03 =*/ ne03,
+             /*.nb00 =*/ nb00, /*.nb01 =*/ nb01, /*.nb02 =*/ nb02, /*.nb03 =*/ nb03,
 +            /*.ne10 =*/ ne10, /*.ne11 =*/ ne11, /*.ne12 =*/ ne12, /*.ne13 =*/ ne13,
 +            /*.nb10 =*/ nb10, /*.nb11 =*/ nb11, /*.nb12 =*/ nb12, /*.nb13 =*/ nb13,
-+            /*.ne0  =*/ ne0,  /*.ne1  =*/ ne1,  /*.ne2  =*/ ne2,  /*.ne3  =*/ ne3,
-+            /*.nb0  =*/ nb0,  /*.nb1  =*/ nb1,  /*.nb2  =*/ nb2,  /*.nb3  =*/ nb3,
+             /*.ne0  =*/ ne0,  /*.ne1  =*/ ne1,  /*.ne2  =*/ ne2,  /*.ne3  =*/ ne3,
+             /*.nb0  =*/ nb0,  /*.nb1  =*/ nb1,  /*.nb2  =*/ nb2,  /*.nb3  =*/ nb3,
 +            /*.dim  =*/ dim,
 +            /*.nc0  =*/ 1,
 +        };
@@ -106,7 +100,7 @@ index 01f6454ed..25381e61d 100644
      int32_t ne0_arg  = ne0;
      if (is_q) {
          const int32_t blck = ggml_blck_size(op->type);
-@@ -3022,17 +3052,23 @@ int ggml_metal_op_cpy(ggml_metal_op_t ctx, int idx) {
+@@ -3162,16 +3188,23 @@ int ggml_metal_op_cpy(ggml_metal_op_t ctx, int idx) {
          ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
          ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
          ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
@@ -115,7 +109,6 @@ index 01f6454ed..25381e61d 100644
          return 1;
      }
  
--    auto pipeline = ggml_metal_library_get_pipeline_cpy(lib, op->src[0]->type, op->type, false);
 +    const auto f32_f16 = [](ggml_type t) { return t == GGML_TYPE_F32 || t == GGML_TYPE_F16; };
 +    const bool flat = props_cpy->simd_width == 32 && !props_cpy->has_unified_memory &&
 +                      f32_f16(op->src[0]->type) && f32_f16(op->type) && ggml_is_contiguous(op) &&
@@ -132,10 +125,10 @@ index 01f6454ed..25381e61d 100644
  
      int64_t nk0 = ne00;
 diff --git a/ggml/src/ggml-metal/kernels/quantize.metal b/ggml/src/ggml-metal/kernels/quantize.metal
-index 3cc9c7440..c58e7aad4 100644
+index 5cd1df10a..bec1d903c 100644
 --- a/ggml/src/ggml-metal/kernels/quantize.metal
 +++ b/ggml/src/ggml-metal/kernels/quantize.metal
-@@ -92,16 +92,45 @@ template [[host_name("kernel_cpy_f32_bf16e")]]  kernel kernel_cpy_t kernel_cpy_t
+@@ -92,16 +92,44 @@ template [[host_name("kernel_cpy_f32_bf16e")]]  kernel kernel_cpy_t kernel_cpy_t
  template [[host_name("kernel_cpy_f16_f32")]]   kernel kernel_cpy_t kernel_cpy_t_t<half,    float>;
  template [[host_name("kernel_cpy_f16_f16")]]   kernel kernel_cpy_t kernel_cpy_t_t<half,    half>;
  #if defined(GGML_METAL_HAS_BF16)
@@ -172,7 +165,7 @@ index 3cc9c7440..c58e7aad4 100644
 +template [[host_name("kernel_cpy_flat_f32_f16")]] kernel kernel_cpy_t kernel_cpy_flat_t_t<float, half>;
 +template [[host_name("kernel_cpy_flat_f16_f32")]] kernel kernel_cpy_t kernel_cpy_flat_t_t<half,  float>;
 +template [[host_name("kernel_cpy_flat_f16_f16")]] kernel kernel_cpy_t kernel_cpy_flat_t_t<half,  half>;
-+
+ 
  template<short QK,
           typename block_q,
           void (*quantize_func)(device const float *, device block_q &)>
@@ -180,13 +173,12 @@ index 3cc9c7440..c58e7aad4 100644
          constant ggml_metal_kargs_cpy & args,
          device const char * src0,
          device char * dst,
-         uint3   tgpig[[threadgroup_position_in_grid]],
-@@ -615,8 +644,53 @@ kernel void kernel_cpy_transpose_f32(
-     FOR_UNROLL (short k = 0; k < 32; k += 8) {
+@@ -617,20 +645,53 @@ kernel void kernel_cpy_transpose_f32(
          const int i0 = b0 + tx;
          const int i1 = b1 + ty + k;
          if (i0 < args.ne00 && i1 < args.ne01) {
-             *(device float *) (dst + i3*args.nb3 + i2*args.nb2 + (uint64_t) i1*args.nb1 + (uint64_t) i0*args.nb0) = tile[tx*33 + ty + k];
+             // dst is contiguous but may have another shape, so the element goes to its linear index
+             ((device float *) dst)[(((int64_t) i3*args.ne02 + i2)*args.ne01 + i1)*args.ne00 + i0] = tile[tx*33 + ty + k];
          }
      }
  }
@@ -197,16 +189,16 @@ index 3cc9c7440..c58e7aad4 100644
 +        device  const char * src0,
 +        device  const char * src1,
 +        device        char * dst,
-+        threadgroup  float * tile [[threadgroup(0)]],
-+        uint3   tgpig[[threadgroup_position_in_grid]],
-+        ushort3 tpitg[[thread_position_in_threadgroup]]) {
-+    const int b0 = tgpig.x*32;
-+    const int b1 = tgpig.y*32;
+         threadgroup  float * tile [[threadgroup(0)]],
+         uint3   tgpig[[threadgroup_position_in_grid]],
+         ushort3 tpitg[[thread_position_in_threadgroup]]) {
+     const int b0 = tgpig.x*32;
+     const int b1 = tgpig.y*32;
 +    const int i2 = tgpig.z % args.ne2;
 +    const int i3 = tgpig.z / args.ne2;
-+    const int tx = tpitg.x;
-+    const int ty = tpitg.y;
-+
+     const int tx = tpitg.x;
+     const int ty = tpitg.y;
+ 
 +    device char * drow = dst + i3*args.nb3 + i2*args.nb2;
 +
 +    if (tgpig.x == 0) {
@@ -220,14 +212,14 @@ index 3cc9c7440..c58e7aad4 100644
 +        }
 +    }
 +
-+    FOR_UNROLL (short k = 0; k < 32; k += 8) {
+     FOR_UNROLL (short k = 0; k < 32; k += 8) {
 +        const int j0 = b0 + ty + k;
 +        const int i1 = b1 + tx;
 +        tile[(ty + k)*33 + tx] = j0 < args.ne10 && i1 < args.ne1 ?
 +            *(device const float *) (src1 + i3*args.nb13 + i2*args.nb12 + (uint64_t) i1*args.nb11 + (uint64_t) j0*args.nb10) : 0.0f;
-+    }
-+    threadgroup_barrier(mem_flags::mem_threadgroup);
-+    FOR_UNROLL (short k = 0; k < 32; k += 8) {
+     }
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+     FOR_UNROLL (short k = 0; k < 32; k += 8) {
 +        const int j0 = b0 + tx;
 +        const int i1 = b1 + ty + k;
 +        if (j0 < args.ne10 && i1 < args.ne1) {
@@ -236,10 +228,10 @@ index 3cc9c7440..c58e7aad4 100644
 +    }
 +}
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 8a5f61a3a..ceb08b8d2 100644
+index f7146a7d0..8703972d6 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -6748,16 +6748,64 @@ struct test_conv_3d : public test_case {
+@@ -7366,16 +7366,64 @@ struct test_conv_3d : public test_case {
  
          ggml_tensor * out = ggml_conv_3d_direct(ctx, kernel, input, s0, s1, s2, p0, p1, p2, d0, d1, d2, (int)IC, (int)N, (int)OC);
          ggml_set_name(out, "out");
@@ -296,15 +288,15 @@ index 8a5f61a3a..ceb08b8d2 100644
 +    }
 +};
 +
- struct test_concat : public test_case {
-     const ggml_type type;
-     const std::array<int64_t, 4> ne_a;
-     const int64_t ne_b_d;
-     const int dim;
-     const int v; // view (1 << 0: non-cont a (first 3 dim), 1 << 1: non-cont b (first 3 dim), 1 << 2: non-cont a (last 2 dim), 1 << 3: non-cont b (last 2 dim))
+ // a transposed view copied into a grid of another shape, as vision patches before pooling
+ struct test_cont_transpose_reshape : public test_case {
+     const std::array<int64_t, 3> ne; // {embd, patches x, patches y}
  
      std::string vars() override {
-@@ -11096,16 +11144,24 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+         return VARS_TO_STR1(ne);
+     }
+ 
+@@ -12714,18 +12762,26 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      for (ggml_type type_a : { GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0 }) {
          for (int v : { 0, 4, 8, 12 }) {
              for (int dim : { 0, 1, 2, 3, }) {
@@ -320,6 +312,8 @@ index 8a5f61a3a..ceb08b8d2 100644
 +    test_cases.emplace_back(new test_cont_reshape({64, 4, 33}));
 +    test_cases.emplace_back(new test_cont_reshape({256, 16, 512}));
 +    test_cases.emplace_back(new test_cont_reshape({100, 3, 7}));
+     test_cases.emplace_back(new test_cont_transpose_reshape({64, 6, 6}));
+     test_cases.emplace_back(new test_cont_transpose_reshape({1152, 48, 48}));
 +
      // few long rows, which backends may split across workgroups
      for (int dim : { 0, 1 }) {
@@ -328,4 +322,4 @@ index 8a5f61a3a..ceb08b8d2 100644
          test_cases.emplace_back(new test_concat(GGML_TYPE_Q8_0, {8192, 2, 1, 1}, dim == 0 ? 4096 : 1, dim, 0));
      }
  
-     for (ggml_sort_order order : {GGML_SORT_ORDER_ASC, GGML_SORT_ORDER_DESC}) {
+     // GDN conv_input

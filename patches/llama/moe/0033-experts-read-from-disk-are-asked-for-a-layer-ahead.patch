@@ -1,8 +1,8 @@
 diff --git a/src/llama-tosh-dmoe.cpp b/src/llama-tosh-dmoe.cpp
-index 0680c8a0e..56f85f742 100644
+index ba01dd6ce..56f85f742 100644
 --- a/src/llama-tosh-dmoe.cpp
 +++ b/src/llama-tosh-dmoe.cpp
-@@ -79,19 +79,21 @@ struct host_bank {
+@@ -79,18 +79,21 @@ struct host_bank {
      const ggml_tensor * up   = nullptr;
      const ggml_tensor * down = nullptr;
      bool fused = false;             // gate holds gate and up, one after the other, and up is null
@@ -15,7 +15,6 @@ index 0680c8a0e..56f85f742 100644
 +    std::vector<float> router, router_b;
      host_bank() = default;
      host_bank(const host_bank & o) : gate(o.gate), up(o.up), down(o.down), fused(o.fused), gate_b(o.gate_b), up_b(o.up_b),
--        act(o.act.load()), alpha(o.alpha), limit(o.limit) {}
 +        act(o.act.load()), alpha(o.alpha), limit(o.limit), router(o.router), router_b(o.router_b) {}
  };
  
@@ -25,7 +24,7 @@ index 0680c8a0e..56f85f742 100644
      return dmoe_gate(L) && L.ffn_down_exps && (L.ffn_gate_exps ? L.ffn_up_exps != nullptr : L.ffn_up_exps == nullptr);
  }
  
-@@ -441,16 +443,53 @@ struct executor {
+@@ -440,16 +443,53 @@ struct executor {
          us_wide += (uint64_t) ((t1 - t0)*1e6);
          tosh_dmoe_timeline(1, il, t0, t1);
          tosh_dmoe_rare_host_done(il, t0, t1, tosh_dmoe_reach_get() >= jb.value);
@@ -79,7 +78,7 @@ index 0680c8a0e..56f85f742 100644
          if (stage == nullptr || il >= (int) banks.size() || banks[il].gate == nullptr) {
              tosh_dmoe_fail("a mixed layer has no host bank or stage");
              return false;
-@@ -523,18 +562,22 @@ struct executor {
+@@ -522,18 +562,22 @@ struct executor {
              us_quant += (uint64_t) us_since(tq);
  
              if (!pin_misses(il, TOSH_HC_DECODE)) {
@@ -102,7 +101,7 @@ index 0680c8a0e..56f85f742 100644
      }
  
      void leader_main() {
-@@ -639,19 +682,19 @@ struct executor {
+@@ -638,17 +682,19 @@ struct executor {
                      (double) n_wide_miss.load()/n_wide.load(), (double) n_wide_experts.load()/n_wide.load(),
                      us_wide.load()/1e3, (double) us_wide.load()/n_wide.load());
          }
@@ -111,10 +110,8 @@ index 0680c8a0e..56f85f742 100644
              return;
          }
          const uint64_t m = n_miss.load();
--        fprintf(stderr, "tosh_dmoe: jobs %llu, routed %llu, host %llu, hit rate %.2f%%\n",
 +        fprintf(stderr, "tosh_dmoe: jobs %llu, routed %llu, host %llu, hit rate %.2f%%, read ahead %llu\n",
                  (unsigned long long) n_jobs.load(), (unsigned long long) routed, (unsigned long long) m,
--                100.0*(double) (routed - m)/(double) routed);
 +                100.0*(double) (routed - m)/(double) routed, (unsigned long long) n_ahead);
          fprintf(stderr, "tosh_dmoe: host time per job %.1f us (quantize %.1f, gate/up %.1f, down %.1f)\n",
                  (double) us_job.load()/n_jobs.load(), (double) us_quant.load()/n_jobs.load(),
@@ -124,7 +121,7 @@ index 0680c8a0e..56f85f742 100644
          static const int edges[] = { 1, 9, 17, 33, 65, 129, 257, 513, 1 << 16 };
          std::string line = "tosh_dmoe: hit rate by graph";
          for (int b = 0; b + 1 < (int) (sizeof(edges)/sizeof(edges[0])); ++b) {
-@@ -1855,16 +1898,32 @@ static void dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & h
+@@ -1852,16 +1898,32 @@ static void dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & h
          hb.up    = L.ffn_up_exps;
          hb.fused = L.ffn_gate_exps == nullptr;
          hb.down = L.ffn_down_exps;
@@ -158,7 +155,7 @@ index 0680c8a0e..56f85f742 100644
              }
              dst->resize(ggml_nelements(b));
 diff --git a/tosh-moe/tosh-hostcache.cpp b/tosh-moe/tosh-hostcache.cpp
-index e1957bc13..49adb07c4 100644
+index 867173c58..49adb07c4 100644
 --- a/tosh-moe/tosh-hostcache.cpp
 +++ b/tosh-moe/tosh-hostcache.cpp
 @@ -24,16 +24,23 @@
@@ -306,7 +303,7 @@ index e1957bc13..49adb07c4 100644
          g.bg[s] = 0;
          g.bg_unused[s] = 0;
          g.origin[s] = g.ready ? 0 : 1;
-@@ -687,17 +734,20 @@ const char * tosh_hostcache_part(int il, int e, int part) {
+@@ -687,16 +734,20 @@ const char * tosh_hostcache_part(int il, int e, int part) {
  }
  
  void tosh_hostcache_release(int il, const int32_t * ids, int n) {
@@ -315,7 +312,6 @@ index e1957bc13..49adb07c4 100644
          const int e = ids[i];
          if (e < 0 || e >= g.n_expert) continue;
          const int s = g.slot_of[il*g.n_expert + e];
--        if (s >= 0 && --g.ref[s] == 0) g.lru_push(s);
 +        if (s >= 0 && --g.ref[s] == 0) {
 +            static const bool prompt_last = env_on("TOSH_HC_PROMPT_LAST");
 +            if (prompt_last && g.prompt_only[s]) g.lru_push_tail(s); else g.lru_push(s);
@@ -328,7 +324,7 @@ index e1957bc13..49adb07c4 100644
      if (g.base == nullptr) return;
      const int key = il*g.n_expert + e;
      const int s = g.slot_of[key];
-@@ -727,16 +777,17 @@ static int readback_slot(int il, int e) {
+@@ -726,16 +777,17 @@ static int readback_slot(int il, int e) {
      g.state[s] = LOADING;
      g.ref[s] = 0;
      g.ever[key] = 1;
@@ -346,7 +342,7 @@ index e1957bc13..49adb07c4 100644
          std::lock_guard<std::mutex> lock(g.m);
          const int s = readback_slot(il, e);
          if (s < 0) return;
-@@ -849,16 +900,17 @@ void tosh_hostcache_report(void) {
+@@ -848,16 +900,17 @@ void tosh_hostcache_report(void) {
          if (g.req[k] == 0) continue;
          fprintf(stderr, "tosh_hostcache: %-7s waits: own reads %.1f ms, another demand %.1f ms, a read-back %.1f ms\n", names[k],
                  g.wait_own_us[k]/1000, g.wait_co_dem_us[k]/1000, g.wait_co_bg_us[k]/1000);

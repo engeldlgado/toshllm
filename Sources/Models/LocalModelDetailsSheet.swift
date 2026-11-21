@@ -43,6 +43,9 @@ struct LocalModelDetailsSheet: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(parsed.title).font(.title2.bold()).lineLimit(2)
                 HStack(spacing: 7) {
+                    if let author = parsed.author, !author.isEmpty {
+                        detailChip(author, icon: "person.2")
+                    }
                     if !parsed.quant.isEmpty { detailChip(parsed.quant, icon: "shippingbox") }
                     detailChip(parsed.family, icon: "cpu")
                     detailChip("GGUF", icon: "doc")
@@ -58,8 +61,10 @@ struct LocalModelDetailsSheet: View {
 
     private var informationCard: some View {
         detailCard(title: loc.t("Información del modelo", "Model information"), icon: "info.circle") {
-            detailRow(loc.t("Nombre del GGUF", "GGUF name"),
-                      metadata?.string(for: "general.name") ?? parsed.title)
+            let rawMetaName = metadata?.string(for: "general.name")
+            let isGenericMeta = rawMetaName != nil && ["model", "original model", "converted model", "untitled", "ours", "hf", "huggingface", "gguf", "base", "default"].contains(rawMetaName!.lowercased())
+            let ggufDisplayName = (rawMetaName != nil && !isGenericMeta) ? rawMetaName! : parsed.title
+            detailRow(loc.t("Nombre del GGUF", "GGUF name"), ggufDisplayName)
             detailRow(loc.t("Arquitectura", "Architecture"),
                       metadata?.string(for: "general.architecture") ?? parsed.family)
             detailRow(loc.t("Cuantización", "Quantization"),
@@ -80,9 +85,18 @@ struct LocalModelDetailsSheet: View {
     private var provenanceCard: some View {
         detailCard(title: loc.t("Procedencia", "Provenance"), icon: "arrow.down.circle") {
             if let source {
-                detailRow(loc.t("Registro", "Record"), source.isRecorded
-                          ? loc.t("Descargado con ToshLLM", "Downloaded with ToshLLM")
-                          : loc.t("Coincidencia del catálogo", "Catalog match"))
+                detailRow(loc.t("Registro", "Record"), {
+                    switch source.kind {
+                    case .recorded:
+                        return loc.t("Descargado con ToshLLM", "Downloaded with ToshLLM")
+                    case .catalog:
+                        return loc.t("Coincidencia del catálogo", "Catalog match")
+                    case .browserDownload:
+                        return loc.t("Descarga del navegador", "Browser download")
+                    case .metadata:
+                        return loc.t("Metadatos GGUF", "GGUF metadata")
+                    }
+                }())
                 if let repository = source.repository {
                     detailRow(loc.t("Repositorio", "Repository"), repository)
                 }
@@ -99,16 +113,20 @@ struct LocalModelDetailsSheet: View {
                         .help(loc.t("Cuándo se publicó el modelo en Hugging Face; si este archivo es una cuantización, la fecha es la del modelo original. Lo que sabe suele terminar unos meses antes.",
                                     "When the model was published on Hugging Face; if this file is a quantization, the date is the original model's. What it knows usually ends a few months earlier."))
                 }
-                detailRow(loc.t("Archivo de origen", "Source file"), source.fileName)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(loc.t("URL de descarga", "Download URL"))
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(source.url.absoluteString)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(9)
-                        .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
+                if let fileName = source.fileName {
+                    detailRow(loc.t("Archivo de origen", "Source file"), fileName)
+                }
+                if let url = source.url ?? source.repositoryURL {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(loc.t("URL de descarga", "Download URL"))
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(url.absoluteString)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(9)
+                            .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 8))
+                    }
                 }
                 HStack {
                     if let repositoryURL = source.repositoryURL {
@@ -117,11 +135,13 @@ struct LocalModelDetailsSheet: View {
                         }
                         .glassButton()
                     }
-                    Button(loc.t("Copiar URL", "Copy URL"), systemImage: "doc.on.doc") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(source.url.absoluteString, forType: .string)
+                    if let copyTarget = source.url ?? source.repositoryURL {
+                        Button(loc.t("Copiar URL", "Copy URL"), systemImage: "doc.on.doc") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(copyTarget.absoluteString, forType: .string)
+                        }
+                        .glassButton()
                     }
-                    .glassButton()
                 }
             } else {
                 Label(loc.t("No hay una fuente de descarga registrada para este archivo.",
@@ -194,35 +214,90 @@ struct LocalModelDetailsSheet: View {
         .font(.callout)
     }
 
-    private struct SourceInfo {
-        let url: URL
-        let isRecorded: Bool
+    enum SourceKind {
+        case recorded
+        case catalog
+        case browserDownload
+        case metadata
+    }
 
-        var components: [String] { url.pathComponents.filter { $0 != "/" } }
-        var resolveIndex: Int? { components.firstIndex(of: "resolve") ?? components.firstIndex(of: "blob") }
-        var repository: String? {
-            guard url.host?.contains("huggingface.co") == true,
-                  let index = resolveIndex, index >= 2 else { return nil }
-            return components[(index - 2)...(index - 1)].joined(separator: "/")
+    private struct SourceInfo {
+        let url: URL?
+        let kind: SourceKind
+        let customRepository: String?
+        let customAuthor: String?
+
+        init(url: URL?, kind: SourceKind, repository: String? = nil, author: String? = nil) {
+            self.url = url
+            self.kind = kind
+            self.customRepository = repository
+            self.customAuthor = author
         }
-        var author: String? { repository?.split(separator: "/").first.map(String.init) }
+
+        var isRecorded: Bool { kind == .recorded }
+
+        var components: [String] {
+            guard let url else { return [] }
+            return url.pathComponents.filter { $0 != "/" }
+        }
+        var resolveIndex: Int? {
+            components.firstIndex(of: "resolve") ?? components.firstIndex(of: "blob")
+        }
+        var repository: String? {
+            if let customRepository, !customRepository.isEmpty { return customRepository }
+            guard let url, url.host?.contains("huggingface.co") == true else { return nil }
+            if let index = resolveIndex, index >= 2 {
+                return components[(index - 2)...(index - 1)].joined(separator: "/")
+            } else if components.count >= 2 {
+                return "\(components[0])/\(components[1])"
+            }
+            return nil
+        }
+        var author: String? {
+            if let customAuthor, !customAuthor.isEmpty { return customAuthor }
+            return repository?.split(separator: "/").first.map(String.init)
+        }
         var revision: String? {
             guard let index = resolveIndex, components.indices.contains(index + 1) else { return nil }
             return components[index + 1]
         }
-        var fileName: String { url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent }
-        var repositoryURL: URL? { repository.flatMap { URL(string: "https://huggingface.co/\($0)") } }
+        var fileName: String? {
+            guard let url else { return nil }
+            return url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+        }
+        var repositoryURL: URL? {
+            if let repository {
+                return URL(string: "https://huggingface.co/\(repository)")
+            }
+            if let url, url.pathComponents.count <= 3 && resolveIndex == nil {
+                return url
+            }
+            return nil
+        }
     }
 
     private var source: SourceInfo? {
         for part in model.partURLs {
             if let value = ModelStore.source(forFile: part.lastPathComponent), let url = URL(string: value) {
-                return SourceInfo(url: url, isRecorded: true)
+                return SourceInfo(url: url, kind: .recorded)
             }
         }
         if let catalog = Catalog.models.first(where: { $0.fileName == model.name }),
            let url = URL(string: catalog.urlString) {
-            return SourceInfo(url: url, isRecorded: false)
+            return SourceInfo(url: url, kind: .catalog)
+        }
+        for part in model.partURLs {
+            if let whereFroms = ModelName.whereFromsURL(forPath: part.path),
+               let url = URL(string: whereFroms) {
+                return SourceInfo(url: url, kind: .browserDownload, repository: parsed.repository, author: parsed.author)
+            }
+        }
+        if let repo = parsed.repository, !repo.isEmpty {
+            let url = parsed.repositoryURL
+            return SourceInfo(url: url, kind: .metadata, repository: repo, author: parsed.author)
+        }
+        if let author = parsed.author, !author.isEmpty {
+            return SourceInfo(url: nil, kind: .metadata, repository: nil, author: author)
         }
         return nil
     }

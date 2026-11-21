@@ -1,0 +1,27 @@
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 70a3c1f1b..a4b22226d 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -2726,17 +2726,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         }
+ 
+         // TODO: this graph-level rescaling should only be applied when the corresponding backend does not support
+         //       ggml_prec_set_src(experts, GGML_PREC_BF16, 1);
+         //       the amax op cannot be split across devices, so these architectures are denied -sm tensor [TAG_MOE_AMAX_SCALE]
+         //       ref: https://github.com/ggml-org/llama.cpp/pull/30656#issuecomment-6269597922
+         llm_graph_amax_src1 amax_src1 = { nullptr, nullptr };
+ 
+-        if (arch == LLM_ARCH_MISTRAL4 || arch == LLM_ARCH_MELLUM || arch == LLM_ARCH_FLINT || arch == LLM_ARCH_LAGUNA) {
++        // a single token on device experts goes through the f32 mat-vec, where a power-of-two rescale changes nothing
++        const bool amax_noop = cur->ne[2] == 1 && down_exps->buffer != nullptr &&
++            !ggml_backend_buffer_is_host(down_exps->buffer);
++
++        if ((arch == LLM_ARCH_MISTRAL4 || arch == LLM_ARCH_MELLUM || arch == LLM_ARCH_FLINT || arch == LLM_ARCH_LAGUNA) && !amax_noop) {
+             amax_src1 = build_amax_src1_f16(cur);
+             cur = amax_src1.res;
+         }
+ 
+         ggml_tensor * experts = build_lora_mm_id(down_exps, cur, ids, down_exps_s, mm_ids, cached); // [n_embd, n_expert_used, n_tokens]
+         //ggml_prec_set_src(experts, GGML_PREC_BF16, 1); // (see TODO above)
+         cb(experts, "ffn_moe_down", il);
+ 

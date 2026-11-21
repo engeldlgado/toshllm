@@ -1,8 +1,13 @@
 diff --git a/tools/server/server.cpp b/tools/server/server.cpp
-index ade45be2e..d19b0eca7 100644
+index 3ce50ce0c..7d56f74ce 100644
 --- a/tools/server/server.cpp
 +++ b/tools/server/server.cpp
-@@ -177,11 +177,16 @@ static std::vector<std::string> tosh_agent_chunks(const json & answer, int statu
+@@ -179,19 +179,26 @@ static std::vector<std::string> tosh_agent_chunks(const json & answer, int statu
+         }
+     }
+     for (size_t i = 0; i < calls.size(); i++) {
+         calls[i]["index"] = (int) i;
+     }
      if (!calls.empty()) {
          delta["tool_calls"] = calls;
      }
@@ -15,9 +20,12 @@ index ade45be2e..d19b0eca7 100644
      json first = head;
      first["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
      json last = head;
--    last["choices"] = json::array({{{"index", 0}, {"delta", json::object()},
--                                    {"finish_reason", calls.empty() ? "stop" : "tool_calls"}}});
 +    last["choices"] = json::array({{{"index", 0}, {"delta", json::object()}, {"finish_reason", finish}}});
      for (const char * key : {"usage", "tosh"}) {
          if (answer.contains(key)) {
              last[key] = answer.at(key);
+         }
+     }
+     return {"data: " + first.dump() + "\n\n", "data: " + last.dump() + "\n\n", "data: [DONE]\n\n"};
+ }
+ 

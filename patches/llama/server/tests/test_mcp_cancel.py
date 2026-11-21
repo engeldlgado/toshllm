@@ -38,6 +38,10 @@ KEEP = os.environ.get("TOSH_TEST_KEEP") == "1"
 TIMINGS = os.environ.get("TOSH_TEST_TIMINGS")
 
 
+# the reason the engine gives an MCP server when the caller of a tool goes away
+CANCELLED = "cancelled"
+
+
 def note(key, seconds):
     if TIMINGS:
         with open(TIMINGS, "a") as f:
@@ -329,7 +333,7 @@ class McpCancelTest(EngineTest):
         gone = time.monotonic()
         told = wait_for(lambda: engine.cancels_of("gone"), 3)
         note("disconnect_cancel_s", time.monotonic() - gone)
-        self.assertEqual(told, ["the caller went away"], "the probe was not told within 3 s")
+        self.assertEqual(told, [CANCELLED], "the probe was not told within 3 s")
         self.assertServing(engine)
 
     def test_a_call_after_a_cancelled_one_is_answered_at_once(self):
@@ -400,7 +404,7 @@ class McpCancelTest(EngineTest):
         note("busy_gone_next_call_s", time.monotonic() - gone)
         self.assertEqual(body, {"plain_text_response": "after"})
         self.assertLess(time.monotonic() - gone, 5, "the next call waited for the abandoned call's timeout")
-        self.assertEqual(engine.cancels_of("busy"), ["the caller went away"])
+        self.assertEqual(engine.cancels_of("busy"), [CANCELLED])
         self.assertServing(engine)
 
     def test_concurrent_calls_each_get_their_own_answer(self):
@@ -418,7 +422,7 @@ class McpCancelTest(EngineTest):
         caller = engine.start_call("defer", message="gone")
         self.assertTrue(wait_for(lambda: engine.call_of("gone"), 10), "the call never reached the probe")
         leave(caller)
-        self.assertEqual(wait_for(lambda: engine.cancels_of("gone"), 3), ["the caller went away"])
+        self.assertEqual(wait_for(lambda: engine.cancels_of("gone"), 3), [CANCELLED])
         # the probe sends the held answer to "gone" just before this one's, on the same process
         body, elapsed = engine.call("echo", message="mine")
         self.assertEqual(body, {"plain_text_response": "mine"})

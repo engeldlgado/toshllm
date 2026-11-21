@@ -1,5 +1,5 @@
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
-index a93bedbe7..d76ca9a23 100644
+index 2cf60106e..1cecb7b09 100644
 --- a/common/tosh-plan.cpp
 +++ b/common/tosh-plan.cpp
 @@ -51,16 +51,17 @@ struct moe_info {
@@ -20,7 +20,7 @@ index a93bedbe7..d76ca9a23 100644
      int    n_swa     = 0;
      // recurrent state of one sequence, every recurrent layer: what a hybrid model's checkpoint holds
      double recr_elems = 0;
-@@ -91,17 +92,17 @@ struct probe {
+@@ -91,16 +92,17 @@ struct probe {
  };
  
  double env_mib(const char * k, double d) {
@@ -29,7 +29,6 @@ index a93bedbe7..d76ca9a23 100644
  }
  
  // metadata comes from the first shard, tensors from every shard of a split model
--moe_info read_moe_info(const char * path) {
 +moe_info read_moe_info(const char * path, llama_lazy_mode lazy) {
      moe_info mi;
      gguf_init_params gp = { /*.no_alloc =*/ true, /*.ctx =*/ nullptr };
@@ -39,7 +38,7 @@ index a93bedbe7..d76ca9a23 100644
          return mi;
      }
      auto get_u32 = [&](const std::string & k) -> int {
-@@ -174,16 +175,21 @@ moe_info read_moe_info(const char * path) {
+@@ -173,16 +175,21 @@ double env_mib(const char * k, double d) {
          }
          for (int64_t i = 0; i < gguf_get_n_tensors(gs); ++i) {
              const std::string name = gguf_get_tensor_name(gs, i);
@@ -61,7 +60,7 @@ index a93bedbe7..d76ca9a23 100644
              mi.max_tensor_mib = std::max(mi.max_tensor_mib, mib);
              const int il = std::stoi(m[1]);
              if (il >= 0 && il < (int) layer_mib.size()) layer_mib[il] += mib;
-@@ -412,18 +418,18 @@ static std::string plan_product_json(const tosh_plan & p) {
+@@ -411,16 +418,18 @@ static std::string plan_product_json(const tosh_plan & p) {
                         bytes(p.effective_mib), bytes(p.lockable_mib), bytes(p.swap_used_mib), bytes(p.compressed_mib));
      o += string_format(", \"projected_rss_bytes\": %lld, \"projected_vram_bytes\": %lld, \"vram_total_bytes\": %lld, \"vram_free_bytes\": %lld, \"prompt_cache_bytes\": %lld, \"context_checkpoints\": %d, \"checkpoint_bytes\": %lld}",
                         bytes(p.projected_rss_mib), bytes(p.private_mib), bytes(p.vram_total_mib), bytes(p.vram_free_mib), bytes(p.prompt_cache_mib),
@@ -70,8 +69,6 @@ index a93bedbe7..d76ca9a23 100644
                         bytes(p.bank_mib), bytes(p.arena_mib), bytes(p.warm_mib), bytes(p.warm_floor_mib), p.coverage, jstr(p.coverage_state).c_str());
      o += string_format(", \"runtime\": {\"context\": %d, \"kv_type\": %s, \"kv_bytes\": %lld, \"ubatch\": %d, \"ncmoe_layers\": %d}",
                         p.n_ctx, jstr(ggml_type_name(p.kv)).c_str(), bytes(p.kv_mib), p.ubatch, p.ncmoe);
--    o += string_format(", \"model\": {\"model_bytes\": %lld, \"split_count\": %d, \"host_weights_bytes\": %lld}",
--                       bytes(p.model_mib), p.n_split, bytes(p.host_weights_mib));
 +    o += string_format(", \"model\": {\"model_bytes\": %lld, \"split_count\": %d, \"host_weights_bytes\": %lld, \"host_lazy_bytes\": %lld}",
 +                       bytes(p.model_mib), p.n_split, bytes(p.host_weights_mib), bytes(p.host_lazy_mib));
      if (p.plan_mode == TOSH_PLAN_MODE_UNSUPPORTED) {
@@ -82,7 +79,7 @@ index a93bedbe7..d76ca9a23 100644
      return o;
  }
  
-@@ -484,18 +490,18 @@ static void plan_log(const tosh_plan & p) {
+@@ -481,16 +490,18 @@ static void plan_log(const tosh_plan & p) {
          LOG_DBG("  host budget to add: static %.1f GiB (reserve %.1f), current %.1f GiB (headroom %.1f), lockable %.1f GiB -> %.1f GiB\n",
                  p.static_cap_mib/1024, p.static_reserve_mib/1024, p.dynamic_cap_mib/1024, p.headroom_mib/1024, p.lockable_mib/1024, p.effective_mib/1024);
          LOG_DBG("  full host bank %.1f GiB: %s | RAM cache %.1f GiB, coverage %.2f: %s | projected RSS %.1f GiB, reclaimable left %.1f GiB\n",
@@ -91,8 +88,6 @@ index a93bedbe7..d76ca9a23 100644
      }
      std::string limits;
      for (const auto & l : p.limits) limits += (limits.empty() ? "" : ", ") + l;
--    LOG_DBG("  model %.1f GiB in %d file%s, expert bank %.1f GiB, other weights in host memory %.1f GiB\n",
--            p.model_mib/1024, p.n_split, p.n_split > 1 ? "s" : "", p.bank_mib/1024, p.host_weights_mib/1024);
 +    LOG_DBG("  model %.1f GiB in %d file%s, expert bank %.1f GiB, other weights in host memory %.1f GiB, read on demand %.1f GiB\n",
 +            p.model_mib/1024, p.n_split, p.n_split > 1 ? "s" : "", p.bank_mib/1024, p.host_weights_mib/1024, p.host_lazy_mib/1024);
      LOG_DBG("  selected %s (%s, %s): %s, KV %s, ubatch %d, arena %.0f MiB, projected free %.0f MiB, host %.1f GiB%s%s%s%s\n",
@@ -103,36 +98,15 @@ index a93bedbe7..d76ca9a23 100644
      for (const auto & w : p.warnings) warn += (warn.empty() ? "" : ",") + w;
      if (p.plan_mode == TOSH_PLAN_MODE_UNSUPPORTED) {
          LOG_INF("Tosh Dynamic MoE: mode=%s reason=%s limits=%s required_host=%.1fGiB available_host=%.1fGiB required_vram=%.1fGiB available_vram=%.1fGiB\n",
-@@ -561,17 +567,17 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
-         return false;
-     }
-     std::string force = (strcmp(mode_env, "1") == 0 || strcmp(mode_env, "auto") == 0) ? "" : mode_env;
-     // nodmoe: auto without mixed execution, the retry after the expert bank could not be locked
-     const bool no_dmoe = force == "nodmoe";
-     if (no_dmoe) force.clear();
- 
-     tosh_plan p;
--    const moe_info mi = read_moe_info(params.model.path.c_str());
-+    const moe_info mi = read_moe_info(params.model.path.c_str(), params.lazy_mode);
-     p.n_split = mi.n_split; p.model_mib = mi.total_mib; p.warm_floor_mib = mi.warm_floor_mib;
-     if (!mi.error.empty()) {
-         p.state = TOSH_PLAN_UNSUPPORTED; p.mode = "none";
-         p.plan_mode = TOSH_PLAN_MODE_UNSUPPORTED; p.code = tosh_plan_mode_name(p.plan_mode);
-         p.primary_reason = "SPLIT_GGUF_METADATA_ERROR"; p.limiting_resource = "METADATA";
-         p.limits = { "SPLIT_GGUF_METADATA_ERROR", "NO_SAFE_FALLBACK" };
-         p.reason = mi.error;
-         plan_emit(p);
-@@ -633,26 +639,28 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -667,23 +678,28 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+         probe f = pf;
          f.model += mi.bank_mib;
          f.host_model = std::max(0.0, f.host_model - mi.bank_mib);
          full.push_back({ kvs[k], f });
-     }
      if (!read_vram(p.vram_free_mib, p.vram_total_mib)) {
          LOG_WRN("%s: no GPU memory reading, planning off\n", __func__);
          return false;
      }
--    // every weight the probe left in host memory besides the bank: embeddings, per-layer inputs
--    p.host_weights_mib = dm[0][0].ok ? std::max(mi.embd_mib, dm[0][0].host_model - mi.bank_mib) : mi.embd_mib;
 +    // every weight the probe left in host memory besides the bank and what is read lazily
 +    p.host_weights_mib = dm[0][0].ok ? std::max(mi.embd_mib, dm[0][0].host_model - mi.bank_mib - mi.lazy_mib) : mi.embd_mib;
 +    p.host_lazy_mib = mi.lazy_mib;
@@ -143,7 +117,6 @@ index a93bedbe7..d76ca9a23 100644
      auto decide = [&](const host_mem & hi) -> const tosh_plan_candidate * {
      p = base;
      p.host_available_mib = hi.available_mib;
--    const double host_engine = p.host_weights_mib + dm[0][0].host_other + 1024.0;
 +    // a lazy table only needs its hot rows cached; the OS drops the rest under pressure
 +    const double host_engine = p.host_weights_mib + std::min(p.host_lazy_mib, 1024.0) + dm[0][0].host_other + 1024.0;
      const double host_dmoe   = mi.bank_mib + host_engine;
@@ -155,7 +128,7 @@ index a93bedbe7..d76ca9a23 100644
                                     host_dmoe/1024, p.host_reserve_mib/1024, hi.ram_mib/1024);
      } else if (hi.available_mib > 0 && host_dmoe + HOST_MARGIN_MIB > hi.available_mib) {
 diff --git a/common/tosh-plan.h b/common/tosh-plan.h
-index 430f53fa4..186a81684 100644
+index 1ddde0698..06fb440b0 100644
 --- a/common/tosh-plan.h
 +++ b/common/tosh-plan.h
 @@ -84,16 +84,17 @@ struct tosh_plan {

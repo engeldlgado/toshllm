@@ -1,8 +1,8 @@
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 4804d838b..e65093e46 100644
+index 497164286..fa8947ee8 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -623,17 +623,18 @@ void llama_kv_cache::seq_keep(llama_seq_id seq_id) {
+@@ -663,17 +663,18 @@ void llama_kv_cache::seq_keep(llama_seq_id seq_id) {
  
  void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
      // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
@@ -22,7 +22,7 @@ index 4804d838b..e65093e46 100644
          return;
      }
  
-@@ -1241,18 +1242,20 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
+@@ -1273,18 +1274,20 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
      }
  }
  
@@ -44,11 +44,11 @@ index 4804d838b..e65093e46 100644
      const auto & cells = v_cells[seq_to_stream[0]];
  
      return cells.size();
-diff --git a/tools/mtmd/clip-model.h b/tools/mtmd/clip-model.h
-index 33f679fc0..d5f359676 100644
---- a/tools/mtmd/clip-model.h
-+++ b/tools/mtmd/clip-model.h
-@@ -203,22 +203,25 @@ struct clip_hparams {
+diff --git a/tools/mtmd/mtmd-model.h b/tools/mtmd/mtmd-model.h
+index 0d975ba36..962bb9beb 100644
+--- a/tools/mtmd/mtmd-model.h
++++ b/tools/mtmd/mtmd-model.h
+@@ -262,22 +262,25 @@ struct mtmd_hparams {
              image_min_pixels = custom_image_min_tokens * patch_area;
          }
          if (custom_image_max_tokens > 0) {

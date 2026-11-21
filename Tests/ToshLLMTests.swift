@@ -4,6 +4,7 @@
 
 import AppKit
 import CoreText
+import IOKit.pwr_mgt
 import PDFKit
 import XCTest
 @testable import ToshLLM
@@ -1009,7 +1010,7 @@ final class ServerSettingsTests: XCTestCase {
                        cacheTypeK: "f16", cacheTypeV: "f16", mlock: false)
     }
 
-    private func writeMinimalMoEGGUF(_ url: URL) throws {
+    private func writeMinimalMoEGGUF(_ url: URL, extra: [(String, UInt32)] = []) throws {
         var data = Data("GGUF".utf8)
         func u32(_ value: UInt32) {
             withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
@@ -1024,7 +1025,7 @@ final class ServerSettingsTests: XCTestCase {
             ("qwen35moe.block_count", 40),
             ("qwen35moe.expert_count", 256),
             ("qwen35moe.expert_used_count", 8),
-        ]
+        ] + extra
         u32(3); u64(0); u64(UInt64(values.count))
         for (key, value) in values {
             string(key); u32(4); u32(value)
@@ -1042,6 +1043,33 @@ final class ServerSettingsTests: XCTestCase {
         s.parallelSlots = 1
         s.separateKV = false
         XCTAssertFalse(s.arguments.contains("--kv-unified"), "one slot has nothing to share")
+    }
+
+    func testAutoGPULayersAreFittedByTheEngineWithTheVRAMReserve() {
+        var s = makeSettings()
+        s.ngl = -1
+        s.ncmoe = 0
+        var args = s.arguments
+        XCTAssertEqual(args[args.firstIndex(of: "-ngl")! + 1], "auto")
+        XCTAssertEqual(args[args.firstIndex(of: "--fit-target")! + 1], "1024")
+        args = s.benchmarkArguments
+        XCTAssertFalse(args.contains("-ngl"), "llama-bench fits only when it gets no layer count")
+        XCTAssertEqual(args[args.firstIndex(of: "--fit-target")! + 1], "1024")
+        // the server's fit leaves the layers alone once experts are on the CPU, so all of them load
+        s.ncmoe = 24
+        args = s.benchmarkArguments
+        XCTAssertEqual(args[args.firstIndex(of: "-ngl")! + 1], "99")
+        XCTAssertFalse(args.contains("--fit-target"))
+
+        s.dynamicMoeEnabled = true
+        s.executionMode = "full"
+        args = s.arguments
+        XCTAssertEqual(args[args.firstIndex(of: "-ngl")! + 1], "all", "Full GPU by hand keeps every layer")
+        XCTAssertFalse(args.contains("--fit-target"))
+
+        s = makeSettings()
+        XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-ngl")! + 1], "99")
+        XCTAssertFalse(s.arguments.contains("--fit-target"))
     }
 
     func testBaseArguments() {
@@ -1081,6 +1109,7 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--dynamic-moe")! + 1], "on")
         XCTAssertNil(s.environment["TOSH_AUTO"], "the switch is the flag; TOSH_AUTO stays a developer override")
         XCTAssertEqual(s.environment["TOSH_AUTO_KV"], "auto")
+        XCTAssertNil(s.environment["TOSH_AUTO_KV_TURBO4"], "no head size to tell whether turbo4 fits")
         XCTAssertNil(s.environment["TOSH_AUTO_HOST_BANK"], "the whole bank stays in RAM unless asked")
         s.dynamicMoeLeanRAM = true
         XCTAssertEqual(s.environment["TOSH_AUTO_HOST_BANK"], "lean")
@@ -1105,6 +1134,34 @@ final class ServerSettingsTests: XCTestCase {
         s.executionMode = "legacy"
         XCTAssertFalse(s.usesAutoPlan)
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "--n-cpu-moe")! + 1], "24")
+    }
+
+    func testAutoKVMayFallBackToTurbo4OnlyWhereTheModelSupportsIt() throws {
+        let model = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tosh-auto-turbo-\(UUID().uuidString).gguf")
+        try writeMinimalMoEGGUF(model, extra: [("qwen35moe.embedding_length", 2048),
+                                               ("qwen35moe.attention.head_count", 16)])
+        defer { try? FileManager.default.removeItem(at: model) }
+        var s = makeSettings()
+        s.modelPath = model.path
+        s.dynamicMoeEnabled = true
+        XCTAssertEqual(s.environment["TOSH_AUTO_KV_TURBO4"], ServerSettings.isAppleSilicon ? nil : "1")
+        s.autoKVMode = "q8_0"
+        XCTAssertNil(s.environment["TOSH_AUTO_KV_TURBO4"], "a cache chosen by hand is kept")
+    }
+
+    func testPlanSaysWhenAutoPickedTurbo4() throws {
+        func plan(_ warnings: String) throws -> AutoMemoryPlan {
+            let json = #"{"plan_schema_version": 1, "product": {"mode": "PLAN_BOUNDED_DMOE", "mode_label_key": "plan.mode.x", "reason": "CURRENT_RAM_LIMIT", "warnings": [\#(warnings)], "limits": [], "limiting_resource": "HOST_RAM", "memory": {"physical_bytes": 1, "reclaimable_bytes": 1, "projected_rss_bytes": 1, "projected_vram_bytes": 1}, "dmoe": {"expert_bank_bytes": 1, "hot_bytes": 1, "warm_bytes": 1, "coverage": 1.07, "coverage_state": "CONSTRAINED"}, "runtime": {"context": 8192, "kv_type": "turbo4", "kv_bytes": 1, "ubatch": 1024, "ncmoe_layers": 0}}, "state": "DMOE_BOUNDED_HOST", "mode": "dmoe_bounded", "reason": "r", "fallback": "", "kv": "turbo4", "n_ctx": 8192, "ubatch": 1024, "ncmoe": 0, "reserve_mib": 975, "arena_mib": 1200, "min_arena_mib": 546, "projected_private_mib": 1, "projected_free_mib": 800, "vram_total_mib": 8192, "vram_free_mib": 7000, "host_required_mib": 1, "host_ram_mib": 40960, "host_available_mib": 1, "host_reserve_mib": 1, "bank_mib": 17000, "mlock": "required", "dispersion": "normal", "candidates": []}"#
+            return try XCTUnwrap(AutoMemoryPlan.decode(Data(json.utf8)))
+        }
+        let picked = try plan(#""KV_TURBO4_AUTO""#)
+        let chosen = try plan("")
+        XCTAssertTrue(picked.autoPickedTurbo4)
+        XCTAssertFalse(chosen.autoPickedTurbo4, "turbo4 set by hand needs no warning")
+        XCTAssertNotEqual(AutoMemoryText.summary(picked, runtime: nil), AutoMemoryText.summary(chosen, runtime: nil))
+        XCTAssertTrue(AutoMemoryText.reason(picked).hasPrefix(AutoMemoryText.reason(chosen)))
+        XCTAssertNotEqual(AutoMemoryText.reason(picked), AutoMemoryText.reason(chosen))
     }
 
     func testAutoMemoryPlanDecodesTheEnginePlan() throws {
@@ -1629,13 +1686,25 @@ final class ServerSettingsTests: XCTestCase {
     }
 
     func testMTPDetectionReadsKeyValueAndTensors() {
-        // Key present decides by value: 1 = MTP, 0 = stripped head (the common
-        // quantizer case that used to false-positive on a bare "nextn" grep).
-        XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 1, tensorName: "blk.0.attn_q.weight").path))
+        XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 1, tensorName: "blk.32.nextn.eh_proj.weight").path))
         XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 0, tensorName: "blk.0.attn_q.weight").path))
-        // No key: the .nextn. tensor names decide.
+        // a quantizer dropped the head's tensors and kept the key
+        XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: 1, tensorName: "blk.0.attn_q.weight").path))
         XCTAssertTrue(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: nil, tensorName: "blk.0.nextn.eh_proj.weight").path))
         XCTAssertFalse(ServerSettings.modelHasMTP(at: makeGGUF(nextnLayers: nil, tensorName: "blk.0.attn_q.weight").path))
+    }
+
+    func testMTPHeadInALaterPartOfASplitModelIsFound() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-split-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let first = dir.appendingPathComponent("Qwen3.6-27B-Q8_0-00001-of-00002.gguf")
+        let second = dir.appendingPathComponent("Qwen3.6-27B-Q8_0-00002-of-00002.gguf")
+        try FileManager.default.moveItem(at: makeGGUF(nextnLayers: 1, tensorName: "blk.0.attn_q.weight"), to: first)
+        try FileManager.default.moveItem(at: makeGGUF(nextnLayers: nil, tensorName: "blk.64.nextn.eh_proj.weight"), to: second)
+
+        XCTAssertTrue(ServerSettings.modelHasMTP(at: first.path))
     }
 
     func testSeparateMTPAssistantIsHiddenPairedAndPassedAsDraft() throws {
@@ -1713,6 +1782,7 @@ final class ServerSettingsTests: XCTestCase {
             u32(3); u64(tensors); u64(2)
             str("qwen35moe.block_count"); u32(4); u32(blocks)
             str("qwen35moe.nextn_predict_layers"); u32(4); u32(1)
+            str("blk.\(blocks - 1).nextn.eh_proj.weight"); u32(1); u64(8); u32(0); u64(0)
             return d
         }
         let dir = FileManager.default.temporaryDirectory
@@ -2888,6 +2958,16 @@ final class RouterModeTests: XCTestCase {
         XCTAssertTrue(ini.contains("--host") == false, "el router no repite --host/--port por modelo")
     }
 
+    func testRouterPresetPassesAutoGPULayersWithTheVRAMReserve() {
+        var s = makeSettings()
+        s.ngl = -1
+        let ini = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+        XCTAssertTrue(ini.contains("n-gpu-layers = auto"))
+        XCTAssertTrue(ini.contains("fit-target = 1024"))
+        XCTAssertTrue(makeSettings().routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+            .contains("n-gpu-layers = 99"))
+    }
+
     func testRouterPresetAliasCollisionIsDisambiguated() {
         let ini = makeSettings().routerPresetINI(
             modelPaths: ["/a/model.gguf", "/b/model.gguf"], ncmoeByPath: [:])
@@ -3059,6 +3139,40 @@ final class ModelNameTests: XCTestCase {
         XCTAssertEqual(ModelName("Qwen3.5-122B-A10B-UD-Q8_K_XL-00001-of-00005.gguf").title, "Qwen3.5 122B-A10B")
     }
 
+    func testRepoNameAndAuthorDisplay() {
+        let m = ModelName("Qwen3.8-35B-A3B-Distill", author: "empero-ai", repository: "empero-ai/Qwen3.8-35B-A3B-Distill")
+        XCTAssertEqual(m.title, "Qwen3.8 35B-A3B")
+        XCTAssertEqual(m.author, "empero-ai")
+        XCTAssertEqual(m.repository, "empero-ai/Qwen3.8-35B-A3B-Distill")
+        XCTAssertEqual(m.repositoryURL?.absoluteString, "https://huggingface.co/empero-ai/Qwen3.8-35B-A3B-Distill")
+        XCTAssertEqual(m.family, "Qwen")
+        XCTAssertTrue(m.badges.contains("Distill"))
+        XCTAssertTrue(m.badges.contains("MoE"))
+        XCTAssertTrue(m.display.contains("empero-ai"))
+
+        let qatModel = ModelName("Qwen3.8-35B-A3B-QAT", author: "empero-ai")
+        XCTAssertEqual(qatModel.title, "Qwen3.8 35B-A3B")
+        XCTAssertTrue(qatModel.badges.contains("QAT"))
+        XCTAssertTrue(qatModel.display.contains("QAT"))
+    }
+
+    func testHuggingFaceURLParsing() {
+        let resolveURL = "https://huggingface.co/empero-ai/Qwen3.8-35B-A3B-Distill-GGUF/resolve/main/Qwen3.8-35B-A3B-Q4_K_M.gguf"
+        let parsedResolve = ModelName.parseHuggingFaceURL(resolveURL)
+        XCTAssertEqual(parsedResolve?.author, "empero-ai")
+        XCTAssertEqual(parsedResolve?.repo, "Qwen3.8-35B-A3B-Distill")
+
+        let blobURL = "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/blob/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+        let parsedBlob = ModelName.parseHuggingFaceURL(blobURL)
+        XCTAssertEqual(parsedBlob?.author, "bartowski")
+        XCTAssertEqual(parsedBlob?.repo, "Meta-Llama-3.1-8B-Instruct")
+
+        let repoURL = "https://huggingface.co/Qwen/Qwen3.6-35B-A3B"
+        let parsedRepo = ModelName.parseHuggingFaceURL(repoURL)
+        XCTAssertEqual(parsedRepo?.author, "Qwen")
+        XCTAssertEqual(parsedRepo?.repo, "Qwen3.6-35B-A3B")
+    }
+
     // MARK: engine check
 
     private var engineCheckSample: String {
@@ -3117,5 +3231,46 @@ extension ServerSettingsTests {
         let hint = ServerController.diagnose(log, exitCode: 1)
         XCTAssertTrue(hint.contains("por capas"), hint)
         XCTAssertTrue(hint.contains("by layers"), hint)
+    }
+}
+
+@MainActor
+final class KeepAwakeTests: XCTestCase {
+    /// Idle-sleep assertions this process holds under `reason`.
+    private func idleSleepAssertions(_ reason: String) -> Int {
+        var raw: Unmanaged<CFDictionary>?
+        guard IOPMCopyAssertionsByProcess(&raw) == kIOReturnSuccess,
+              let all = raw?.takeRetainedValue() as NSDictionary?,
+              let mine = all[NSNumber(value: getpid())] as? [[String: Any]] else { return 0 }
+        return mine.filter {
+            $0[kIOPMAssertionTypeKey] as? String == kIOPMAssertionTypePreventUserIdleSystemSleep &&
+            $0[kIOPMAssertionNameKey] as? String == reason
+        }.count
+    }
+
+    func testHoldsIdleSleepOffOnlyWhileHeld() {
+        var held: KeepAwake? = KeepAwake.update(nil, active: true, reason: "keep-awake test")
+        XCTAssertEqual(idleSleepAssertions("keep-awake test"), 1)
+        XCTAssertTrue(KeepAwake.update(held, active: true, reason: "keep-awake test") === held,
+                      "an active job keeps the assertion it already holds")
+        held = KeepAwake.update(held, active: false, reason: "keep-awake test")
+        XCTAssertNil(held)
+        XCTAssertEqual(idleSleepAssertions("keep-awake test"), 0)
+    }
+
+    func testGeneratorsKeepTheMacAwakeOnlyWhileWorking() {
+        let video = VideoGenerator()
+        video.state = .generating
+        XCTAssertEqual(idleSleepAssertions("Generating a video"), 1)
+        video.state = .generating
+        XCTAssertEqual(idleSleepAssertions("Generating a video"), 1)
+        video.state = .failed("stopped")
+        XCTAssertEqual(idleSleepAssertions("Generating a video"), 0)
+
+        let upscaler = ImageUpscaler()
+        upscaler.state = .running
+        XCTAssertEqual(idleSleepAssertions("Upscaling an image"), 1)
+        upscaler.state = .done
+        XCTAssertEqual(idleSleepAssertions("Upscaling an image"), 0)
     }
 }

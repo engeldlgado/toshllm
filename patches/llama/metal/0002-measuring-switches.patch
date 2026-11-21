@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 63e05fdbd..4f6c2a714 100644
+index 648d6e15a..522a4d315 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -16,17 +16,212 @@
@@ -215,7 +215,7 @@ index 63e05fdbd..4f6c2a714 100644
  struct ggml_metal {
      char name[128];
  
-@@ -237,16 +432,18 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+@@ -250,16 +445,18 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
  
          res->pipelines_ext = ggml_metal_pipelines_init();
  
@@ -234,7 +234,7 @@ index 63e05fdbd..4f6c2a714 100644
              [ctx->prefetch_stage_cmds[i] release];
          }
          [ctx->prefetch_stages[i] release];
-@@ -327,22 +524,35 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -342,22 +539,35 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
          @autoreleasepool {
              id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
              ggml_metal_encode_pending_waits(ctx, cmd_buf);
@@ -270,44 +270,11 @@ index 63e05fdbd..4f6c2a714 100644
          for (int cb_idx = 0; cb_idx <= n_cb; ++cb_idx) {
              id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[cb_idx].obj;
              if (!cmd_buf) {
-@@ -360,16 +570,32 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -1029,32 +1239,51 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+ 
+                 ggml_metal_cmd_buf_submit(ctx, cmd_buf);
              }
          }
-     }
- 
-     // release any completed extra command buffers
-     if (ctx->cmd_bufs_ext.count > 0) {
-         for (size_t i = 0; i < ctx->cmd_bufs_ext.count; ++i) {
-             id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs_ext[i];
-+    // release any completed extra command buffers
-+    if (ctx->cmd_bufs_ext.count > 0) {
-+        for (size_t i = 0; i < ctx->cmd_bufs_ext.count; ++i) {
-+            id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs_ext[i];
-+
-+            MTLCommandBufferStatus status = [cmd_buf status];
-+            if (status != MTLCommandBufferStatusCompleted) {
-+                GGML_LOG_ERROR("%s: error: command buffer %d failed with status %d\n", __func__, (int) i, (int) status);
-+                if (status == MTLCommandBufferStatusError) {
-+                    GGML_LOG_ERROR("error: %s\n", [[cmd_buf error].localizedDescription UTF8String]);
-+                }
-+
-+                // release this and all remaining command buffers before returning
-+                for (size_t j = i; j < ctx->cmd_bufs_ext.count; ++j) {
-+                    [ctx->cmd_bufs_ext[j] release];
-+                }
-                 [ctx->cmd_bufs_ext removeAllObjects];
- 
-                 ctx->has_error = true;
-                 return;
-             }
- 
-             [cmd_buf release];
-         }
-@@ -1089,32 +1315,52 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
-         return GGML_STATUS_FAILED;
-     }
- 
-     if (gf->n_nodes == 0) {
          return GGML_STATUS_SUCCESS;
      }
  
@@ -319,7 +286,6 @@ index 63e05fdbd..4f6c2a714 100644
          const char * v = TOSH_ENV("TOSH_N_MAIN");
 +        n_main_env = v ? atoi(v) : -1;
 +    }
-+    const int n_main = n_main_env >= 0 ? n_main_env : MAX(64, 0.1*gf->n_nodes);
  
      // number of threads in addition to the main thread
      const int n_cb = ctx->n_cb;
@@ -328,7 +294,7 @@ index 63e05fdbd..4f6c2a714 100644
      ggml_metal_device_rsets_keep_alive(ctx->dev);
  
      // submit the ggml compute graph to the GPU by creating command buffers and encoding the ops in them
-     // the first n_nodes_0 are encoded and submitted for processing directly by the calling thread
+     // the first n_main nodes are encoded and submitted for processing directly by the calling thread
      // while these nodes are processing, we start n_cb threads to enqueue the rest of the nodes
      // each thread creates it's own command buffer and enqueues the ops in parallel
      //
@@ -352,12 +318,12 @@ index 63e05fdbd..4f6c2a714 100644
      @autoreleasepool {
          ctx->gf = gf;
  
-         if (ctx->n_cb == 0) {
-             // single-threaded encoding: the whole graph is encoded by one command buffer
-             ctx->n_nodes_0      = gf->n_nodes;
-             ctx->n_nodes_1      = 0;
-             ctx->n_nodes_per_cb = 0;
-@@ -1159,22 +1405,24 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         // the main thread encodes [0, cb_start[0]) and the extra command buffer i encodes [cb_start[i], cb_start[i + 1])
+         // a fusion cannot span two command buffers, so each boundary moves to the end of the fusable group it falls
+         // into and the encoders fuse the same nodes as with a single command buffer
+         {
+             const int n_rest   = gf->n_nodes - MIN(n_main, gf->n_nodes);
+@@ -1111,24 +1340,26 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
                      ctx->capture_started = true;
                  }
              }
@@ -373,6 +339,8 @@ index 63e05fdbd..4f6c2a714 100644
          {
              id<MTLCommandBuffer> cmd_buf = [queue commandBufferWithUnretainedReferences];
              [cmd_buf retain];
+                     if (ctx->n_ev_wait_pending > 0 || ctx->n_peer_waits > 0) {
+             ggml_metal_encode_pending_waits(ctx, cmd_buf);
 +            tosh_cbp_attach(cmd_buf, cbp);
  
              if (ctx->cmd_bufs[n_cb].obj) {
@@ -382,8 +350,7 @@ index 63e05fdbd..4f6c2a714 100644
  
              [cmd_buf enqueue];
  
-@@ -1183,16 +1431,17 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
- 
+@@ -1138,16 +1369,17 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
          // remember the command buffer for the next iteration
          ctx->cmd_buf_last = ctx->cmd_bufs[n_cb].obj;
  
@@ -391,6 +358,7 @@ index 63e05fdbd..4f6c2a714 100644
          // cmd_buf[0.. n_cb)
          for (int cb_idx = 0; cb_idx < n_cb; ++cb_idx) {
              id<MTLCommandBuffer> cmd_buf = [queue commandBufferWithUnretainedReferences];
+             ggml_metal_encode_pending_waits(ctx, cmd_buf);
 +            tosh_cbp_attach(cmd_buf, cbp);
              [cmd_buf retain];
  
@@ -400,7 +368,7 @@ index 63e05fdbd..4f6c2a714 100644
              ctx->cmd_bufs[cb_idx].obj = cmd_buf;
  
              // always enqueue the first two command buffers
-@@ -1201,17 +1450,23 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -1156,17 +1388,23 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
                  [cmd_buf enqueue];
  
                  // update the pointer to the last queued command buffer
@@ -423,13 +391,13 @@ index 63e05fdbd..4f6c2a714 100644
          // enter here only when capturing in order to wait for all computation to finish
          // otherwise, we leave the graph to compute asynchronously
          if (use_capture && ctx->capture_started) {
-             // wait for completion and check status of each command buffer
-@@ -1265,16 +1520,25 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
- 
-             [ctx->capture_scope endScope];
-             [[MTLCaptureManager sharedCaptureManager] stopCapture];
- 
+             enum ggml_status res = GGML_STATUS_SUCCESS;
+@@ -1230,16 +1468,25 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
              ctx->capture_started = false;
+ 
+             if (res != GGML_STATUS_SUCCESS) {
+                 return res;
+             }
          }
      }
  
@@ -450,7 +418,7 @@ index 63e05fdbd..4f6c2a714 100644
  
      if (ctx->use_graph_optimize) {
          ggml_graph_optimize(gf);
-@@ -1365,30 +1629,39 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
+@@ -1327,30 +1574,39 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
              ctx->gf,
              ctx->finfo,
              idx_start,
@@ -491,7 +459,7 @@ index 63e05fdbd..4f6c2a714 100644
  }
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 0982546c9..817a45c3a 100644
+index 7aa7762ca..1c3539e71 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -1,14 +1,17 @@
@@ -512,46 +480,7 @@ index 0982546c9..817a45c3a 100644
  
  #include <stdatomic.h>
  #include <unistd.h>
-@@ -1729,16 +1732,38 @@ void ggml_metal_device_rsets_add(ggml_metal_device_t dev, ggml_metal_rset_t rset
- 
-     [dev->rsets->data addObject:rset];
- 
-     [dev->rsets->lock unlock];
- }
- 
- void ggml_metal_device_rsets_rm(ggml_metal_device_t dev, ggml_metal_rset_t rset) {
-     if (rset == nil) {
-+        return;
-+    }
-+
-+    GGML_ASSERT(dev->rsets);
-+
-+    [dev->rsets->lock lock];
-+
-+    [dev->rsets->data removeObject:rset];
-+
-+    [dev->rsets->lock unlock];
-+}
-+
-+void ggml_metal_device_rsets_keep_alive(ggml_metal_device_t dev) {
-+    if (dev->rsets == NULL) {
-+        return;
-+    }
-+
-+    atomic_store_explicit(&dev->rsets->d_loop, dev->rsets->loops_per_s*dev->rsets->keep_alive_s, memory_order_relaxed);
-+}
-+
-+struct ggml_metal_event {
-+    void * obj; // id<MTLSharedEvent>
- 
-     atomic_int value;
- };
- 
- void ggml_metal_event_encode_signal(ggml_metal_event_t ev, ggml_metal_cmd_buf_t cmd_buf_raw) {
-     id<MTLSharedEvent> event = (id<MTLSharedEvent>)ev->obj;
- 
-     id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
-@@ -1781,16 +1806,17 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
+@@ -1800,16 +1803,17 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
      const bool res = [event waitUntilSignaledValue:atomic_load_explicit(&ev->value, memory_order_relaxed) timeoutMS:60000];
      if (!res) {
          GGML_ABORT("%s: failed to wait for event\n", __func__);
@@ -569,7 +498,7 @@ index 0982546c9..817a45c3a 100644
          *free      = *total > cur ? *total - cur : 0;
      } else {
          *free = 0;
-@@ -2920,18 +2946,21 @@ bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buff
+@@ -3000,18 +3004,21 @@ bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buff
          [dev->stage_set_cmds[slot] waitUntilCompleted];
          [dev->stage_set_cmds[slot] release];
          dev->stage_set_cmds[slot] = nil;
@@ -591,7 +520,7 @@ index 0982546c9..817a45c3a 100644
      }
  
      memcpy(stage.contents, data, size);
-@@ -3059,17 +3088,42 @@ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buff
+@@ -3176,17 +3183,42 @@ bool ggml_metal_device_stage_get(ggml_metal_device_t dev, struct ggml_metal_buff
  
      [dev->stage_lock unlock];
  
@@ -634,7 +563,7 @@ index 0982546c9..817a45c3a 100644
          memcpy((char *) tensor->data + offset, data, size);
          return;
      }
-@@ -3097,29 +3151,55 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -3214,26 +3246,52 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
                      stage_load = 0;
                  } else if (TOSH_ENV("TOSH_STAGE_LOAD") != NULL) {
                      stage_load = 1;
@@ -645,7 +574,7 @@ index 0982546c9..817a45c3a 100644
              }
 +            if (stage_load) {
 +                bool done_all = true;
-+                for (size_t done = 0; done < size;) {
+                 for (size_t done = 0; done < size;) {
 +                    static size_t slice = 0;
 +                    if (slice == 0) {
                          const char * v = TOSH_ENV("TOSH_STAGE_SLICE_MB");
@@ -653,10 +582,10 @@ index 0982546c9..817a45c3a 100644
 +                        if (slice == 0) { slice = GGML_METAL_STAGE_BUF_MAX; }
 +                    }
 +                    const size_t n = MIN(slice, size - done);
-+
+ 
 +                    struct ggml_metal_buffer_id bid = bid_dst;
 +                    bid.offs += done;
- 
++
 +                    if (!ggml_metal_device_stage_set(buf->dev, bid, (const char *) data + done, n)) {
 +                        done_all = false;
 +                        break;
@@ -683,16 +612,12 @@ index 0982546c9..817a45c3a 100644
                                                                 length:size
                                                                options:MTLResourceStorageModeShared
                                                            deallocator:nil];
--
          // dst
          struct ggml_metal_buffer_id bid_dst = ggml_metal_buffer_get_id(buf, tensor);
          bid_dst.offs += offset;
  
          if (buf_src == nil) {
-             // newBufferWithBytesNoCopy requires page-aligned data, and some drivers cap the size of
-             // host-visible allocations; copy through a small staging buffer in chunks instead
-             size_t stage_size = MIN(size, (size_t) 8*1024*1024);
-@@ -3204,18 +3284,43 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
+@@ -3321,18 +3379,43 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor *
          //[cmd_buf waitUntilCompleted];
  
          if (t0) {
@@ -737,10 +662,10 @@ index 0982546c9..817a45c3a 100644
          return;
      }
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index bcfa97af5..25b27f003 100644
+index 8dd8a45a8..980a487ad 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2769,17 +2769,27 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+@@ -2915,17 +2915,27 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
                             op->src[0]->type == GGML_TYPE_Q6_K ||
                             op->src[0]->type == GGML_TYPE_Q2_K ||
                             op->src[0]->type == GGML_TYPE_Q3_K;
@@ -768,7 +693,7 @@ index bcfa97af5..25b27f003 100644
              /*.ne01  =*/ ne01,
              /*.ne02  =*/ ne02,
              /*.nb00  =*/ nb00,
-@@ -3722,23 +3732,51 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -3899,23 +3909,51 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              const bool k_q4 = op->src[1]->type == GGML_TYPE_Q4_0;
              const bool v_q4 = op->src[2]->type == GGML_TYPE_Q4_0;
                  fa_amd_nsg = 24;
@@ -821,40 +746,18 @@ index bcfa97af5..25b27f003 100644
          }
  
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 0d1069f2c..19e13e722 100644
+index 5d012e484..4325e6a3c 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -1031,28 +1031,69 @@ kernel void kernel_mul_mv_t_t(
+@@ -493,28 +493,54 @@ kernel void kernel_mul_mv_q5_0_f32(
+         device       char * dst,
          threadgroup  char * shmem [[threadgroup(0)]],
          uint3  tgpig[[threadgroup_position_in_grid]],
          ushort tiisg[[thread_index_in_simdgroup]],
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-     kernel_mul_mv_t_t_disp<T0, T1, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+     mul_vec_q_n_f32_impl<block_q5_0, N_R0_Q5_0, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
  
- typedef decltype(kernel_mul_mv_t_t<half, half>) mul_mv_t_t;
-+}
- 
--template [[host_name("kernel_mul_mv_f32_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<float, float>;
--template [[host_name("kernel_mul_mv_f16_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  float>;
--template [[host_name("kernel_mul_mv_f16_f16")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  half>;
--#if defined(GGML_METAL_HAS_BF16)
--template [[host_name("kernel_mul_mv_bf16_f32")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, float>;
--template [[host_name("kernel_mul_mv_bf16_bf16")]] kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, bfloat>;
--template [[host_name("kernel_mul_mv_f32_bf16")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<float,  bfloat>;
--#endif
-+kernel void kernel_mul_mv_q5_0_f32(
-+        constant ggml_metal_kargs_mul_mv & args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem [[threadgroup(0)]],
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiisg[[thread_index_in_simdgroup]],
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+    mul_vec_q_n_f32_impl<block_q5_0, N_R0_Q5_0, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
-+
 +[[host_name("kernel_mul_mv_q5_0_f32_r8")]]
 +kernel void kernel_mul_mv_q5_0_f32_r8(
 +        constant ggml_metal_kargs_mul_mv & args,
@@ -868,20 +771,18 @@ index 0d1069f2c..19e13e722 100644
 +    mul_vec_q_n_f32_impl<block_q5_0, 8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 +}
 +
-+kernel void kernel_mul_mv_q5_1_f32(
-+        constant ggml_metal_kargs_mul_mv & args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem [[threadgroup(0)]],
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiisg[[thread_index_in_simdgroup]],
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+    mul_vec_q_n_f32_impl<block_q5_1, N_R0_Q5_1, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
+ kernel void kernel_mul_mv_q5_1_f32(
+         constant ggml_metal_kargs_mul_mv & args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+     mul_vec_q_n_f32_impl<block_q5_1, N_R0_Q5_1, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
  
--template<typename T0, typename T04, typename T1, typename T14, short NR0, typename args_t>
--void kernel_mul_mv_t_t_4_impl(
 +[[host_name("kernel_mul_mv_q5_1_f32_r8")]]
 +kernel void kernel_mul_mv_q5_1_f32_r8(
 +        constant ggml_metal_kargs_mul_mv & args,
@@ -895,37 +796,65 @@ index 0d1069f2c..19e13e722 100644
 +    mul_vec_q_n_f32_impl<block_q5_1, 8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
 +}
 +
-+template<short NR0, typename args_t>
+ template<short NR0, typename args_t>
+ void kernel_mul_mv_q8_0_f32_impl(
          args_t args,
          device const char * src0,
          device const char * src1,
          device       char * dst,
          threadgroup  char * shmem,
          uint3  tgpig,
-         ushort tiisg,
-         ushort sgitg) {
-@@ -1425,16 +1466,145 @@ void kernel_mul_mv_q3_K_f32_impl(
-             yl[l+16] = y1[l+32];
-             yl[l+24] = y1[l+48];
-         }
+@@ -1032,23 +1058,17 @@ kernel void kernel_mul_mv_t_t(
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+     kernel_mul_mv_t_t_disp<T0, T1, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
  
-         device const uint16_t * q = (device const uint16_t *)(x[i].qs + q_offset);
-         device const uint16_t * h = (device const uint16_t *)(x[i].hmask + l0);
-         device const uint16_t * a = (device const uint16_t *)(x[i].scales);
-         device const half * dh = &x[i].d;
-+kernel void kernel_mul_mv_iq4_nl_f32(
-+        constant ggml_metal_kargs_mul_mv & args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem [[threadgroup(0)]],
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiisg[[thread_index_in_simdgroup]],
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+
-+    kernel_mul_mv_iq4_nl_f32_impl<N_R0_IQ4_NL, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
-+
+ typedef decltype(kernel_mul_mv_t_t<half, half>) mul_mv_t_t;
+ 
+-template [[host_name("kernel_mul_mv_f32_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<float, float>;
+-template [[host_name("kernel_mul_mv_f16_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  float>;
+-template [[host_name("kernel_mul_mv_f16_f16")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  half>;
+ #if defined(GGML_METAL_HAS_BF16)
+-template [[host_name("kernel_mul_mv_bf16_f32")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, float>;
+-template [[host_name("kernel_mul_mv_bf16_bf16")]] kernel mul_mv_t_t kernel_mul_mv_t_t<bfloat, bfloat>;
+-template [[host_name("kernel_mul_mv_f32_bf16")]]  kernel mul_mv_t_t kernel_mul_mv_t_t<float,  bfloat>;
+ #endif
+ 
+ template<typename T0, typename T04, typename T1, typename T14, short NR0, typename args_t>
+ void kernel_mul_mv_t_t_4_impl(
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+@@ -1436,16 +1456,17 @@ void kernel_mul_mv_q3_K_f32_impl(
+ 
+             scales16[0] = a[4];
+             scales16[1] = a[5];
+             aux32 = ((scales32 >> s_shift2) << 4) & 0x30303030;
+             scales16[0] = a[il+0];
+             scales16[1] = a[il+1];
+             scales32 = ((scales32 >> s_shift1) & 0x0f0f0f0f) | aux32;
+ 
++            }
+             float s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0;
+             for (short l = 0; l < 8; l += 2) {
+                 const int32_t qs = q[l/2];
+                 s1 += yl[l+0] * (qs & qm[il/2][0]);
+                 s2 += yl[l+1] * (qs & qm[il/2][1]);
+                 s3 += ((h[l/2] & hm[0]) ? 0.f : yl[l+0]) + ((h[l/2] & hm[1]) ? 0.f : yl[l+1]);
+                 s4 += yl[l+16] * (qs & qm[il/2][2]);
+                 s5 += yl[l+17] * (qs & qm[il/2][3]);
+@@ -2915,16 +2936,26 @@ kernel void kernel_mul_mv_iq4_nl_f32(
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
+     kernel_mul_mv_iq4_nl_f32_impl<N_R0_IQ4_NL, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
 +[[host_name("kernel_mul_mv_iq4_nl_f32_r8")]]
 +kernel void kernel_mul_mv_iq4_nl_f32_r8(
 +        constant ggml_metal_kargs_mul_mv & args,
@@ -936,23 +865,23 @@ index 0d1069f2c..19e13e722 100644
 +        uint3  tgpig[[threadgroup_position_in_grid]],
 +        ushort tiisg[[thread_index_in_simdgroup]],
 +        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+
-+    kernel_mul_mv_iq4_nl_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
-+
-+kernel void kernel_mul_mv_iq4_xs_f32(
-+        constant ggml_metal_kargs_mul_mv & args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem [[threadgroup(0)]],
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiisg[[thread_index_in_simdgroup]],
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+
-+    kernel_mul_mv_iq4_xs_f32_impl<N_R0_IQ4_XS, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
-+
+ template<int NR0, typename args_t>
+ void kernel_mul_mv_iq4_xs_f32_impl(
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
+@@ -3025,16 +3056,26 @@ kernel void kernel_mul_mv_iq4_xs_f32(
+         threadgroup  char * shmem [[threadgroup(0)]],
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiisg[[thread_index_in_simdgroup]],
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
+     kernel_mul_mv_iq4_xs_f32_impl<N_R0_IQ4_XS, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+ }
+ 
 +[[host_name("kernel_mul_mv_iq4_xs_f32_r8")]]
 +kernel void kernel_mul_mv_iq4_xs_f32_r8(
 +        constant ggml_metal_kargs_mul_mv & args,
@@ -963,49 +892,25 @@ index 0d1069f2c..19e13e722 100644
 +        uint3  tgpig[[threadgroup_position_in_grid]],
 +        ushort tiisg[[thread_index_in_simdgroup]],
 +        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+
-+    kernel_mul_mv_iq4_xs_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
-+
-+template<int NR0, typename args_t>
-+void kernel_mul_mv_mxfp4_f32_impl(
-+        args_t args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
-+        ushort tiisg,
-+        ushort sgitg) {
-+    const short NSG = FC_mul_mv_nsg;
-+
-+    threadgroup float * shmem_f32 = (threadgroup float *) shmem;
-+
-+    const int r0 = tgpig.x;
-+    const int r1 = tgpig.y;
+ // decode the E2M1 value in the low nibble of n, scaled by 2^-14, without a lookup table: the 3 magnitude bits
+ // land in the fp16 exponent/mantissa (e=0 gives the 0.5 subnormal). same decode as MLX's fp4_e2m1
+ static inline half mxfp4_dq1(uint32_t n) {
+     const half c = as_type<half>(ushort((n & 7) << 9));
+     return (n & 8) ? -c : c;
+ }
+ 
+ // low / high nibbles of the 4 bytes of w, in byte order, scaled by 2^-14
+@@ -3386,16 +3427,52 @@ kernel void kernel_mul_mv_id(
+         tiisg,
+         sgitg);
+ }
+ 
+ typedef decltype(kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<float, float>>>) kernel_mul_mv_id_t;
+ 
+ typedef decltype(kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<float, float4, float, float4>>>) kernel_mul_mv_id_4_t;
+ 
 +template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<3, 4>;
 +template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<4, 4>;
-+template [[host_name("kernel_mul_mv_ext_q4_K_raw_lds_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_lds_f32_disp<5, 4>;
-+
-+template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<2, 4>;
-+template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<3, 4>;
-+template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<4, 4>;
-+template [[host_name("kernel_mul_mv_ext_q4_K_raw_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4_K_raw_f32_disp<5, 4>;
-+
-+template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 4, block_q5_K>;
-+template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 4, block_q5_K>;
-+template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 4, block_q5_K>;
-+template [[host_name("kernel_mul_mv_ext_q5_K_hdr_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 4, block_q5_K>;
-+
-+template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 4, block_q2_K>;
-+template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 4, block_q2_K>;
-+template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 4, block_q2_K>;
-+template [[host_name("kernel_mul_mv_ext_q2_K_hdr_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<5, 4, block_q2_K>;
-+
-+template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<2, 4, block_q3_K>;
-+template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<3, 4, block_q3_K>;
-+template [[host_name("kernel_mul_mv_ext_q3_K_hdr_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_qK_hdr_f32_disp<4, 4, block_q3_K>;
-+
 +[[host_name("kernel_mul_mv_q8_0_f32_r8")]]
 +kernel void kernel_mul_mv_q8_0_f32_r8(
 +        constant ggml_metal_kargs_mul_mv & args,
@@ -1016,10 +921,7 @@ index 0d1069f2c..19e13e722 100644
 +        uint3  tgpig[[threadgroup_position_in_grid]],
 +        ushort tiisg[[thread_index_in_simdgroup]],
 +        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+
 +    kernel_mul_mv_q8_0_f32_impl<8, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
-+
 +template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q4_K, 256, dequantize_q4_K>;
 +template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q4_K, 256, dequantize_q4_K>;
 +template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 4, block_q4_K, 256, dequantize_q4_K>;
@@ -1031,6 +933,7 @@ index 0d1069f2c..19e13e722 100644
 +template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q6_K, 256, dequantize_q6_K>;
 +template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q6_K, 256, dequantize_q6_K>;
 +template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_4_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<4, 4, block_q6_K, 256, dequantize_q6_K>;
++
 +template [[host_name("kernel_mul_mv_ext_q6_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q6_K, 256, dequantize_q6_K>;
 +template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_2_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, 4, block_q2_K, 256, dequantize_q2_K>;
 +template [[host_name("kernel_mul_mv_ext_q2_K_f32_r1_3_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, 4, block_q2_K, 256, dequantize_q2_K>;
@@ -1042,15 +945,15 @@ index 0d1069f2c..19e13e722 100644
 +template [[host_name("kernel_mul_mv_ext_q3_K_f32_r1_5_nr0_4")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<5, 4, block_q3_K, 256, dequantize_q3_K>;
 +template [[host_name("kernel_mul_mv_f32_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<float, float>;
 +template [[host_name("kernel_mul_mv_f16_f32")]]   kernel mul_mv_t_t kernel_mul_mv_t_t<half,  float>;
- 
-         for (short row = 0; row < nr0; ++row) {
-             const float d_all = (float)dh[0];
- 
-             scales16[0] = a[4];
-             scales16[1] = a[5];
-             aux32 = ((scales32 >> s_shift2) << 4) & 0x30303030;
-             scales16[0] = a[il+0];
-@@ -3391,8 +3561,9 @@ template [[host_name("kernel_mul_mv_id_iq1_m_f32")]]   kernel kernel_mul_mv_id_t
+ template [[host_name("kernel_mul_mv_id_f32_f32")]]     kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<float, float>>>;
+ template [[host_name("kernel_mul_mv_id_f16_f32")]]     kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<half,  float>>>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_mul_mv_id_bf16_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_disp<bfloat, float>>>;
+ #endif
+ template [[host_name("kernel_mul_mv_id_f32_f32_4")]]   kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<float, float4, float, float4>>>;
+ template [[host_name("kernel_mul_mv_id_f16_f32_4")]]   kernel kernel_mul_mv_id_4_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_t_t_4_disp<half,  half4,  float, float4>>>;
+ #if defined(GGML_METAL_HAS_BF16)
+@@ -3423,8 +3500,9 @@ template [[host_name("kernel_mul_mv_id_iq1_m_f32")]]   kernel kernel_mul_mv_id_t
  template [[host_name("kernel_mul_mv_id_iq2_xxs_f32")]] kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq2_xxs_f32_disp<ggml_metal_kargs_mul_mv>>>;
  template [[host_name("kernel_mul_mv_id_iq2_xs_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq2_xs_f32_disp<ggml_metal_kargs_mul_mv>>>;
  template [[host_name("kernel_mul_mv_id_iq3_xxs_f32")]] kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_iq3_xxs_f32_disp<ggml_metal_kargs_mul_mv>>>;

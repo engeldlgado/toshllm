@@ -338,6 +338,7 @@ struct ChatAdvancedSettingsSection: View {
                 }
                 .onAppear { blockedToolModels = ToolSupport.blockedModels }
             }
+            }
 
             if destination == .agents {
                 ChatSettingsGroup(title: loc.t("Memoria", "Memory")) {
@@ -409,23 +410,23 @@ struct ChatAdvancedSettingsSection: View {
                 }
             }
 
-            if destination == .general {
+            if destination == .agents {
                 ChatSettingsGroup(title: loc.t("Adjuntos", "Attachments")) {
                     integerStepper(loc.t("Texto pegado a archivo", "Paste text to file"),
                                    value: $pasteLongTextLength, range: 0...100_000, step: 500,
                                    zeroLabel: loc.t("Desactivado", "Off"),
                                    help: loc.t("Si pegas texto más largo que esto (en caracteres), se convierte en un adjunto en vez de llenar el cuadro de escritura. 0 lo desactiva.",
                                                "If you paste text longer than this (in characters), it becomes an attachment instead of filling the input box. 0 disables it."))
-                    LabeledContent(loc.t("Tamaño máximo de imagen (MP)", "Maximum image size (MP)")) {
-                        HStack(spacing: 8) {
-                            DeferredNumberField("1", value: $maxImageMegapixels, width: 90)
-                                .onChange(of: maxImageMegapixels) { _, value in
-                                    let clamped = min(4, max(0.25, value))
-                                    if clamped != value { maxImageMegapixels = clamped }
-                                }
-                            InfoTip(text: loc.t("Reduce las imágenes adjuntas a este máximo de megapíxeles antes de enviarlas, para ahorrar tokens de visión (0.25–4).",
-                                                "Downsizes attached images to this megapixel maximum before sending, to save vision tokens (0.25–4)."))
-                        }
+                    SettingsRow(icon: "photo",
+                                title: loc.t("Tamaño máximo de imagen (MP)", "Maximum image size (MP)"),
+                                help: loc.t("Reduce las imágenes adjuntas a este máximo de megapíxeles antes de enviarlas, para ahorrar tokens de visión (0.25–4).",
+                                            "Downsizes attached images to this megapixel maximum before sending, to save vision tokens (0.25–4).")) {
+                        DeferredNumberField("1", value: $maxImageMegapixels, width: 100)
+                            .onChange(of: maxImageMegapixels) { _, value in
+                                let clamped = min(4, max(0.25, value))
+                                if clamped != value { maxImageMegapixels = clamped }
+                            }
+                            .frame(width: Self.controlColumn, alignment: .trailing)
                     }
                     SettingsRow(icon: "doc.richtext",
                                 title: loc.t("PDF como imágenes para modelos con visión", "PDF as images for vision models"),
@@ -434,7 +435,6 @@ struct ChatAdvancedSettingsSection: View {
                         SettingsToggle(isOn: $pdfAsImages)
                     }
                 }
-            }
             }
 
             if destination == .advanced {

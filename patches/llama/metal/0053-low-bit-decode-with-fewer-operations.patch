@@ -1,8 +1,11 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 13ddeb6dc..aa92cc22a 100644
+index feea87f32..c31a74cd4 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1964,10 +1964,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -1989,28 +1989,45 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     const bool row8_aligned = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0);
+     const bool row8_width   = nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0);
+     const bool row8 = row8_aligned && row8_width && TOSH_ENV("TOSH_MV_ROW8_DISABLE") == nullptr;
  
      // Cards that require natural alignment read the wrong bytes from the odd blocks of the
      // 22-, 34-, 98-, 110- and 210-byte types, so the wide read splits in two there.
@@ -25,13 +28,13 @@ index 13ddeb6dc..aa92cc22a 100644
      // rebuilding. The pipeline name carries both, so a run can be checked against what it asked.
      {
          const char * st = TOSH_ENV("TOSH_SWEEP_TYPE");
-@@ -1976,11 +1988,15 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+ 
+         if (st != nullptr && strcmp(st, ggml_type_name(tsrc0)) == 0) {
              const char * snr = TOSH_ENV("TOSH_SWEEP_NR0");
              const char * sns = TOSH_ENV("TOSH_SWEEP_NSG");
  
              const char * sln = TOSH_ENV("TOSH_SWEEP_LANES");
  
--            if (snr != nullptr && sln != nullptr) {
 +            if (snr != nullptr && strcmp(suffix, "_v2") == 0) {
 +                nr0 = atoi(snr);
 +                snprintf(sweep_sfx, sizeof(sweep_sfx), "_v2_r%d", nr0);
@@ -42,7 +45,13 @@ index 13ddeb6dc..aa92cc22a 100644
                  snprintf(sweep_sfx, sizeof(sweep_sfx), "_L%dr%d", atoi(sln), nr0);
                  suffix = sweep_sfx;
                  w64 = simd_width == 64;
-@@ -2045,10 +2061,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+             } else if (snr != nullptr) {
+                 nr0 = atoi(snr);
+                 snprintf(sweep_sfx, sizeof(sweep_sfx), "_r%d", nr0);
+@@ -2068,16 +2085,24 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         ggml_metal_cv_free(cv);
+     }
+ 
      res.nr0  = nr0;
      res.nr1  = nr1;
      res.nsg  = nsg;
@@ -59,13 +68,42 @@ index 13ddeb6dc..aa92cc22a 100644
      return res;
  }
  
- ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_amax_part(ggml_metal_library_t lib) {
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(ggml_metal_library_t lib, int ne02, int ne20) {
      char base[256];
+     char name[256];
+ 
+     snprintf(base, 256, "kernel_mul_mm_id_map0_ne20_%d", ne20);
+@@ -2437,16 +2462,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                              tsrc0 == GGML_TYPE_IQ2_S || tsrc0 == GGML_TYPE_IQ1_S ||
+                              tsrc0 == GGML_TYPE_IQ1_M);
+         const bool lut = (tsrc0 == GGML_TYPE_MXFP4 || tsrc0 == GGML_TYPE_IQ4_NL || tsrc0 == GGML_TYPE_IQ4_XS);
+         if (helper) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float)*nr0; }
+         else if (sr) { nw = (int16_t) props_id->simd_width; }
+         else if (lut) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float); }
+     }
+ 
++        static const bool v2 = TOSH_ENV("TOSH_MV_V2_DISABLE") == nullptr;
++                   tsrc0 == GGML_TYPE_IQ2_XXS || tsrc0 == GGML_TYPE_IQ2_XS || tsrc0 == GGML_TYPE_IQ1_S  ||
++                   tsrc0 == GGML_TYPE_IQ1_M   || tsrc0 == GGML_TYPE_Q3_K   || tsrc0 == GGML_TYPE_Q2_K   ||
++                   tsrc0 == GGML_TYPE_Q5_K)) {
++            suffix = "_v2";
++        }
+     const bool row4 = (op->src[0]->nb[1] % 2 == 0) && (op->src[0]->nb[2] % 2 == 0) &&
+                       TOSH_ENV("TOSH_MV_ROW4_DISABLE") == nullptr;
+ 
+     // The expert kernels share the implementations of the dense path, so they can read the
+     // quant arrays a word at a time under the same conditions.
+     const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
+                       (nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0)) &&
+                       TOSH_ENV("TOSH_MV_ROW8_DISABLE") == nullptr;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index 2e8e998b6..55a051425 100644
+index 088fbf619..48ccef458 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
-@@ -57,10 +57,13 @@ struct ggml_metal_pipeline_with_params {
+@@ -54,16 +54,19 @@ struct ggml_metal_pipeline_with_params {
+ 
+     size_t smem;
+ 
      bool c4;
      bool cnt;
  
@@ -79,11 +117,17 @@ index 2e8e998b6..55a051425 100644
  int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_with_params pipeline);
  
  //
+ // MTLCommandBuffer wrapper
+ //
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 68dfa2ee6..1e4bf6e4f 100644
+index b6d308c2c..ef1cbac6c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -847,10 +847,11 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline(ggml_meta
+@@ -845,16 +845,17 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline(ggml_meta
+         /*.pipeline =*/ nil,
+         /*.nsg      =*/ 0,
+         /*.nr0      =*/ 0,
          /*.nr1      =*/ 0,
          /*.smem     =*/ 0,
          /*.c4       =*/ false,
@@ -95,7 +139,13 @@ index 68dfa2ee6..1e4bf6e4f 100644
      res.pipeline = ggml_metal_pipelines_get(lib->pipelines, name);
  
      [lib->lock unlock];
-@@ -866,10 +867,11 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+ 
+     return res;
+ }
+@@ -864,16 +865,17 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+         /*.pipeline =*/ nil,
+         /*.nsg      =*/ 0,
+         /*.nr0      =*/ 0,
          /*.nr1      =*/ 0,
          /*.smem     =*/ 0,
          /*.c4       =*/ false,
@@ -107,17 +157,22 @@ index 68dfa2ee6..1e4bf6e4f 100644
      [lib->lock lock];
  
      res.pipeline = ggml_metal_pipelines_get(lib->pipelines, name);
+     if (res.pipeline) {
+         [lib->lock unlock];
+ 
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 35b70f00c..4973ecfdd 100644
+index 3cb7d65a6..294d3d955 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -3241,11 +3241,15 @@ static int ggml_metal_op_mul_mat_mv(ggml_metal_op_t ctx, int idx) {
+@@ -3394,16 +3394,21 @@ static int ggml_metal_op_mul_mat_mv(ggml_metal_op_t ctx, int idx) {
+     }
+ 
+     if (op->src[0]->type == GGML_TYPE_F32 ||
          op->src[0]->type == GGML_TYPE_F16 ||
          op->src[0]->type == GGML_TYPE_BF16 ||
          op->src[0]->type == GGML_TYPE_Q8_0) {
          ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + nr0 - 1)/(nr0)), ((ne11 + nr1 - 1)/nr1), ne12*ne13, nth, nsg, 1);
      } else {
--        ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + nr0*nsg - 1)/(nr0*nsg)), ((ne11 + nr1 - 1)/nr1), ne12*ne13, nth, nsg, 1);
 +        int ntg0 = (ne01 + nr0*nsg - 1)/(nr0*nsg);
 +        if (pipeline.ntg > 0) {
 +            ntg0 = MIN(ntg0, pipeline.ntg);
@@ -128,17 +183,41 @@ index 35b70f00c..4973ecfdd 100644
      return 1;
  }
  
+ static int ggml_metal_op_mul_mat_qvk(ggml_metal_op_t ctx, int idx) {
+     static const bool disabled = TOSH_ENV("TOSH_QKV_FUSION_DISABLE") != nullptr;
+ 
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 26823d0b9..4d2f725a0 100644
+index c487daae6..b52df15c8 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -10547,5 +10547,1094 @@ kernel void kernel_mul_mv_q8_0_swiglu_f32(
+@@ -5069,16 +5069,18 @@ void kernel_mul_mv_mxfp4_f32_impl(
+     const int ns01 = args.nb01/args.nb00; // this can be larger than nb for permuted src0 tensors
+ 
+     // block groups by real simd width: 16 on wave32, 32 on wave64
+     const short NG = FC_mul_mv_nw/2;
+ 
+     const short ix = tiisg/2;  // 0...NG-1
+     const short it = tiisg%2;  // 0 or 1
+ 
++    }
++
+     float4 yl[4];
+     float sumf[NR0]={0.f};
+ 
+     device const float * yb = y + ix*QK_MXFP4 + it*8;
+ 
+     // note: just the check `ib < nb` is enough, but adding the redundant `&& ib < ns01` check makes the kernel a bit faster
+     //       no idea why that is - needs some deeper investigation [TAG_MUL_MV_WEIRD]
+     for (int ib = ix; ib < nb && ib < ns01; ib += NG) {
+@@ -10586,70 +10588,598 @@ kernel void kernel_mul_mv_q8_0_swiglu_f32(
+         device       char * dst,
+         threadgroup  char * shmem [[threadgroup(0)]],
          uint3  tgpig[[threadgroup_position_in_grid]],
          ushort tiisg[[thread_index_in_simdgroup]],
          ushort sgitg[[simdgroup_index_in_threadgroup]]) {
      kernel_mul_mv_q8_0_swiglu_f32_impl<N_R0_Q8_0/2>(args, src0g, src0u, src1, dst, shmem, tgpig, tiisg, sgitg);
  }
-+
+ 
 +// low-bit decode with the standalone geometry and fewer operations per weight: grid entries are
 +// read as one word, and as grid values are positive a sign is or-ed into the float
 +
@@ -167,14 +246,14 @@ index 26823d0b9..4d2f725a0 100644
 +        ushort sgitg) {
 +    const short NSG = FC_mul_mv_nsg;
 +
-+    const int nb = args.ne00/QK_K;
-+
-+    threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
-+    {
-+        const int gid = FC_mul_mv_nw*sgitg + tiisg;
-+        const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
-+        for (int i = gid; i < 256; i += gsz) svalues[i] = iq3xxs_grid[i];
-+        threadgroup_barrier(mem_flags::mem_threadgroup);
+     const int nb = args.ne00/QK_K;
+ 
+     threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
+     {
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         for (int i = gid; i < 256; i += gsz) svalues[i] = iq3xxs_grid[i];
+         threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
 +
 +    const int nrb = (args.ne01 + NSG*nr0 - 1)/(NSG*nr0);
@@ -251,15 +330,15 @@ index 26823d0b9..4d2f725a0 100644
 +#define MV_V2_GRID_KERNEL(T, NR0, NAME) \
 +[[host_name(NAME)]] \
 +kernel void kernel_mul_mv_##T##_f32_v2_r##NR0( \
-+        constant ggml_metal_kargs_mul_mv & args, \
-+        device const char * src0, \
-+        device const char * src1, \
-+        device       char * dst, \
-+        threadgroup  char * shmem [[threadgroup(0)]], \
-+        uint3  tgpig[[threadgroup_position_in_grid]], \
+         constant ggml_metal_kargs_mul_mv & args, \
+         device const char * src0, \
+         device const char * src1, \
+         device       char * dst, \
+         threadgroup  char * shmem [[threadgroup(0)]], \
+         uint3  tgpig[[threadgroup_position_in_grid]], \
 +        uint3  tgpg[[threadgroups_per_grid]], \
-+        ushort tiisg[[thread_index_in_simdgroup]], \
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) { \
+         ushort tiisg[[thread_index_in_simdgroup]], \
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) { \
 +    kernel_mul_mv_##T##_f32_v2_impl<NR0, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, shmem, tgpig, tgpg.x, tiisg, sgitg); \
 +}
 +
@@ -279,15 +358,15 @@ index 26823d0b9..4d2f725a0 100644
 +        ushort tiisg,
 +        ushort sgitg) {
 +    const short NSG = FC_mul_mv_nsg;
-+
-+    const int nb = args.ne00/QK_K;
-+
-+    threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
-+    {
-+        const int gid = FC_mul_mv_nw*sgitg + tiisg;
-+        const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
-+        for (int i = gid; i < 512; i += gsz) svalues[i] = iq3s_grid[i];
-+        threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+     const int nb = args.ne00/QK_K;
+ 
+     threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
+     {
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         for (int i = gid; i < 512; i += gsz) svalues[i] = iq3s_grid[i];
+         threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
 +
 +    const int nrb = (args.ne01 + NSG*nr0 - 1)/(NSG*nr0);
@@ -366,11 +445,11 @@ index 26823d0b9..4d2f725a0 100644
 +template<int nr0, typename args_t>
 +void kernel_mul_mv_iq2_s_f32_v2_impl(
 +        args_t args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
 +        uint   ntg,
 +        ushort tiisg,
 +        ushort sgitg) {
@@ -382,8 +461,8 @@ index 26823d0b9..4d2f725a0 100644
 +    threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
 +    {
 +        threadgroup uint64_t * s64 = (threadgroup uint64_t *) shmem;
-+        const int gid = FC_mul_mv_nw*sgitg + tiisg;
-+        const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
 +        for (int i = gid; i < 1024; i += gsz) s64[i] = iq2s_grid[i];
 +        threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
@@ -612,30 +691,30 @@ index 26823d0b9..4d2f725a0 100644
 +        ushort tiisg,
 +        ushort sgitg) {
 +    const short NSG = FC_mul_mv_nsg;
-+
-+    const int nb = args.ne00/QK_K;
-+
-+    const int r0 = tgpig.x;
-+    const int r1 = tgpig.y;
-+    const int im = tgpig.z;
-+
-+    const int first_row = (r0 * NSG + sgitg) * nr0;
-+
-+    const uint i12 = im%FC_mul_mv_ne12;
-+    const uint i13 = im/FC_mul_mv_ne12;
-+
-+    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
-+    const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
-+
+ 
+     const int nb = args.ne00/QK_K;
+ 
+     const int r0 = tgpig.x;
+     const int r1 = tgpig.y;
+     const int im = tgpig.z;
+ 
+     const int first_row = (r0 * NSG + sgitg) * nr0;
+ 
+     const uint i12 = im%FC_mul_mv_ne12;
+     const uint i13 = im/FC_mul_mv_ne12;
+ 
+     const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
+     const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
+ 
 +    device const block_q2_K * x = (device const block_q2_K *) (src0 + offset0);
 +    device const float      * y = (device const float      *) (src1 + offset1);
 +
-+    const short nbi = FC_mul_mv_nw/8;
-+
-+    const short ix = tiisg/8;
-+    const short it = tiisg%8;
-+    const short iq = it/4;
-+    const short ir = it%4;
+     const short nbi = FC_mul_mv_nw/8;
+ 
+     const short ix = tiisg/8;
+     const short it = tiisg%8;
+     const short iq = it/4;
+     const short ir = it%4;
 +    const short is = (8*ir)/16;
 +
 +    device const float * y4 = y + ix * QK_K + 128 * iq + 8 * ir;
@@ -654,7 +733,7 @@ index 26823d0b9..4d2f725a0 100644
 +            sy[k] = t.x + t.y + t.z + t.w;
 +        }
 +
-+        // widen to int before the pointer math: short offsets into a device base miscompile on AMD
+         // widen to int before the pointer math: short offsets into a device base miscompile on AMD
 +        device const uchar * q  = x[ib].qs + (int) (32*iq + 8*ir);
 +        device const uchar * sc = x[ib].scales + (int) (8*iq + is);
 +        device const half  * dh = &x[ib].d;
@@ -721,45 +800,31 @@ index 26823d0b9..4d2f725a0 100644
 +        ushort tiisg,
 +        ushort sgitg) {
 +    const short NSG = FC_mul_mv_nsg;
-+
-+    const int nb = args.ne00/QK_K;
-+
-+    const int r0 = tgpig.x;
-+    const int r1 = tgpig.y;
-+    const int im = tgpig.z;
-+
-+    const int first_row = (r0 * NSG + sgitg) * nr0;
-+
-+    const uint i12 = im%FC_mul_mv_ne12;
-+    const uint i13 = im/FC_mul_mv_ne12;
-+
-+    const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
-+    const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
-+
-+    device const block_q5_K * x = (device const block_q5_K *) (src0 + offset0);
-+    device const float     * yy = (device const float      *) (src1 + offset1);
-+
-+    constexpr uint16_t kmask1 = 0x3f3f;
-+    constexpr uint16_t kmask2 = 0x0f0f;
-+    constexpr uint16_t kmask3 = 0xc0c0;
-+
-+    const short NG  = FC_mul_mv_nw/8;
-+    const short tid = tiisg%8;
-+    const short ix  = tiisg/8;
-+    const short iq  = tid/4;
-+    const short ir  = tid%4;
-+
-+    const short l0 = 8*ir;
-+    const short q_offset = 32*iq + l0;
-+    const short y_offset = 64*iq + l0;
+ 
+     const int nb = args.ne00/QK_K;
+ 
+     const int r0 = tgpig.x;
+     const int r1 = tgpig.y;
+     const int im = tgpig.z;
+ 
+     const int first_row = (r0 * NSG + sgitg) * nr0;
+@@ -10671,72 +11201,483 @@ kernel void kernel_mul_mv_q8_0_swiglu_f32(
+     const short tid = tiisg%8;
+     const short ix  = tiisg/8;
+     const short iq  = tid/4;
+     const short ir  = tid%4;
+ 
+     const short l0 = 8*ir;
+     const short q_offset = 32*iq + l0;
+     const short y_offset = 64*iq + l0;
 +
 +    // pre-shifted by 2*iq, the fifth bits of this lane's four runs sit at bits 0, 1, 4 and 5
-+    const ushort hsh = 2*iq;
-+    const ushort shs = 16*iq;
-+
-+    uint16_t sc16[4];
-+    thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
-+
+     const ushort hsh = 2*iq;
+     const ushort shs = 16*iq;
+ 
+     uint16_t sc16[4];
+     thread const uint8_t * sc8 = (thread const uint8_t *)sc16;
+ 
 +    device const float * y1 = yy + ix*QK_K + y_offset;
 +
 +    float sumf[nr0] = {0.f};
@@ -783,18 +848,18 @@ index 26823d0b9..4d2f725a0 100644
 +        device const uint4 * hp = (device const uint4 *) &x[i];
 +
 +        for (short row = 0; row < nr0; ++row) {
-+            const uint4  hdr = *hp;
-+            const half2  dm  = as_type<half2>(hdr.x);
-+
-+            const uint16_t s0 = (uint16_t) (hdr.y >> shs);
-+            const uint16_t s2 = (uint16_t) (hdr.z >> shs);
-+            const uint16_t s4 = (uint16_t) (hdr.w >> shs);
-+
-+            sc16[0] = s0 & kmask1;
-+            sc16[1] = s2 & kmask1;
-+            sc16[2] = ((s4 >> 0) & kmask2) | ((s0 & kmask3) >> 2);
-+            sc16[3] = ((s4 >> 4) & kmask2) | ((s2 & kmask3) >> 2);
-+
+             const uint4  hdr = *hp;
+             const half2  dm  = as_type<half2>(hdr.x);
+ 
+             const uint16_t s0 = (uint16_t) (hdr.y >> shs);
+             const uint16_t s2 = (uint16_t) (hdr.z >> shs);
+             const uint16_t s4 = (uint16_t) (hdr.w >> shs);
+ 
+             sc16[0] = s0 & kmask1;
+             sc16[1] = s2 & kmask1;
+             sc16[2] = ((s4 >> 0) & kmask2) | ((s0 & kmask3) >> 2);
+             sc16[3] = ((s4 >> 4) & kmask2) | ((s2 & kmask3) >> 2);
+ 
 +            const uint2 qa = q1[0];
 +            const uint2 qb = q1[8];
 +            const uint2 hw = qh[0] >> hsh;
@@ -812,9 +877,9 @@ index 26823d0b9..4d2f725a0 100644
 +
 +            q1 = (device const uint2 *) ((device const char *) q1 + args.nb01);
 +            qh = (device const uint2 *) ((device const char *) qh + args.nb01);
-+            hp = (device const uint4 *) ((device const char *) hp + args.nb01);
-+        }
-+
+             hp = (device const uint4 *) ((device const char *) hp + args.nb01);
+         }
+ 
 +        y1 += NG * QK_K;
 +    }
 +
@@ -853,13 +918,13 @@ index 26823d0b9..4d2f725a0 100644
 +        ushort sgitg) {
 +    const short NSG = FC_mul_mv_nsg;
 +
-+    const int nb = args.ne00/QK_K;
-+
-+    threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
-+    {
+     const int nb = args.ne00/QK_K;
+ 
+     threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
+     {
 +        threadgroup uint64_t * s64 = (threadgroup uint64_t *) shmem;
-+        const int gid = FC_mul_mv_nw*sgitg + tiisg;
-+        const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
 +        for (int i = gid; i < 256; i += gsz) s64[i] = iq2xxs_grid[i];
 +        threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
@@ -936,24 +1001,24 @@ index 26823d0b9..4d2f725a0 100644
 +
 +template<int nr0, typename args_t>
 +void kernel_mul_mv_iq2_xs_f32_v2_impl(
-+        args_t args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
 +        uint   ntg,
 +        ushort tiisg,
 +        ushort sgitg) {
 +    const short NSG = FC_mul_mv_nsg;
-+
-+    const int nb = args.ne00/QK_K;
-+
-+    threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
-+    {
+ 
+     const int nb = args.ne00/QK_K;
+ 
+     threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
+     {
 +        threadgroup uint64_t * s64 = (threadgroup uint64_t *) shmem;
-+        const int gid = FC_mul_mv_nw*sgitg + tiisg;
-+        const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
 +        for (int i = gid; i < 512; i += gsz) s64[i] = iq2xs_grid[i];
 +        threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
@@ -1031,25 +1096,25 @@ index 26823d0b9..4d2f725a0 100644
 +// the iq1 grids hold eight values as nibbles: byte j is weight j and its high nibble weight j + 4
 +template<int nr0, typename args_t>
 +void kernel_mul_mv_iq1_s_f32_v2_impl(
-+        args_t args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
+         args_t args,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
 +        uint   ntg,
 +        ushort tiisg,
 +        ushort sgitg) {
 +    const short NSG = FC_mul_mv_nsg;
-+
-+    const int nb = args.ne00/QK_K;
-+
+ 
+     const int nb = args.ne00/QK_K;
+ 
 +    threadgroup uint32_t * sgrid = (threadgroup uint32_t *) shmem;
-+    {
-+        const int gid = FC_mul_mv_nw*sgitg + tiisg;
-+        const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
-+        for (int i = gid; i < NGRID_IQ1S; i += gsz) sgrid[i] = iq1s_grid_gpu[i];
-+        threadgroup_barrier(mem_flags::mem_threadgroup);
+     {
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         for (int i = gid; i < NGRID_IQ1S; i += gsz) sgrid[i] = iq1s_grid_gpu[i];
+         threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
 +
 +    const int nrb = (args.ne01 + NSG*nr0 - 1)/(NSG*nr0);
@@ -1126,11 +1191,11 @@ index 26823d0b9..4d2f725a0 100644
 +template<int nr0, typename args_t>
 +void kernel_mul_mv_iq1_m_f32_v2_impl(
 +        args_t args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
+         device const char * src0,
+         device const char * src1,
+         device       char * dst,
+         threadgroup  char * shmem,
+         uint3  tgpig,
 +        uint   ntg,
 +        ushort tiisg,
 +        ushort sgitg) {
@@ -1139,11 +1204,11 @@ index 26823d0b9..4d2f725a0 100644
 +    const int nb = args.ne00/QK_K;
 +
 +    threadgroup uint32_t * sgrid = (threadgroup uint32_t *) shmem;
-+    {
-+        const int gid = FC_mul_mv_nw*sgitg + tiisg;
-+        const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
-+        for (int i = gid; i < NGRID_IQ1S; i += gsz) sgrid[i] = iq1s_grid_gpu[i];
-+        threadgroup_barrier(mem_flags::mem_threadgroup);
+     {
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         for (int i = gid; i < NGRID_IQ1S; i += gsz) sgrid[i] = iq1s_grid_gpu[i];
+         threadgroup_barrier(mem_flags::mem_threadgroup);
 +    }
 +
 +    const int nrb = (args.ne01 + NSG*nr0 - 1)/(NSG*nr0);

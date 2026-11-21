@@ -1,8 +1,8 @@
 diff --git a/common/reasoning-budget.cpp b/common/reasoning-budget.cpp
-index 4884299f3..f8895b196 100644
+index 81b7c3e56..fcc90b3c7 100644
 --- a/common/reasoning-budget.cpp
 +++ b/common/reasoning-budget.cpp
-@@ -303,8 +303,29 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
+@@ -304,8 +304,29 @@ bool common_reasoning_budget_force(struct llama_sampler * smpl) {
  
      ctx->state = REASONING_BUDGET_FORCING;
      ctx->force_pos = 0;
@@ -50,7 +50,7 @@ index 1b89a04c4..0d1ff28a4 100644
 +// while the end is being forced it is not one of the forced tokens.
 +void common_reasoning_budget_accept_prompt(struct llama_sampler * smpl, llama_token token);
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index d9c508049..5d42a62a5 100644
+index 564fa9c4d..6d25dd419 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
 @@ -316,17 +316,17 @@ struct common_sampler * common_sampler_init(
@@ -73,7 +73,7 @@ index d9c508049..5d42a62a5 100644
          std::vector<llama_logit_bias> merged = params.logit_bias;
  
 diff --git a/tests/test-reasoning-budget.cpp b/tests/test-reasoning-budget.cpp
-index 3bcc77e17..e4a0e3767 100644
+index a50a10824..75c9ff3b5 100644
 --- a/tests/test-reasoning-budget.cpp
 +++ b/tests/test-reasoning-budget.cpp
 @@ -183,16 +183,63 @@ static void test_reasoning_budget_clone_mid_forcing() {
@@ -140,7 +140,7 @@ index 3bcc77e17..e4a0e3767 100644
      // if COUNTING, force() succeeds and begins forcing the end sequence from the start
      {
          auto * sampler = common_reasoning_budget_init(nullptr, {start}, {end}, forced, 5, REASONING_BUDGET_IDLE);
-@@ -487,16 +534,17 @@ int main(void) {
+@@ -504,16 +551,17 @@ int main(void) {
          test_reasoning_budget("multiple end sequences", sequence, start, end, forced,
              5,      // budget of 5 tokens
              REASONING_BUDGET_IDLE,

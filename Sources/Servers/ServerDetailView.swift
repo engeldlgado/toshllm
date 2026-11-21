@@ -169,21 +169,47 @@ private struct ServerDetailHero: View {
                         .font(.system(size: 23, weight: .bold))
                     modelMenu
                 }
-                Text(model.quant.isEmpty ? loc.t("Configura un modelo para esta instancia", "Configure a model for this instance") : model.quant)
-                    .font(.system(size: 14, weight: .medium)).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text(model.quant.isEmpty ? loc.t("Configura un modelo para esta instancia", "Configure a model for this instance") : model.quant)
+                        .font(.system(size: 14, weight: .medium)).foregroundStyle(.secondary)
+                    if !settings.modelPath.isEmpty {
+                        let fileName = URL(fileURLWithPath: settings.modelPath).lastPathComponent
+                        Text("·")
+                            .foregroundStyle(.tertiary)
+                        Text(fileName)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(settings.modelPath)
+                    }
+                }
                 WrappingFilterLayout(spacing: 7) {
                     if let params = model.paramsB { chip(String(format: "%.1fB params", params), "atom") }
                     chip(model.badges.contains("Vision") ? "Vision" : "Text & Chat", "bubble.left")
                     chip(model.family, "cpu")
+                    if let author = model.author, !author.isEmpty {
+                        chip(author, "person.2")
+                    }
                     chip("GGUF", "shippingbox")
                 }
                 Text(description(for: model))
                     .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
                 if let local = localModel(at: settings.modelPath) {
-                    Button(loc.t("Ver detalles del modelo", "View model details") + "  →") {
-                        inspectedModel = local
+                    HStack(spacing: 14) {
+                        Button(loc.t("Ver detalles del modelo", "View model details") + "  →") {
+                            inspectedModel = local
+                        }
+                        .buttonStyle(.plain).foregroundStyle(Color.appAccent).font(.system(size: 13, weight: .medium))
+
+                        Button {
+                            NSWorkspace.shared.activateFileViewerSelecting([local.url])
+                        } label: {
+                            Label(loc.t("Mostrar en Finder", "Reveal in Finder"), systemImage: "folder")
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).font(.system(size: 12))
+                        .help(loc.t("Abre la carpeta del modelo en el Finder con el archivo seleccionado.",
+                                    "Opens the model's folder in Finder with the file selected."))
                     }
-                    .buttonStyle(.plain).foregroundStyle(Color.appAccent).font(.system(size: 13, weight: .medium))
                 }
             }
         }
@@ -601,8 +627,8 @@ private struct ServerConfigurationWorkspace: View {
                 ServerSettingRow(icon: "key", title: loc.t("Caché KV", "KV cache"),
                                  detail: loc.t("Para el plan de Dynamic MoE", "For the Dynamic MoE plan")) {
                     ToshDropdown(selection: autoKV(settings), options: autoKVOptions(settings, facts), width: 200)
-                        .help(loc.t("Auto usa F16 y pasa a Q8 solo cuando libera memoria que de verdad importa. Turbo4 ahorra más memoria a cambio de algo de velocidad y calidad; nunca se elige solo.",
-                                    "Auto uses F16 and moves to Q8 only when that frees memory that really matters. Turbo4 saves more memory at some speed and quality cost; it is never chosen automatically."))
+                        .help(loc.t("Auto usa F16 y pasa a Q8 solo cuando libera memoria que de verdad importa. Turbo4 ahorra más memoria a cambio de algo de calidad: Auto solo lo elige, si el modelo lo admite, cuando ni F16 ni Q8 dejan los expertos en la GPU, y en ese caso puede ir bastante más rápido. Elige F16 o Q8 para no usarlo nunca.",
+                                    "Auto uses F16 and moves to Q8 only when that frees memory that really matters. Turbo4 saves more memory at some quality cost: Auto picks it, when the model supports it, only if neither F16 nor Q8 keeps the experts on the GPU, and then it can be much faster. Pick F16 or Q8 to never use it."))
                 }
             } else {
                 let kvTypes = ServerSettings.kvTypeChoices(supportsTurbo: facts.supportsTurboKV,

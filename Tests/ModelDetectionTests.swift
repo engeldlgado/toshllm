@@ -294,6 +294,125 @@ final class ModelDetectionTests: XCTestCase {
         XCTAssertEqual(parsed.quant, "Q4_K_M")
     }
 
+    func testAuthorIsWhoPublishedTheFileNotTheBaseModelsMaker() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        ModelName.forgetCachedNames()
+
+        let quantized = dir.appendingPathComponent("Qwen3.5-4B-Q4_K_M.gguf")
+        try writeGGUF(to: quantized, strings: ["general.quantized_by": "Unsloth",
+                                               "general.repo_url": "https://huggingface.co/unsloth",
+                                               "general.base_model.0.organization": "Qwen"])
+        XCTAssertEqual(ModelName.forPath(quantized.path).author, "Unsloth")
+
+        let baseOnly = dir.appendingPathComponent("gemma-3-4b-it-Q4_K_M.gguf")
+        try writeGGUF(to: baseOnly, strings: ["general.base_model.0.organization": "Google",
+                                              "general.base_model.0.repo_url": "https://huggingface.co/google/gemma-3-4b-pt"])
+        XCTAssertNil(ModelName.forPath(baseOnly.path).author)
+        XCTAssertNil(ModelName.forPath(baseOnly.path).repository)
+
+        let quantRepo = dir.appendingPathComponent("olmOCR-2-7B-1025.Q6_K.gguf")
+        try writeGGUF(to: quantRepo, strings: ["general.name": "olmOCR 2 7B 1025",
+                                               "general.url": "https://huggingface.co/mradermacher/olmOCR-2-7B-1025-GGUF",
+                                               "general.base_model.0.organization": "Qwen"])
+        let parsed = ModelName.forPath(quantRepo.path)
+        XCTAssertEqual(parsed.author, "mradermacher")
+        XCTAssertEqual(parsed.repositoryURL?.absoluteString, "https://huggingface.co/mradermacher/olmOCR-2-7B-1025-GGUF")
+    }
+
+    func testRecordedSourceNamesTheRepoAndNothingIsRecordedWhileReading() throws {
+        let dir = try temporaryDirectory()
+        let saved = UserDefaults.standard.object(forKey: SettingsKeys.modelSource)
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+            UserDefaults.standard.set(saved, forKey: SettingsKeys.modelSource)
+        }
+        ModelName.forgetCachedNames()
+        let name = "Ternary-Bonsai-2-27B-PQ2_0-\(UUID().uuidString.prefix(6)).gguf"
+        let recorded = dir.appendingPathComponent(name)
+        try writeGGUF(to: recorded, strings: ["general.name": "Hf"])
+        ModelStore.recordSource("https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/\(name)", forFile: name)
+        let parsed = ModelName.forPath(recorded.path)
+        XCTAssertEqual(parsed.title, "Ternary Bonsai 2 27B")
+        XCTAssertEqual(parsed.author, "prism-ml")
+        XCTAssertEqual(parsed.repositoryURL?.absoluteString, "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf")
+
+        let unrecorded = "DeepHat-V1-7B-\(UUID().uuidString.prefix(6)).Q4_K_M.gguf"
+        try writeGGUF(to: dir.appendingPathComponent(unrecorded),
+                      strings: ["general.url": "https://huggingface.co/mradermacher/DeepHat-V1-7B-GGUF"])
+        _ = ModelName.forPath(dir.appendingPathComponent(unrecorded).path)
+        XCTAssertNil(ModelStore.source(forFile: unrecorded), "reading a name must not invent a download source")
+    }
+
+    func testBrowserDownloadOriginNamesTheRepo() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        ModelName.forgetCachedNames()
+        let url = dir.appendingPathComponent("Foo-7B-Q4_K_M.gguf")
+        try writeGGUF(to: url, strings: ["general.name": "Foo 7B"])
+        let origins = try PropertyListSerialization.data(fromPropertyList: [
+            "https://cas-bridge.xethub.hf.co/xet-bridge-us/abc?X-Amz-Signature=0",
+            "https://huggingface.co/bartowski/Foo-7B-GGUF/blob/main/Foo-7B-Q4_K_M.gguf",
+        ], format: .binary, options: 0)
+        let status = origins.withUnsafeBytes {
+            setxattr(url.path, "com.apple.metadata:kMDItemWhereFroms", $0.baseAddress, origins.count, 0, 0)
+        }
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(ModelName.whereFromsURL(forPath: url.path),
+                       "https://huggingface.co/bartowski/Foo-7B-GGUF/blob/main/Foo-7B-Q4_K_M.gguf")
+        XCTAssertEqual(ModelName.forPath(url.path).author, "bartowski")
+    }
+
+    func testHubAddressesThatNameNoModelAreIgnored() {
+        XCTAssertNil(ModelName.parseHuggingFaceURL("https://cdn-lfs.huggingface.co/repos/ab/cd/0123?X-Amz-Signature=0"))
+        XCTAssertNil(ModelName.parseHuggingFaceURL("https://huggingface.co/datasets/owner/data"))
+        XCTAssertNil(ModelName.parseHuggingFaceURL("https://huggingface.co/api/models/owner/repo"))
+        XCTAssertNil(ModelName.parseHuggingFaceURL("https://huggingface.co/unsloth"))
+        let mirror = ModelName.parseHuggingFaceURL("https://hf-mirror.com/bartowski/Foo-7B-GGUF/blob/main/Foo-7B-Q4_K_M.gguf")
+        XCTAssertEqual(mirror?.author, "bartowski")
+        XCTAssertEqual(mirror?.rawRepo, "Foo-7B-GGUF")
+        XCTAssertEqual(mirror?.repo, "Foo-7B")
+    }
+
+    func testPlaceholderNamesAndSizesGiveWayToTheFile() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        ModelName.forgetCachedNames()
+
+        let upload = dir.appendingPathComponent("Qwen3.6-35B-A3B-dspark-Q8_0.gguf")
+        try writeGGUF(to: upload, strings: ["general.name": "Upload_V2", "general.architecture": "dflash"])
+        let parsed = ModelName.forPath(upload.path)
+        XCTAssertTrue(parsed.title.hasPrefix("Qwen3.6 35B-A3B"), parsed.title)
+        XCTAssertEqual(parsed.family, "Qwen")
+
+        let unsized = dir.appendingPathComponent("Mythos-35B-A3B-Q4_K_M.gguf")
+        try writeGGUF(to: unsized, strings: ["general.name": "Mythos"])
+        XCTAssertEqual(ModelName.forPath(unsized.path).title, "Mythos 35B-A3B")
+
+        let sizedHeader = dir.appendingPathComponent("custom-model-Q4_K_M.gguf")
+        try writeGGUF(to: sizedHeader, strings: ["general.name": "Foo 7B"])
+        XCTAssertEqual(ModelName.forPath(sizedHeader.path).paramsB, 7)
+    }
+
+    func testFamilyFallsBackToTheBaseModelAndArchitectureButNotLlama() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        ModelName.forgetCachedNames()
+        func family(_ file: String, _ strings: [String: String]) throws -> String {
+            let url = dir.appendingPathComponent(file)
+            try writeGGUF(to: url, strings: strings)
+            return ModelName.forPath(url.path).family
+        }
+        XCTAssertEqual(try family("NeoHorse-1-9B-Q5_K_M.gguf",
+                                  ["general.name": "NeoHorse-1-9B", "general.base_model.0.name": "Qwen3.5 9B"]), "Qwen")
+        XCTAssertEqual(try family("Ornith-1.5-9B-MXFP4.gguf",
+                                  ["general.name": "Ornith 1.5 9B", "general.architecture": "qwen35"]), "Qwen")
+        XCTAssertEqual(try family("Mythic-12B-Q4_K_M.gguf",
+                                  ["general.name": "Mythic 12B", "general.architecture": "llama"]), ModelName.otherFamily)
+        XCTAssertEqual(try family("pixtral-12b-Q4_K_M.gguf",
+                                  ["general.name": "Pixtral", "general.architecture": "llama"]), "Mistral")
+    }
+
     func testGGUFFileTypeOverridesStaleBF16MetadataName() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -339,8 +458,18 @@ final class ModelDetectionTests: XCTestCase {
         appendUInt32(4)
         appendUInt32(32_768)
 
+        appendString("general.url")
+        appendUInt32(8)
+        appendString("https://huggingface.co/mradermacher/Qwen3-4B-GGUF")
+        appendString("general.quantized_by")
+        appendUInt32(8)
+        appendString("mradermacher")
+        data.replaceSubrange(16..<24, with: withUnsafeBytes(of: UInt64(6).littleEndian) { Data($0) })
+
         let metadata = try XCTUnwrap(GGUFMetadataCache.parse(from: data))
         XCTAssertEqual(metadata.fileTypeLabel, "IQ4_NL")
+        XCTAssertEqual(metadata.string(for: "general.url"), "https://huggingface.co/mradermacher/Qwen3-4B-GGUF")
+        XCTAssertEqual(metadata.string(for: "general.quantized_by"), "mradermacher")
     }
 
     func testIQ4NLFilenameFallbackKeepsFullQuantizationName() {

@@ -3,6 +3,44 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.88.0] - 2026-11-18
+
+### Added
+
+- **Models can download from a mirror such as hf-mirror.com (#156).** Settings › General › Download source picks Hugging Face, hf-mirror.com or an address of your own, and downloads, search and update checks all go there; the SHA-256 checksum is still verified. HF_ENDPOINT is honored when the app is opened with it.
+
+### Improved
+
+- **LLMs: the engine moves to llama.cpp v1.0.0.** Upstream's fixes and model support since v0.6.0 come with it, and the AMD backend, Dynamic MoE and the rest of the engine work carry over.
+- **LLMs: a model's name comes from its Hugging Face repo, with who published the file next to it (#164).** Placeholders such as "Hf" no longer win, and the server card can reveal the file in Finder. Contributed by [andruwa13](https://github.com/andruwa13) in [#165](https://github.com/engeldlgado/toshllm/pull/165).
+- **The Mac no longer idle-sleeps in the middle of a generation (#163).** While an answer, an image, a video, an upscale, a transcription, a subtitled export or a benchmark runs, ToshLLM keeps the system awake; the display can still turn off.
+
+### Fixed
+
+- **LLMs: Qwen3.5 and Qwen3.8 Flash-Next files from newer converters load instead of failing with "tensor not found".**
+- **LLMs: GGUFs with FP8 weights load instead of being read as another type;** their matrix products run on the CPU.
+- **LLMs on AMD cards: MoE models that choose experts by groups with softmax routing pick the right ones.**
+- **LLMs: Gemma 4 tool calls that start before the model closes its thinking are read as calls.**
+- **LLMs: a client that keeps its connection open after a streamed answer can send its next request on it.**
+- **LLMs on Radeon RX 400/500, Vega, Radeon VII and Radeon Pro Vega/WX: models with BF16 weights, such as Gemma 4 E4B, no longer stop the engine on prompts of 448 tokens or more.** Reported by [andruwa13](https://github.com/andruwa13) in [#149](https://github.com/engeldlgado/toshllm/pull/149).
+- **LLMs on Radeon RX 6000 cards: Gemma 4 26B describes the image it is shown instead of a jumble of coloured text (#166).** The step that lays the image features out on a grid before pooling scattered them; it has done so since 0.87.32.
+- **LLMs: the agent's text search reads past its first 100 matches (#167).** It takes an offset and says which one gives the next page, so a model no longer gets the same 100 lines back each time. Proposed by [Sergey](https://github.com/SergeySlice) in [#167](https://github.com/engeldlgado/toshllm/issues/167).
+- **Chat: Maximum image size under Attachments lines up with the rows around it,** with its icon and its ⓘ where the others have them.
+
+## [0.87.34] - 2026-11-11
+
+### Improved
+
+- **LLMs: with Dynamic MoE, Auto tries a Turbo4 cache before leaving the experts on the CPU (#155).** It can be much faster at some quality cost, as the memory plan says; F16 or Q8 set by hand never use it. On an RX 6700 XT with 3 GB of VRAM free, OLMoE-1B-7B goes from 36 to 180 tokens a second, perplexity 1.3% higher.
+- **LLMs: GPU layers has an Auto setting, one step below 0 (#154).** The engine loads as many layers as fit in free VRAM and keeps the VRAM reserve, counting what the display and other apps already hold, so a model slightly too big for the card no longer overflows it.
+- **LLMs: in a Hugging Face repo's file list, a line separates each file,** so on a wide window the buttons on the right stay with their quantization. Contributed by [andruwa13](https://github.com/andruwa13) in [#157](https://github.com/engeldlgado/toshllm/pull/157).
+
+### Fixed
+
+- **LLMs: a model whose file declares an MTP head it does not carry loads without it instead of failing (#160).** Some quantized uploads keep the head's entry and drop its weights; the engine takes upstream llama.cpp's fix for these files, and the app no longer asks it to draft from a head that is not there.
+- **LLMs: "Start server on app launch" starts the server with the app, not when the chat window first appears.** A login item that opens the app with its window minimized or hidden starts the server too.
+- **Chat: the Attachments settings show again under Agents and attachments (#161).** PDF as images for vision models, the maximum image size and pasting long text as a file had no place in the window. Contributed by [andruwa13](https://github.com/andruwa13) in [#162](https://github.com/engeldlgado/toshllm/pull/162).
+
 ## [0.87.33] - 2026-11-04
 
 ### Fixed

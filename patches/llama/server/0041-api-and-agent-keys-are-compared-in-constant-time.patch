@@ -1,8 +1,11 @@
 diff --git a/tools/server/server-common.cpp b/tools/server/server-common.cpp
-index c1b517a34..c826697be 100644
+index a94a28b76..e5d0a62d7 100644
 --- a/tools/server/server-common.cpp
 +++ b/tools/server/server-common.cpp
-@@ -106,10 +106,21 @@ json server_slot_stats::to_json() const {
+@@ -164,16 +164,27 @@ json server_slot_stats::to_json() const {
+ 
+     return base;
+ }
  
  //
  // random string / id
@@ -24,11 +27,17 @@ index c1b517a34..c826697be 100644
  
      std::random_device rd;
      std::mt19937 generator(rd());
+ 
+     std::string result(32, ' ');
+ 
 diff --git a/tools/server/server-common.h b/tools/server/server-common.h
-index 6165d871c..ca9f9af30 100644
+index 05622849a..0ca6dae5e 100644
 --- a/tools/server/server-common.h
 +++ b/tools/server/server-common.h
-@@ -97,10 +97,13 @@ json format_error_response(const std::string & message, const enum error_type ty
+@@ -99,16 +99,19 @@ json format_error_response(const std::string & message, const enum error_type ty
+ // path of the running llama-server binary, used to spawn siblings. throws on failure
+ std::filesystem::path get_server_exec_path();
+ 
  //
  // random string / id
  //
@@ -42,11 +51,17 @@ index 6165d871c..ca9f9af30 100644
  
  // get a random marker; note: each time the server restarts, the marker will be different
  const char * get_media_marker();
+ 
+ //
+ // audio utils
 diff --git a/tools/server/server-http.cpp b/tools/server/server-http.cpp
-index aeb782fe2..f940e3bbb 100644
+index ed2681cf3..acc52a7c0 100644
 --- a/tools/server/server-http.cpp
 +++ b/tools/server/server-http.cpp
-@@ -280,11 +280,11 @@ bool server_http_context::init_listener(const common_params & params) {
+@@ -364,17 +364,17 @@ bool server_http_context::init_listener(const common_params & params) {
+ 
+         // remove the "Bearer " prefix if needed
+         static std::string prefix = "Bearer ";
          if (req_api_key.substr(0, prefix.size()) == prefix) {
              req_api_key = req_api_key.substr(prefix.size());
          }
@@ -59,20 +74,28 @@ index aeb782fe2..f940e3bbb 100644
  
          // API key is invalid or not provided
          res.status = 401;
+         res.set_content(
+             safe_json_to_str(json {
+                 {"error", {
 diff --git a/tools/server/server-tools.cpp b/tools/server/server-tools.cpp
-index 4bc757ff5..bdfd75bb9 100644
+index e48b9f7e0..3cdc0c3e0 100644
 --- a/tools/server/server-tools.cpp
 +++ b/tools/server/server-tools.cpp
-@@ -2089,11 +2089,11 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
+@@ -2082,16 +2082,17 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
+     auto hidden_from = [this](const server_http_req & req, const server_tool & tool) {
+         if (tool.type() != "mcp" || agent_only.empty()) {
+             return false;
          }
          const auto * mcp_tool = dynamic_cast<const server_mcp_tool *>(&tool);
          if (mcp_tool == nullptr || agent_only.count(mcp_tool->server_name) == 0) {
              return false;
          }
--        return agent_key.empty() || get_header(req.headers, "x-tosh-agent-key") != agent_key;
 +        return agent_key.empty() || !same_secret(get_header(req.headers, "x-tosh-agent-key"), agent_key);
      };
  
      // The built-in tools reach this computer's shell and files: another computer gets them only with the
      // API key, which the server then checks on every request.
      auto local_only = [this](const server_http_req & req, const server_tool & tool) {
+         if (tool.type() == "mcp" || keyed) {
+             return false;
+         }

@@ -1,48 +1,60 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 1e4bf6e4f..5b81531c0 100644
+index ef1cbac6c..294a5af6a 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -2791,11 +2791,11 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -2846,16 +2846,17 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+                     ((dk == 384 || dk == 640) && (k_turbo || v_turbo)) ||
+                     (dk == 72 && f16_kv) ||
+                     // UNet diffusion heads (SD 1.5): not whole quant blocks, so f16 only
                      ((dk == 40 || dk == 80 || dk == 160) && f16_kv);
                  const bool simple =
                      dk_ok &&
                      op->src[2]->ne[0] == dk &&
                      k_std && v_std && turbo_dk_ok &&
--                    max_bias == 0.0f && softcap == 0.0f;
 +                    max_bias == 0.0f;
                  if (simple) {
                      return true;
                  }
                  // MLA: asymmetric head, K is the latent plus the rope tail and V is the bare
                  // latent. deepseek2 is 576/512; mistral4 has a 256-wide latent, so 320/256.
+                 const int64_t dv = op->src[2]->ne[0];
+                 const bool mla_amd =
+                     ((dk == 576 && dv == 512) || (dk == 320 && dv == 256)) &&
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 4973ecfdd..bfe3021bd 100644
+index 294d3d955..eb01f993a 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -5022,11 +5022,11 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -5211,16 +5211,17 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+     // sparse attention (QSA / DeepSeek-V4): the mask already carries the selection, the
+     // index kernel compacts it and the vec kernel walks the list instead of the whole cache
+     const int amd_n_kv_max = ggml_metal_op_flash_attn_ext_n_kv_max_sparse(op);
      const bool amd_sparse  = amd_n_kv_max > 0 && ne01 == 1;
      const int amd_n_kv_pad = amd_sparse ? GGML_PAD(amd_n_kv_max, OP_FLASH_ATTN_EXT_VEC_NCPSG) : 0;
  
      if (TOSH_ENV("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
          !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
--        !has_bias && !has_scap) {
 +        !has_bias) {
  
          ggml_metal_kargs_flash_attn_ext_amd args = {
              /*.ne01          =*/ ne01,
              /*.ne02          =*/ ne02,
              /*.ne03          =*/ ne03,
+             /*.nb01          =*/ nb01,
+             /*.nb02          =*/ nb02,
+             /*.nb03          =*/ nb03,
 diff --git a/ggml/src/ggml-metal/kernels/fa.metal b/ggml/src/ggml-metal/kernels/fa.metal
-index 770f2dfc4..1a302e20d 100644
+index 6df91f9c4..1a302e20d 100644
 --- a/ggml/src/ggml-metal/kernels/fa.metal
 +++ b/ggml/src/ggml-metal/kernels/fa.metal
-@@ -134,11 +134,13 @@ kernel void kernel_flash_attn_ext_vec_amd(
+@@ -131,16 +131,19 @@ kernel void kernel_flash_attn_ext_vec_amd(
+             for (ushort o = 1; o < SUBW; o <<= 1) {
+                 pl += simd_shuffle_xor(pl, o);
+             }
          } else {
              pl = simd_sum(pl);
          }
          const float p = pl; // full DK-dim Q.K
  
--        const float pp   = p*args.scale + mv;
 +        // the host has already divided the scale by the softcap
 +        const float ps   = p*args.scale;
 +        const float pp   = (args.logit_softcap != 0.0f ? args.logit_softcap*precise::tanh(ps) : ps) + mv;
@@ -51,13 +63,18 @@ index 770f2dfc4..1a302e20d 100644
          const float w    = msk ? 0.0f : exp(pp - nm);
  
          device const v_t * vb = (device const v_t *) (vp + (uint64_t) i11a*args.nb21);
-@@ -598,11 +600,12 @@ kernel void kernel_flash_attn_ext_tile_amd(
+         for (short c = 0; c < NCV; ++c) {
+             const short ch = lch + c*SUBW;
+             if (ch < DV4) {
+@@ -594,16 +597,18 @@ kernel void kernel_flash_attn_ext_tile_amd(
+             for (short c = 0; c < NCK; ++c) {
+                 const short ch = tiisg + c*NW;
+                 if (ch < DK4) {
                      pl += dot(myq[c], (float4) sk[jj*DK4 + ch]);
                  }
              }
              const float p = simd_sum(pl); // full DK-dim Q.K
  
--            const float pp   = p*args.scale + mv;
 +            const float ps   = p*args.scale;
 +            const float pp   = (args.logit_softcap != 0.0f ? args.logit_softcap*precise::tanh(ps) : ps) + mv;
              const float nm   = max(m, pp);
@@ -65,7 +82,13 @@ index 770f2dfc4..1a302e20d 100644
              const float w    = exp(pp - nm);
  
              for (short c = 0; c < NCV; ++c) {
-@@ -937,10 +940,13 @@ kernel void kernel_flash_attn_ext_pf_amd(
+                 const short ch = tiisg + c*NW;
+                 if (ch < DV4) {
+                     acc[c] = acc[c]*corr + w*(float4) sv[jj*DV4 + ch];
+@@ -932,16 +937,19 @@ kernel void kernel_flash_attn_ext_pf_amd(
+                 }
+             }
+         }
  
          for (short rr = 0; rr < NQR; ++rr) {
              const short row = qg + NQG*rr;
@@ -79,11 +102,17 @@ index 770f2dfc4..1a302e20d 100644
                  } else if (j0 + kg + 16*cc >= args.ne11) {
                      sc[rr][cc] = -INFINITY;
                  }
+                 mx = max(mx, sc[rr][cc]);
+             }
+             for (ushort o = 1; o < 16; o <<= 1) {
 diff --git a/ggml/src/ggml-metal/kernels/fa_w64.metal b/ggml/src/ggml-metal/kernels/fa_w64.metal
 index e945e7e98..c969b8925 100644
 --- a/ggml/src/ggml-metal/kernels/fa_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/fa_w64.metal
-@@ -163,10 +163,13 @@ kernel void kernel_flash_attn_ext_pf_amd_w64(
+@@ -160,16 +160,19 @@ kernel void kernel_flash_attn_ext_pf_amd_w64(
+                 }
+             }
+         }
  
          for (short rr = 0; rr < NQR; ++rr) {
              const short row = qg + NQG*rr;
@@ -97,3 +126,6 @@ index e945e7e98..c969b8925 100644
                  } else if (j0 + kg + LG*cc >= args.ne11) {
                      sc[rr][cc] = -INFINITY;
                  }
+                 mx = max(mx, sc[rr][cc]);
+             }
+             for (ushort o = 1; o < LG; o <<= 1) {

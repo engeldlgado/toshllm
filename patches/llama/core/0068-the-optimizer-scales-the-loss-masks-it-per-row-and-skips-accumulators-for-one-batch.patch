@@ -1,5 +1,5 @@
 diff --git a/ggml/include/ggml-opt.h b/ggml/include/ggml-opt.h
-index 1c2ed79..469dbc3 100644
+index 1c2ed79b7..469dbc39f 100644
 --- a/ggml/include/ggml-opt.h
 +++ b/ggml/include/ggml-opt.h
 @@ -26,50 +26,69 @@ extern "C" {
@@ -136,7 +136,7 @@ index 1c2ed79..469dbc3 100644
      GGML_API ggml_opt_result_t ggml_opt_result_init(void);
      GGML_API void ggml_opt_result_free(ggml_opt_result_t result);
 diff --git a/ggml/src/ggml-opt.cpp b/ggml/src/ggml-opt.cpp
-index 53903de..3abf00e 100644
+index 53903defa..3abf00e74 100644
 --- a/ggml/src/ggml-opt.cpp
 +++ b/ggml/src/ggml-opt.cpp
 @@ -5,82 +5,97 @@

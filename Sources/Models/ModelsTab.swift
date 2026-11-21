@@ -498,9 +498,14 @@ private struct CatalogModelInspector: View {
         let path = url.pathComponents[1..<resolve].joined(separator: "/")
         return URL(string: "https://huggingface.co/\(path)")
     }
-    private var repositoryOwner: String { repositoryURL?.pathComponents.dropFirst().first ?? "—" }
+    private var repositoryOwner: String {
+        if let owner = repositoryURL?.pathComponents.dropFirst().first, !owner.isEmpty {
+            return owner
+        }
+        return ModelName.forPath(model.fileName).author ?? "—"
+    }
     private var quantization: String { ModelName.forPath(model.fileName).quant }
-    private var modelFamily: String { ModelName(model.name).title.split(separator: " ").first.map(String.init) ?? model.name }
+    private var modelFamily: String { ModelName.forPath(model.fileName).family }
     private func openRepository() { if let repositoryURL { NSWorkspace.shared.open(repositoryURL) } }
 }
 
@@ -760,6 +765,7 @@ private struct RepoCard: View {
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.orange.opacity(0.12))
+                    Divider()
                 }
                 Group {
                     if let files = search.files[repo.id] {
@@ -767,10 +773,11 @@ private struct RepoCard: View {
                             Text(loc.t("Sin archivos .gguf directos", "No direct .gguf files"))
                                 .font(.caption).foregroundStyle(.secondary).padding(12)
                         } else {
-                            LazyVStack(spacing: 8) {
-                                ForEach(files) { FileRow(repo: repo.id, file: $0) }
+                            LazyVStack(spacing: 0) {
+                                ForEach(files) { file in
+                                    FileRow(repo: repo.id, file: file, showsDivider: file.id != files.last?.id)
+                                }
                             }
-                            .padding(12)
                         }
                     } else {
                         ProgressView().controlSize(.small).padding(12)
@@ -790,6 +797,7 @@ private struct RepoCard: View {
 private struct FileRow: View {
     let repo: String
     let file: HFFile
+    var showsDivider = true
     @EnvironmentObject var search: SearchStore
     @EnvironmentObject var models: ModelStore
     @EnvironmentObject var loc: Localizer
@@ -805,17 +813,25 @@ private struct FileRow: View {
             spec: .estimated(fileBytes: file.sizeBytes, isMoE: search.isMoE(repo: repo, file: file),
                              name: URL(fileURLWithPath: file.path).lastPathComponent,
                              split: search.weightSplit(repo: repo, file: file)), hw: hardware)
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                ModelTitleLabel(ModelName.forPath(file.path), titleFont: .caption)
-                EstimateLine(est: est)
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ModelTitleLabel(ModelName.forPath(file.path), titleFont: .caption)
+                    EstimateLine(est: est)
+                }
+                Spacer()
+                Text(file.sizeGB).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    modelPill(est: est)
+                    if repoHasVision { visionPill }
+                    if let draft = search.draftRepos[repo] { dflashPill(draft) }
+                }
             }
-            Spacer()
-            Text(file.sizeGB).font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                modelPill(est: est)
-                if repoHasVision { visionPill }
-                if let draft = search.draftRepos[repo] { dflashPill(draft) }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            if showsDivider {
+                Divider()
             }
         }
     }

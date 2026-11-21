@@ -321,13 +321,13 @@ struct ServerSettings {
         let faValue = kvNeedsFlashAttention ? "1" : (effectiveFaAmd ? "auto" : flashAttn)
         var args = [
             "-m", modelPath,
-            "-ngl", String(ngl),
+            "-ngl", nglArgument,
             "-c", String(ctx),
             "-t", String(threads),
             "-fa", faValue,
             "--host", localNetworkDiscovery ? "0.0.0.0" : "127.0.0.1",
             "--port", String(port),
-        ]
+        ] + fitTargetArguments
         // under the plan the engine picks offload and batch; by hand, Full GPU offloads nothing
         let planOwnsMemory = usesAutoPlan || manualFullGPU
         if ncmoe > 0 && !planOwnsMemory { args += ["--n-cpu-moe", String(ncmoe)] }
@@ -385,6 +385,7 @@ struct ServerSettings {
             args += sympyArguments
         }
         if uiMcpProxy { args.append("--ui-mcp-proxy") }
+        args += unauthenticatedToolsArguments(toolsEnabled: agentToolsEnabled || !sympyArguments.isEmpty || uiMcpProxy)
         if persistCache && effectiveFaAmd {
             args += ["--slot-save-path", Self.slotCacheDir(port: port).path]
         }
@@ -414,6 +415,28 @@ struct ServerSettings {
         return args
     }
 
+    /// `-ngl` as the engine takes it. Auto (below 0) leaves the layers to the engine's fit,
+    /// except under Full GPU chosen by hand.
+    var nglArgument: String {
+        guard ngl < 0 else { return String(ngl) }
+        return manualFullGPU ? "all" : "auto"
+    }
+
+    /// Under Auto the fit keeps free the same VRAM reserve as the memory plan.
+    var fitTargetArguments: [String] {
+        guard nglArgument == "auto" else { return [] }
+        let indices = selectedGPUIndices
+        let vramMB = ServerController.availableGPUs().filter { indices.contains($0.index) }.map(\.vramMB).max() ?? 0
+        return ["--fit-target", String(Self.effectiveVramReserveMB(vramReserveMB, vramMB: vramMB))]
+    }
+
+    /// llama-bench takes no `-ngl auto`, but fits with a target. The server's fit leaves the
+    /// layers alone once experts are placed on the CPU, so that case loads them all.
+    private var benchmarkLayerArguments: [String] {
+        guard ngl < 0 else { return ["-ngl", String(ngl)] }
+        return nglArgument == "auto" && ncmoe == 0 ? fitTargetArguments : ["-ngl", "99"]
+    }
+
     /// Router writes one entry per model with the same context, but a multi-head model
     /// caches several times more per token than a GQA one and can overflow VRAM on
     /// load, which hangs the driver. Shrink the context for the models that don't fit.
@@ -440,6 +463,12 @@ struct ServerSettings {
         return value
     }
 
+    /// The engine refuses tools on the network without an API key; the key stays optional
+    /// here, and the engine still logs its warning once at startup.
+    func unauthenticatedToolsArguments(toolsEnabled: Bool) -> [String] {
+        localNetworkDiscovery && !apiKeyEnabled && toolsEnabled ? ["--allow-unauthenticated-tools"] : []
+    }
+
     /// Router-mode CLI args: no `-m`, the preset file lists every model. Per-model
     /// flags (mmproj, ncmoe, MTP...) live in that INI instead, see `routerPresetINI`.
     private var routerArguments: [String] {
@@ -463,6 +492,7 @@ struct ServerSettings {
             args += sympyArguments
         }
         if uiMcpProxy { args.append("--ui-mcp-proxy") }
+        args += unauthenticatedToolsArguments(toolsEnabled: agentToolsEnabled || !sympyArguments.isEmpty || uiMcpProxy)
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         args += Self.chatUIArgs
         args += extraArgTokens.cli
@@ -508,8 +538,9 @@ struct ServerSettings {
             let modelCtx = Self.routerCtx(forModel: path, requested: ctx, ncmoe: ncmoeByPath[path] ?? 0,
                                           kvScale: Estimator.kvTypeScale(cacheTypeK),
                                           reserveMB: vramReserveMB)
-            var lines = ["[\(alias)]", "model = \(path)", "n-gpu-layers = \(ngl)",
+            var lines = ["[\(alias)]", "model = \(path)", "n-gpu-layers = \(nglArgument)",
                          "ctx-size = \(modelCtx)", "threads = \(threads)", "flash-attn = \(faValue)"]
+            if let target = fitTargetArguments.last { lines.append("fit-target = \(target)") }
             if let ncmoe = ncmoeByPath[path], ncmoe > 0 { lines.append("n-cpu-moe = \(ncmoe)") }
             if let mode = Self.loadMode(noMmap: noMmap, mlock: mlock) { lines.append("load-mode = \(mode)") }
             let mmproj = loadVision ? Self.mmprojPath(forModel: path) : nil
@@ -590,7 +621,7 @@ struct ServerSettings {
         // Same load mode as the server, or the numbers are not the ones the app
         // delivers: with experts on the CPU, locking the model is worth most of
         // the prompt speed.
-        var args = ["-m", modelPath, "-ngl", String(ngl), "-r", "2",
+        var args = ["-m", modelPath] + benchmarkLayerArguments + ["-r", "2",
                     "-p", String(benchPPClamped), "-n", String(benchTGClamped)]
         let mode = Self.loadMode(noMmap: noMmap, mlock: mlock)
         if let mode { args += ["--load-mode", mode] }
@@ -801,6 +832,10 @@ struct ServerSettings {
             // --dynamic-moe runs the plan; a forced mode or the retry without it rides on TOSH_AUTO
             if planWithoutDMoE { env["TOSH_AUTO"] = "nodmoe" } else if executionMode == "dmoe" { env["TOSH_AUTO"] = "dmoe" }
             env["TOSH_AUTO_KV"] = autoKVMode
+            // Auto falls back to turbo4 only where F16 and Q8 leave the experts on the CPU
+            if autoKVMode == "auto", !Self.isAppleSilicon, Self.modelSupportsTurboKV(at: modelPath) {
+                env["TOSH_AUTO_KV_TURBO4"] = "1"
+            }
             if dynamicMoeLeanRAM { env["TOSH_AUTO_HOST_BANK"] = "lean" }
             env["TOSH_AUTO_PLAN_FILE"] = AutoMemoryPlan.planURL(port: port).path
         } else if prefetchExperts && ((ncmoe > 0 && !manualFullGPU) || routerMode) {
@@ -1145,13 +1180,11 @@ struct ServerSettings {
         }
     }
 
-    /// Whether a GGUF ships the MTP (multi-token prediction) head. Quantizers often
-    /// strip it but leave the key at 0, and the server aborts on the missing tensors,
-    /// so trust the value and fall back to the tensor names.
+    /// Whether a GGUF ships the MTP (multi-token prediction) head. Quantizers often strip
+    /// the head and keep `nextn_predict_layers`, at 0 or at its original count, so the
+    /// tensors decide: the server cannot draft from a head the file does not carry.
     nonisolated static func modelHasMTP(at path: String) -> Bool {
-        if let layers = ggufUInt32("nextn_predict_layers", at: path) {
-            return layers >= 1
-        }
+        if ggufUInt32("nextn_predict_layers", at: path) == 0 { return false }
         return GGUFMetadataCache.hasNextNTensor(at: path)
     }
 
@@ -1828,6 +1861,13 @@ final class ServerController: ObservableObject {
         availableGPUs().contains { $0.isExternal }
     }
 
+    func startOnLaunchIfEnabled() {
+        let settings = ServerSettings.fromDefaults()
+        guard UserDefaults.standard.bool(forKey: SettingsKeys.autoStart), state == .stopped,
+              settings.routerMode || !settings.modelPath.isEmpty else { return }
+        start(settings)
+    }
+
     func start(_ settings: ServerSettings) {
         guard state == .stopped || isFailed else { return }
         guard FileManager.default.fileExists(atPath: settings.serverBinary) else {
@@ -2016,7 +2056,7 @@ final class ServerController: ObservableObject {
                 : " · peer group \($0.peerGroupID) (\($0.peerCount) GPUs)"
             return "    [\($0.index)] \($0.name) · \($0.vramGB) GB\(peer)\($0.isExternal ? " · EXTERNAL/eGPU" : "")\($0.isIntegrated ? " · iGPU (not auto-selected)" : "")"
         }.joined(separator: "\n")
-        let envKeys = ["TOSH_AUTO", "TOSH_AUTO_KV", "TOSH_AUTO_HOST_BANK", "GGML_METAL_VRAM_RESERVE_MB",
+        let envKeys = ["TOSH_AUTO", "TOSH_AUTO_KV", "TOSH_AUTO_KV_TURBO4", "TOSH_AUTO_HOST_BANK", "GGML_METAL_VRAM_RESERVE_MB",
                        "GGML_METAL_DEVICE_INDEX", "GGML_METAL_DEVICES", "GGML_METAL_DEVICE_LIST",
                        "GGML_METAL_SHARED_BUFFERS_DISABLE", "TOSH_FA_AMD",
                        "GGML_SCHED_PREFETCH_EXPERTS", "GGML_CPU_NO_REPACK",
@@ -2047,7 +2087,7 @@ final class ServerController: ObservableObject {
          GPUs detected:
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
-         settings: ngl=\(settings.ngl) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn)\(kvLine) cacheRAM=\(settings.cacheRAM)
+         settings: ngl=\(settings.nglArgument) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn)\(kvLine) cacheRAM=\(settings.cacheRAM)
          dflash : \(settings.routerMode ? "per-model router plan" : settings.dflashPlanSummary)
          env: \(envLine)
          args: \(redact(settings.arguments).joined(separator: " "))

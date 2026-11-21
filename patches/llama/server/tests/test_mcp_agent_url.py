@@ -46,12 +46,15 @@ class AgentUrlTest(unittest.TestCase):
         """The base_url the server gave its agent for one chat request, listening on `host`."""
         log, port = os.path.join(self.dir, f"agent-{port_safe(host)}.log"), free_port()
         config = {"mcpServers": {"agent": {"command": sys.executable, "args": ["-I", PROBE, log], "timeout_ms": 30000}}}
+        # the engine refuses tools on any address but loopback unless told the network is trusted
+        trusted = [] if host in ("127.0.0.1", "localhost", "::1") else ["--allow-unauthenticated-tools"]
         process = subprocess.Popen([BINARY, "--host", host, "--port", str(port), "--offline", "--no-ui",
-                                    "--mcp-servers-json", json.dumps(config), "--mcp-agent", "agent"],
+                                    "--mcp-servers-json", json.dumps(config), "--mcp-agent", "agent", *trusted],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             deadline = time.monotonic() + 600
             while time.monotonic() < deadline:
+                self.assertIsNone(process.poll(), f"llama-server exited listening on {host}")
                 connection = http.client.HTTPConnection(host, port, timeout=5)
                 try:
                     connection.request("GET", "/health")

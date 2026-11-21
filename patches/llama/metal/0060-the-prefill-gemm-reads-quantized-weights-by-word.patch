@@ -1,29 +1,11 @@
-diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index d7b00f286..e49737a39 100644
---- a/ggml/src/ggml-metal/ggml-metal-device.cpp
-+++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1173,16 +1173,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
-     // Both floors were derived against the 32-lane tile. The 64-lane rewrite moved the
-     // crossover, and it moved by a different amount per type, so each carries its own:
-     // a single number would have to pick whom to hurt (q8_0 gains 3.7% where q4_K loses 3.1%).
-     // Types with no measurement of their own keep the width default.
-     int wide_floor = wide_floor_env ? wide_floor_env : (simd_width == 64 ? 448 : 112);
--    // On 32 lanes q5_0 and q5_1 never earn the wide tile: it costs them 5 to 30% from 48 to
--    // 2048 tokens, while the same tile is worth 24% to them on 64 lanes.
--    if (!wide_floor_env && simd_width == 32 &&
--        (tsrc0 == GGML_TYPE_Q5_0 || tsrc0 == GGML_TYPE_Q5_1)) {
--        wide_floor = INT32_MAX;
--    }
-     if (!wide_floor_env && simd_width == 64) {
-         switch (tsrc0) {
-             // measured one type at a time over 128/192/256/384 tokens: 192 is where the tile
-             // starts paying for these, and below it every type loses (128 costs 4 to 19%)
-             case GGML_TYPE_Q8_0:
 diff --git a/ggml/src/ggml-metal/kernels/dequantize.h b/ggml/src/ggml-metal/kernels/dequantize.h
-index a888c478f..06006e7a7 100644
+index 53000bb6a..06006e7a7 100644
 --- a/ggml/src/ggml-metal/kernels/dequantize.h
 +++ b/ggml/src/ggml-metal/kernels/dequantize.h
-@@ -695,10 +695,222 @@ void dequantize_lo(device const block_q4_K * xb, short il, bool lo, thread type4
+@@ -692,44 +692,226 @@ void dequantize_lo(device const block_q4_K * xb, short il, bool lo, thread type4
+     dequantize_q4_K_impl<true>(xb, il, lo, reg);
+ }
+ 
  template <typename type4x4>
  void dequantize_lo(device const block_q5_K * xb, short il, bool lo, thread type4x4 & reg) {
      dequantize_q5_K_impl<true>(xb, il, lo, reg);
@@ -50,7 +32,7 @@ index a888c478f..06006e7a7 100644
 +    return (i & 1) ? ushort(w[i/2] >> 16) : ushort(w[i/2] & 0xFFFF);
 +}
 +
-+template <typename block_q, typename type4x4>
+ template <typename block_q, typename type4x4>
 +void dequantize_words(device const block_q * xb, short il, thread type4x4 & reg) {}
 +
 +template <typename type4x4>
@@ -98,14 +80,14 @@ index a888c478f..06006e7a7 100644
 +
 +    for (int i = 0; i < 8; i++) {
 +        const ushort qsi = word_half(w, i);
-+        reg_f[i/2][2*(i%2) + 0] = d1 * (qsi & mask0) + md;
-+        reg_f[i/2][2*(i%2) + 1] = d2 * (qsi & mask1) + md;
-+    }
-+
-+    reg = (type4x4) reg_f;
-+}
-+
-+template <typename type4x4>
+         reg_f[i/2][2*(i%2) + 0] = d1 * (qsi & mask0) + md;
+         reg_f[i/2][2*(i%2) + 1] = d2 * (qsi & mask1) + md;
+     }
+ 
+     reg = (type4x4) reg_f;
+ }
+ 
+ template <typename type4x4>
 +void dequantize_words(device const block_q4_1 * xb, short il, thread type4x4 & reg) {
 +    device const uint32_t * q32 = (device const uint32_t *) xb;
 +    const half2 dm = as_type<half2>(q32[0]);
@@ -121,13 +103,13 @@ index a888c478f..06006e7a7 100644
 +
 +    for (int i = 0; i < 8; i++) {
 +        const ushort qsi = word_half(w, i);
-+        reg_f[i/2][2*(i%2) + 0] = ((qsi & mask0) * d1) + m;
-+        reg_f[i/2][2*(i%2) + 1] = ((qsi & mask1) * d2) + m;
-+    }
-+
-+    reg = (type4x4) reg_f;
-+}
-+
+         reg_f[i/2][2*(i%2) + 0] = ((qsi & mask0) * d1) + m;
+         reg_f[i/2][2*(i%2) + 1] = ((qsi & mask1) * d2) + m;
+     }
+ 
+     reg = (type4x4) reg_f;
+ }
+ 
 +// The fifth bit goes into the integer next to its nibble, so each weight is still one exact
 +// product and one add, as in dequantize_q5_0, with no per-weight shifts of the nibble.
 +template <typename type4x4>
@@ -138,10 +120,10 @@ index a888c478f..06006e7a7 100644
 +    const ushort mask1 = mask0 << 8;
 +    const uint hq = qh >> (16*il);
 +    const short s0 = 4 + 4*il;
-+
-+    float4x4 reg_f;
-+
-+    for (int i = 0; i < 8; i++) {
+ 
+     float4x4 reg_f;
+ 
+     for (int i = 0; i < 8; i++) {
 +        const uint u  = word_half(w, i);
 +        const uint x0 = (u & mask0) | (((hq >> (2*i    )) & 1) << s0);
 +        const uint x1 = (u & mask1) | (((hq >> (2*i + 1)) & 1) << (s0 + 8));
@@ -190,20 +172,20 @@ index a888c478f..06006e7a7 100644
 +    const float min = dm.y;
 +    const uint8_t sc = xb->scales[il];
 +
-+    const int qoff = 32*((int) il/8) + 16*((int) il & 1);
+     const int qoff = 32*((int) il/8) + 16*((int) il & 1);
 +    const uint4 qw = load_words16((device const uint16_t *)(xb->qs + qoff));
 +    il = (il/2)%4;
 +
 +    half  coef = il>1 ? (il>2 ? 1/64.h : 1/16.h) : (il>0 ? 1/4.h : 1.h);
 +    uchar mask = il>1 ? (il>2 ? 192    : 48)     : (il>0 ? 12    : 3);
 +    const float dl = d * (sc & 0xF) * coef, ml = min * (sc >> 4);
-+
-+    const ushort mask1 = (ushort) mask << 8;
-+    const float  dl2   = dl / 256.f;
-+
-+    float4x4 reg_f;
-+
-+    for (int i = 0; i < 8; ++i) {
+ 
+     const ushort mask1 = (ushort) mask << 8;
+     const float  dl2   = dl / 256.f;
+ 
+     float4x4 reg_f;
+ 
+     for (int i = 0; i < 8; ++i) {
 +        const ushort qv = word_half(qw, i);
 +        reg_f[i/2][2*(i%2) + 0] = dl  * (qv & mask)  - ml;
 +        reg_f[i/2][2*(i%2) + 1] = dl2 * (qv & mask1) - ml;
@@ -239,18 +221,22 @@ index a888c478f..06006e7a7 100644
 +    }
 +
 +    reg = (type4x4) reg_f;
-+}
-+
+ }
+ 
  template <typename type4x4>
  void dequantize_q6_K(device const block_q6_K *xb, short il, thread type4x4 & reg) {
      const half d_all = xb->d;
      device const uint16_t * ql = (device const uint16_t *)xb->ql;
      device const uint16_t * qh = (device const uint16_t *)xb->qh;
+     device const int8_t * scales = (device const int8_t *)xb->scales;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
-index 2ec7bc6bb..f5ed223d1 100644
+index f125e8592..63724e4f5 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mm.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
-@@ -274,10 +274,12 @@ kernel void kernel_mul_mm(
+@@ -280,16 +280,18 @@ kernel void kernel_mul_mm(
+         } else {
+             S0_4x4 temp_a;
+             if (loadA) {
                  // q4_K/q5_K wide: il is il0 + 2*(t % 8) with t = loop_k/NK, so the scale pair's
                  // j < 4 is (loop_k & 128) == 0, uniform per wave instead of derived per lane
                  if (FC_mul_mm_uniform_scale && NLR == 8 &&
@@ -263,13 +249,18 @@ index 2ec7bc6bb..f5ed223d1 100644
                  }
              }
  
-@@ -845,11 +847,15 @@ kernel void kernel_mul_mm_id(
+             if (!FC_mul_mm_double_buffer) {
+                 threadgroup_barrier(mem_flags::mem_threadgroup);
+             }
+@@ -788,19 +790,26 @@ kernel void kernel_mul_mm_id(
+                 // manual path stores row-major within the 8x8 block so (k, k+1)
+                 // pairs sit contiguous for its packed-half2 compute loop
+                 const short el = FC_mul_mm_manual ? (8*lx + ly) : (8*ly + lx);
  
                  *(sa + 64*ib + el) = loop_k + 16*il + i < args.ne00 ? (S0) *((device T0 *) x + i) : (S0) 0;
              }
          } else {
              S0_4x4 temp_a;
--            dequantize_func(x, il, temp_a);
 +            if (FC_mul_mm_manual && has_dequantize_words<block_q>()) {
 +                dequantize_words(x, il, temp_a);
 +            } else {
@@ -278,5 +269,13 @@ index 2ec7bc6bb..f5ed223d1 100644
  
              threadgroup_barrier(mem_flags::mem_threadgroup);
  
-             const short sy = (tiitg/NL0)/8;
-             const short lx = (tiitg/NL0)%8;
++            const short sy = (tiitg/NL0)/8;
++            const short lx = (tiitg/NL0)%8;
+ 
+             if (FC_mul_mm_manual) {
+                 const short ib0 = 8*(2*il0    ) + sy;
+                 const short ib1 = 8*(2*il0 + 1) + sy;
+ 
+                 *(threadgroup vec<S0, 4> *)(sa + 64*ib0 + 8*lx + 0) = temp_a[0];
+                 *(threadgroup vec<S0, 4> *)(sa + 64*ib0 + 8*lx + 4) = temp_a[1];
+                 *(threadgroup vec<S0, 4> *)(sa + 64*ib1 + 8*lx + 0) = temp_a[2];

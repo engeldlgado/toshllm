@@ -1,8 +1,11 @@
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index f539502a4..49363af64 100644
+index 750fda533..03c25eb01 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -2511,10 +2511,24 @@ private:
+@@ -2723,16 +2723,32 @@ private:
+ 
+         return true;
+     }
  
      // n_tokens_cur: the number of tokens added to the batch for the current slot
      void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
@@ -13,8 +16,10 @@ index f539502a4..49363af64 100644
 +            const int64_t n_tokens_new = slot.prompt.n_tokens() - n_tokens_cur;
 +            auto & ckpts = slot.prompt.checkpoints;
 +            for (auto it = ckpts.begin(); it != ckpts.end(); ++it) {
-+                if (it->n_tokens == n_tokens_new && it->pos_min == pos_min && it->pos_max == pos_max) {
-+                    it->id_task = id_task;
++                const auto & cur = **it;
++                if (cur.n_tokens == n_tokens_new && cur.pos_min == pos_min && cur.pos_max == pos_max) {
++                    // only the task mark changes, so the prompt cache may keep sharing it
++                    const_cast<common_prompt_checkpoint &>(cur).id_task = id_task;
 +                    ckpts.splice(ckpts.end(), ckpts, it);
 +                    SLT_TRC(slot, "kept context checkpoint at n_tokens = %" PRId64 "\n", n_tokens_new);
 +                    return;
@@ -27,3 +32,6 @@ index f539502a4..49363af64 100644
          // only when the list is full, otherwise short prompts keep just the oldest checkpoint
          int64_t last = -1;
          for (auto it = slot.prompt.checkpoints.begin();
+                 slot.prompt.checkpoints.size() + 1 >= (size_t) params_base.n_ctx_checkpoints &&
+                 it != slot.prompt.checkpoints.end(); ) {
+             const auto & cur = **it;

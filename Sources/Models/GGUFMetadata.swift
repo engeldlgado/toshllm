@@ -21,6 +21,11 @@ struct GGUFMetadata: Sendable {
 
     fileprivate static let tensorCountKey = "gguf.tensor_count"
 
+    /// Who published the file; quantizers often write these after the tokenizer.
+    fileprivate static let lateStringKeys: Set<String> = [
+        "general.url", "general.repo_url", "general.source.url", "general.quantized_by",
+    ]
+
     /// Tensors the file holds, from the fixed part of its header.
     var tensorCount: UInt64? { integerValues[Self.tensorCountKey] }
 
@@ -189,7 +194,9 @@ enum GGUFMetadataCache {
         }
         lock.unlock()
 
-        let found = scanForNextNTensor(at: key.path)
+        // the head is the last block, so in a split model it sits in a later part
+        let parts = splitSiblings(of: key.path)
+        let found = (parts.count > 1 ? parts : [key.path]).contains { scanForNextNTensor(at: $0) }
         lock.lock()
         removeStaleEntries(for: key.path, keeping: key)
         nextNEntries[key] = found
@@ -327,9 +334,11 @@ enum GGUFMetadataCache {
             // llama.cpp converters commonly place general.file_type after the
             // tokenizer. Read that scalar directly without walking every token.
             if key.hasPrefix("tokenizer.") {
-                if let fileType = cursor.findUInt32MetadataValue(for: "general.file_type") {
+                let late = cursor.findGeneralValues(strings: GGUFMetadata.lateStringKeys.subtracting(strings.keys))
+                if let fileType = late.fileType {
                     integerValues["general.file_type"] = UInt64(fileType)
                 }
+                strings.merge(late.strings) { current, _ in current }
                 return GGUFMetadata(strings: strings, integerValues: integerValues)
             }
 
@@ -571,28 +580,45 @@ private struct GGUFDataCursor {
         return skip(count: length)
     }
 
-    func findUInt32MetadataValue(for key: String) -> UInt32? {
-        let needle = Data(key.utf8)
+    /// The `general.*` scalars and strings stored after the tokenizer, found in one pass by
+    /// their key instead of walking every token.
+    func findGeneralValues(strings wanted: Set<String>) -> (fileType: UInt32?, strings: [String: String]) {
+        let needle = Data("general.".utf8)
+        var fileType: UInt32?
+        var found: [String: String] = [:]
         var start = offset
-        while start <= data.count - needle.count,
-              let match = data.range(of: needle, in: start..<data.count) {
-            defer { start = match.upperBound }
-            guard match.lowerBound >= 8, match.upperBound + 8 <= data.count else { continue }
+        var end = data.count
+        while start <= end - needle.count,
+              let match = data.range(of: needle, in: start..<end) {
+            start = match.upperBound
+            guard match.lowerBound >= 8 else { continue }
             let keyLength = data.withUnsafeBytes { raw in
-                UInt64(littleEndian: raw.loadUnaligned(
-                    fromByteOffset: match.lowerBound - 8, as: UInt64.self))
+                UInt64(littleEndian: raw.loadUnaligned(fromByteOffset: match.lowerBound - 8, as: UInt64.self))
             }
+            guard keyLength <= 256 else { continue }
+            let keyEnd = match.lowerBound + Int(keyLength)
+            guard keyEnd + 12 <= data.count,
+                  let key = String(data: data[match.lowerBound..<keyEnd], encoding: .utf8) else { continue }
             let type = data.withUnsafeBytes { raw in
-                UInt32(littleEndian: raw.loadUnaligned(
-                    fromByteOffset: match.upperBound, as: UInt32.self))
+                UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: keyEnd, as: UInt32.self))
             }
-            guard keyLength == UInt64(needle.count), type == 4 else { continue }
-            return data.withUnsafeBytes { raw in
-                UInt32(littleEndian: raw.loadUnaligned(
-                    fromByteOffset: match.upperBound + 4, as: UInt32.self))
+            if key == "general.file_type", type == 4, fileType == nil {
+                fileType = data.withUnsafeBytes { raw in
+                    UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: keyEnd + 4, as: UInt32.self))
+                }
+                // the publisher's keys sit next to it; past that only tensor data is left to scan
+                end = min(end, keyEnd + 65_536)
+            } else if type == 8, wanted.contains(key), found[key] == nil {
+                let length = data.withUnsafeBytes { raw in
+                    UInt64(littleEndian: raw.loadUnaligned(fromByteOffset: keyEnd + 4, as: UInt64.self))
+                }
+                let valueStart = keyEnd + 12
+                guard length <= 4096, valueStart + Int(length) <= data.count else { continue }
+                found[key] = String(data: data[valueStart..<valueStart + Int(length)], encoding: .utf8)
             }
+            if fileType != nil, found.count == wanted.count { break }
         }
-        return nil
+        return (fileType, found)
     }
 
     mutating func skip(count: Int) -> Bool {

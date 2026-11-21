@@ -59,7 +59,7 @@ struct ModelPublishDate: Equatable, Sendable {
 
     private static func info(_ repository: String) async -> (created: Date?, base: String?)? {
         guard let url = URL(string: "https://huggingface.co/api/models/\(repository)"),
-              let (data, response) = try? await URLSession.shared.data(from: url),
+              let (data, response) = try? await HubEndpoint.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return parse(data)
     }

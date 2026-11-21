@@ -90,7 +90,17 @@ struct ControlPanelView: View {
             }
             .background(WorkspaceStyle.canvas)
             .toolbar {
+                #if compiler(>=6.2)
+                if #available(macOS 26, *) {
+                    ToolbarSpacer(.flexible)
+                    ToolbarItem(placement: .automatic) { DonateToolbarButton() }
+                        .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .automatic) { DonateToolbarButton() }
+                }
+                #else
                 ToolbarItem(placement: .automatic) { DonateToolbarButton() }
+                #endif
             }
         }
         .tint(AppTheme.accent(accentRaw))

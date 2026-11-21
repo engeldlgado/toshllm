@@ -453,7 +453,10 @@ final class ChatStore: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var projects: [ChatProject] = []
     @Published var currentID: UUID?
-    @Published var generating = false
+    @Published var generating = false {
+        didSet { keepAwake = KeepAwake.update(keepAwake, active: generating, reason: "Writing an answer") }
+    }
+    private var keepAwake: KeepAwake?
     @Published var mapLoading: Set<UUID> = []
     @Published var mapFailed: Set<UUID> = []
     /// Conversation currently streaming, so its live bubble only shows there.

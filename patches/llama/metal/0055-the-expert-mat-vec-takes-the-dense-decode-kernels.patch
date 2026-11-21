@@ -1,8 +1,11 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index aa92cc22a..d7b00f286 100644
+index c31a74cd4..3384f163c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -2465,10 +2465,25 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2462,22 +2462,31 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+                              tsrc0 == GGML_TYPE_IQ2_S || tsrc0 == GGML_TYPE_IQ1_S ||
+                              tsrc0 == GGML_TYPE_IQ1_M);
+         const bool lut = (tsrc0 == GGML_TYPE_MXFP4 || tsrc0 == GGML_TYPE_IQ4_NL || tsrc0 == GGML_TYPE_IQ4_XS);
          if (helper) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float)*nr0; }
          else if (sr) { nw = (int16_t) props_id->simd_width; }
          else if (lut) { nw = (int16_t) props_id->simd_width; smem = (size_t) nw*sizeof(float); }
@@ -10,13 +13,13 @@ index aa92cc22a..d7b00f286 100644
  
 +    // the 32-lane expert mat-vec takes the same kernels as the dense one
 +    if (!id_w64 && nw == 32 && suffix[0] == '\0') {
-+        static const bool v2 = TOSH_ENV("TOSH_MV_V2_DISABLE") == nullptr;
+         static const bool v2 = TOSH_ENV("TOSH_MV_V2_DISABLE") == nullptr;
 +        if (v2 && (tsrc0 == GGML_TYPE_IQ3_XXS || tsrc0 == GGML_TYPE_IQ3_S  || tsrc0 == GGML_TYPE_IQ2_S  ||
-+                   tsrc0 == GGML_TYPE_IQ2_XXS || tsrc0 == GGML_TYPE_IQ2_XS || tsrc0 == GGML_TYPE_IQ1_S  ||
-+                   tsrc0 == GGML_TYPE_IQ1_M   || tsrc0 == GGML_TYPE_Q3_K   || tsrc0 == GGML_TYPE_Q2_K   ||
-+                   tsrc0 == GGML_TYPE_Q5_K)) {
-+            suffix = "_v2";
-+        }
+                    tsrc0 == GGML_TYPE_IQ2_XXS || tsrc0 == GGML_TYPE_IQ2_XS || tsrc0 == GGML_TYPE_IQ1_S  ||
+                    tsrc0 == GGML_TYPE_IQ1_M   || tsrc0 == GGML_TYPE_Q3_K   || tsrc0 == GGML_TYPE_Q2_K   ||
+                    tsrc0 == GGML_TYPE_Q5_K)) {
+             suffix = "_v2";
+         }
 +        if (tsrc0 == GGML_TYPE_Q5_1 && !props_id->has_unified_memory && TOSH_ENV("TOSH_MV_Q5_1_L2_DISABLE") == nullptr) {
 +            nr0    = 2;
 +            suffix = "_L2r2";
@@ -28,11 +31,17 @@ index aa92cc22a..d7b00f286 100644
  
      // The expert kernels share the implementations of the dense path, so they can read the
      // quant arrays a word at a time under the same conditions.
+     const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
+                       (nw == 64 || (nw == 32 && tsrc0 == GGML_TYPE_Q8_0)) &&
+                       TOSH_ENV("TOSH_MV_ROW8_DISABLE") == nullptr;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 4d2f725a0..8f1e459b8 100644
+index b52df15c8..23ca83e65 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
-@@ -11636,5 +11636,40 @@ void kernel_mul_mv_iq1_m_f32_v2_impl(
+@@ -11676,8 +11676,43 @@ void kernel_mul_mv_iq1_m_f32_v2_impl(
+             }
+         }
+     }
  }
  
  MV_V2_GRID_KERNEL(iq1_m, N_R0_IQ1_M, "kernel_mul_mv_iq1_m_f32_v2")

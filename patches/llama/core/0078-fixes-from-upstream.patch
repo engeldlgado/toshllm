@@ -1,0 +1,157 @@
+diff --git a/common/parsers/gemma4.cpp b/common/parsers/gemma4.cpp
+index 5902e290b..2a2e929e1 100644
+--- a/common/parsers/gemma4.cpp
++++ b/common/parsers/gemma4.cpp
+@@ -298,17 +298,18 @@ common_chat_params common_chat_params_init_gemma4(const common_chat_template &
+     data.message_delimiters = {
+         { COMMON_CHAT_ROLE_USER,      "<|turn>user"  },
+         { COMMON_CHAT_ROLE_ASSISTANT, "<|turn>model" },
+     };
+ 
+     data.format            = COMMON_CHAT_FORMAT_PEG_GEMMA4;
+     data.supports_thinking  = true;
+     data.thinking_start_tag = "<|channel>thought";
+-    data.thinking_end_tags  = {"<channel|>"};
++    // a tool call may start before the thought channel is closed; <channel|> stays first, the budget sampler forces it
++    data.thinking_end_tags  = {"<channel|>", "<|tool_call>"};
+ 
+     data.preserved_tokens = {
+         "<|channel>",
+         "<channel|>",
+         "<|tool_call>",
+         "<tool_call|>",
+         "<|turn>",
+     };
+@@ -329,19 +330,20 @@ common_chat_params common_chat_params_init_gemma4(const common_chat_template &
+     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
+     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
+     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
+ 
+     data.parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+         auto start = p.rule("start", p.optional(p.literal("<|turn>model\n")));
+ 
+         if (extract_reasoning) {
+-            p.rule("thought", p.literal("<|channel>thought") + p.space() + p.reasoning(p.until("<channel|>")) + p.literal("<channel|>"));
++            // the model may start a tool call before closing the thought channel
++            p.rule("thought", p.literal("<|channel>thought") + p.space() + p.reasoning(p.until_one_of({"<channel|>", "<|tool_call>"})) + (p.literal("<channel|>") | p.peek(p.literal("<|tool_call>"))));
+         } else {
+-            p.rule("thought", p.content(p.literal("<|channel>thought") + p.space() + p.until("<channel|>") + p.literal("<channel|>")));
++            p.rule("thought", p.content(p.literal("<|channel>thought") + p.space() + p.until_one_of({"<channel|>", "<|tool_call>"}) + (p.literal("<channel|>") | p.peek(p.literal("<|tool_call>")))));
+         }
+ 
+         auto consume_empty_channels = p.gbnf(p.zero_or_more(p.literal("<|channel>") + p.negate(p.literal("thought"))), "");
+         auto thought = (p.peek(p.literal("<|channel>")) + consume_empty_channels + p.ref("thought")) | p.negate(p.literal("<|channel>"));
+ 
+         if (has_response_format) {
+             auto response_format = p.literal("```json") <<
+                 p.content(p.schema(p.json(), "response-format-schema", inputs.json_schema)) <<
+diff --git a/tests/test-chat.cpp b/tests/test-chat.cpp
+index f229ed729..445e34ce4 100644
+--- a/tests/test-chat.cpp
++++ b/tests/test-chat.cpp
+@@ -3264,16 +3264,27 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+             .tools({ get_time_tool })
+             .tool_choice(COMMON_CHAT_TOOL_CHOICE_REQUIRED)
+             .expect_reasoning("I'm\nthinking")
+             .expect_tool_calls({
+                 { "get_time", R"({"city": "Paris"})", {} },
+             })
+             .run();
+ 
++        // Tool call after reasoning, the model did not close the thought channel (#32231)
++        tst.test(
++                "<|channel>thought\nI'm\nthinking<|tool_call>call:get_time{city:<|\"|>Paris<|\"|>}<tool_call|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .tools({ get_time_tool })
++            .expect_reasoning("I'm\nthinking")
++            .expect_tool_calls({
++                { "get_time", R"({"city": "Paris"})", {} },
++            })
++            .run();
++
+         // Parallel tool calls
+         tst.test(
+                 "<|tool_call>call:get_time{city:<|\"|>London<|\"|>}<tool_call|>"
+                 "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>")
+             .tools({ get_time_tool, get_weather_tool })
+             .parallel_tool_calls(true)
+             .expect_tool_calls({
+                 { "get_time", R"({"city": "London"})", "" },
+diff --git a/tools/server/server-http.cpp b/tools/server/server-http.cpp
+index acc52a7c0..9744725da 100644
+--- a/tools/server/server-http.cpp
++++ b/tools/server/server-http.cpp
+@@ -777,17 +777,17 @@ static void process_handler_response(server_http_req_ptr && request, server_http
+                     return false;
+                 }
+                 SRV_DBG("http: streamed chunk: %s\n", chunk.c_str());
+             }
+             if (!has_next) {
+                 sink.done();
+                 SRV_DBG("%s", "http: stream ended\n");
+             }
+-            return has_next;
++            return true;
+         };
+         const auto on_complete = [request = q_ptr, response = r_ptr](bool) mutable {
+             response->on_complete();
+             response.reset();
+             request.reset();
+         };
+         res.set_chunked_content_provider(content_type, chunked_content_provider, on_complete);
+     } else {
+diff --git a/tools/server/tests/unit/test_completion.py b/tools/server/tests/unit/test_completion.py
+index 6afcb1773..0c5beb23e 100644
+--- a/tools/server/tests/unit/test_completion.py
++++ b/tools/server/tests/unit/test_completion.py
+@@ -1,8 +1,9 @@
++import http.client
+ import pytest
+ import requests
+ import time
+ import random
+ 
+ from openai import OpenAI
+ from utils import *
+ 
+@@ -88,16 +89,40 @@ def test_completion_stream_vs_non_stream():
+         "prompt": "I believe the meaning of life is",
+     })
+     content_stream = ""
+     for data in res_stream:
+         content_stream += data["content"]
+     assert content_stream == res_non_stream.body["content"]
+ 
+ 
++def test_completion_connection_reuse():
++    server.start()
++    conn = http.client.HTTPConnection(server.server_host, server.server_port, timeout=30)
++    try:
++        conn.connect()
++        conn.auto_open = 0
++        original_socket = conn.sock
++        conn.request("POST", "/completion", json.dumps({
++            "prompt": "Hello", "n_predict": 4, "stream": True,
++        }), {"Content-Type": "application/json"})
++        with conn.getresponse() as response:
++            assert response.status == 200
++            assert response.chunked
++            assert not response.will_close
++            assert response.read()
++        conn.request("GET", "/health")
++        with conn.getresponse() as response:
++            assert response.status == 200
++            assert json.loads(response.read())["status"] == "ok"
++        assert conn.sock is original_socket
++    finally:
++        conn.close()
++
++
+ def test_completion_with_openai_library():
+     global server
+     server.start()
+     client = OpenAI(api_key="dummy", base_url=f"http://{server.server_host}:{server.server_port}/v1")
+     res = client.completions.create(
+         model="davinci-002",
+         prompt="I believe the meaning of life is",
+         max_tokens=8,

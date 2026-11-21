@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 3421e85..01f6454 100644
+index a0aeb0d9a..b420093a7 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -2070,16 +2070,40 @@ int ggml_metal_op_ssm_conv(ggml_metal_op_t ctx, int idx) {
+@@ -2210,19 +2210,40 @@ int ggml_metal_op_ssm_conv(ggml_metal_op_t ctx, int idx) {
          /*.ne2  =*/ ne2,
          /*.nb0  =*/ nb0,
          /*.nb1  =*/ nb1,
@@ -16,9 +16,9 @@ index 3421e85..01f6454 100644
 +    if (props_ssm->simd_width == 32 && !props_ssm->has_unified_memory && ne1 > 1 && ne10 <= 8 && nb00 == sizeof(float) && nb0 == sizeof(float) && TOSH_ENV("TOSH_SSM_CONV_TILED_DISABLE") == nullptr) {
 +        char name[128];
 +        snprintf(name, sizeof(name), "kernel_ssm_conv_f32_f32_tiled_nc=%d_silu=%d", (int) ne10, use_silu ? 1 : 0);
-+        ggml_metal_pipeline_with_params pipeline = ggml_metal_library_get_pipeline(lib, name);
-+        if (!pipeline.pipeline) {
-+            ggml_metal_cv_t cv = ggml_metal_cv_init();
+         ggml_metal_pipeline_with_params pipeline = ggml_metal_library_get_pipeline(lib, name);
+         if (!pipeline.pipeline) {
+             ggml_metal_cv_t cv = ggml_metal_cv_init();
 +            ggml_metal_cv_set_int16(cv, 1,              FC_SSM_CONV + 0);
 +            ggml_metal_cv_set_bool (cv, use_silu,       FC_SSM_CONV + 1);
 +            ggml_metal_cv_set_int32(cv, (int32_t) ne10, FC_SSM_CONV + 2);
@@ -44,7 +44,7 @@ index 3421e85..01f6454 100644
          if      (ne1 > 128) BATCH_SIZE = 256;
          else if (ne1 > 64 ) BATCH_SIZE = 128;
 diff --git a/ggml/src/ggml-metal/kernels/ssm.metal b/ggml/src/ggml-metal/kernels/ssm.metal
-index 1b39578..0001daa 100644
+index 1b3957871..0001daaed 100644
 --- a/ggml/src/ggml-metal/kernels/ssm.metal
 +++ b/ggml/src/ggml-metal/kernels/ssm.metal
 @@ -596,8 +596,60 @@ kernel void kernel_ssm_scan_ssd_mma_f32(

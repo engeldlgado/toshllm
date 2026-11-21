@@ -1,15 +1,15 @@
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 98a08c8b8..97c3df0a0 100644
+index 5ae5e8d79..78aa09a9a 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -1540,17 +1540,21 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1679,17 +1679,21 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+                     SPC_WRN("backend offload failed for seq_id=%d; using CPU sampler\n", (int) seq_id);
+                     llama_sampler_free(chain);
+                     chain = nullptr;
                  }
                  backend_chains[seq_id] = chain;
              }
          }
- 
-         llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
-         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
  
 -        is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt;
 +        // only the Gemma 4 assistant shares the target's memory; a qwen4exp head that borrows
@@ -19,33 +19,21 @@ index 98a08c8b8..97c3df0a0 100644
 +        is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt && std::strcmp(arch, "gemma4-assistant") == 0;
          chain_heads   = n_mtp_layers > 1 && !is_mem_shared;
  
+         llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ is_mem_shared);
+         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
+ 
          if (chain_heads) {
              this->params.n_max = std::min(this->params.n_max, n_mtp_layers);
  
-             chain_h.assign(n_seq, {});
-             for (auto & c : chain_h) {
-                 c.reserve((size_t) (this->params.n_max + 1) * n_embd);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 2c3d89f47..0dde5d443 100644
+index 4eeff4147..2612faae2 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -569,31 +569,49 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_lightning_indexe
-     snprintf(name, 256, "%s_nh=%d", base, nh);
+@@ -622,27 +622,37 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_mask(
  
-     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
-     if (!res.pipeline) {
-         ggml_metal_cv_t cv = ggml_metal_cv_init();
+     return res;
+ }
  
-         ggml_metal_cv_set_int16(cv, nh, FC_LIGHTNING_INDEXER + 0);
- 
-+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
-+
-+        ggml_metal_cv_free(cv);
-+    }
-+
-+    return res;
-+}
-+
  ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_dsv4_hc(ggml_metal_library_t lib, const ggml_tensor * op) {
      char name[256];
      const char * base = nullptr;
@@ -82,27 +70,18 @@ index 2c3d89f47..0dde5d443 100644
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index f35b55917..68dfa2ee6 100644
+index 1862a5c83..b6d308c2c 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -2874,24 +2874,25 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
-                 op->type         == GGML_TYPE_F32 &&
-                 op->src[0]->ne[0] == 24 &&
-                 op->src[1]->ne[0] >= 3 &&
-                 op->src[2]->ne[0] == 24 &&
-                 ggml_is_contiguous_rows(op->src[0]) &&
-                 ggml_is_contiguous_rows(op->src[1]) &&
-                 ggml_is_contiguous_rows(op->src[2]);
+@@ -2941,16 +2941,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
          case GGML_OP_DSV4_HC_PRE:
--            return has_simdgroup_reduction &&
-+            return (has_simdgroup_reduction || wave64_decode) &&
+             return (has_simdgroup_reduction || wave64_decode) &&
                  op->src[0]->type == GGML_TYPE_F32 &&
                  op->src[1]->type == GGML_TYPE_F32 &&
                  op->type         == GGML_TYPE_F32 &&
                  ggml_is_contiguous_rows(op->src[0]) &&
                  ggml_is_contiguous_rows(op->src[1]);
          case GGML_OP_DSV4_HC_POST:
--            return has_simdgroup_reduction &&
 +            // 64-lane cards only have the kernel without a combination matrix
 +            return (has_simdgroup_reduction || (wave64_decode && op->src[3] == NULL)) &&
                  op->src[0]->type == GGML_TYPE_F32 &&
@@ -114,10 +93,10 @@ index f35b55917..68dfa2ee6 100644
                  op->src[2]->ne[0] == 4 &&
                  (op->src[3] == NULL || (op->src[3]->ne[0] == 4 && op->src[3]->ne[1] == 4)) &&
 diff --git a/ggml/src/ggml-metal/kernels/misc.metal b/ggml/src/ggml-metal/kernels/misc.metal
-index d0e949a6c..7a480ed26 100644
+index 1be2ad8d7..c9b71d071 100644
 --- a/ggml/src/ggml-metal/kernels/misc.metal
 +++ b/ggml/src/ggml-metal/kernels/misc.metal
-@@ -930,16 +930,97 @@ kernel void kernel_dsv4_hc_post_nocomb_f32(
+@@ -1064,16 +1064,97 @@ kernel void kernel_dsv4_hc_post_nocomb_f32(
      const float xv = *(device const float *) (x + i0*args.nb_x0 + it*args.nb_x1);
      device const char * rb = residual + i0*args.nb_r0 + it*args.nb_r2;
      FOR_UNROLL (ushort idst = 0; idst < hc; ++idst) {
@@ -215,29 +194,11 @@ index d0e949a6c..7a480ed26 100644
          device const char * comb,
          device       char * dst,
          uint3   tgpig[[threadgroup_position_in_grid]],
-@@ -989,16 +1070,17 @@ kernel void kernel_dsv4_hc_post_f32(
-             result[idst] = fma(rv, comb_reg[isrc][idst], result[idst]);
-         }
-     }
- 
-     FOR_UNROLL (ushort idst = 0; idst < hc; ++idst) {
-         *(device float *) (dst + i0*args.nb_d0 + idst*args.nb_d1 + it*args.nb_d2) = result[idst];
-     }
- }
-+
- kernel void kernel_zero_bytes(
-         device char             * dst,
-         constant uint64_t       & n,
-         uint tpig[[thread_position_in_grid]]) {
-     if (tpig < n) {
-         dst[tpig] = 0;
-     }
- }
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 0fe22f2f4..5785065dc 100644
+index 07d676470..45367829c 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -212,17 +212,18 @@ llama_context::llama_context(
+@@ -243,17 +243,18 @@ llama_context::llama_context(
          if (params.ctx_other == nullptr) {
              // TODO: change from runtime_error to llama_exception to avoid printing error message
              throw std::runtime_error("Gemma4Assistant requires ctx_other to be set (this warning is normal during memory fitting)");
@@ -254,11 +215,11 @@ index 0fe22f2f4..5785065dc 100644
                  throw std::runtime_error(model.arch_name() + " requires ctx_other to be set (this warning is normal during memory fitting)");
              }
              cparams.ctx_other = params.ctx_other;
-         }
-     }
- 
+         } else if (model.arch == LLM_ARCH_DFLASH) {
+             // used to read the target's layer input device buffer
+             cparams.ctx_other = params.ctx_other;
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index 250eb74da..a4881eb55 100644
+index 181e4dca4..be5c5344f 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
 @@ -1,15 +1,21 @@
@@ -283,14 +244,14 @@ index 250eb74da..a4881eb55 100644
      }
  }
  
-@@ -175,26 +181,27 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
+@@ -177,26 +183,27 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
+     const int64_t hc     = hparams.dsv4_hc_mult;
      const int64_t hc_dim = hc * n_embd;
      const int64_t hc_lr  = hparams.hc_low_rank;
  
-     // an MTP-only file carries the MTP block, the embeddings and the LM head, but no trunk
-     const bool mtp_only    = n_layer_nextn > 0 && ml.get_weight(tn(LLM_TENSOR_HC_ATTN_NORM, "weight", 0).str().c_str()) == nullptr;
-     const int  trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
-     const int  mtp_flags   = ml.load_mtp ? 0 : TENSOR_SKIP;
+     const auto nf = nextn_flags(ml, LLM_TENSOR_HC_ATTN_NORM);
+     const int trunk_flags = nf.trunk;
+     const int mtp_flags   = nf.mtp;
  
 -    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
 +    // a head shared with its target may leave the embeddings and the LM head to it
@@ -313,13 +274,13 @@ index 250eb74da..a4881eb55 100644
          // the head ranges are what the gather indexes, so they set the minimum row count
          int64_t ple_rows = 0;
          for (uint32_t h = 0; h < hparams.ple_n_heads; ++h) {
-@@ -521,16 +528,29 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -569,16 +576,29 @@ llama_model_qwen4exp::graph::graph(const llm_graph_params & params) :
+     cb(cur, "result_norm", -1);
+     res->t_embd = cur;
  
      cur = build_lora_mm(model.output, cur, model.output_s);
      cb(cur, "result_output", -1);
      res->t_logits = cur;
- 
-     ggml_build_forward_expand(gf, cur);
  }
  
 +// a draft head without embeddings or an LM head of its own borrows its target's
@@ -335,40 +296,40 @@ index 250eb74da..a4881eb55 100644
 +    return other;
 +}
 +
- llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params) :
-     graph(model, params, no_build{}) {
+ llama_model_qwen4exp::graph_mtp::graph_mtp(const llm_graph_params & params) :
+     graph(params, no_build{}) {
      GGML_ASSERT(hparams.n_layer_nextn == 1 && "qwen4exp MTP has a single block");
-     GGML_ASSERT(ubatch.token && "qwen4exp MTP requires token input");
+     ASSERT_EMBD_OR_TOKEN(ubatch);
  
      const int64_t hc = hparams.dsv4_hc_mult;
      GGML_ASSERT(hparams.n_embd_out() == (uint32_t) (n_embd*hc) && "qwen4exp MTP hidden width mismatch");
  
-@@ -550,17 +570,18 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+@@ -595,17 +615,18 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llm_graph_params & params) :
  
-     inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_out(), n_tokens);
+     inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_inp(), n_tokens);
      ggml_set_input(inp->embd);
  
-     inp->h = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_out(), n_tokens);
-     ggml_set_input(inp->h);
-     ggml_set_name(inp->h, "mtp_h_input");
+     inp->h = build_inp_embd_state(inp.get(), hparams.n_embd_out());
  
--    ggml_tensor * tok_embd = ggml_get_rows(ctx0, model.tok_embd, inp->tokens);
-+    ggml_tensor * tok_embd_w = model.tok_embd ? model.tok_embd : qwen4exp_shared_model(cparams, model, "token_embd.weight").tok_embd;
-+    ggml_tensor * tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+     ggml_tensor * tok_embd;
+     if (ubatch.token) {
+-        tok_embd = ggml_get_rows(ctx0, model.tok_embd, inp->tokens);
++        ggml_tensor * tok_embd_w = model.tok_embd ? model.tok_embd : qwen4exp_shared_model(cparams, model, "token_embd.weight").tok_embd;
++        tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+     } else {
+         tok_embd = inp->embd;
+     }
      cb(tok_embd, "mtp_tok_embd", il);
  
      ggml_tensor * h = inp->h;
  
      res->add_input(std::move(inp));
+@@ -655,17 +676,18 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llm_graph_params & params) :
  
-     auto * inp_hyb = build_inp_mem_hybrid();
-     const auto * mctx_hyb = static_cast<const llama_memory_hybrid_idx_context *>(inp_hyb->mctx);
-@@ -605,17 +626,18 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
-     ggml_build_forward_expand(gf, res->t_h_nextn);
- 
-     cur = build_hc_mix(ggml_reshape_3d(ctx0, flat_out, n_embd, hc, flat_out->ne[1]),
+     hc_mix head_mix = build_hc_mix(ggml_reshape_3d(ctx0, flat_out, n_embd, hc, flat_out->ne[1]),
              layer.nextn.hc_head_norm, layer.nextn.hc_head_down, layer.nextn.hc_head_up,
              nullptr, nullptr, il);
+     cur = head_mix.cur;
      cb(cur, "result_norm", -1);
      res->t_embd = cur;
  
@@ -377,13 +338,13 @@ index 250eb74da..a4881eb55 100644
 +    cur = build_lora_mm(head.output, cur, head.output_s);
      cb(cur, "result_output", -1);
      res->t_logits = cur;
- 
-     ggml_build_forward_expand(gf, cur);
  }
  
  std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen4exp::graph::build_qkvz(
                  ggml_tensor * input,
-@@ -709,16 +731,17 @@ llama_model_qwen4exp::llm_graph_input_kpool * llama_model_qwen4exp::graph::build
+                         int   il) {
+     const int64_t n_seqs       = ubatch.n_seqs;
+@@ -775,16 +797,17 @@ llama_model_qwen4exp::llm_graph_input_kpool * llama_model_qwen4exp::graph::build
      inp->pool_mask  = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_pool, n_tokens);
      inp->tail_idxs  = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, kpool - 1, n_tokens);
      ggml_set_input(inp->pool_cells);
@@ -401,11 +362,11 @@ index 250eb74da..a4881eb55 100644
      inp->n_kv  = mctx_idx->get_n_kv();
      inp->n_new = mctx_hyb->get_n_kpool_new();
      // the top blocks plus the tail
-@@ -727,16 +750,19 @@ llama_model_qwen4exp::llm_graph_input_kpool * llama_model_qwen4exp::graph::build
-     inp->new_pool_idxs = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, kpool, inp->n_new);
+@@ -794,16 +817,19 @@ llama_model_qwen4exp::llm_graph_input_kpool * llama_model_qwen4exp::graph::build
      ggml_set_input(inp->new_pool_idxs);
-     // the scatter target is part of the graph shape: llama_context reserves the full-context graph,
-     // so this must not depend on cache_safe, which only the decode-time graph can know
+     // one view for all layers: each view of a host input is a separate upload
+     inp->new_pool_flat = ggml_reshape_1d(ctx0, inp->new_pool_idxs, kpool*inp->n_new);
+     // one scatter row per new pool, each a distinct rep row (see kpool_build_state)
      inp->new_pool_rep = ggml_new_tensor_1d(ctx0, GGML_TYPE_I64, inp->n_new);
      ggml_set_input(inp->new_pool_rep);
      inp->new_pool_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 4*inp->n_new);
@@ -421,7 +382,7 @@ index 250eb74da..a4881eb55 100644
  // a block is scored by one pooled key: the mean of its raw indexer keys, normed and rotated to its first member
  ggml_tensor * llama_model_qwen4exp::graph::build_qsa_sel(
          const llama_memory_hybrid_idx_context * mctx_hyb,
-@@ -1216,16 +1242,65 @@ public:
+@@ -1285,16 +1311,65 @@ public:
  
      // the predecessor tokens live in the attention KV cells (ext.tok)
      const llama_kv_cache_context * mctx;
@@ -487,7 +448,7 @@ index 250eb74da..a4881eb55 100644
      // gemma3n and gemma4 do the same with a hardcoded row 0 of per_layer_token_embd.
      const llama_token img_tok = hparams.ple_image_token_id != 0
          ? (llama_token) hparams.ple_image_token_id
-@@ -1280,19 +1355,28 @@ void llm_graph_input_qwen4exp_ple::set_input(const llama_ubatch * ubatch) {
+@@ -1349,19 +1424,28 @@ void llm_graph_input_qwen4exp_ple::set_input(const llama_ubatch * ubatch) {
                      (int32_t) (mixed % hparams.ple_head_vocab_sizes[h_i] + hparams.ple_head_offsets[h_i]);
              }
          }

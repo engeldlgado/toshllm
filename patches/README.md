@@ -15,7 +15,7 @@ moving a file.
 
 ## `llama/`
 
-The port to upstream `d81235049` (v0.6.0), one patch per feature, in a folder per area:
+The port to upstream `b1b770d90d` (v1.0.0), one patch per feature, in a folder per area:
 
 | folder | what lives there |
 |---|---|
@@ -66,8 +66,8 @@ Four rules that have each cost real time:
   tree by *file name*, ignoring the area directories, so adding `metal/0051-*` while upstream is
   at `metal/0051-*` too does not conflict — it interleaves, in whatever order the two titles
   compare. The one that lands second then finds its context moved, and the failure is a build
-  without that work rather than an error. On this branch upstream's engine work runs to 0073, so
-  ours start at 0081.
+  without that work rather than an error. At the v1.0.0 pin (llama.cpp `b1b770d`) upstream's series runs to 0081, so
+  ours start at 0082.
 - **Every later patch must still apply.** `scripts/check-patch-series.sh <LLAMA_COMMIT>` runs the
   whole series in a throwaway worktree and reports each patch.
 - **Verify the round trip.** Apply the whole series into a worktree at the pinned commit, and

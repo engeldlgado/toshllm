@@ -1,8 +1,8 @@
 diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
-index 2940c23..45b0948 100644
+index 161698ba8..28cbb2068 100644
 --- a/common/CMakeLists.txt
 +++ b/common/CMakeLists.txt
-@@ -71,16 +71,18 @@ add_library(${TARGET}
+@@ -73,16 +73,18 @@ add_library(${TARGET}
      common.cpp
      common.h
      console.cpp
@@ -17,15 +17,15 @@ index 2940c23..45b0948 100644
      fit.h
      tosh-plan.cpp
      tosh-plan.h
+     file-lock.cpp
+     file-lock.h
      hf-cache.cpp
      hf-cache.h
-     http.h
-     imatrix-loader.cpp
 diff --git a/common/common.h b/common/common.h
-index 7b871e5..6542fc0 100644
+index d6c80beb7..e72d4a035 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -585,16 +585,17 @@ struct common_params {
+@@ -601,16 +601,17 @@ struct common_params {
      bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
      bool verbose_prompt    = false; // print prompt tokens before generation
      bool display_prompt    = true;  // print prompt before generation
@@ -45,7 +45,7 @@ index 7b871e5..6542fc0 100644
  
 diff --git a/common/finetune.cpp b/common/finetune.cpp
 new file mode 100644
-index 0000000..0ff0085
+index 000000000..c95a0c309
 --- /dev/null
 +++ b/common/finetune.cpp
 @@ -0,0 +1,299 @@
@@ -169,7 +169,7 @@ index 0000000..0ff0085
 +                    inputs.messages.begin(), inputs.messages.end(),
 +                    [](const common_chat_msg & m) { return !m.reasoning_content.empty(); });
 +                try {
-+                    render = common_chat_templates_apply(chat_templates.get(), inputs).prompt;
++                    render = common_chat_templates_apply(chat_templates.get(), inputs).prompt.str();
 +
 +                    size_t last_im_end = render.rfind("<|im_end|>");
 +                    if (last_im_end != std::string::npos) {
@@ -350,7 +350,7 @@ index 0000000..0ff0085
 +}
 diff --git a/common/finetune.h b/common/finetune.h
 new file mode 100644
-index 0000000..259bb56
+index 000000000..259bb5650
 --- /dev/null
 +++ b/common/finetune.h
 @@ -0,0 +1,15 @@
@@ -370,7 +370,7 @@ index 0000000..259bb56
 +        int64_t                stride,
 +        const std::string    & chat_template_path = "");
 diff --git a/examples/training/CMakeLists.txt b/examples/training/CMakeLists.txt
-index 8bb20d0..890f29a 100644
+index 8bb20d0f2..890f29ac4 100644
 --- a/examples/training/CMakeLists.txt
 +++ b/examples/training/CMakeLists.txt
 @@ -1,5 +1,11 @@
@@ -387,7 +387,7 @@ index 8bb20d0..890f29a 100644
 +target_compile_features(${TARGET} PRIVATE cxx_std_11)
 diff --git a/examples/training/finetune-lora.cpp b/examples/training/finetune-lora.cpp
 new file mode 100644
-index 0000000..324e4b7
+index 000000000..324e4b72e
 --- /dev/null
 +++ b/examples/training/finetune-lora.cpp
 @@ -0,0 +1,1029 @@
@@ -1421,10 +1421,10 @@ index 0000000..324e4b7
 +    return 0;
 +}
 diff --git a/include/llama.h b/include/llama.h
-index 2dc7f0d..0c258ab 100644
+index d69dd80de..c7d0c5c3e 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -1720,26 +1720,118 @@ extern "C" {
+@@ -1718,26 +1718,118 @@ extern "C" {
  
          llama_opt_param_filter param_filter; // callback for determining which tensors contain trainable parameters
          void * param_filter_ud;              // userdata for determining which tensors contain trainable parameters
@@ -1544,7 +1544,7 @@ index 2dc7f0d..0c258ab 100644
  
  #endif // LLAMA_H
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 3d2a2cb..a122043 100644
+index ab702d119..fb1287167 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -10,16 +10,17 @@ file(GLOB LLAMA_MODELS_SOURCES "models/*.cpp")
@@ -1566,7 +1566,7 @@ index 3d2a2cb..a122043 100644
      llama-kv-cache.cpp
      llama-kv-cache-iswa.cpp
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 5515c39..f595bf9 100644
+index a142dc106..df7b6316a 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -8,16 +8,18 @@ static inline size_t tosh_dmoe_private_bytes(void) { return 0; }
@@ -1582,16 +1582,16 @@ index 5515c39..f595bf9 100644
 +#include "llama-kv-cache.h"
  #include "llama-mmap.h"
  #include "llama-model.h"
+ #include "llama-moe-cache.h"
  #include "llama-ext.h"
  #include "llama-sampler.h"
  #include "llama.h"
  
- #include <atomic>
- #include <cinttypes>
-@@ -2626,17 +2628,19 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
+ #include <algorithm>
+@@ -3073,17 +3075,19 @@ uint32_t llama_context::graph_max_nodes() const {
          model.arch == LLM_ARCH_MINIMAX_M3 ||
          model.arch == LLM_ARCH_HY_V4) {
-         res = std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
+         res = std::max<uint32_t>(1024u, 32u * model.n_tensors());
      } else if (model.arch == LLM_ARCH_DFLASH && model.hparams.dflash_selector_rank > 0) {
          // DFlash2's convolutions and selector are shape work rather than matmuls,
          // so they cost ~8.6 nodes per tensor against ~5.9 for a plain DFlash draft
@@ -1606,10 +1606,10 @@ index 5515c39..f595bf9 100644
          }
      }
  
-     uint32_t n_sampling_nodes = 0;
-     uint32_t n_sampling_nodes_max = 0;
+     // every sampler builds n_outputs_max_per_seq chains, see llm_graph_context::build_sampling
      for (const auto & [seq_id, sampler] : sampling.samplers) {
-@@ -3818,43 +3822,65 @@ static void llama_set_param(struct ggml_tensor * tensor, llama_opt_param_filter
+         res += llama_sampler_backend_n_nodes(sampler) * cparams.n_outputs_max_per_seq;
+@@ -4418,43 +4422,65 @@ static void llama_set_param(struct ggml_tensor * tensor, llama_opt_param_filter
      if (strcmp(tensor->name, "rope_freqs.weight") == 0) {
          return; // FIXME
      }
@@ -1679,7 +1679,7 @@ index 5515c39..f595bf9 100644
    //llama_set_param(model->tok_embd,        param_filter, param_filter_ud); // FIXME
      llama_set_param(model->type_embd,       param_filter, param_filter_ud);
      llama_set_param(model->pos_embd,        param_filter, param_filter_ud);
-@@ -3867,84 +3893,156 @@ void llama_context::opt_init(struct llama_model * model, struct llama_opt_params
+@@ -4467,84 +4493,156 @@ void llama_context::opt_init(struct llama_model * model, struct llama_opt_params
      llama_set_param(model->output_norm_enc, param_filter, param_filter_ud);
      llama_set_param(model->cls,             param_filter, param_filter_ud);
      llama_set_param(model->cls_b,           param_filter, param_filter_ud);
@@ -1842,7 +1842,7 @@ index 5515c39..f595bf9 100644
  
              auto * res = get_gf_res_prev();
  
-@@ -3965,87 +4063,214 @@ void llama_context::opt_epoch_iter(
+@@ -4565,88 +4663,215 @@ void llama_context::opt_epoch_iter(
                      /*.mem_buffer =*/ nullptr,
                      /*.no_alloc   =*/ true,
                  };
@@ -1905,6 +1905,7 @@ index 5515c39..f595bf9 100644
 +                    }
                  }
              }
+             copy_experts.reset();
              ggml_opt_eval(opt_ctx, result);
              if (callback) {
                  callback(train, opt_ctx, dataset, result, idata_in_loop + (pos_ctx + pos_batch)/n_ubatch + 1, ndata_in_loop, t_loop_start);
@@ -1962,12 +1963,12 @@ index 5515c39..f595bf9 100644
          constexpr bool train = true;
 -        const int64_t idata_in_loop = idata*ubatch_per_ctx;
 +        const int64_t idata_in_loop = idata * ubatch_per_ctx;
-+
-+        if (opt_loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED && ggml_opt_dataset_masks(dataset)) {
-+            ggml_opt_dataset_get_batch_host_with_masks(dataset, tokens.data(), n_ctx*sizeof(llama_token), labels_sparse.data(), masks_sparse.data(), idata);
  
 -        ggml_opt_dataset_get_batch_host(dataset, tokens.data(), n_ctx*sizeof(llama_token), labels_sparse.data(), idata);
 -        opt_epoch_iter(dataset, result_train, tokens, labels_sparse, batch,
++        if (opt_loss_type == GGML_OPT_LOSS_TYPE_CROSS_ENTROPY_MASKED && ggml_opt_dataset_masks(dataset)) {
++            ggml_opt_dataset_get_batch_host_with_masks(dataset, tokens.data(), n_ctx*sizeof(llama_token), labels_sparse.data(), masks_sparse.data(), idata);
++
 +        } else {
 +            ggml_opt_dataset_get_batch_host(dataset, tokens.data(), n_ctx*sizeof(llama_token), labels_sparse.data(), idata);
 +        }
@@ -2071,7 +2072,7 @@ index 5515c39..f595bf9 100644
      llama_context_params result = {
          /*.n_ctx                       =*/ 512,
          /*.n_batch                     =*/ 2048,
-@@ -4755,16 +4980,32 @@ void llama_perf_context_reset(llama_context * ctx) {
+@@ -5385,16 +5610,32 @@ void llama_perf_context_reset(llama_context * ctx) {
  //
  
  bool llama_opt_param_filter_all(const struct ggml_tensor * tensor, void * userdata) {
@@ -2104,7 +2105,7 @@ index 5515c39..f595bf9 100644
          struct llama_context    * ctx,
          ggml_opt_dataset_t        dataset,
          ggml_opt_result_t         result_train,
-@@ -4773,17 +5014,61 @@ void llama_opt_epoch(
+@@ -5403,17 +5644,61 @@ void llama_opt_epoch(
          ggml_opt_epoch_callback   callback_train,
          ggml_opt_epoch_callback   callback_eval) {
      ctx->opt_epoch(
@@ -2168,13 +2169,13 @@ index 5515c39..f595bf9 100644
      }
      return -1;
 diff --git a/src/llama-context.h b/src/llama-context.h
-index eb57695..3bf099f 100644
+index c09b27baa..9f3b5d487 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
-@@ -7,16 +7,17 @@
- #include "llama-adapter.h"
+@@ -8,16 +8,17 @@
  #include "llama-impl.h"
  #include "llama-memory.h"
+ #include "llama-moe-cache.h"
  
  #include "ggml-cpp.h"
  #include "ggml-opt.h"
@@ -2186,10 +2187,10 @@ index eb57695..3bf099f 100644
  
  struct llama_model;
  class llama_batch_allocr;
+ class llama_moe_cache;
  
  class llama_io_read_i;
- class llama_io_write_i;
-@@ -204,23 +205,41 @@ struct llama_context {
+@@ -221,23 +222,41 @@ struct llama_context {
  
      // TODO: more flexible combinations of logical/physical batch size and context size
      void opt_epoch(
@@ -2232,9 +2233,9 @@ index eb57695..3bf099f 100644
              int64_t                          t_loop_start);
  
  private:
-@@ -356,16 +375,26 @@ private:
- 
-     bool sched_need_reserve = true;
+@@ -431,16 +450,26 @@ private:
+     int32_t n_reallocs_same = 0;
+     int32_t n_reallocs_diff = 0;
  
      ggml_backend_t backend_cpu = nullptr;
      std::vector<ggml_backend_ptr> backends;
@@ -2260,14 +2261,14 @@ index eb57695..3bf099f 100644
  
      std::vector<std::pair<ggml_backend_t, ggml_backend_set_n_threads_t>> set_n_threads_fns;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 8c71e01..23bde53 100644
+index 9a2e4e54e..70a3c1f1b 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1125,32 +1125,39 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
-     if (cross_kq_mask->type == GGML_TYPE_F16) {
-         fill_mask((ggml_fp16_t *) cross_kq_mask->data);
+@@ -1205,25 +1205,30 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
+     if (cross_attn_mask.raw->type == GGML_TYPE_F16) {
+         fill_mask((ggml_fp16_t *) cross_attn_mask.raw->data);
      } else {
-         fill_mask((float *) cross_kq_mask->data);
+         fill_mask((float *) cross_attn_mask.raw->data);
      }
  }
  
@@ -2282,20 +2283,8 @@ index 8c71e01..23bde53 100644
 +        mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
 +    }
  
--    mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
-+    if (inp_attn->self_kq_mask && inp_attn->self_kq_mask->buffer) {
-+        mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
-+    }
- 
--    if (inp_attn->self_k_rot) {
-+    if (inp_attn->self_k_rot && inp_attn->self_k_rot->buffer) {
-         mctx->get_attn()->set_input_k_rot(inp_attn->self_k_rot);
-     }
- 
--    if (inp_attn->self_v_rot) {
-+    if (inp_attn->self_v_rot && inp_attn->self_v_rot->buffer) {
-         mctx->get_attn()->set_input_v_rot(inp_attn->self_v_rot);
-     }
+     // kv_rows and the mask stay unallocated if all attention layers have their own (e.g. qwen4exp QSA)
+     mctx->get_attn()->set_input_attn_mask(inp_attn->self_attn_mask, ubatch, cparams.causal_attn);
  
      const int64_t n_rs = mctx->get_recr()->get_n_rs();
  
@@ -2310,10 +2299,10 @@ index 8c71e01..23bde53 100644
          }
      }
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index e65093e..a66346e 100644
+index fa8947ee8..7291a93af 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1316,17 +1316,17 @@ uint32_t llama_kv_cache::get_stream(llama_seq_id seq_id) const {
+@@ -1348,17 +1348,17 @@ uint32_t llama_kv_cache::get_stream(llama_seq_id seq_id) const {
      return seq_to_stream[seq_id];
  }
  
@@ -2322,21 +2311,21 @@ index e65093e..a66346e 100644
  
      // pad the n_kv value so that the graph remains constant across batches and can be reused
      // note: this also helps some backends with performance (f.ex https://github.com/ggml-org/llama.cpp/pull/16812#issuecomment-3455112220)
--    const uint32_t n_pad_cur = std::max(n_pad, 256u);
-+    const uint32_t n_pad_cur = std::max(n_pad, n_pad_graph);
+-    const uint32_t n_pad = 256;
++    const uint32_t n_pad = n_pad_graph;
  
      for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
          const auto & cells = v_cells[sinfo.strm[s]];
  
-         result = std::max(std::min(cells.size(), std::max(n_pad_cur, GGML_PAD(cells.used_max_p1(), n_pad_cur))), result);
+         result = std::max(std::min(cells.size(), std::max(n_pad, GGML_PAD(cells.used_max_p1(), n_pad))), result);
      }
  
      return result;
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 9bfb8f2..b1ea386 100644
+index a81cd8498..136a0ed16 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
-@@ -187,16 +187,18 @@ public:
+@@ -189,16 +189,17 @@ public:
      void state_clear(llama_seq_id seq_id);
  
      //
@@ -2346,38 +2335,37 @@ index 9bfb8f2..b1ea386 100644
      uint32_t get_n_kv(const slot_info & sinfo) const;
  
 +    void set_n_pad_graph(uint32_t n) { n_pad_graph = n; }
-+
-     // get views of the current state of the cache
-     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
-     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+     // attention over the cells of each sequence of the ubatch instead of the whole cache (see ggml_flash_attn_ext_rows)
+     // the ubatch splits into n_slices groups of tokens with one sequence each
+     // if it cannot (f.ex. interleaved or coupled sequences), it is a single slice over the cells of all its sequences
+     // TODO: allow slices with coupled sequences
+     static uint32_t get_n_kv_slices(const llama_ubatch & ubatch);
  
-     // store k_cur and v_cur in the cache based on the provided head location
-     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
-     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
+     // padded length of the longest cell list of the slices; 0 if kv_rows are not used (multiple streams)
+     uint32_t get_n_kv_rows(const llama_ubatch & ubatch) const;
+@@ -283,16 +284,19 @@ private:
+         ggml_tensor * v_rot = nullptr;
+     };
  
-@@ -269,16 +271,19 @@ private:
      bool v_trans = true;  // the value tensor is transposed
  
      const uint32_t n_seq_max = 1;
      const uint32_t n_stream  = 1;
  
-     // required padding
-     const uint32_t n_pad = 1;
- 
++
 +    // the floor of n_kv that keeps the graph the same across batches; training rebuilds it every step
 +    uint32_t n_pad_graph = 256;
-+
      // SWA
      const uint32_t n_swa = 0;
+ 
+     const bool is_indexer = false;
  
      // env: LLAMA_ATTN_ROT_DISABLE
      uint32_t n_rot_k = 0;
      uint32_t n_rot_v = 0;
- 
-     // if all layers participating in the cache have constant head size, the value is stored here
 diff --git a/src/llama-lora-training.cpp b/src/llama-lora-training.cpp
 new file mode 100644
-index 0000000..b14ea65
+index 000000000..b14ea65d0
 --- /dev/null
 +++ b/src/llama-lora-training.cpp
 @@ -0,0 +1,467 @@
@@ -2850,7 +2838,7 @@ index 0000000..b14ea65
 +}
 diff --git a/src/llama-lora-training.h b/src/llama-lora-training.h
 new file mode 100644
-index 0000000..ee3580f
+index 000000000..ee3580f65
 --- /dev/null
 +++ b/src/llama-lora-training.h
 @@ -0,0 +1,31 @@
@@ -2885,78 +2873,3 @@ index 0000000..ee3580f
 +bool llama_lora_allocate_buffers(
 +    struct llama_adapter_lora * adapter,
 +    const std::vector<ggml_backend_buffer_type_t> & bufts);
-diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
-index fee5ff4..386ab33 100644
---- a/src/models/delta-net-base.cpp
-+++ b/src/models/delta-net-base.cpp
-@@ -227,16 +227,19 @@ std::pair<ggml_tensor *, ggml_tensor *> llm_build_delta_net_base::build_delta_ne
-     cb(kg_t, "key_gdiff_t", il);
- 
-     s = ggml_reshape_4d(ctx0, s, S_v, S_v, 1, H_v * n_seqs);
-     cb(s, "dnet_add_ch_state", il);
- 
-     // [CS, S_v, n_chunks, H_v * n_seqs]
-     ggml_tensor * v_t = ggml_cont(ctx0, ggml_transpose(ctx0, v));
- 
-+    // training cannot differentiate through the in-place write of each chunk: the chunks are kept and joined after
-+    std::vector<ggml_tensor *> chunk_out;
-+
-     for (int64_t chunk = 0; chunk < n_chunks; chunk++) {
-         ggml_tensor * ch_k_cd    = get_slice_2d(ctx0, k_cd,    chunk); // [S_k,  CS, 1, H_k * n_seqs]
-         ggml_tensor * ch_v_t     = get_slice_2d(ctx0, v_t,     chunk); // [ CS, S_v, 1, H_v * n_seqs]
-         ggml_tensor * ch_kq      = get_slice_2d(ctx0, kq,      chunk); // [ CS,  CS, 1, H_k * n_seqs]
-         ggml_tensor * ch_q_g_exp = get_slice_2d(ctx0, q_g_exp, chunk); // [S_k,  CS, 1, H_k * n_seqs]
-         ggml_tensor * ch_kg_t    = get_slice_2d(ctx0, kg_t,    chunk); // [ CS, S_k, 1, H_v * n_seqs]
- 
-         // [CS, S_v, 1, H_v * n_seqs]
-@@ -254,30 +257,49 @@ std::pair<ggml_tensor *, ggml_tensor *> llm_build_delta_net_base::build_delta_ne
-         // [S_v, CS, 1, H_v * n_seqs]
-         ggml_tensor * attn_inter = ggml_mul_mat(ctx0, s, ch_q_g_exp);
-         cb(attn_inter, "attn_inter", il);
- 
-         // [S_v, CS, 1, H_v * n_seqs]
-         ggml_tensor * o_ch = ggml_add(ctx0, attn_inter, v_attn);
-         cb(o_ch, "dnet_add_ch_attn_out", il);
- 
--        v = ggml_set_inplace(ctx0, v, o_ch, v->nb[1], v->nb[2], v->nb[3], chunk * v->nb[2]);
-+        if (cparams.training) {
-+            chunk_out.push_back(o_ch);
-+        } else {
-+            v = ggml_set_inplace(ctx0, v, o_ch, v->nb[1], v->nb[2], v->nb[3], chunk * v->nb[2]);
-+        }
- 
-         // kgdmulvnew = (key_gdiff).transpose(-1, -2) @ v_new
-         // TODO: head broadcast might not work here - probably will need a transpose
-         ggml_tensor * kgv = ggml_mul_mat(ctx0, ch_kg_t, v_t_new); // [S_k, S_v, 1, H_k * n_seqs]
- 
-         // last_recurrent_state = last_recurrent_state * g_last + kgdmulvnew
-         ggml_tensor * ch_g_last_exp_t = get_slice_2d(ctx0, g_last_exp_t, chunk);
- 
-         s = ggml_mul(ctx0, s, ch_g_last_exp_t);
-         s = ggml_add(ctx0, s, kgv);
-         cb(s, "dnet_add_ch_state", il);
-     }
- 
-+    // joined pairwise, so each chunk is copied about log2(n_chunks) times
-+    while (chunk_out.size() > 1) {
-+        std::vector<ggml_tensor *> joined;
-+        for (size_t i = 0; i + 1 < chunk_out.size(); i += 2) {
-+            joined.push_back(ggml_concat(ctx0, chunk_out[i], chunk_out[i + 1], 2));
-+        }
-+        if (chunk_out.size() % 2) {
-+            joined.push_back(chunk_out.back());
-+        }
-+        chunk_out.swap(joined);
-+    }
-+    if (!chunk_out.empty()) {
-+        v = chunk_out[0];
-+    }
-+
-     // truncate padded tokens
-     ggml_tensor * o = ggml_view_4d(ctx0, v,
-             S_v, n_tokens, H_v, n_seqs,
-             ggml_row_size(v->type, S_v),
-             ggml_row_size(v->type, S_v * CS * n_chunks),
-             ggml_row_size(v->type, S_v * CS * n_chunks * H_v), 0);
-     o = ggml_permute  (ctx0, o, 0, 2, 1, 3); // [S_v, H_v, n_tokens, n_seqs]
-     s = ggml_reshape_4d(ctx0, s, S_v, S_v, H_v, n_seqs);

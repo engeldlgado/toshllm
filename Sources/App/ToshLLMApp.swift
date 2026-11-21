@@ -28,6 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         source.resume()
         sigtermSource = source
 
+        // Here and not when the chat window appears: a login item may open the app with
+        // its window minimized or hidden.
+        AppObjects.shared.server.startOnLaunchIfEnabled()
         MenuBarItemController.shared.start()
         ControlWindow.register()
         LiveWindowShots.runIfRequested()

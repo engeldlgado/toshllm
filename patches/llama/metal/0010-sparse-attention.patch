@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 15cec07ac..f6745d185 100644
+index 62ac048ca..252555799 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -507,16 +507,35 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_lightning_indexe
+@@ -507,16 +507,43 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_lightning_indexe
          res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
  
          ggml_metal_cv_free(cv);
@@ -30,15 +30,23 @@ index 15cec07ac..f6745d185 100644
 +
 +        ggml_metal_cv_set_int16(cv, nh, FC_LIGHTNING_INDEXER + 0);
 +
- ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_dsv4_hc(ggml_metal_library_t lib, const ggml_tensor * op) {
-     char name[256];
-     const char * base = nullptr;
- 
-     switch (op->op) {
-         case GGML_OP_DSV4_HC_COMB:
-             base = "kernel_dsv4_hc_comb_f32";
-             snprintf(name, 256, "%s", base);
-@@ -2635,17 +2654,19 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
++        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
++
++        ggml_metal_cv_free(cv);
++    }
++
++    return res;
++}
++
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_mask(
+         ggml_metal_library_t lib,
+         const ggml_tensor * op,
+         bool    fill,
+         bool    has_score,
+         bool    has_blocks,
+         bool    has_extra,
+         bool    vec) {
+@@ -2697,19 +2724,19 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_r
  ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_vec_idx(
          ggml_metal_library_t lib,
          const ggml_tensor * op) {
@@ -48,8 +56,8 @@ index 15cec07ac..f6745d185 100644
      char name[256];
  
 -    snprintf(name, 256, "kernel_flash_attn_ext_vec_idx");
-+    const int nw = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
-+
+     const int nw = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->simd_width;
+ 
 +    snprintf(name, 256, "kernel_flash_attn_ext_vec_idx%s", nw == 64 ? "_w64" : "");
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
@@ -60,7 +68,7 @@ index 15cec07ac..f6745d185 100644
      GGML_UNUSED(op);
  
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index d52df6700..597401cae 100644
+index a2026c54a..45d106d3b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -124,16 +124,17 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_silu_back
@@ -73,6 +81,7 @@ index d52df6700..597401cae 100644
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_soft_max          (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_lightning_indexer (ggml_metal_library_t lib, const struct ggml_tensor * op);
 +struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_lightning_indexer_amd(ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_top_k_mask        (ggml_metal_library_t lib, const struct ggml_tensor * op, bool fill, bool has_score, bool has_blocks, bool has_extra, bool vec);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_dsv4_hc           (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_ssm_conv          (ggml_metal_library_t lib, const struct ggml_tensor * op, int32_t nc, bool use_silu);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_ssm_conv_batched  (ggml_metal_library_t lib, const struct ggml_tensor * op, int ssm_conv_bs, int32_t nc, bool use_silu);
@@ -80,12 +89,11 @@ index d52df6700..597401cae 100644
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_ssm_scan          (ggml_metal_library_t lib, const struct ggml_tensor * op, bool tail);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_ssm_scan_ssd_mma  (ggml_metal_library_t lib, const struct ggml_tensor * op);
  struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rwkv              (ggml_metal_library_t lib, const struct ggml_tensor * op);
- struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net   (ggml_metal_library_t lib, const struct ggml_tensor * op);
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index da30462f4..20c5489e7 100644
+index cff6be5c7..314e637d3 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -2147,17 +2147,17 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -2206,17 +2206,17 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                  default:
                      return false;
              }
@@ -105,10 +113,10 @@ index da30462f4..20c5489e7 100644
                  !ggml_is_contiguous_rows(op->src[2]) ||
                  !ggml_is_contiguous_rows(op->src[3])) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index 8f34d24f2..578a9a80f 100644
+index edd3dedc8..fe79b99bd 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -139,16 +139,19 @@
+@@ -142,16 +142,19 @@
  #define OP_FLASH_ATTN_EXT_VEC_NQPSG 1
  #define OP_FLASH_ATTN_EXT_VEC_NCPSG 32
  
@@ -128,7 +136,7 @@ index 8f34d24f2..578a9a80f 100644
  #define OP_UNARY_NUM_SQRT       14
  #define OP_UNARY_NUM_SIN        15
  #define OP_UNARY_NUM_COS        16
-@@ -482,16 +485,18 @@ typedef struct {
+@@ -498,18 +501,55 @@ typedef struct {
      float    m1;
      int32_t  n_head_log2;
      float    logit_softcap;
@@ -139,21 +147,39 @@ index 8f34d24f2..578a9a80f 100644
  
 +// the AMD kernels take their own copy: a field added to the upstream vec struct changes the
 +// constant buffer layout and with it the code the Metal compiler emits for them
-     uint64_t nb23;
-     int32_t  ne31;
-     int32_t  ne32;
-     int32_t  ne33;
-     uint64_t nb31;
-     uint64_t nb32;
-     uint64_t nb33;
-     int32_t  ne1;
-@@ -500,16 +505,18 @@ typedef struct {
-     float    scale;
-     float    max_bias;
-     float    m0;
-     float    m1;
-     int32_t  n_head_log2;
-     float    logit_softcap;
++typedef struct {
++    int32_t  ne01;
++    int32_t  ne02;
++    int32_t  ne03;
++    uint64_t nb01;
++    uint64_t nb02;
++    uint64_t nb03;
++    int32_t  ne11;
++    int32_t  ne_12_2; // assume K and V are same shape
++    int32_t  ne_12_3;
++    int32_t  ns10;
++    uint64_t nb11;
++    uint64_t nb12;
++    uint64_t nb13;
++    int32_t  ns20;
++    uint64_t nb21;
++    uint64_t nb22;
++    uint64_t nb23;
++    int32_t  ne31;
++    int32_t  ne32;
++    int32_t  ne33;
++    uint64_t nb31;
++    uint64_t nb32;
++    uint64_t nb33;
++    int32_t  ne1;
++    int32_t  ne2;
++    int32_t  ne3;
++    float    scale;
++    float    max_bias;
++    float    m0;
++    float    m1;
++    int32_t  n_head_log2;
++    float    logit_softcap;
      int32_t  has_sinks; // read by the AMD kernels; upstream uses a function constant
      int32_t  has_mask;  // 0 for bidirectional attention (vision towers), which has no mask
 +    int32_t  n_kv_max_padded; // sparse: length of the per-row index list
@@ -167,10 +193,10 @@ index 8f34d24f2..578a9a80f 100644
      uint64_t nb32;
      uint64_t nb33;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 44519f5aa..8bd07ad25 100644
+index 14e57b0e9..38c623b13 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -1427,16 +1427,32 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
+@@ -1445,16 +1445,32 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
      };
  
      ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(q),  1);
@@ -203,7 +229,7 @@ index 44519f5aa..8bd07ad25 100644
      ggml_metal_encoder_set_pipeline(enc, pipeline);
      ggml_metal_encoder_set_bytes(enc, &args, sizeof(args), 0);
      ggml_metal_encoder_dispatch_threadgroups(enc,
-@@ -1709,16 +1725,17 @@ int ggml_metal_op_ssm_conv(ggml_metal_op_t ctx, int idx) {
+@@ -1845,16 +1861,17 @@ int ggml_metal_op_ssm_conv(ggml_metal_op_t ctx, int idx) {
  
      ggml_metal_kargs_ssm_conv args = {
          /*.ne00 =*/ ne00,
@@ -221,7 +247,7 @@ index 44519f5aa..8bd07ad25 100644
          /*.ne2  =*/ ne2,
          /*.nb0  =*/ nb0,
          /*.nb1  =*/ nb1,
-@@ -1749,17 +1766,17 @@ int ggml_metal_op_ssm_conv(ggml_metal_op_t ctx, int idx) {
+@@ -1885,17 +1902,17 @@ int ggml_metal_op_ssm_conv(ggml_metal_op_t ctx, int idx) {
          ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(op->src[1]), 2);
          ggml_metal_encoder_set_buffer(enc, bid_dst, 3);
  
@@ -240,7 +266,7 @@ index 44519f5aa..8bd07ad25 100644
          ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(op->src[1]), 2);
          ggml_metal_encoder_set_buffer(enc, bid_dst, 3);
  
-@@ -3813,16 +3830,22 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -3984,16 +4001,22 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
                       (int) ne00, (int) ne20, ks, vs, props_dev->simd_width == 64 ? "_w64" : "");
          }
      }
@@ -257,13 +283,13 @@ index 44519f5aa..8bd07ad25 100644
 +
      if (TOSH_ENV("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
          !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
-         !has_bias && !has_scap) {
  
          ggml_metal_kargs_flash_attn_ext_amd args = {
              /*.ne01          =*/ ne01,
              /*.ne02          =*/ ne02,
              /*.ne03          =*/ ne03,
-@@ -3852,16 +3875,18 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+             /*.nb01          =*/ nb01,
+@@ -4022,16 +4045,18 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              /*.scale         =*/ scale,
              /*.max_bias      =*/ max_bias,
              /*.m0            =*/ m0,
@@ -282,7 +308,7 @@ index 44519f5aa..8bd07ad25 100644
          const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
          const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
                                 op->src[2]->type == GGML_TYPE_F16;
-@@ -4081,16 +4106,51 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4252,16 +4277,51 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
              (wg_dk128 || ne11 >= 1024) &&
              TOSH_ENV("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
@@ -334,7 +360,7 @@ index 44519f5aa..8bd07ad25 100644
              char lds_pipeline[112];
              snprintf(lds_pipeline, sizeof(lds_pipeline), "%s_lds32", fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
              auto lds = ggml_metal_fa_amd_pipeline(lib, lds_pipeline);
-@@ -4116,16 +4176,18 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4287,16 +4347,18 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
          ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
          ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
          ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
@@ -353,7 +379,7 @@ index 44519f5aa..8bd07ad25 100644
              ggml_metal_kargs_flash_attn_ext_vec_reduce args0 = { (int32_t) (ne1*ne2*ne3) };
  
              auto pipeline0 = ggml_metal_library_get_pipeline_flash_attn_ext_vec_reduce(lib, op, ne20, fa_amd_nwg);
-@@ -4552,17 +4614,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4802,17 +4864,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              auto pipeline0 = ggml_metal_library_get_pipeline_flash_attn_ext_vec_idx(lib, op);
  
              ggml_metal_encoder_set_pipeline(enc, pipeline0);
@@ -375,7 +401,7 @@ index 44519f5aa..8bd07ad25 100644
          if (has_kvpad) {
              assert(ggml_metal_op_flash_attn_ext_extra_pad(op) != 0);
 diff --git a/ggml/src/ggml-metal/kernels/fa.metal b/ggml/src/ggml-metal/kernels/fa.metal
-index 1e1255daf..a38bfb471 100644
+index 3e1e37ef1..072453d1f 100644
 --- a/ggml/src/ggml-metal/kernels/fa.metal
 +++ b/ggml/src/ggml-metal/kernels/fa.metal
 @@ -1,26 +1,28 @@
@@ -402,12 +428,12 @@ index 1e1255daf..a38bfb471 100644
          uint3  tgpig [[threadgroup_position_in_grid]],
          ushort tiisg [[thread_index_in_simdgroup]],
          ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+     constexpr short DK4 = DK/4;
      // chunks per lane scale with the simd width; on wave64 with DK=128 the upper
      // lanes own no chunk (guarded below) but still join the simd_sum reductions.
      // heads narrower than the simd width would leave the upper lanes idle, so the
      // simdgroup splits into RPS sub-groups that each take their own cache row
-     constexpr short SUBW = SUBWP ? SUBWP : (DV4 < NW ? DV4 : NW);
-@@ -54,34 +56,60 @@ kernel void kernel_flash_attn_ext_vec_amd(
+@@ -55,34 +57,60 @@ kernel void kernel_flash_attn_ext_vec_amd(
      device const char * kp = k + ikv2*args.nb12 + ikv3*args.nb13;
      device const char * vp = v + ikv2*args.nb22 + ikv3*args.nb23;
  
@@ -469,10 +495,10 @@ index 1e1255daf..a38bfb471 100644
              }
          }
 @@ -94,16 +122,17 @@ kernel void kernel_flash_attn_ext_vec_amd(
+             pl = simd_sum(pl);
          }
          const float p = pl; // full DK-dim Q.K
  
-         const float pp   = p*args.scale + mv;
          const float nm   = msk ? m : max(m, pp);
          const float corr = exp(m  - nm);
          const float w    = msk ? 0.0f : exp(pp - nm);
@@ -486,7 +512,7 @@ index 1e1255daf..a38bfb471 100644
              }
          }
          s = s*corr + w;
-@@ -849,8 +878,128 @@ FA_AMD_PF_INST_DV(320, 256, 16, 32, "kf16_vf16",   half4,      1, dequantize_f16
+@@ -867,15 +896,128 @@ FA_AMD_PF_INST_DV(320, 256, 16, 32, "kf16_vf16",   half4,      1, dequantize_f16
  FA_AMD_PF_INST_DV(320, 256, 16, 32, "kq8_0_vq8_0", block_q8_0, 8, dequantize_q8_0_t4_h2, block_q8_0, 8, dequantize_q8_0_t4_h2)
  #undef FA_AMD_PF_512
  #undef FA_AMD_PF_PAIR
@@ -511,10 +537,10 @@ index 1e1255daf..a38bfb471 100644
 +        device const char * w,
 +        device const char * m,
 +        device       char * dst,
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiitg[[thread_index_in_threadgroup]]) {
+         uint3  tgpig[[threadgroup_position_in_grid]],
+         ushort tiitg[[thread_index_in_threadgroup]]) {
 +    constexpr short DK   = OP_LIGHTNING_INDEXER_DK;
-+    constexpr short DK4  = DK/4;
+     constexpr short DK4  = DK/4;
 +    constexpr short DK16 = DK/16;
 +    constexpr short NK   = OP_LIGHTNING_INDEXER_AMD_NK;
 +    constexpr short NB   = OP_LIGHTNING_INDEXER_AMD_NB;
@@ -557,8 +583,8 @@ index 1e1255daf..a38bfb471 100644
 +    float score = 0.0f;
 +
 +    for (short h0 = 0; h0 < NH; h0 += NHC) {
-+        threadgroup_barrier(mem_flags::mem_threadgroup);
-+
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
 +        for (short i = tiitg; i < NB*NHC*DK4; i += NT) {
 +            const short b  = i/(NHC*DK4);
 +            const short h  = (i/DK4)%NHC;
@@ -582,8 +608,8 @@ index 1e1255daf..a38bfb471 100644
 +                : 0.0f;
 +        }
 +
-+        threadgroup_barrier(mem_flags::mem_threadgroup);
-+
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
 +        threadgroup const half4 * kr = sk + ik*SKS;
 +        for (short h = 0; h < NHC; ++h) {
 +            threadgroup const half4 * qr = sq + (ib*NHC + h)*DK4;
@@ -616,10 +642,10 @@ index 1e1255daf..a38bfb471 100644
 +template [[host_name("kernel_lightning_indexer_amd_q5_1")]] kernel kernel_lightning_indexer_amd_t kernel_lightning_indexer_amd<block_q5_1, 2, dequantize_q5_1>;
 +template [[host_name("kernel_lightning_indexer_amd_q8_0")]] kernel kernel_lightning_indexer_amd_t kernel_lightning_indexer_amd<block_q8_0, 2, dequantize_q8_0>;
 diff --git a/ggml/src/ggml-metal/kernels/fa_aux.metal b/ggml/src/ggml-metal/kernels/fa_aux.metal
-index ebee1becd..222545763 100644
+index 6fe47470f..ab681810f 100644
 --- a/ggml/src/ggml-metal/kernels/fa_aux.metal
 +++ b/ggml/src/ggml-metal/kernels/fa_aux.metal
-@@ -177,24 +177,24 @@ kernel void kernel_flash_attn_ext_blk(
+@@ -251,24 +251,24 @@ kernel void kernel_flash_attn_ext_blk(
  
      if (tiisg == 0) {
          dst[((i3*args.ne32 + i2)*nblk1 + i1)*nblk0 + i0] = res;
@@ -646,7 +672,7 @@ index ebee1becd..222545763 100644
  
      device const half * pm  = (device const half *) ((device const char *) mask + i1*args.nb31 + i2*args.nb32 + i3*args.nb33);
      device int * pidx = idx + (((int64_t)i3*args.ne32 + i2)*args.ne31 + i1)*args.n_kv_max_padded;
-@@ -464,16 +464,25 @@ kernel void kernel_lightning_indexer(
+@@ -538,16 +538,25 @@ kernel void kernel_lightning_indexer(
                  device       float * pd = (device       float *) (dst + i_batch*args.nb1  + i_stream*args.nb3);
  
                  pd[ik] = score + (float) pm[ik];

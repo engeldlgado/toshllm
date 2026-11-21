@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 3086e81b1..1fa5ffa4d 100644
+index 30aed5c91..1183a3182 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -124,16 +124,18 @@ option(LLAMA_FATAL_WARNINGS "llama: enable -Werror flag" OFF)
@@ -20,12 +20,12 @@ index 3086e81b1..1fa5ffa4d 100644
  option(LLAMA_BUILD_APP       "llama: build the unified binary"                                                   ${LLAMA_STANDALONE})
  option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server"                                       OFF)
  option(LLAMA_USE_PREBUILT_UI "llama: use prebuilt UI from HF Bucket when available" ON)
- 
+ option(LLAMA_CONNECT         "llama: include the llama-connect tool (downloads a prebuilt binary)"               OFF)
 diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
-index 2b307c59d..2940c2329 100644
+index e38485ca0..161698ba8 100644
 --- a/common/CMakeLists.txt
 +++ b/common/CMakeLists.txt
-@@ -73,16 +73,18 @@ add_library(${TARGET}
+@@ -75,16 +75,18 @@ add_library(${TARGET}
      console.cpp
      console.h
      debug.cpp
@@ -36,19 +36,19 @@ index 2b307c59d..2940c2329 100644
      fit.h
 +    tosh-plan.cpp
 +    tosh-plan.h
+     file-lock.cpp
+     file-lock.h
      hf-cache.cpp
      hf-cache.h
      http.h
      imatrix-loader.cpp
      imatrix-loader.h
      json-schema-to-grammar.cpp
-     json-schema.cpp
-     json-schema.h
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 1e21f1ed5..3ffcf6f6c 100644
+index 668df2ef1..65a587771 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -256,16 +256,32 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
+@@ -233,16 +233,32 @@ static void parse_tensor_buffer_overrides(const std::string & value, std::vector
      for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
          auto * dev = ggml_backend_dev_get(i);
          auto * buft = ggml_backend_dev_buffer_type(dev);
@@ -82,7 +82,7 @@ index 1e21f1ed5..3ffcf6f6c 100644
          std::string tensor_name = override.substr(0, pos);
          std::string buffer_type = override.substr(pos + 1);
 diff --git a/common/common.cpp b/common/common.cpp
-index c301c22ca..0d91ce3d9 100644
+index 657dcdbf5..bfad9c22d 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -3,16 +3,17 @@
@@ -103,30 +103,12 @@ index c301c22ca..0d91ce3d9 100644
  
  #include <algorithm>
  #include <cinttypes>
-@@ -1224,16 +1225,17 @@ common_decision_type common_get_decision_type(const std::string & fname) {
-     if (gguf_get_kv_type(gguf_ctx.get(), type_id) != GGUF_TYPE_STRING) {
-         return COMMON_DECISION_TYPE_UNKNOWN; // malformed metadata
-     }
-     return common_decision_type_from_string(gguf_get_val_str(gguf_ctx.get(), type_id));
- }
- 
- common_init_result::common_init_result(common_params & params, bool model_only) :
-     pimpl(new impl{}) {
-+
-     auto mparams = common_model_params_to_llama(params);
-     auto cparams = common_context_params_to_llama(params);
- 
-     if (params.fit_params) {
-         COM_TRC("%s", "fitting params to device memory ...\n");
-         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
- 
-         // the draft context is created from the same base params and follows the main context, fit both together
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
 new file mode 100644
-index 000000000..e6befba34
+index 000000000..34c861418
 --- /dev/null
 +++ b/common/tosh-plan.cpp
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,510 @@
 +#include "tosh-plan.h"
 +
 +#include "common.h"
@@ -194,7 +176,6 @@ index 000000000..e6befba34
 +    return v ? atof(v) : d;
 +}
 +
-+moe_info read_moe_info(const char * path) {
 +    moe_info mi;
 +    gguf_init_params gp = { /*.no_alloc =*/ true, /*.ctx =*/ nullptr };
 +    gguf_context * g = gguf_init_from_file(path, gp);
@@ -213,8 +194,8 @@ index 000000000..e6befba34
 +    mi.n_ctx_train = get_u32(arch + ".context_length");
 +
 +    const std::regex bank("^blk\\.([0-9]+)\\.ffn_(up|down|gate|gate_up)_exps\\.weight$");
-+        }
-+        }
++            }
++    }
 +    gguf_free(g);
 +    return mi;
 +}
@@ -277,8 +258,8 @@ index 000000000..e6befba34
 +    cp.type_v   = kv;
 +    try {
 +        std::vector<ggml_backend_dev_t> devs;
-+        uint32_t ngl = 0, ctx_train = 0, n_expert = 0;
-+        const auto mem = common_get_device_memory_data(params.model.path.c_str(), &mp, &cp, devs, ngl, ctx_train, n_expert,
++        uint32_t ngl = 0, ngl_skip = 0, ctx_train = 0, n_expert = 0;
++        const auto mem = common_get_device_memory_data({ params.model.path }, &mp, &cp, devs, ngl, ngl_skip, ctx_train, n_expert,
 +                                                       GGML_LOG_LEVEL_ERROR);
 +        if (mem.size() < 2) {
 +            return p;
@@ -402,7 +383,9 @@ index 000000000..e6befba34
 +    if (no_dmoe) force.clear();
 +
 +    tosh_plan p;
-+    const moe_info mi = read_moe_info(params.model.path.c_str());
++        if (out) *out = p;
++        return false;
++    }
 +    if (!mi.moe) {
 +        if (out) *out = p;
 +        return false;
@@ -445,7 +428,6 @@ index 000000000..e6befba34
 +    dmoe_built = true;
 +#endif
 +    std::vector<std::pair<ggml_type, probe>> full;
-+    for (size_t k = 0; k < kvs.size(); ++k) {
 +        for (int u = 0; u < 3; ++u) dm[k][u] = run_probe(params, p.n_ctx, kvs[k], ubs[u], true, 0);
 +        int uf = -1;
 +        for (int u = 0; u < 3; ++u) if (ubs[u] == ub_full) uf = u;
@@ -454,7 +436,6 @@ index 000000000..e6befba34
 +        f.model += mi.bank_mib;
 +        f.host_model = std::max(0.0, f.host_model - mi.bank_mib);
 +        full.push_back({ kvs[k], f });
-+    }
 +    if (!read_vram(p.vram_free_mib, p.vram_total_mib)) {
 +        LOG_WRN("%s: no GPU memory reading, planning off\n", __func__);
 +        return false;
@@ -536,8 +517,6 @@ index 000000000..e6befba34
 +        const double a = c512->arena_mib;
 +        tosh_plan_candidate * c1k = find("dmoe", kv, 1024);
 +        tosh_plan_candidate * c2k = find("dmoe", kv, 2048);
-+        // what a larger ubatch takes from the arena is paid in decode misses, as a share of the bank
-+        const double cost = 0.10*mi.bank_mib;
 +        if (high && c2k && c2k->valid && a - c2k->arena_mib <= cost) return c2k;
 +        if (p.n_ctx <= 32768 && c1k && c1k->valid && a - c1k->arena_mib <= cost) return c1k;
 +        return c512;
@@ -551,25 +530,13 @@ index 000000000..e6befba34
 +    const auto & spec_types = params.speculative.types;
 +    const bool mtp = std::find(spec_types.begin(), spec_types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != spec_types.end();
 +        evaluate(R);
-+        const tosh_plan_candidate * f16 = find("full_gpu", kvs[0], 0);
-+        const tosh_plan_candidate * q8  = kvs.size() > 1 ? find("full_gpu", kvs[1], 0) : nullptr;
 +        if (force.empty() || force == "full") {
 +            if (f16 && f16->valid) { sel = f16; p.reason = "the model and the requested context fit with the reserve"; }
 +            else if (q8 && q8->valid) { sel = q8; p.reason = "q8_0 cache makes the full model fit with the reserve"; }
 +        }
 +        if (sel == nullptr && !no_dmoe && (force.empty() || force == "dmoe")) {
-+            tosh_plan_candidate * a = pick_ub(kvs[0]);
-+            tosh_plan_candidate * b = kvs.size() > 1 ? pick_ub(kvs[1]) : nullptr;
-+            // the q8_0 cache is worth it when its savings buy a material share of the bank
-+            if (a && b && a->arena_mib < 0.9*mi.bank_mib && b->arena_mib - a->arena_mib >= 0.10*mi.bank_mib) {
-+                sel = b; p.reason = "q8_0 cache gives the expert arena a material share of the bank";
-+            } else if (a) {
-+                sel = a; p.reason = "the requested context and the reserve fit; experts take what is left";
-+            } else if (b) {
-+                sel = b; p.reason = "only a q8_0 cache leaves a useful expert arena";
 +            }
 +        }
-+        if (sel == nullptr && (force.empty() || force == "legacy")) {
 +            const tosh_plan_candidate * l16 = find("legacy_offload", kvs[0], 0);
 +            const tosh_plan_candidate * l8  = kvs.size() > 1 ? find("legacy_offload", kvs[1], 0) : nullptr;
 +            if (l16 && l16->valid) sel = l16; else if (l8 && l8->valid) sel = l8;
@@ -602,6 +569,7 @@ index 000000000..e6befba34
 +        }
 +    }
 +    }
++    for (const auto & c : p.candidates) {
 +    if (out) *out = p;
 +        return false;
 +    }
@@ -619,6 +587,7 @@ index 000000000..e6befba34
 +    }
 +        add_override(params, experts_pattern());
 +        params.load_mode = LLAMA_LOAD_MODE_MLOCK;
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
 +        setenv("TOSH_DMOE_CACHE_MIB", "auto", 1);
 +        setenv("TOSH_DMOE_RESERVE_MIB", string_format("%.0f", p.reserve_mib).c_str(), 1);
 +        setenv("TOSH_DMOE_MIN_ARENA_MIB", string_format("%.0f", p.min_arena_mib).c_str(), 1);
@@ -649,6 +618,7 @@ index 000000000..e6befba34
 +    }
 +    return true;
 +}
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
 diff --git a/common/tosh-plan.h b/common/tosh-plan.h
 new file mode 100644
 index 000000000..5b7c55fe7
@@ -723,10 +693,10 @@ index 000000000..5b7c55fe7
 +
 +bool tosh_plan_apply(common_params & params, tosh_plan * out = nullptr);
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 17562a498..c4b6a5e0c 100644
+index f7ef3eaef..64f7a6d88 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
-@@ -607,16 +607,20 @@ extern "C" {
+@@ -436,16 +436,20 @@ extern "C" {
  
          GGML_OP_CROSS_ENTROPY_LOSS,
          GGML_OP_CROSS_ENTROPY_LOSS_BACK,
@@ -747,8 +717,8 @@ index 17562a498..c4b6a5e0c 100644
          GGML_UNARY_OP_SGN,
          GGML_UNARY_OP_NEG,
          GGML_UNARY_OP_STEP,
-@@ -1503,16 +1507,55 @@ extern "C" {
-         "use ggml_prec_set_acc() instead");
+@@ -1320,16 +1324,55 @@ extern "C" {
+             struct ggml_tensor  * b);
  
      // change the hint of a matrix multiplication
      GGML_API void ggml_mul_mat_set_hint(
@@ -795,19 +765,19 @@ index 17562a498..c4b6a5e0c 100644
 +            struct ggml_tensor  * ids,        // [n_expert_used, n_tokens] i32
 +            int                   il);
 +
+     // an id of -1 skips the slot and zeroes the matching row of the result
+     //
+     // [TAG_MUL_MAT_ID_DUPLICATE_ID]
+     // note: this op has undefined behaviour if a given `a` is referenced more than once for a given `b`
+     //       (i.e. duplicate experts per token are not guaranteed to be supported in all backends)
+     // TODO: add backend support: https://github.com/ggml-org/llama.cpp/pull/29998#issuecomment-6153742533
+     // the CPU backend skips negative ids, their rows of the result are zero
      GGML_API struct ggml_tensor * ggml_mul_mat_id(
-             struct ggml_context * ctx,
-             struct ggml_tensor  * as,
-             struct ggml_tensor  * b,
-             struct ggml_tensor  * ids);
- 
-     // A: m columns, n rows,
-     // B: p columns, n rows,
 diff --git a/ggml/src/CMakeLists.txt b/ggml/src/CMakeLists.txt
-index 56466ce7b..3da878c0e 100644
+index 88b97d5ab..a2457faee 100644
 --- a/ggml/src/CMakeLists.txt
 +++ b/ggml/src/CMakeLists.txt
-@@ -184,16 +184,20 @@ if (WIN32)
+@@ -178,16 +178,20 @@ if (WIN32)
  endif()
  
  # ggml
@@ -828,7 +798,7 @@ index 56466ce7b..3da878c0e 100644
              ../include/ggml-opt.h
              ../include/gguf.h
              ggml.c
-@@ -202,18 +206,24 @@ add_library(ggml-base
+@@ -196,18 +200,24 @@ add_library(ggml-base
              ggml-backend.cpp
              ggml-backend-meta.cpp
              ggml-opt.cpp
@@ -854,7 +824,7 @@ index 56466ce7b..3da878c0e 100644
  
  target_include_directories(ggml-base PRIVATE . ${CMAKE_CURRENT_BINARY_DIR})
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index 2cc32ec89..3ef9afa8c 100644
+index 536f61de0..4a9e3ecb5 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -7,16 +7,26 @@
@@ -884,20 +854,190 @@ index 2cc32ec89..3ef9afa8c 100644
  #include <stdlib.h>
  #include <string.h>
  #include <algorithm>
-@@ -1910,16 +1920,20 @@ static bool ggml_backend_sched_prefetch_init(ggml_backend_sched_t sched, ggml_ba
-     return true;
+@@ -1179,16 +1189,21 @@ static bool ggml_is_view_op(enum ggml_op op) {
+ // routing ids read for the expert copies of one graph compute
+ struct ggml_backend_sched_expert_ids {
+     const struct ggml_tensor * prev_ids_tensor = nullptr;
+     std::vector<int32_t>       ids;
+     std::vector<ggml_bitset_t> used_ids;
+ 
+     // per-expert row counts of the chunk for the compact upload of the prefetch path
+     const struct ggml_tensor * chunk_rows_ids = nullptr;
++    std::vector<int32_t>       chunk_ids;
++    std::vector<int32_t>       chunk_rows;
++    std::vector<float>         chunk_tail;
++};
++
+ struct ggml_backend_sched_split {
+     int backend_id;
+     int i_start;
+     int i_end;
+     struct ggml_tensor ** inputs;
+     int n_inputs;
+     int inputs_capacity;
+     // graph view of this split
+@@ -2248,33 +2263,95 @@ static void ggml_backend_sched_prefetch_expert(ggml_backend_sched_t sched, struc
+             input = split->inputs[i];
+             break;
+         }
+     }
+     if (input == NULL || !ggml_backend_sched_is_host_weight(input) || !sched->hv_tensor_requires_copy[hash_id(input)]) {
+         return;
+     const ggml_tensor * ids = node->src[2];
+     const int64_t n_expert = input->ne[2];
++    const bool compact = tosh_dmoe_compact();
++    if (!(compact || ids->ne[0]*ids->ne[1] >= 2*n_expert) ||
++        !ggml_backend_sched_prefetch_init(sched, split_backend, ggml_nbytes(input))) {
++        return;
++    }
++
++    if (compact) {
++        // the chunk's routing decides which experts the upload carries
++        ggml_backend_sched_expert_ids & st = *sched->expert_ids;
++        ggml_backend_t ids_backend;
++        struct ggml_tensor * ids_tensor = ggml_backend_sched_expert_ids_src(sched, split, node, &ids_backend);
++        if (ids_tensor != st.chunk_rows_ids) {
++            const int64_t t_wait = ggml_time_us();
++            const double tl_wait = tosh_dmoe_host_seconds();
++            st.chunk_ids.resize(ggml_nbytes(ids_tensor) / sizeof(int32_t));
++            ggml_backend_tensor_get_async(ids_backend, ids_tensor, st.chunk_ids.data(), 0, ggml_nbytes(ids_tensor));
++            ggml_backend_synchronize(ids_backend);
++            const int64_t t_count = ggml_time_us();
++            tosh_dmoe_note_time(0, t_count - t_wait);
++            tosh_dmoe_timeline(0, -1, tl_wait, tosh_dmoe_host_seconds());
++            st.chunk_rows.assign(n_expert, 0);
++            st.chunk_tail.assign(n_expert, 0.0f);
++            const float decay = tosh_dmoe_token_decay();
++            float w = 1.0f;
++            for (int64_t i1 = ids_tensor->ne[1] - 1; i1 >= 0; i1--, w *= decay) {
++                for (int64_t i0 = 0; i0 < ids_tensor->ne[0]; i0++) {
++                    const int32_t id = st.chunk_ids[i1 * ids_tensor->nb[1]/sizeof(int32_t) + i0 * ids_tensor->nb[0]/sizeof(int32_t)];
++                    if (id < 0) {
++                        continue;   // a row the host computes
++                    }
++                    GGML_ASSERT(id < n_expert);
++                    st.chunk_rows[id]++;
++                    st.chunk_tail[id] += w;
++                }
++            }
++            st.chunk_rows_ids = ids_tensor;
++            tosh_dmoe_note_time(3, ggml_time_us() - t_count);
++        }
++        tosh_dmoe_set_chunk_rows(st.chunk_rows.data(), st.chunk_tail.data(), (int) n_expert);
++    }
++
+     const int slot = sched->prefetch_cur;
+     sched->prefetch_cur = (sched->prefetch_cur + 1) % sched->prefetch_n_slots;
+     // wait for the previous user of this slot to finish computing
+     if (sched->prefetch_used[slot]) {
+         ggml_backend_event_wait(sched->prefetch_backend, sched->prefetch_free[slot]);
+     }
+     // point the staging copy at the slot only for the duration of this split, so a fallback
+     // to the regular path on a later eval can never see a dangling slot pointer
+     sched->expert_slot_cpy          = input_cpy;
+     sched->expert_slot_saved_buffer = input_cpy->buffer;
+     sched->expert_slot_saved_data   = input_cpy->data;
+     input_cpy->buffer = sched->prefetch_slots[slot];
+     input_cpy->data   = ggml_backend_buffer_get_base(sched->prefetch_slots[slot]);
++    const int64_t t_up = compact ? ggml_time_us() : 0;
++    const double tl_up = compact ? tosh_dmoe_host_seconds() : 0.0;
+     ggml_backend_tensor_set_async(sched->prefetch_backend, input_cpy, input->data, 0, ggml_nbytes(input));
++    if (compact) {
++        tosh_dmoe_set_chunk_rows(nullptr, nullptr, 0);
++        tosh_dmoe_note_time(1, ggml_time_us() - t_up);
++        tosh_dmoe_timeline(3, -1, tl_up, tosh_dmoe_host_seconds());
++    }
+     ggml_backend_event_record(sched->prefetch_ready[slot], sched->prefetch_backend);
+     ggml_backend_event_wait(split_backend, sched->prefetch_ready[slot]);
+     sched->expert_slot = slot;
++}
++
++// Dynamic MoE leaves the rows with a negative id to the host and the bounded host cache holds the bytes
++// of the banks, so with either of them the used experts are copied here instead of in the copy callback
++static bool ggml_backend_sched_copy_experts_tosh(ggml_backend_sched_t sched, struct ggml_backend_sched_split * split, struct ggml_tensor * input, struct ggml_tensor * input_cpy) {
++    if ((!tosh_dmoe_compact() && !tosh_hostcache_on()) || split->graph.n_nodes == 0) {
++        return false;
++    }
++    struct ggml_tensor * node = split->graph.nodes[0];
++    if (node->op != GGML_OP_MUL_MAT_ID || node->src[0] != input_cpy) {
++        return false;
++    }
++
++    ggml_backend_t split_backend = sched->backends[split->backend_id];
+     const int64_t n_expert   = input->ne[2];
+     const size_t expert_size = input->nb[2];
+ 
+     ggml_backend_synchronize(ggml_backend_sched_get_tensor_backend(sched, input));
+ 
+     if (ggml_nelements(node->src[2]) == 0) {
+         return true;
+     }
+@@ -2289,16 +2366,52 @@ static void ggml_backend_sched_prefetch_expert(ggml_backend_sched_t sched, struc
+         ggml_backend_synchronize(ids_backend);
+ 
+         // find the used experts
+         st.used_ids.clear();
+         st.used_ids.resize(ggml_bitset_size(n_expert));
+         for (int64_t i1 = 0; i1 < ids_tensor->ne[1]; i1++) {
+             for (int64_t i0 = 0; i0 < ids_tensor->ne[0]; i0++) {
+                 int32_t id = st.ids[i1 * ids_tensor->nb[1]/sizeof(int32_t) + i0 * ids_tensor->nb[0]/sizeof(int32_t)];
++                if (id < 0 && tosh_dmoe_compact()) {
++                    continue;   // a row the host computes
++                }
++                GGML_ASSERT(id >= 0 && id < n_expert);
++                ggml_bitset_set(st.used_ids.data(), id);
++            }
++        }
++
++        st.prev_ids_tensor = ids_tensor;
++    }
++
++    if (id == n_expert) {
++        return true;   // every row runs on the host
++    }
++    int32_t first_id = id;
++    int32_t last_id = first_id;
++
++    for (++id; id < n_expert; ++id) {
++        if (!ggml_bitset_get(st.used_ids.data(), id)) {
++            continue;
++        }
++
++        if (id == last_id + 1) {
++            last_id = id;
++            continue;
++        }
++
++        copy_experts(first_id, last_id);
++
++        first_id = id;
++        last_id = id;
++    }
++    copy_experts(first_id, last_id);
++    return true;
++}
++
+ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggml_backend_sched_split * split, struct ggml_tensor * input) {
+     const int split_backend_id = split->backend_id;
+     ggml_backend_t split_backend = sched->backends[split_backend_id];
+     ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, input);
+     struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+ 
+     // read before the previous split, wait for the copy only
+     if (split == &sched->splits[sched->prefetch_split]) {
+@@ -2415,16 +2528,20 @@ static void ggml_backend_sched_prefetch_inputs(ggml_backend_sched_t sched, int s
+         ggml_backend_event_record(sched->prefetch_events[backend_id], backend);
+     }
+ }
+ 
  static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
      GGML_ASSERT(sched);
      struct ggml_backend_sched_split * splits = sched->splits;
  
-     ggml_tensor * prev_ids_tensor = nullptr;
-     std::vector<int32_t> ids;
-     std::vector<ggml_bitset_t> used_ids;
-+    std::vector<int32_t> chunk_ids;
-+    std::vector<int32_t> chunk_rows;
-+    std::vector<float>   chunk_tail;
-+    ggml_tensor * chunk_rows_ids = nullptr;
- 
++    // routing ids read by an earlier graph are stale, their tensors may hold new data
++    sched->expert_ids->prev_ids_tensor = nullptr;
++    sched->expert_ids->chunk_rows_ids  = nullptr;
++
      int prev_backend_id = -1;
  
      for (int split_id = 0; split_id < sched->n_splits; split_id++) {
@@ -905,142 +1045,9 @@ index 2cc32ec89..3ef9afa8c 100644
          int split_backend_id = split->backend_id;
          ggml_backend_t split_backend = sched->backends[split_backend_id];
  
-@@ -1989,38 +2003,89 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
-                 // and let the copy overlap compute of the previous split
-                 if (sched->prefetch_experts && !sched->callback_eval && split_prefetch_slot == -1 && split->graph.n_nodes > 0) {
-                     ggml_tensor * node = split->graph.nodes[0];
-                     if (ggml_backend_buffer_get_usage(input->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
-                         ggml_backend_buffer_is_host(input->buffer) &&
-                         node->op == GGML_OP_MUL_MAT_ID && node->src[0] == input_cpy) {
-                         const ggml_tensor * ids = node->src[2];
-                         const int64_t n_expert = input->ne[2];
-+                        const bool compact = tosh_dmoe_compact();
-+                        if ((compact || ids->ne[0]*ids->ne[1] >= 2*n_expert) &&
-                             ggml_backend_sched_prefetch_init(sched, split_backend, ggml_nbytes(input))) {
-+                            if (compact) {
-+                                // the chunk's routing decides which experts the upload carries
-+                                ggml_tensor * ids_tensor = node->src[2];
-+                                ggml_backend_t ids_backend = split_backend;
-+                                for (int i = input_id + 1; i < split->n_inputs; i++) {
-+                                    if (ids_tensor == tensor_copy(split->inputs[i], split_backend_id, sched->cur_copy)) {
-+                                        ids_tensor = split->inputs[i];
-+                                        ids_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[i]);
-+                                        break;
-+                                    }
-+                                }
-+                                if (ids_tensor != chunk_rows_ids) {
-+                                    const int64_t t_wait = ggml_time_us();
-+                                    const double tl_wait = tosh_dmoe_host_seconds();
-+                                    chunk_ids.resize(ggml_nbytes(ids_tensor) / sizeof(int32_t));
-+                                    ggml_backend_tensor_get_async(ids_backend, ids_tensor, chunk_ids.data(), 0, ggml_nbytes(ids_tensor));
-+                                    ggml_backend_synchronize(ids_backend);
-+                                    const int64_t t_count = ggml_time_us();
-+                                    tosh_dmoe_note_time(0, t_count - t_wait);
-+                                    tosh_dmoe_timeline(0, -1, tl_wait, tosh_dmoe_host_seconds());
-+                                    chunk_rows.assign(n_expert, 0);
-+                                    chunk_tail.assign(n_expert, 0.0f);
-+                                    const float decay = tosh_dmoe_token_decay();
-+                                    float w = 1.0f;
-+                                    for (int64_t i1 = ids_tensor->ne[1] - 1; i1 >= 0; i1--, w *= decay) {
-+                                        for (int64_t i0 = 0; i0 < ids_tensor->ne[0]; i0++) {
-+                                            const int32_t id = chunk_ids[i1 * ids_tensor->nb[1]/sizeof(int32_t) + i0 * ids_tensor->nb[0]/sizeof(int32_t)];
-+                                            if (id < 0) {
-+                                                continue;   // a row the host computes
-+                                            }
-+                                            GGML_ASSERT(id < n_expert);
-+                                            chunk_rows[id]++;
-+                                            chunk_tail[id] += w;
-+                                        }
-+                                    }
-+                                    chunk_rows_ids = ids_tensor;
-+                                    tosh_dmoe_note_time(3, ggml_time_us() - t_count);
-+                                }
-+                                tosh_dmoe_set_chunk_rows(chunk_rows.data(), chunk_tail.data(), (int) n_expert);
-+                            }
-                             const int slot = sched->prefetch_cur;
-                             sched->prefetch_cur = (sched->prefetch_cur + 1) % sched->prefetch_n_slots;
-                             // wait for the previous user of this slot to finish computing
-                             if (sched->prefetch_used[slot]) {
-                                 ggml_backend_event_wait(sched->prefetch_backend, sched->prefetch_free[slot]);
-                             }
-                             // point the staging copy at the slot only for the duration of
-                             // this split, so a fallback to the regular path on a later
-                             // eval can never see a dangling slot pointer
-                             prefetch_input_cpy    = input_cpy;
-                             prefetch_saved_buffer = input_cpy->buffer;
-                             prefetch_saved_data   = input_cpy->data;
-                             input_cpy->buffer = sched->prefetch_slots[slot];
-                             input_cpy->data   = ggml_backend_buffer_get_base(sched->prefetch_slots[slot]);
-+                            const int64_t t_up = compact ? ggml_time_us() : 0;
-+                            const double tl_up = compact ? tosh_dmoe_host_seconds() : 0.0;
-                             ggml_backend_tensor_set_async(sched->prefetch_backend, input_cpy, input->data, 0, ggml_nbytes(input));
-+                            if (compact) {
-+                                tosh_dmoe_set_chunk_rows(nullptr, nullptr, 0);
-+                                tosh_dmoe_note_time(1, ggml_time_us() - t_up);
-+                                tosh_dmoe_timeline(3, -1, tl_up, tosh_dmoe_host_seconds());
-+                            }
-                             ggml_backend_event_record(sched->prefetch_ready[slot], sched->prefetch_backend);
-                             ggml_backend_event_wait(split_backend, sched->prefetch_ready[slot]);
-                             split_prefetch_slot = slot;
-                             continue;
-                         }
-                     }
-+                }
-+
-                 // wait for the split backend to finish using the input before overwriting it
-                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
-                     ggml_backend_event_wait(split_backend, sched->events[split_backend_id][sched->cur_copy]);
-                 } else {
-                     ggml_backend_synchronize(split_backend);
-                 }
- 
-                 // when offloading MoE weights, we can reduce the amount of data copied by copying only the experts that are used
-@@ -2061,16 +2126,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
-                         ggml_backend_synchronize(ids_backend);
- 
-                         // find the used experts
-                         used_ids.clear();
-                         used_ids.resize(ggml_bitset_size(n_expert));
-                         for (int64_t i1 = 0; i1 < ids_tensor->ne[1]; i1++) {
-                             for (int64_t i0 = 0; i0 < ids_tensor->ne[0]; i0++) {
-                                 int32_t id = ids[i1 * ids_tensor->nb[1]/sizeof(int32_t) + i0 * ids_tensor->nb[0]/sizeof(int32_t)];
-+                                if (id < 0 && tosh_dmoe_compact()) {
-+                                    continue;   // a row the host computes
-+                                }
-                                 GGML_ASSERT(id >= 0 && id < n_expert);
-                                 ggml_bitset_set(used_ids.data(), id);
-                             }
-                         }
- 
-                         prev_ids_tensor = ids_tensor;
-                     }
- 
-@@ -2085,19 +2153,22 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
-                             input_cpy,
-                             (const uint8_t *)input->data + expert_offset, expert_offset,
-                             // copy a bit extra at the to ensure there are no NaNs in the padding of the last expert
-                             // this is necessary for MMQ in the CUDA backend
-                             expert_size_copy + padding_end);
-                     };
- 
-                     int id = 0;
--                    while (!ggml_bitset_get(used_ids.data(), id)) {
-+                    while (id < n_expert && !ggml_bitset_get(used_ids.data(), id)) {
-                         id++;
-                     }
-+                    if (id == n_expert) {
-+                        continue;   // every row runs on the host
-+                    }
-                     int32_t first_id = id;
-                     int32_t last_id = first_id;
- 
-                     for (++id; id < n_expert; ++id) {
-                         if (!ggml_bitset_get(used_ids.data(), id)) {
-                             continue;
-                         }
- 
+         // TOSH_MOE_PROFILE: dump the first splits once, to map which ops run where
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.cpp b/ggml/src/ggml-cpu/ggml-cpu.cpp
-index d98ffc9b4..227a17c79 100644
+index 512ab2907..0eaf57f81 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.cpp
 +++ b/ggml/src/ggml-cpu/ggml-cpu.cpp
 @@ -437,16 +437,20 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
@@ -1065,7 +1072,7 @@ index d98ffc9b4..227a17c79 100644
                  op->type != GGML_TYPE_IQ2_XS  &&
                  op->type != GGML_TYPE_IQ2_S   &&
 diff --git a/ggml/src/ggml-metal/CMakeLists.txt b/ggml/src/ggml-metal/CMakeLists.txt
-index 89057c41e..16c727829 100644
+index f5c8a1a65..b6379faac 100644
 --- a/ggml/src/ggml-metal/CMakeLists.txt
 +++ b/ggml/src/ggml-metal/CMakeLists.txt
 @@ -1,11 +1,12 @@
@@ -1117,7 +1124,7 @@ index 89057c41e..16c727829 100644
      kernels/fa_q5_0.metal
      kernels/fa_q5_1.metal
      kernels/fa_q8_0.metal
-@@ -280,8 +283,13 @@ if (NOT GGML_METAL_EMBED_LIBRARY)
+@@ -281,8 +284,13 @@ if (NOT GGML_METAL_EMBED_LIBRARY)
          FILES_MATCHING PATTERN "*.metal" PATTERN "*.h"
      )
  
@@ -1132,7 +1139,7 @@ index 89057c41e..16c727829 100644
 +    target_compile_definitions(ggml-metal PRIVATE TOSH_ENABLE_DYNAMIC_MOE)
 +endif()
 diff --git a/ggml/src/ggml-metal/ggml-metal-common.cpp b/ggml/src/ggml-metal/ggml-metal-common.cpp
-index 8b065f54a..fcea023ae 100644
+index f36312254..0d9103c59 100644
 --- a/ggml/src/ggml-metal/ggml-metal-common.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-common.cpp
 @@ -1,15 +1,16 @@
@@ -1152,7 +1159,7 @@ index 8b065f54a..fcea023ae 100644
  static bool ggml_metal_fwht_supported_size(int64_t n, size_t max_tg_mem) {
      if (n == 64 || n == 128 || n == 256 || n == 512) {
          return true;
-@@ -27,32 +28,16 @@ static bool ggml_metal_fwht_supported_size(int64_t n, size_t max_tg_mem) {
+@@ -27,33 +28,16 @@ static bool ggml_metal_fwht_supported_size(int64_t n, size_t max_tg_mem) {
  // through reaches the generic path, which has no F32 src0 by F16 src1 kernel.
  bool ggml_metal_op_mul_mat_use_fwht(const struct ggml_tensor * op, size_t max_tg_mem) {
      return ggml_get_op_params_i32(op, 1) == GGML_HINT_SRC0_IS_HADAMARD && op->type == GGML_TYPE_F32 &&
@@ -1167,14 +1174,15 @@ index 8b065f54a..fcea023ae 100644
 -
 -    return !ggml_is_transposed(op->src[0]) &&
 -           !ggml_is_transposed(op->src[1]) &&
--           has_simdgroup_mm && ne00 >= 64 && ne11 > 8;
+-           has_simdgroup_mm && ne11 > 8 && ne00 >= 32;
 -}
 -
 -bool ggml_metal_op_mul_mat_id_use_mm(const struct ggml_tensor * op, bool has_simdgroup_mm) {
 -    const int64_t ne00 = op->src[0]->ne[0];
+-    const int64_t ne02 = op->src[0]->ne[2];
 -    const int64_t ne21 = op->src[2]->ne[1];
 -
--    return has_simdgroup_mm && ne00 >= 64 && ne21 >= 32;
+-    return has_simdgroup_mm && ne00 >= 64 && ne02 <= 1024 && ne21 >= 32;
 -}
 -
  // the most src1 rows of the few-row MMA kernels
@@ -1186,7 +1194,7 @@ index 8b065f54a..fcea023ae 100644
  // weights per K step of the q5_K and generic few-row MMA kernels
  static constexpr int64_t GGML_METAL_MMA_K_CHUNK = 64;
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index 9d6fba29a..3eb9feaba 100644
+index 15a137330..67c621567 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
 @@ -4,16 +4,18 @@
@@ -1233,7 +1241,7 @@ index 9d6fba29a..3eb9feaba 100644
      _Atomic uint64_t           ct_idx;
  
      // Synchronization and resources shared by both cross-device copy paths.
-@@ -1066,16 +1076,27 @@ void ggml_metal_free(ggml_metal_t ctx) {
+@@ -1067,16 +1077,27 @@ void ggml_metal_free(ggml_metal_t ctx) {
      for (int i = 0; i < ctx->prefetch_stage_count; ++i) {
          if (ctx->prefetch_stage_cmds[i]) {
              [ctx->prefetch_stage_cmds[i] waitUntilCompleted];
@@ -1261,7 +1269,7 @@ index 9d6fba29a..3eb9feaba 100644
              [ctx->xlinks[i].ev_x_done waitUntilSignaledValue:ctx->xlinks[i].seq_x timeoutMS:10000];
          }
          [ctx->xlinks[i].wrap_src release];
-@@ -1179,16 +1200,29 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
+@@ -1180,16 +1201,29 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
  
      // wait for any backend operations to finish
      const bool cbp_on = tosh_cbp_on();
@@ -1291,7 +1299,7 @@ index 9d6fba29a..3eb9feaba 100644
      }
  
      // in-flight staged uploads count as pending backend operations
-@@ -1272,29 +1306,354 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
+@@ -1273,53 +1307,360 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
  
  void ggml_metal_read_batch_begin(ggml_metal_t ctx) {
      ggml_metal_device_read_batch_begin(ctx->dev);
@@ -1330,16 +1338,16 @@ index 9d6fba29a..3eb9feaba 100644
 +
 +
 +static void ggml_metal_dmoe_submit(ggml_metal_t ctx, id<MTLCommandBuffer> cmd_buf, int il) {
-+    [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+     [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
 +        tosh_dmoe_note_time(2, (int64_t) ((cb.GPUEndTime - cb.GPUStartTime)*1e6));
 +        tosh_dmoe_timeline(2, il, cb.GPUStartTime, cb.GPUEndTime);
 +    }];
-+    [cmd_buf commit];
-+    [ctx->cmd_bufs_ext addObject:cmd_buf];
-+    ctx->cmd_buf_last = cmd_buf;
-+    [cmd_buf retain];
-+}
-+
+     [cmd_buf commit];
+     [ctx->cmd_bufs_ext addObject:cmd_buf];
+     ctx->cmd_buf_last = cmd_buf;
+     [cmd_buf retain];
+ }
+ 
 +// Copies the pieces into their ring chunk on several threads and blits them to the slot.
 +static void ggml_metal_dmoe_ring_flush(ggml_metal_t ctx, const void * data, id<MTLBuffer> dst, size_t dst_offs,
 +        const struct dmoe_piece * p, int n, bool * first, int il) {
@@ -1368,9 +1376,9 @@ index 9d6fba29a..3eb9feaba 100644
 +            kk -= m;
 +        }
 +    });
-+    id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
+     id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
 +    if (*first) {
-+        ggml_metal_encode_pending_waits(ctx, cmd_buf);
+         ggml_metal_encode_pending_waits(ctx, cmd_buf);
 +        *first = false;
 +    }
 +    id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
@@ -1401,8 +1409,8 @@ index 9d6fba29a..3eb9feaba 100644
 +
 +    // residents first: they need no host work and can run while the ring fills
 +    {
-+        id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
-+        ggml_metal_encode_pending_waits(ctx, cmd_buf);
+         id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
+         ggml_metal_encode_pending_waits(ctx, cmd_buf);
 +        first = false;
 +        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
 +        for (int e = 0; e < plan->n_expert; ++e) {
@@ -1429,6 +1437,11 @@ index 9d6fba29a..3eb9feaba 100644
 +    struct dmoe_piece p[64];
 +    int n = 0;
 +    size_t fill = 0;
++                ggml_metal_dmoe_ring_flush(ctx, data, bid_dst.metal, bid_dst.offs, p, n, &first, plan->il);
++                n = 0;
++                fill = 0;
++            }
++        ggml_metal_dmoe_ring_flush(ctx, data, bid_dst.metal, bid_dst.offs, p, n, &first, plan->il);
 +        if (rows[e] == 0 || plan->slot_of[e] >= 0) {
 +            ++e;
 +            continue;
@@ -1450,9 +1463,10 @@ index 9d6fba29a..3eb9feaba 100644
 +        }
 +        e = e1;
 +    }
++        ggml_metal_dmoe_ring_flush(ctx, data, bid_dst.metal, bid_dst.offs, p, n, &first, plan->il);
 +
 +    if (plan->n_promo > 0) {
-+        id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
+         id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
 +        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
 +        for (int i = 0; i < plan->n_promo; ++i) {
 +            const int e = plan->promo_expert[i], sl = plan->promo_slot[i];
@@ -1470,20 +1484,20 @@ index 9d6fba29a..3eb9feaba 100644
 +        if (ctx->dmoe_mark == nil) {
 +            ctx->dmoe_mark = [ggml_metal_device_get_obj(ctx->dev) newBufferWithLength:256 options:MTLResourceStorageModeShared];
 +        }
-+        id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
-+        id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
+         id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
+         id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
 +        [encoder copyFromBuffer:bid_dst.metal sourceOffset:bid_dst.offs toBuffer:ctx->dmoe_mark destinationOffset:0 size:16];
 +        [encoder endEncoding];
 +        const int il = plan->il;
-+        [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+         [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
 +            tosh_dmoe_rare_dma_done(il, cb.GPUEndTime);
 +        }];
-+        [cmd_buf commit];
-+        [ctx->cmd_bufs_ext addObject:cmd_buf];
-+        ctx->cmd_buf_last = cmd_buf;
-+        [cmd_buf retain];
-+    }
-+
+         [cmd_buf commit];
+         [ctx->cmd_bufs_ext addObject:cmd_buf];
+         ctx->cmd_buf_last = cmd_buf;
+         [cmd_buf retain];
+     }
+ 
 +    atomic_fetch_add(&g_dmoe_pf_host_bytes, host_bytes);
 +    atomic_fetch_add(&g_dmoe_pf_vram_bytes, vram_bytes);
 +    atomic_fetch_add(&g_dmoe_pf_skip_bytes, skip_bytes);
@@ -1547,7 +1561,7 @@ index 9d6fba29a..3eb9feaba 100644
 +    // with the chunk's routing only the routed experts are carried; the rest of the slot is never read
 +    const int32_t * rows = plan.rows;
 +    id<MTLCommandBuffer> cmd_buf = [ctx->queue commandBuffer];
-+    ggml_metal_encode_pending_waits(ctx, cmd_buf);
+     ggml_metal_encode_pending_waits(ctx, cmd_buf);
 +    id<MTLBlitCommandEncoder> encoder = [cmd_buf blitCommandEncoder];
 +    uint64_t host_bytes = 0, vram_bytes = 0, skip_bytes = 0, rare[3] = { 0, 0, 0 }, used = 0, used_res = 0;
 +    for (int e = 0; e < plan.n_expert;) {
@@ -1593,7 +1607,7 @@ index 9d6fba29a..3eb9feaba 100644
 +    }
 +    [encoder endEncoding];
 +    if (rows) {
-+        [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+         [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
 +            tosh_dmoe_note_time(2, (int64_t) ((cb.GPUEndTime - cb.GPUStartTime)*1e6));
 +        }];
 +    }
@@ -1619,7 +1633,7 @@ index 9d6fba29a..3eb9feaba 100644
 +}
 +#endif
 +
-+void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
      @autoreleasepool {
          ggml_metal_prof_note(tensor->name, size, false);
          id<MTLDevice> device = ggml_metal_device_get_obj(ctx->dev);
@@ -1646,7 +1660,7 @@ index 9d6fba29a..3eb9feaba 100644
              if (buf_src == nil) {
                  stage = ctx->prefetch_stage_cur;
                  ctx->prefetch_stage_cur = (ctx->prefetch_stage_cur + 1) % ctx->prefetch_stage_count;
-@@ -3561,16 +3920,52 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+@@ -3586,16 +3927,53 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
      if (ctx->has_error) {
          GGML_LOG_ERROR("%s: backend is in error state from a previous command buffer failure - recreate the backend to recover\n", __func__);
          return GGML_STATUS_FAILED;
@@ -1691,15 +1705,16 @@ index 9d6fba29a..3eb9feaba 100644
 +        tosh_dmoe_set_active(true);
 +    }
 +#endif
++
+                 ggml_metal_encode_pending_waits(ctx, cmd_buf);
  
-     // number of nodes encoded by the main thread (empirically determined)
-     // the split was tuned on unified memory; TOSH_N_MAIN overrides it to A/B the share here
-     static int n_main_env = -2;
-     if (n_main_env == -2) {
-         const char * v = TOSH_ENV("TOSH_N_MAIN");
-         n_main_env = v ? atoi(v) : -1;
+                 ggml_metal_cmd_buf_submit(ctx, cmd_buf);
+             }
+         }
+         return GGML_STATUS_SUCCESS;
      }
-@@ -3835,22 +4230,31 @@ static bool ggml_metal_graph_is_moe_decode(const struct ggml_cgraph * gf, int ma
+ 
+@@ -3888,22 +4266,31 @@ static bool ggml_metal_graph_is_moe_decode(const struct ggml_cgraph * gf, int ma
  
      return has_experts;
  }
@@ -1733,10 +1748,39 @@ index 9d6fba29a..3eb9feaba 100644
  
  void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 045a0711e..2c3d89f47 100644
+index 39cc4eba1..4eeff4147 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -2371,30 +2371,35 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
+@@ -2022,26 +2022,20 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(g
+     char base[256];
+     char name[256];
+ 
+     snprintf(base, 256, "kernel_mul_mm_id_map0_ne20_%d", ne20);
+     snprintf(name, 256, "%s_ne02=%d", base, ne02);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+-        ggml_metal_cv_t cv = ggml_metal_cv_init();
+-        ggml_metal_cv_set_int32(cv, ne02, FC_MUL_MM + 7);
+-
+-        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+-
+-        ggml_metal_cv_free(cv);
++        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+     }
+ 
+-    // per expert: entry count + base offset, followed by the staging of the ids of ntg tokens
+-    res.smem = 2*(size_t) ne02*sizeof(uint32_t) + (size_t) ne02*ne20*sizeof(uint16_t);
++    res.smem = (size_t) ne02*ne20*sizeof(uint16_t);
+     res.smem = GGML_PAD(res.smem, 16);
+ 
+     return res;
+ }
+ 
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_zero(ggml_metal_library_t lib) {
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, "kernel_mul_mm_id_zero");
+     if (!res.pipeline) {
+@@ -2396,30 +2390,34 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
      // The expert kernels share the implementations of the dense path, so they can read the
      // quant arrays a word at a time under the same conditions.
      const bool row8 = row4 && (op->src[0]->nb[1] % 4 == 0) && (op->src[0]->nb[2] % 4 == 0) &&
@@ -1749,7 +1793,6 @@ index 045a0711e..2c3d89f47 100644
 +    const bool id_skip = op->src[2] != nullptr && op->src[2]->op == GGML_OP_TOSH_DMOE_PUBLISH;
 +
      snprintf(base, 256, "kernel_mul_mv_id_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, id_w64 ? "_w64" : "");
-+    snprintf(name, 256, "%s_nsg=%d_nw=%d_a4=%d_a8=%d_al=%d_sk=%d", base, nsg, nw, row4, row8, align, id_skip);
  
      ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
      if (!res.pipeline) {
@@ -1773,7 +1816,7 @@ index 045a0711e..2c3d89f47 100644
      res.nr0  = nr0;
      res.nr1  = nr1;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
-index 722c8670a..1806555c9 100644
+index 36ed27458..b8d7b6c59 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.h
 +++ b/ggml/src/ggml-metal/ggml-metal-device.h
 @@ -92,16 +92,19 @@ bool ggml_metal_fb_residual_take(ggml_metal_device_t dev, const struct ggml_tens
@@ -1796,7 +1839,7 @@ index 722c8670a..1806555c9 100644
  // MTLLibrary wrapper
  //
  
-@@ -379,16 +382,26 @@ ggml_metal_event_t ggml_metal_device_event_init(ggml_metal_device_t dev);
+@@ -386,16 +389,26 @@ ggml_metal_event_t ggml_metal_device_event_init(ggml_metal_device_t dev);
  void ggml_metal_device_event_free(ggml_metal_device_t dev, ggml_metal_event_t ev);
  void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_event_t ev);
  
@@ -1824,7 +1867,7 @@ index 722c8670a..1806555c9 100644
  // device buffers
  //
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index beb661b22..3fe87e824 100644
+index 0a9a025b9..9a6e7a415 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -3,25 +3,59 @@
@@ -1905,7 +1948,7 @@ index beb661b22..3fe87e824 100644
      X(FA_Q5_0,         fa_q5_0)        \
      X(FA_Q5_1,         fa_q5_1)        \
      X(FA_Q8_0,         fa_q8_0)        \
-@@ -314,16 +349,86 @@ static NSString * ggml_metal_library_flatten_source(NSString * path_source, NSEr
+@@ -315,16 +350,86 @@ static NSString * ggml_metal_library_flatten_source(NSString * path_source, NSEr
  
      if (!ggml_metal_library_flatten_file(src, path_source, search_paths, seen, error)) {
          [src release];
@@ -1992,7 +2035,7 @@ index beb661b22..3fe87e824 100644
  static bool ggml_metal_library_compile_all(
          ggml_metal_library_t res,
          id<MTLDevice> device,
-@@ -489,16 +594,38 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+@@ -490,16 +595,38 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
  #undef X
      };
      static const char * const lib_end[GGML_METAL_LIB_COUNT] = {
@@ -2031,7 +2074,7 @@ index beb661b22..3fe87e824 100644
                                            encoding:NSUTF8StringEncoding];
          }, "embedded data");
  
-@@ -838,16 +965,17 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+@@ -839,16 +966,17 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
  }
  
  //
@@ -2049,7 +2092,7 @@ index beb661b22..3fe87e824 100644
      static dispatch_once_t         once[8];
  
      static os_unfair_lock          lock = OS_UNFAIR_LOCK_INIT;
-@@ -949,16 +1077,18 @@ struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3_rms_mul(g
+@@ -950,16 +1078,18 @@ struct ggml_metal_pipeline_with_params ggml_metal_device_pipeline_add3_rms_mul(g
      return res;
  }
  
@@ -2068,7 +2111,7 @@ index beb661b22..3fe87e824 100644
  
      [res->obj retain];
  
-@@ -1003,16 +1133,36 @@ void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int
+@@ -1004,16 +1134,36 @@ void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int
  void ggml_metal_encoder_memory_barrier(ggml_metal_encoder_t encoder) {
      [encoder->obj memoryBarrierWithScope:MTLBarrierScopeBuffers];
  }
@@ -2105,7 +2148,7 @@ index beb661b22..3fe87e824 100644
      // a single global queue shared by all Metal backends
      // technically not needed for devices with unified memory, but enables discrete GPUs support
      // ref: https://github.com/ggml-org/llama.cpp/pull/15906
-@@ -1050,18 +1200,275 @@ struct ggml_metal_device {
+@@ -1051,18 +1201,275 @@ struct ggml_metal_device {
      struct {
          const void *  base;
          size_t        size;
@@ -2381,7 +2424,7 @@ index beb661b22..3fe87e824 100644
      NSLock * lock;
  
      NSMutableArray * data;
-@@ -1343,16 +1750,25 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+@@ -1344,16 +1751,25 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
              if (dev->mtl_device) {
                  dev->mtl_queue = ggml_metal_new_queue(dev->mtl_device);
                  if (dev->mtl_queue == nil) {
@@ -2407,7 +2450,7 @@ index beb661b22..3fe87e824 100644
                  // additional (virtual) devices are emulated on top of it via GGML_METAL_DEVICES
                  dev->props.device_phys = 0;
                  dev->props.device_virt = device;
-@@ -1659,22 +2075,40 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+@@ -1660,22 +2076,40 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
                  // The 4 GiB failure that motivated this was reported by Slice on an RX 570:
                  // https://www.insanelymac.com/forum/profile/112217-slice/
                  if (TOSH_ENV("TOSH_METAL_MAX_BUFFER_MB")) {
@@ -2448,7 +2491,7 @@ index beb661b22..3fe87e824 100644
                              val ? atoi(val) : 0);
                  }
  
-@@ -1855,44 +2289,62 @@ void * ggml_metal_device_wrap_host(ggml_metal_device_t dev, const void * data, s
+@@ -1856,40 +2290,62 @@ void * ggml_metal_device_wrap_host(ggml_metal_device_t dev, const void * data, s
              id<MTLBuffer> buf = [[dev->host_wraps[i].buf retain] autorelease];
              [dev->wrap_lock unlock];
  
@@ -2457,8 +2500,6 @@ index beb661b22..3fe87e824 100644
          }
      }
  
--    atomic_store_explicit(&dev->rsets->d_loop, dev->rsets->loops_per_s*dev->rsets->keep_alive_s, memory_order_relaxed);
--}
 +    // A no-copy host buffer only makes already allocated system-RAM pages addressable by Metal;
 +    // it does not make them private VRAM residents. recommendedMaxWorkingSetSize is therefore the
 +    // wrong ceiling: on a discrete GPU it rejects the exact oversized models this cache exists to
@@ -2467,8 +2508,8 @@ index beb661b22..3fe87e824 100644
 +    if (len > dev->props.max_buffer_size) {
 +        [dev->wrap_lock unlock];
 +        return NULL;
-     }
- 
++    }
++
      // Left uncapped, a large MoE offload maps its whole host-resident expert set here and the
      // device stops granting any new shared buffer: measured failing a 1.21 GiB allocation with
      // 142.75 GiB wrapped against a 34.34 GiB working set. The cap costs no speed (measured
@@ -2513,7 +2554,7 @@ index beb661b22..3fe87e824 100644
          dev->n_host_wraps--;
      }
  
-@@ -2089,16 +2541,22 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -2099,16 +2555,22 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                             (op->src[0]->type == GGML_TYPE_BF16 && op->type == GGML_TYPE_F32);
                  default:
                      return false;
@@ -2529,17 +2570,17 @@ index beb661b22..3fe87e824 100644
 +            return true;
 +#endif
          case GGML_OP_SCALE:
+             return ggml_is_contiguous_rows(op->src[0]) && (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_BF16);
          case GGML_OP_FILL:
          case GGML_OP_CLAMP:
          case GGML_OP_SQR:
          case GGML_OP_SQRT:
          case GGML_OP_SIN:
          case GGML_OP_COS:
-         case GGML_OP_LOG:
-@@ -2807,28 +3265,37 @@ static void * ggml_metal_host_malloc(size_t n) {
+@@ -2870,25 +3332,37 @@ static void * ggml_metal_host_malloc(size_t n) {
+         GGML_LOG_ERROR("%s: error: vm_allocate failed\n", __func__);
          return NULL;
      }
- #endif
  
      return data;
  }
@@ -2554,9 +2595,9 @@ index beb661b22..3fe87e824 100644
 +        if (!buf->is_shared && buf->buffers[i].metal != nil) {
 +            atomic_fetch_sub(&g_metal_private_bytes, (size_t) [buf->buffers[i].metal length]);
 +        }
-         [buf->buffers[i].metal release];
-     }
- 
++        [buf->buffers[i].metal release];
++    }
++
      if (buf->is_shared && buf->owned && buf->all_data != NULL) {
  #if TARGET_OS_OSX
          vm_deallocate((vm_map_t)mach_task_self(), (vm_address_t)buf->all_data, buf->all_size);
@@ -2574,7 +2615,7 @@ index beb661b22..3fe87e824 100644
      const size_t size_page = sysconf(_SC_PAGESIZE);
  
      size_t size_aligned = size;
-@@ -2855,23 +3322,29 @@ ggml_metal_buffer_t ggml_metal_buffer_init(ggml_metal_device_t dev, size_t size,
+@@ -2915,23 +3389,29 @@ ggml_metal_buffer_t ggml_metal_buffer_init(ggml_metal_device_t dev, size_t size,
  
      res->n_buffers = 1;
  
@@ -2605,7 +2646,7 @@ index beb661b22..3fe87e824 100644
  
      // the host allocation outlives res on these paths unless it is handed back
      if (size_aligned > 0 && (res->all_data == NULL || res->buffers[0].metal == nil)) {
-@@ -2995,16 +3468,19 @@ ggml_metal_buffer_t ggml_metal_buffer_map(ggml_metal_device_t dev, void * ptr, s
+@@ -3055,16 +3535,19 @@ ggml_metal_buffer_t ggml_metal_buffer_map(ggml_metal_device_t dev, void * ptr, s
      return res;
  }
  
@@ -2624,47 +2665,31 @@ index beb661b22..3fe87e824 100644
      }
  
      if (buf->is_shared && buf->owned) {
- #if TARGET_OS_OSX
+         vm_deallocate((vm_map_t)mach_task_self(), (vm_address_t)buf->all_data, buf->all_size);
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index d8d24af5e..75c0ca8f0 100644
+index 9b58418e1..f1b2761fb 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -501,16 +501,33 @@ typedef struct {
-     float    logit_softcap;
-     int32_t  n_kv_max_padded;
-     int32_t  has_sinks; // read by the AMD kernels; upstream uses a function constant
-     int32_t  has_mask;  // 0 for bidirectional attention (vision towers), which has no mask
- } ggml_metal_kargs_flash_attn_ext_vec;
- 
- // the AMD kernels take their own copy: a field added to the upstream vec struct changes the
- // constant buffer layout and with it the code the Metal compiler emits for them
-+typedef struct {
-+    int32_t  ne01;
-+    int32_t  ne02;
-+    int32_t  ne03;
-+    uint64_t nb01;
-+    uint64_t nb02;
-+    uint64_t nb03;
-+    int32_t  ne11;
-+    int32_t  ne_12_2; // assume K and V are same shape
-+    int32_t  ne_12_3;
-+    int32_t  ns10;
-+    uint64_t nb11;
-+    uint64_t nb12;
-+    uint64_t nb13;
-+    int32_t  ns20;
-+    uint64_t nb21;
-+    uint64_t nb22;
-     uint64_t nb23;
-     int32_t  ne31;
-     int32_t  ne32;
-     int32_t  ne33;
-     uint64_t nb31;
-     uint64_t nb32;
-     uint64_t nb33;
+@@ -643,16 +643,17 @@ typedef struct {
+     uint64_t nb13;
+     int32_t  ne0;
      int32_t  ne1;
+     int16_t  r2;
+     int16_t  r3;
+ } ggml_metal_kargs_mul_mv_ext;
+ 
+ typedef struct {
++    int32_t  ne02;
+     int32_t  ne10;
+     int32_t  ne11;  // n_expert_used (bcast)
+     uint64_t nb11;
+     uint64_t nb12;
+     int32_t  ne21; // n_tokens
+     int32_t  ne20;  // n_expert_used
+     uint64_t nb21;
+ } ggml_metal_kargs_mul_mm_id_map0;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 7ce270237..5a3daa3e4 100644
+index 614d59589..0409baa9e 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -1,24 +1,32 @@
@@ -2803,7 +2828,7 @@ index 7ce270237..5a3daa3e4 100644
  
      bool use_concurrency;
      bool use_capture;
-@@ -460,16 +507,30 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+@@ -464,16 +511,30 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
          case GGML_OP_MUL_MAT:
              {
                  n_fuse = ggml_metal_op_mul_mat(ctx, idx);
@@ -2834,7 +2859,7 @@ index 7ce270237..5a3daa3e4 100644
              {
                  n_fuse = ggml_metal_op_set_rows(ctx, idx);
              } break;
-@@ -3820,22 +3881,29 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+@@ -3975,22 +4036,29 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
  
      ggml_metal_buffer_id bid_src0 = ggml_metal_get_buffer_id(op->src[0]);
      ggml_metal_buffer_id bid_src1 = ggml_metal_get_buffer_id(op->src[1]);
@@ -2844,7 +2869,8 @@ index 7ce270237..5a3daa3e4 100644
      const uint32_t r2 = 1;
      const uint32_t r3 = 1;
 +    int32_t ne02_run = ne02;
-+
+ 
+-    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm)) {
      // escape hatch: revert wave64 MoE prefill to the mat-vec route
      const bool mm_id_manual_ok = props_dev->simd_width == 32 ||
          TOSH_ENV("TOSH_W64_MMID_PREFILL_DISABLE") == NULL;
@@ -2854,8 +2880,7 @@ index 7ce270237..5a3daa3e4 100644
 +    // the tile path maps ids without the -1 a mixed expert layer publishes
 +    // (map0 matches ids as 16-bit expert numbers, so the -1 of a wide publish selects nothing)
 +    GGML_ASSERT(!(use_mm_id && op->src[2]->op == GGML_OP_TOSH_DMOE_PUBLISH && ggml_get_op_params_i32(op->src[2], 1) == 0));
- 
--    if (ggml_metal_op_mul_mat_id_use_mm(op, props_dev->has_simdgroup_mm)) {
++
 +    if (use_mm_id) {
          // some Metal matrix data types require aligned pointers
          // ref: https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf (Table 2.5)
@@ -2865,16 +2890,15 @@ index 7ce270237..5a3daa3e4 100644
          //    case GGML_TYPE_BF16: GGML_ASSERT(nb01 % 8  == 0); break;
          //    default: break;
          //}
-@@ -3877,43 +3945,43 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+@@ -4000,42 +4068,43 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+         bid_tpe.offs += ggml_nbytes(op);
  
-             ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
+         ggml_metal_buffer_id bid_ids = bid_tpe;
+         bid_ids.offs += ggml_metal_op_mul_mat_id_extra_tpe(op);
  
-             ggml_metal_encoder_dispatch_threadgroups(enc, N_MM_NPART_AMAX, 1, 1, 256, 1, 1);
-         }
  
          {
              ggml_metal_kargs_mul_mm_id_map0 args = {
--                ne02,
 +                ne02_run,
                  ne10,
                  ne11, // n_expert_used (bcast)
@@ -2907,15 +2931,15 @@ index 7ce270237..5a3daa3e4 100644
 +            ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, ne02_run, 1, 1);
          }
  
+         // rows with a -1 id belong to no expert and must read as zero; a DMoE publish skips them on purpose
+         if (op->src[2]->op != GGML_OP_TOSH_DMOE_PUBLISH) {
+             ggml_metal_kargs_mul_mm_id_zero args = {
+                 /*.ne0  =*/ ne0,
+                 /*.nb1  =*/ nb1,
+                 /*.nb2  =*/ nb2,
+@@ -4055,17 +4124,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
          ggml_metal_op_concurrency_reset(ctx);
  
-         if (use_amax) {
-             auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id_amax(lib);
- 
-             ggml_metal_encoder_set_pipeline(enc, pipeline);
-@@ -3925,17 +3993,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
-             ggml_metal_op_concurrency_reset(ctx);
-         }
  
          {
              auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op);
@@ -2932,7 +2956,7 @@ index 7ce270237..5a3daa3e4 100644
                  /*.nb11  =*/ nb11,
                  /*.nb12  =*/ nb12,
                  /*.nb13  =*/ nb13,
-@@ -3996,17 +4064,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+@@ -4126,17 +4195,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
          const size_t smem = pipeline.smem;
  
          ggml_metal_kargs_mul_mv_id args = {
@@ -2951,37 +2975,26 @@ index 7ce270237..5a3daa3e4 100644
              /*.ne12 =*/ ne12,
              /*.ne13 =*/ ne13,
              /*.nb10 =*/ nb10,
-@@ -4026,16 +4094,17 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
-         ggml_metal_encoder_set_bytes(enc, &args, sizeof(args), 0);
-         ggml_metal_encoder_set_buffer(enc, bid_src0, 1);
-         ggml_metal_encoder_set_buffer(enc, bid_src1, 2);
-         ggml_metal_encoder_set_buffer(enc, bid_dst,  3);
-         ggml_metal_encoder_set_buffer(enc, bid_src2, 4);
+@@ -4197,27 +4266,322 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+              op->src[0]->type == GGML_TYPE_PTQ1_0)) {
+             id_nth = props_dev->simd_width;
+         }
  
-         const int64_t _ne1 = 1;
-         const int64_t ne123 = ne20*ne21;
-+
-         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
- 
-         // wave64 decode: run the MoE mat-vec on a full 64-wide simdgroup (matches the
-         // kernel's FC_mul_mv_nw); 32 for wave32 and the CPU-bound types.
-         int id_nth = 32;
-         if (props_dev->wave64_decode &&
-             (op->src[0]->type == GGML_TYPE_F16 ||
-              op->src[0]->type == GGML_TYPE_F32 ||
-@@ -4072,31 +4141,315 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
+         if (op->src[0]->type == GGML_TYPE_F32 ||
+             op->src[0]->type == GGML_TYPE_F16 ||
              op->src[0]->type == GGML_TYPE_BF16 ||
              op->src[0]->type == GGML_TYPE_Q8_0) {
+-            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0 - 1)/(nr0), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);
              ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0 - 1)/(nr0), (_ne1 + nr1 - 1)/nr1, ne123, id_nth, nsg, 1);
          } else {
+-            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0*nsg - 1)/(nr0*nsg), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);
              ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0*nsg - 1)/(nr0*nsg), (_ne1 + nr1 - 1)/nr1, ne123, id_nth, nsg, 1);
          }
      }
  
-+    return 1;
-+}
+     return 1;
+ }
  
--        ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 +#ifdef TOSH_ENABLE_DYNAMIC_MOE
 +// TOSH_DMOE_MASK forces router positions to the host for the correctness matrix:
 +// all | alt | half | random
@@ -2997,15 +3010,7 @@ index 7ce270237..5a3daa3e4 100644
 +    }();
 +    return mask;
 +}
- 
--        if (op->src[0]->type == GGML_TYPE_F32 ||
--            op->src[0]->type == GGML_TYPE_F16 ||
--            op->src[0]->type == GGML_TYPE_BF16 ||
--            op->src[0]->type == GGML_TYPE_Q8_0) {
--            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0 - 1)/(nr0), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);
--        } else {
--            ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0*nsg - 1)/(nr0*nsg), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);
--        }
++
 +struct tosh_dmoe_wide_args {
 +    int32_t  n_embd;
 +    int32_t  n_used;
@@ -3062,8 +3067,8 @@ index 7ce270237..5a3daa3e4 100644
 +    args.tail = ggml_get_op_params_i32(op, 5);
 +    if (const int live = tosh_dmoe_rare_rows_live(); live > 0) {
 +        args.rows = live;
-     }
- 
++    }
++
 +    ggml_metal_buffer_id bid_res = ggml_metal_device_dmoe_tables(ctx->dev);
 +    if (bid_res.metal != nullptr) {
 +        bid_res.offs = ((size_t) ggml_get_op_params_i32(op, 4)*TOSH_DMOE_MAX_LAYERS + il)*res->ne[0]*sizeof(int32_t);
@@ -3283,10 +3288,10 @@ index 7ce270237..5a3daa3e4 100644
 +    ggml_metal_encoder_set_buffer  (enc, bid_ring, 2);
 +    ggml_metal_encoder_dispatch_threadgroups(enc, args.n_tokens, 1, 1, 32, 1, 1);
 +
-     return 1;
- }
++    return 1;
++}
 +#endif
- 
++
  int ggml_metal_op_add_id(ggml_metal_op_t ctx, int idx) {
      ggml_tensor * op = ctx->node(idx);
  
@@ -3294,11 +3299,12 @@ index 7ce270237..5a3daa3e4 100644
      ggml_metal_encoder_t enc = ctx->enc;
  
      GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+     GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.h b/ggml/src/ggml-metal/ggml-metal-ops.h
-index 62d339cb8..01e4e92d4 100644
+index f2619a53f..c663d180d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.h
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.h
-@@ -70,16 +70,21 @@ int ggml_metal_op_solve_tri         (ggml_metal_op_t ctx, int idx);
+@@ -73,16 +73,21 @@ int ggml_metal_op_solve_tri         (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_set               (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_cpy               (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_pool_1d           (ggml_metal_op_t ctx, int idx);
@@ -3320,7 +3326,7 @@ index 62d339cb8..01e4e92d4 100644
  int ggml_metal_op_group_norm        (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_norm              (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_rope              (ggml_metal_op_t ctx, int idx);
-@@ -93,16 +98,17 @@ int ggml_metal_op_col2im_1d         (ggml_metal_op_t ctx, int idx);
+@@ -96,16 +101,17 @@ int ggml_metal_op_col2im_1d         (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_snake_fused       (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_upscale           (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_pad               (ggml_metal_op_t ctx, int idx);
@@ -3339,7 +3345,7 @@ index 62d339cb8..01e4e92d4 100644
  int ggml_metal_op_opt_step_sgd      (ggml_metal_op_t ctx, int idx);
  int ggml_metal_op_count_equal       (ggml_metal_op_t ctx, int idx);
 diff --git a/ggml/src/ggml-metal/ggml-metal.cpp b/ggml/src/ggml-metal/ggml-metal.cpp
-index 34c0184d7..497a337a5 100644
+index 88bb15854..3e7d199fa 100644
 --- a/ggml/src/ggml-metal/ggml-metal.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal.cpp
 @@ -1,15 +1,17 @@
@@ -3360,7 +3366,7 @@ index 34c0184d7..497a337a5 100644
  #include <string>
  #ifdef __APPLE__
  #include <dispatch/dispatch.h>
-@@ -840,16 +842,20 @@ static int64_t get_op_batch_size(const ggml_tensor * op) {
+@@ -910,16 +912,21 @@ static int64_t get_op_batch_size(const ggml_tensor * op) {
          default:
              return ggml_nrows(op);
      }
@@ -3369,6 +3375,7 @@ index 34c0184d7..497a337a5 100644
  static bool ggml_backend_metal_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
      ggml_metal_device_t ctx_dev = (ggml_metal_device_t)dev->context;
  
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
 +    // mixed execution takes every batch above its host path: the CPU backend would compute the
 +    // resident experts too, and a bounded host cache leaves it no bytes. The device read the
 +    // threshold before a plan could lower it
@@ -3381,7 +3388,7 @@ index 34c0184d7..497a337a5 100644
  static ggml_backend_event_t ggml_backend_metal_device_event_new(ggml_backend_dev_t dev) {
      ggml_metal_device_t ctx_dev = (ggml_metal_device_t)dev->context;
  
-@@ -1002,16 +1008,18 @@ static void ggml_backend_metal_fusion_stats_reset(ggml_backend_fusion_t finfo) {
+@@ -1072,16 +1079,18 @@ static void ggml_backend_metal_fusion_stats_reset(ggml_backend_fusion_t finfo) {
  static int ggml_backend_metal_fusion_stats_get(ggml_backend_fusion_t finfo, const char ** labels, uint64_t * counts, int n) {
      return ggml_metal_fusion_info_stats_get((struct ggml_metal_fusion_info *) finfo, labels, counts, n);
  }
@@ -3400,8 +3407,35 @@ index 34c0184d7..497a337a5 100644
      // scratch per device and reduction step: reusing one per device would let a step
      // overwrite what the previous one is still reducing
      std::vector<ggml_backend_buffer_t>  tmp;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+index 024fede82..b116681f4 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
+@@ -663,22 +663,16 @@ kernel void kernel_mul_mm_id(
+     device const int32_t  * ids_i32 = (device const int32_t  *) (hids);
+ 
+     const int32_t neh1 = tpe_u32[im];
+ 
+     if (r1 >= neh1) {
+         return;
+     }
+ 
+-    const int im  = tpe_u32[1 + 3*tile];     // expert
+-    const int idb = tpe_u32[1 + 3*tile + 1]; // first entry of this tile in hids
+-
+-    // number of entries in this tile, always <= NR1
+-    const short nr1 = (short) ((tpe_u32[1 + 3*tile + 2] < NR1) ? tpe_u32[1 + 3*tile + 2] : NR1);
+-
+     // if this block is of 64x32 shape or smaller
+     const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
+     const short nr1 = (    neh1 - r1 < NR1) ? (    neh1 - r1) : NR1;
+ 
+     // a thread shouldn't load data outside of the matrix
+     const short lr0  = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
+     const short lr1  = ((short)tiitg/NL1)      < nr1 ? ((short)tiitg/NL1)      : nr1 - 1;
+     const short lr1b = ((short)tiitg/NL1 + 32) < nr1 ? ((short)tiitg/NL1 + 32) : nr1 - 1;
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
-index 937052a71..aec19e5dd 100644
+index 525a84e37..68e765e67 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
 @@ -1,12 +1,14 @@
@@ -3419,160 +3453,29 @@ index 937052a71..aec19e5dd 100644
      if (FC_mul_mv_align) {
          device const ushort * s = (device const ushort *) p;
          return (uint) s[0] | ((uint) s[1] << 16);
-@@ -5200,16 +5202,151 @@ void kernel_mul_mv_tq2_0_f32_impl(
-                 float sum = -sumy;
-                 FOR_UNROLL (short j = 0; j < 4; ++j) {
-                     // express the 2-bit field shifts (v>>2, v>>4, v>>6) as float floor ops
-                     const float v = (float)qs[j];
+@@ -5321,16 +5323,20 @@ kernel void kernel_mul_mv_id(
+         ushort3 ntg [[threads_per_threadgroup]]) {
+     const int iid1 = tgpig.z/args.nei0;
+     const int idx  = tgpig.z%args.nei0;
  
-                     const float f0 = v;
-                     const float f1 = floor(v*0.25f);    // v>>2
-                     const float f2 = floor(v*0.0625);   // v>>4
-+                    const float f3 = floor(v*0.015625); // v>>6
-+
-+                    sum += coef[j][0]*f0 + coef[j][1]*f1 + coef[j][2]*f2 + coef[j][3]*f3;
-+                }
-+
-+                sumf[row] += xb.d * sum;
-+            }
-+        }
-+
-+        yb4 += QK_K * NBLOCK / 4;
-+    }
-+
-+    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
-+
-+    for (int row = 0; row < nr0; ++row) {
-+        const float tot = simd_sum(sumf[row]);
-+        if (tiisg == 0 && first_row + row < args.ne01) {
-+            dst_f32[first_row + row] = tot;
-+        }
-+    }
-+}
-+
-+[[host_name("kernel_mul_mv_tq2_0_f32")]]
-+kernel void kernel_mul_mv_tq2_0_f32(
-+        constant ggml_metal_kargs_mul_mv & args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiisg[[thread_index_in_simdgroup]],
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+
-+    kernel_mul_mv_tq2_0_f32_impl<N_R0_TQ2_0, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
-+}
-+
-+//
-+// matrix-vector multiplication
-+//
-+
-+typedef void (kernel_mul_mv_disp_t)(
-+        ggml_metal_kargs_mul_mv args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        uint3  tgpig,
-+        ushort tiisg);
-+
-+typedef void (kernel_mul_mv2_disp_t)(
-+        ggml_metal_kargs_mul_mv args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
-+        ushort tiisg,
-+        ushort sgitg);
-+
-+template<kernel_mul_mv_disp_t disp_fn>
-+void mmv_fn(
-+        ggml_metal_kargs_mul_mv args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
-+        ushort tiitg,
-+        ushort tiisg,
-+        ushort sgitg) {
-+    disp_fn(args, src0, src1, dst, tgpig, tiisg);
-+}
-+
-+template<kernel_mul_mv2_disp_t disp_fn>
-+void mmv_fn(
-+        ggml_metal_kargs_mul_mv args,
-+        device const char * src0,
-+        device const char * src1,
-+        device       char * dst,
-+        threadgroup  char * shmem,
-+        uint3  tgpig,
-+        ushort tiitg,
-+        ushort tiisg,
-+        ushort sgitg) {
-+    disp_fn(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-+}
-+
-+typedef decltype(mmv_fn<kernel_mul_mv_t_t_disp<half, half, ggml_metal_kargs_mul_mv>>) mul_mv_disp_fn_t;
-+
-+template<mul_mv_disp_fn_t disp_fn>
-+kernel void kernel_mul_mv_id(
-+        constant ggml_metal_kargs_mul_mv_id & args,
-+        device const char * src0s,
-+        device const char * src1,
-+        device       char * dst,
-+        device const char * ids,
-+        threadgroup  char * shmem [[threadgroup(0)]],
-+        uint3  tgpig[[threadgroup_position_in_grid]],
-+        ushort tiitg[[thread_index_in_threadgroup]],
-+        ushort tiisg[[thread_index_in_simdgroup]],
-+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
-+    const int iid1 = tgpig.z/args.nei0;
-+    const int idx  = tgpig.z%args.nei0;
-+
-+    tgpig.z = 0;
-+
-+    const int32_t i02 = ((device const int32_t *) (ids + iid1*args.nbi1))[idx];
-+
+     tgpig.z = 0;
+ 
+     const int32_t i02 = ((device const int32_t *) (ids + iid1*args.nbi1))[idx];
+ 
 +    if (FC_mul_mv_id_skip && i02 < 0) {
 +        return;
 +    }
 +
-+    const int64_t i11 = idx % args.ne11;
-+    const int64_t i12 = iid1;
-+
-+    const int64_t i1 = idx;
-+    const int64_t i2 = i12;
-+
-+    device const char * src0_cur = src0s + i02*args.nb02;
-+    device const char * src1_cur = src1  + i11*args.nb11 + i12*args.nb12;
-+
-+    device char * dst_cur = dst + (i1*args.ne0 + i2*args.ne1*args.ne0)*sizeof(float);
-+
-+    ggml_metal_kargs_mul_mv args0 = {
-+        /*.ne00 =*/ args.ne00,
-+        /*.ne01 =*/ args.ne01,
-+        /*.ne02 =*/ 1, // args.ne02,
-+        /*.nb00 =*/ args.nb00,
-+        /*.nb01 =*/ args.nb01,
-+        /*.nb02 =*/ args.nb02,
-+        /*.nb03 =*/ args.nb02, // args.ne02 == 1
-+        /*.ne10 =*/ args.ne10,
-+        /*.ne11 =*/ 1, // args.ne11,
-+        /*.ne12 =*/ 1, // args.ne12,
-+        /*.nb10 =*/ args.nb10,
-+        /*.nb11 =*/ args.nb11,
-+        /*.nb12 =*/ args.nb12,
-         /*.nb13 =*/ args.nb12, // ne12 == 1
-         /*.ne0  =*/ args.ne0,
-         /*.ne1  =*/ 1, // args.ne1,
-         /*.nr0  =*/ args.nr0,
-         /*.r2   =*/ 1,
-         /*.r3   =*/ 1,
-     };
+     const int64_t i11 = idx % args.ne11;
+     const int64_t i12 = iid1;
+ 
+     const int64_t i1 = idx;
+     const int64_t i2 = i12;
+ 
+     device char * dst_cur = dst + (i1*args.ne0 + i2*args.ne1*args.ne0)*sizeof(float);
  
 diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
-index fbc51861c..61825ed89 100644
+index c064940e0..074c514a0 100644
 --- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 +++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
 @@ -2,16 +2,18 @@
@@ -3594,8 +3497,8 @@ index fbc51861c..61825ed89 100644
      if (FC_mul_mv_align) {
          device const ushort * s = (device const ushort *) p;
          return (uint) s[0] | ((uint) s[1] << 16);
-@@ -8136,16 +8138,20 @@ kernel void kernel_mul_mv_id_w64(
-         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+@@ -8132,16 +8134,20 @@ kernel void kernel_mul_mv_id_w64(
+         ushort3 ntg [[threads_per_threadgroup]]) {
      const int iid1 = tgpig.z/args.nei0;
      const int idx  = tgpig.z%args.nei0;
  
@@ -3807,10 +3710,10 @@ index 000000000..89467c892
 +    }
 +}
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index 1e38b7c01..71a651c77 100644
+index 025dcbb85..0bde42853 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -1151,19 +1151,23 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+@@ -1164,16 +1164,20 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
      "CUSTOM",
  
      "CROSS_ENTROPY_LOSS",
@@ -3825,17 +3728,13 @@ index 1e38b7c01..71a651c77 100644
 +    "TOSH_DMOE_OBSERVE",
  };
  
--static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
-+static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");
+ static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
  
  static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "none",
  
      "x",
-     "x+y",
-     "x[i]+y",
-     "x+y",
-@@ -1267,19 +1271,23 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+@@ -1278,16 +1282,20 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "custom(x)",
  
      "cross_entropy_loss(x,y)",
@@ -3850,24 +3749,20 @@ index 1e38b7c01..71a651c77 100644
 +    "dmoe_observe(x)",
  };
  
--static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
-+static_assert(GGML_OP_COUNT == 105, "GGML_OP_COUNT != 105");
+ static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
  
  static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
  
  static const char * GGML_UNARY_OP_NAME[GGML_UNARY_OP_COUNT] = {
      "ABS",
-     "SGN",
-     "NEG",
-     "STEP",
-@@ -3453,16 +3461,111 @@ void ggml_mul_mat_set_hint(
-     b   -> [cols, n_expert_used, n_tokens]
-     ids -> [n_expert_used, n_tokens] (i32)
+@@ -3455,16 +3463,111 @@ void ggml_mul_mat_set_hint(
      c   -> [rows, n_expert_used, n_tokens]
  
      in b, n_expert_used can be broadcasted to match the n_expert_used of ids
  
      c ~= as[:,:,i] @ b[:,i%r,t], i = ids[e,t] for all e,t in ids
+ 
+     an id of -1 skips the slot: no matrix is selected, c[:,e,t] is set to zero
  */
 +struct ggml_tensor * ggml_tosh_dmoe_publish(
 +        struct ggml_context * ctx,
@@ -3973,10 +3868,10 @@ index 1e38b7c01..71a651c77 100644
      GGML_ASSERT(ids->type == GGML_TYPE_I32);
  
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index afdaddc79..3d2a2cb6b 100644
+index 426c48741..ab702d119 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -31,16 +31,17 @@ set(LLAMA_CORE_SOURCES
+@@ -32,16 +32,17 @@ set(LLAMA_CORE_SOURCES
      llama-memory-hybrid.cpp
      llama-memory-hybrid-iswa.cpp
      llama-memory-hybrid-idx.cpp
@@ -3995,7 +3890,7 @@ index afdaddc79..3d2a2cb6b 100644
  
  add_library(llama
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 432136163..fe8f0a562 100644
+index 6040b2a3d..4a49f265c 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -1,9 +1,15 @@
@@ -4014,11 +3909,11 @@ index 432136163..fe8f0a562 100644
  #include "llama-batch.h"
  #include "llama-io.h"
  #include "llama-memory.h"
-@@ -517,16 +523,34 @@ llama_context::llama_context(
-         cparams.pipeline_parallel = pipeline_parallel;
+@@ -609,16 +615,34 @@ llama_context::llama_context(
+         }
  
-         if (cparams.pipeline_parallel) {
-             LLAMA_LOG_INFO("%s: pipeline parallelism enabled\n", __func__);
+         if (cparams.moe_cache_size > 0) {
+             moe_cache = std::make_unique<llama_moe_cache>(model, model.no_alloc(), backend_ptrs, backend_buft, cparams.moe_cache_size, cparams.moe_cache_cpu_share);
          }
  
          sched_reserve();
@@ -4049,7 +3944,7 @@ index 432136163..fe8f0a562 100644
      }
  
      // Initialize the full vocabulary token ids for backend samplers.
-@@ -536,16 +560,17 @@ llama_context::llama_context(
+@@ -628,16 +652,17 @@ llama_context::llama_context(
          sampling.token_ids_full_vocab.resize(n_vocab);
          for (int i = 0; i < n_vocab; ++i) {
              sampling.token_ids_full_vocab[i] = i;
@@ -4063,12 +3958,12 @@ index 432136163..fe8f0a562 100644
      synchronize();
  
      // when training, ggml_opt allocates extra buffers through the scheduler, so the sizes no longer match the expectation
-     if (!model.hparams.no_alloc && !opt_ctx) {
+     if (!model.no_alloc() && !opt_ctx) {
          for (size_t i = 0; i < backend_ptrs.size(); ++i) {
              ggml_backend_t             backend = backend_ptrs[i];
              ggml_backend_buffer_type_t buft    = backend_buft[i];
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 80cb40906..b60ff6660 100644
+index 0e4a4ea12..b5fb9e17b 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -1,12 +1,16 @@
@@ -4080,6 +3975,7 @@ index 80cb40906..b60ff6660 100644
  #include "llama-impl.h"
  #include "llama-model.h"
 +#include "llama-tosh-dmoe.h"
+ #include "llama-moe-cache.h"
  #include "llama-batch.h"
  #include "llama-cparams.h"
  #include "llama-sampler.h"
@@ -4087,8 +3983,7 @@ index 80cb40906..b60ff6660 100644
  #include "llama-kv-cache.h"
  #include "llama-kv-cache-iswa.h"
  #include "llama-kv-cache-dsa.h"
- #include "llama-kv-cache-dsa-iswa.h"
-@@ -2232,16 +2236,68 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2407,16 +2411,73 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          probs = ggml_reshape_3d(ctx0, probs, 1, hparams.n_expert, n_tokens);
      } else {
          probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
@@ -4148,6 +4043,11 @@ index 80cb40906..b60ff6660 100644
 +#else
 +    GGML_UNUSED(dmoe);
 +#endif
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
++    const bool dmoe_mixed = dmoe_slots != nullptr || dmoe_wide != nullptr;
++#else
++    const bool dmoe_mixed = false;
++#endif
 +
  
      if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
@@ -4157,82 +4057,61 @@ index 80cb40906..b60ff6660 100644
          cb(weights, "ffn_moe_weights_softmax", il);
      }
  
-@@ -2277,17 +2333,17 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2443,25 +2504,28 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     if (w_scale != 0.0f && w_scale != 1.0f) {
+         weights = ggml_scale(ctx0, weights, w_scale);
+         cb(weights, "ffn_moe_weights_scaled", il);
+     }
+ 
+     //call early so that topk-moe can be used
+     ggml_build_forward_expand(gf, weights);
+ 
++#ifdef TOSH_ENABLE_DYNAMIC_MOE
+     // compute the expert input before the slot lookup, so that the scheduler prefetches it for the CPU part (the router can read a different tensor)
+     ggml_build_forward_expand(gf, cur);
+ 
+     // the experts of host-resident layers may be read from the MoE cache, and part of the misses computed from the host experts
+     // the CPU part does not support weights before the FFN, LoRAs or rotated experts
+     const std::array<ggml_tensor *, 4> exps = { up_exps, gate_exps, down_exps, gate_up_exps };
+     const bool can_cpu_share = !weight_before_ffn && loras->empty() &&
+         std::none_of(exps.begin(), exps.end(), [&](ggml_tensor * w) { return w != nullptr && hdmd != nullptr && hdmd->rot.count(w) > 0; });
+-    const llm_graph_moe_cache_slots cache = build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, can_cpu_share, il);
++    // mixed execution already places every expert, so the MoE cache stays out of it
++    const llm_graph_moe_cache_slots cache = dmoe_mixed ? llm_graph_moe_cache_slots{ nullptr, nullptr } :
++        build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, can_cpu_share, il);
+ 
+     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+ 
+     if (weight_before_ffn) {
+         // repeat cur to [n_embd, n_expert_used, n_tokens]
+         ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, n_expert_used, n_tokens, 1);
+         cur = ggml_mul(ctx0, repeated, weights);
          cb(cur, "ffn_moe_weighted", il);
-     }
+@@ -2624,25 +2688,49 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
  
-     ggml_tensor * up = nullptr;
-     ggml_tensor * experts = nullptr;
- 
-     if (gate_up_exps) {
-         // merged gate_up path: one mul_mat_id, then split into gate and up views
--        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
-+        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, expert_ids, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
-         cb(gate_up, "ffn_moe_gate_up", il);
- 
-         if (up_exps_s) {
-             cb(gate_up, "ffn_moe_gate_up_scaled", il);
+         if (amax_src1.scale_s) {
+             experts = ggml_mul(ctx0, experts, amax_src1.scale_s);
          }
  
-         if (gate_up_exps_b) {
-             gate_up = ggml_add_id(ctx0, gate_up, gate_up_exps_b, selected_experts);
-@@ -2296,30 +2352,30 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         return experts;
+     };
  
-         const int64_t n_ff = gate_up->ne[0] / 2;
-         cur = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
-         cb(cur, "ffn_moe_gate", il);
-         up  = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff * gate_up->nb[0]);
-         cb(up, "ffn_moe_up", il);
-     } else {
-         // separate gate and up path
--        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
-+        up = build_lora_mm_id(up_exps, cur, expert_ids, up_exps_s); // [n_ff, n_expert_used, n_tokens]
-         cb(up, "ffn_moe_up", il);
- 
-         if (up_exps_s) {
-             cb(up, "ffn_moe_up_scaled", il);
-         }
- 
-         if (up_exps_b) {
-             up = ggml_add_id(ctx0, up, up_exps_b, selected_experts);
-             cb(up, "ffn_moe_up_biased", il);
-         }
- 
-         if (gate_exps) {
--            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
-+            cur = build_lora_mm_id(gate_exps, cur, expert_ids, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
-             cb(cur, "ffn_moe_gate", il);
-         } else {
-             cur = up;
-         }
- 
-         if (gate_exps_s) {
-             cb(cur, "ffn_moe_gate_scaled", il);
-         }
-@@ -2410,23 +2466,48 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
-                 cur = ggml_relu(ctx0, cur);
-                 cur = ggml_sqr(ctx0, cur);
-                 cb(cur, "ffn_moe_relu_sqr", il);
-             } break;
-         default:
-             GGML_ABORT("fatal error");
-     }
- 
--    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+-    ggml_tensor * experts = build_experts(cur, selected_experts, cache.slots, true);
 +    // with mixed execution the ids are slots, and host rows join after the matmul: scale by expert later
 +    ggml_tensor * down_s_late = nullptr;
-+#ifdef TOSH_ENABLE_DYNAMIC_MOE
-+    if (down_exps_s && (dmoe_slots || dmoe_wide)) {
++    if (down_exps_s && dmoe_mixed) {
 +        down_s_late = down_exps_s;
 +        down_exps_s = nullptr;
 +    }
-+#endif
-+    experts = build_lora_mm_id(down_exps, cur, expert_ids, down_exps_s); // [n_embd, n_expert_used, n_tokens]
-     if (arch == LLM_ARCH_MISTRAL4) {
-         // src1 can exceed F16 range
-         ggml_prec_set_src(experts, GGML_PREC_F32, 1);
++
++    ggml_tensor * experts = build_experts(cur, selected_experts, dmoe_mixed ? expert_ids : cache.slots, !dmoe_mixed);
+     if (cache.cpu_ids != nullptr) {
+         // the cached experts and the misses computed from the host experts, each reads the others as zero
+         // the cached experts come first in the graph, so that they are computed while the misses are
+         ggml_build_forward_expand(gf, experts);
+         experts = ggml_add(ctx0, experts, build_experts(cur, selected_experts, cache.cpu_ids, false));
+         cb(experts, "ffn_moe_down_merged", il);
      }
-     cb(experts, "ffn_moe_down", il);
  
 +#ifdef TOSH_ENABLE_DYNAMIC_MOE
 +    if (dmoe_slots != nullptr) {
@@ -4260,10 +4139,10 @@ index 80cb40906..b60ff6660 100644
          cb(experts, "ffn_moe_down_biased", il);
      }
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 1575fff13..28fbb871f 100644
+index b5f3de2d8..c8d1f8f95 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -1134,16 +1134,17 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1229,16 +1229,17 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          const ctx_key key { buft, is_lazy };
  
          auto it = ctx_map.find(key);
@@ -4282,10 +4161,10 @@ index 1575fff13..28fbb871f 100644
                  /*.mem_size   =*/ ctx_size,
                  /*.mem_buffer =*/ NULL,
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index 8c20945b2..a42c92932 100644
+index 55653b1ca..35a06ff19 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
-@@ -43,16 +43,22 @@ struct llama_model_loader {
+@@ -41,16 +41,22 @@ struct llama_model_loader {
                  throw std::runtime_error(format("tensor '%s' not found in the model", ggml_get_name(tensor)));
              }
  
@@ -4309,7 +4188,7 @@ index 8c20945b2..a42c92932 100644
              int a_layer = -1;
              int b_layer = -1;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index ffc8b277d..d496bdb01 100644
+index efc845ede..42f613abb 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -1,14 +1,15 @@
@@ -4346,11 +4225,11 @@ index ffc8b277d..d496bdb01 100644
  #include <numeric>
  #include <regex>
  #include <sstream>
-@@ -1958,16 +1960,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -2162,16 +2164,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
  
      // load tensor data
-     for (auto & [ctx, buf_map] : ctx_buf_maps) {
-         if (!ml.load_all_data(ctx, buf_map, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
+     for (auto & [ctx, bufs] : ctx_bufs) {
+         if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
              return false;
          }
      }
@@ -4363,14 +4242,14 @@ index ffc8b277d..d496bdb01 100644
          }
      }
  
-     // after the load: a mapped weight only gets its buffer there
-     create_hadamard_tensors(false);
-@@ -3253,16 +3257,17 @@ const llama_vocab * llama_model_get_vocab(const llama_model * model) {
-     return &model->vocab;
+     load_tensors_hadamard();
+ 
+@@ -3581,16 +3585,17 @@ llama_model_params llama_model_default_params() {
+     return result;
  }
  
- void llama_free_model(llama_model * model) {
-     llama_model_free(model);
+ const llama_vocab * llama_model_get_vocab(const llama_model * model) {
+     return &model->vocab;
  }
  
  void llama_model_free(llama_model * model) {
@@ -4385,10 +4264,10 @@ index ffc8b277d..d496bdb01 100644
  int32_t llama_model_n_embd(const llama_model * model) {
 diff --git a/src/llama-tosh-dmoe.cpp b/src/llama-tosh-dmoe.cpp
 new file mode 100644
-index 000000000..dea450cac
+index 000000000..a724a49cb
 --- /dev/null
 +++ b/src/llama-tosh-dmoe.cpp
-@@ -0,0 +1,1891 @@
+@@ -0,0 +1,1899 @@
 +#include "llama-tosh-dmoe.h"
 +
 +#include "llama-impl.h"
@@ -4476,7 +4355,6 @@ index 000000000..dea450cac
 +    float alpha = 0.0f, limit = 0.0f;
 +    host_bank() = default;
 +    host_bank(const host_bank & o) : gate(o.gate), up(o.up), down(o.down), fused(o.fused), gate_b(o.gate_b), up_b(o.up_b),
-+        act(o.act.load()), alpha(o.alpha), limit(o.limit) {}
 +};
 +
 +// A layer's gate bank holds gate and up together when the model fuses them.
@@ -4992,9 +4870,7 @@ index 000000000..dea450cac
 +            return;
 +        }
 +        const uint64_t m = n_miss.load();
-+        fprintf(stderr, "tosh_dmoe: jobs %llu, routed %llu, host %llu, hit rate %.2f%%\n",
 +                (unsigned long long) n_jobs.load(), (unsigned long long) routed, (unsigned long long) m,
-+                100.0*(double) (routed - m)/(double) routed);
 +        fprintf(stderr, "tosh_dmoe: host time per job %.1f us (quantize %.1f, gate/up %.1f, down %.1f)\n",
 +                (double) us_job.load()/n_jobs.load(), (double) us_quant.load()/n_jobs.load(),
 +                (double) us_p1.load()/n_jobs.load(), (double) us_p2.load()/n_jobs.load());
@@ -5174,6 +5050,7 @@ index 000000000..dea450cac
 +    uint64_t exchanged = 0;
 +    double   us_exchange = 0;
 +
++        const int e = slots[(size_t) il*Q + s].e;
 +        if (!tosh_hostcache_on() || e < 0) {
 +            return;
 +        }
@@ -5894,12 +5771,22 @@ index 000000000..dea450cac
 +    LLAMA_LOG_INFO("%s: expert bank locked in host memory, %.0f MiB\n", __func__, bytes/1048576.0);
 +}
 +
++        const llama_layer & L = layers[il];
++        for (const ggml_tensor * t : { (const ggml_tensor *) dmoe_gate(L), (const ggml_tensor *) L.ffn_up_exps, (const ggml_tensor *) L.ffn_down_exps }) {
++    }
++    const size_t page = (size_t) sysconf(_SC_PAGESIZE);
++    for (const llama_layer & L : layers) {
++        for (const ggml_tensor * t : { (const ggml_tensor *) dmoe_gate(L), (const ggml_tensor *) L.ffn_up_exps, (const ggml_tensor *) L.ffn_down_exps }) {
++            if (t == nullptr) continue;
 +static void dmoe_init_or_off(std::vector<llama_layer> & layers, const llama_hparams & hparams, const char * path, double cache_mib) {
 +    if (path != nullptr) {
 +        dmoe_init(layers, hparams, path, cache_mib);
 +        return;
 +    }
 +    try {
++                for (const llama_layer & L : layers) {
++                    for (const ggml_tensor * t : { (const ggml_tensor *) dmoe_gate(L), (const ggml_tensor *) L.ffn_up_exps, (const ggml_tensor *) L.ffn_down_exps }) {
++                        if (t == nullptr) continue;
 +        dmoe_init(layers, hparams, path, cache_mib);
 +        dmoe_status(true, "DMOE_ON", "", g_arena_buf ? ggml_backend_buffer_get_size(g_arena_buf)/1048576.0 : 0.0);
 +    } catch (const std::exception & err) {
@@ -7014,10 +6901,10 @@ index 000000000..cc40c42f8
 +#endif
 diff --git a/tosh-moe/tosh-hostcache.cpp b/tosh-moe/tosh-hostcache.cpp
 new file mode 100644
-index 000000000..94abfe510
+index 000000000..3cb87e8cf
 --- /dev/null
 +++ b/tosh-moe/tosh-hostcache.cpp
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,130 @@
 +#ifdef __APPLE__
 +#include <sys/sysctl.h>
 +#endif
@@ -7056,6 +6943,8 @@ index 000000000..94abfe510
 +    return true;
 +}
 +
++    std::lock_guard<std::mutex> lock(g.m);
++    std::lock_guard<std::mutex> lock(g.m);
 +            char err[256];
 +            if (!mlock_paced(pl.base, pl.bytes, err, sizeof(err))) {
 +                std::lock_guard<std::mutex> lk(g.m);
@@ -7064,10 +6953,25 @@ index 000000000..94abfe510
 +// slots from the moment the model finishes loading, past ready, until the budget or the slots run
 +// out. Demand never waits on it: an entry is published only once read, and last in line for eviction.
 +            for (int key; (key = (*next)++) < n_keys;) {
++    {
++        std::lock_guard<std::mutex> lock(g.m);
++    {
++        std::lock_guard<std::mutex> lock(g.m);
 +bool tosh_mlock_paced(void * addr, size_t bytes, char * err, size_t err_len) {
 +    return mlock_paced(addr, bytes, err, err_len);
 +}
 +
++        const int key = il*g.n_expert + e;
++        g.key_of[s] = key;
++        g.slot_of[key] = s;
++        g.state[s] = LOADING;
++        g.ever[key] = 1;
++        g.enq_t[s] = now_us();
++        g.origin[s] = g.ready ? 0 : 1;
++        g.reused[s] = 0;
++    std::lock_guard<std::mutex> lock(g.m);
++    std::lock_guard<std::mutex> lock(g.m);
++    const int key = il*g.n_expert + e;
 +// a slot for an expert coming back from VRAM, or -1 when RAM still holds it or has no room; g.m held
 +static int readback_slot(int il, int e) {
 +    const int key = il*g.n_expert + e;
@@ -7093,7 +6997,12 @@ index 000000000..94abfe510
 +    return s;
 +}
 +
++    {
++        std::lock_guard<std::mutex> lock(g.m);
 +        const int s = readback_slot(il, e);
++        g.prefetches++;
++        g.queue.push_back(s);
++    }
 +bool tosh_hostcache_store(int il, int e) {
 +    std::lock_guard<std::mutex> lock(g.m);
 +    return readback_slot(il, e) >= 0;
@@ -7116,8 +7025,14 @@ index 000000000..94abfe510
 +    if (ok) g.loaded.notify_all(); else g.work.notify_one();
 +}
 +
++    std::lock_guard<std::mutex> lock(g.m);
++    {
++        std::lock_guard<std::mutex> lock(g.m);
++    std::lock_guard<std::mutex> lock(g.m);
++    std::lock_guard<std::mutex> lock(g.m);
 +    uint64_t hits = 0;
 +    for (int k = 0; k < TOSH_HC_KINDS; ++k) hits += g.hit[k];
++    std::lock_guard<std::mutex> lock(g.m);
 +    fprintf(stderr, "tosh_hostcache: read back on eviction %llu, copied back from VRAM %llu\n",
 +            (unsigned long long) g.prefetches, (unsigned long long) g.stored);
 diff --git a/tosh-moe/tosh-hostcache.h b/tosh-moe/tosh-hostcache.h

@@ -1,13 +1,20 @@
 diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
-index fb36bcfbf..8a94acda9 100644
+index 4f0495055..764f8fa50 100644
 --- a/ggml/src/ggml-metal/ggml-metal-context.m
 +++ b/ggml/src/ggml-metal/ggml-metal-context.m
-@@ -318,10 +318,19 @@ struct ggml_metal {
-     int n_cb;           // number of extra threads used to submit the command buffers
-     int n_nodes_0;      // number of nodes submitted by the main thread
-     int n_nodes_1;      // remaining number of nodes submitted by the n_cb threads
-     int n_nodes_per_cb;
+@@ -315,16 +315,29 @@ struct ggml_metal {
+     id<MTLCaptureScope> capture_scope;
  
+     // command buffer state
+     int n_cb;           // number of extra threads used to submit the command buffers
+ 
+     // first node of each extra command buffer, then the end of the graph
+     int cb_start[GGML_METAL_MAX_COMMAND_BUFFERS + 1];
+ 
++    // nodes the main thread encodes and nodes left to the extra command buffers, from cb_start
++    int n_nodes_0;
++    int n_nodes_1;
++
 +    // main thread's share sized from its measured encode and GPU time per node, per graph size
 +    bool     adapt_n_main;
 +    int      am_nodes[4];
@@ -22,20 +29,31 @@ index fb36bcfbf..8a94acda9 100644
      // the callback given to the thread pool
      void (^encode_async)(size_t ith);
  
-@@ -1015,10 +1024,12 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+     // n_cb command buffers + 1 used by the main thread
+     struct ggml_metal_command_buffer cmd_bufs[GGML_METAL_MAX_COMMAND_BUFFERS + 1];
+ 
+@@ -1012,16 +1025,17 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev, bool prefetch) {
+         res->d_queue = dispatch_queue_create("ggml-metal", DISPATCH_QUEUE_CONCURRENT);
+ 
+         // discrete GPUs (AMD) corrupt their output with a concurrent encoder: the driver does
          // not honour the memory barrier. GGML_METAL_CONCURRENCY_ENABLE forces it back on to test.
          res->use_concurrency = props_dev->has_unified_memory
              ? TOSH_ENV("GGML_METAL_CONCURRENCY_DISABLE") == nil
              : TOSH_ENV("GGML_METAL_CONCURRENCY_ENABLE")  != nil;
  
 +        res->adapt_n_main = !props_dev->has_unified_memory && TOSH_ENV("TOSH_N_MAIN_FIXED") == nil;
-+
+ 
          {
              const char * val = TOSH_ENV("GGML_METAL_GRAPH_DEBUG");
              res->debug_graph = val ? atoi(val) : 0;
          }
  
-@@ -3951,10 +3962,61 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+         res->use_graph_optimize = true;
+ 
+@@ -3949,16 +3963,67 @@ bool ggml_metal_exchange_reduce(ggml_metal_t ctx_self, ggml_metal_t ctx_peer,
+ }
+ 
+ 
  
  // TOSH_MGPU_MERGE=1: a tensor split cuts the graph at every partial node, so a token costs one
  // command buffer for each collective plus one for each subgraph that follows it. With this on,
@@ -97,13 +115,18 @@ index fb36bcfbf..8a94acda9 100644
      if (v < 0) {
          const char * s = TOSH_ENV("TOSH_MGPU_MERGE");
          // on by default: it is inert unless a collective left a buffer held, which only the
-@@ -4021,15 +4083,19 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+         // batch gate above does, so a prompt never sees it
+         v = s ? (s[0] == '1' ? 1 : 0) : 1;
+     }
+@@ -4027,20 +4092,25 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+ 
+     // number of nodes encoded by the main thread (empirically determined)
+     // the split was tuned on unified memory; TOSH_N_MAIN overrides it to A/B the share here
      static int n_main_env = -2;
      if (n_main_env == -2) {
          const char * v = TOSH_ENV("TOSH_N_MAIN");
          n_main_env = v ? atoi(v) : -1;
      }
--    const int n_main = n_main_env >= 0 ? n_main_env : MAX(64, 0.1*gf->n_nodes);
 +    int n_main = n_main_env >= 0 ? n_main_env : MAX(64, 0.1*gf->n_nodes);
  
      // number of threads in addition to the main thread
@@ -117,8 +140,34 @@ index fb36bcfbf..8a94acda9 100644
      ggml_metal_device_rsets_keep_alive(ctx->dev);
  
      // submit the ggml compute graph to the GPU by creating command buffers and encoding the ops in them
-     // the first n_nodes_0 are encoded and submitted for processing directly by the calling thread
-@@ -4109,16 +4175,19 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+     // the first n_main nodes are encoded and submitted for processing directly by the calling thread
+     // while these nodes are processing, we start n_cb threads to enqueue the rest of the nodes
+     // each thread creates it's own command buffer and enqueues the ops in parallel
+     //
+@@ -4075,16 +4145,19 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+             for (int cb_idx = 0; cb_idx < n_cb; ++cb_idx) {
+                 const int target = MIN(n_main + cb_idx*n_per_cb, gf->n_nodes);
+                 while (i < target) {
+                     i += ggml_metal_fusion_max(gf, i);
+                 }
+                 ctx->cb_start[cb_idx] = MIN(i, gf->n_nodes);
+             }
+             ctx->cb_start[n_cb] = gf->n_nodes;
++
++            ctx->n_nodes_0 = n_cb > 0 ? ctx->cb_start[0] : gf->n_nodes;
++            ctx->n_nodes_1 = gf->n_nodes - ctx->n_nodes_0;
+         }
+ 
+         if (ctx->capture_compute >= 0) {
+             ctx->capture_compute--;
+         }
+ 
+         const bool use_capture = ctx->capture_compute == 0;
+         if (use_capture) {
+@@ -4126,22 +4199,25 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+ 
+         // short-hand
+         id<MTLCommandQueue> queue = ctx->queue;
  
          const uint64_t cbp_tc = cbp != NULL ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
  
@@ -138,7 +187,13 @@ index fb36bcfbf..8a94acda9 100644
                  if (tosh_mgpu_trace()) {
                      if (ctx->n_ev_wait_pending > 0 || ctx->n_peer_waits > 0) {
                          atomic_fetch_add(&g_tr_merge_waits, ctx->n_ev_wait_pending + ctx->n_peer_waits);
-@@ -4141,11 +4210,16 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+                     }
+                     atomic_fetch_add(&g_tr_merge_reuse, 1);
+                 }
+@@ -4158,17 +4234,22 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+             }
+             ctx->cmd_bufs[n_cb].obj = cmd_buf;
+ 
              tosh_trace_graph_end(cmd_buf, (int) (([(id<MTLDevice>) ggml_metal_device_get_obj(ctx->dev) peerIndex]) & 1));
  
              [cmd_buf enqueue];
@@ -155,11 +210,17 @@ index fb36bcfbf..8a94acda9 100644
          // remember the command buffer for the next iteration
          ctx->cmd_buf_last = ctx->cmd_bufs[n_cb].obj;
  
+         // the main thread already encoded every node: the remaining command buffers would be
+         // created, dispatched and committed empty. Tensor split hits this on every subgraph.
+         const bool encoded_by_main = ctx->n_nodes_1 == 0 && !use_capture;
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
-index 11d6ce58d..13ddeb6dc 100644
+index 98cbc2def..feea87f32 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
-@@ -1622,10 +1622,16 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+@@ -1647,16 +1647,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+         case GGML_TYPE_Q5_1:
+             {
+                 // eight rows per thread measured worse on 64 lanes for this type, so the
                  // inherited pair stays; TOSH_MV_Q5_1_R8 opens it again for measuring
                  if (TOSH_ENV("TOSH_MV_Q5_1_R8") != nullptr) {
                      nsg = 1;
@@ -176,3 +237,6 @@ index 11d6ce58d..13ddeb6dc 100644
                      nr0 = N_R0_Q5_1;
                  }
                  // the 64-lane twin of this kernel lives in mul_mv_w64.metal
+                 if (simd_width == 64 && TOSH_ENV("TOSH_MV_W64_DISABLE") == nullptr) {
+                     w64 = true;
+                 }
