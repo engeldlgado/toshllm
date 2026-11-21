@@ -14,6 +14,18 @@ actor MCPStdioTransport {
         let deadline: Task<Void, Never>
     }
 
+    /// A class, not the dictionary itself: on Swift 5.7 the continuation closure that
+    /// registers a request is not actor-isolated, so it writes through a captured reference.
+    private final class PendingTable {
+        private var byID: [Int: Waiting] = [:]
+        subscript(_ id: Int) -> Waiting? {
+            get { byID[id] }
+            set { byID[id] = newValue }
+        }
+        var count: Int { byID.count }
+        var keys: [Int] { Array(byID.keys) }
+    }
+
     private let process = Process()
     private let stdin = Pipe()
     private let stdout = Pipe()
@@ -21,7 +33,7 @@ actor MCPStdioTransport {
     /// Writes run off the actor: a server that stops reading fills the pipe, and a blocked
     /// write must not keep a deadline from resolving its request.
     private let writer = DispatchQueue(label: "MCPStdioTransport.writer")
-    private var pending: [Int: Waiting] = [:]
+    private let pending = PendingTable()
     private var tokens: UInt64 = 0
     private var buffer = Data()
     private var readerTask: Task<Void, Never>?
@@ -90,7 +102,11 @@ actor MCPStdioTransport {
         }
         // A dispatch source rather than a blocking read in a task: an idle server would
         // otherwise hold a thread of the shared concurrency pool.
-        let (chunks, feed) = AsyncStream.makeStream(of: Data.self)
+        // The 5.7 stdlib has no AsyncStream.makeStream; the builder closure runs before
+        // init returns, so its continuation can be lifted out.
+        var captured: AsyncStream<Data>.Continuation?
+        let chunks = AsyncStream(Data.self) { captured = $0 }
+        let feed = captured!
         stdout.fileHandleForReading.readabilityHandler = { handle in
             guard let chunk = Self.readAvailable(handle, max: 65_536) else { return }
             if chunk.isEmpty {
@@ -141,7 +157,7 @@ actor MCPStdioTransport {
     }
 
     func send(_ payload: [String: Any], id: Int?, timeout: Int) async throws -> [String: Any] {
-        try await send(payload, id: id, timeout: .seconds(max(5, timeout)))
+        try await send(payload, id: id, timeout: .seconds(Double(max(5, timeout))))
     }
 
     /// Resolves once, by the answer, the deadline, the caller's cancellation or the server
@@ -160,17 +176,18 @@ actor MCPStdioTransport {
         let token = tokens
         let method = payload["method"] as? String
         let late = MCPError.launchFailed("\(name) did not answer in time.")
+        let table = pending
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let deadline = Task { [weak self] in
-                    do { try await Task.sleep(for: timeout) } catch { return }
+                    do { try await Task.sleep(nanoseconds: timeout.nanoseconds) } catch { return }
                     await self?.abandon(id, token, because: late)
                 }
-                pending[id] = Waiting(token: token, method: method, continuation: continuation, deadline: deadline)
+                table[id] = Waiting(token: token, method: method, continuation: continuation, deadline: deadline)
                 if Task.isCancelled { return abandon(id, token, because: CancellationError()) }
                 enqueue(line) { [weak self] error in
                     guard let error else { return }
-                    Task { await self?.resolve(id, token: token, with: .failure(error)) }
+                    Task { [weak self] in await self?.resolve(id, token: token, with: .failure(error)) }
                 }
             }
         } onCancel: {

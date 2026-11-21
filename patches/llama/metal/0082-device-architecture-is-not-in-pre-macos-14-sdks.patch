@@ -1,0 +1,22 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1855,6 +1855,10 @@
+                     bool known    = false;
+                     char how[64]  = "unknown";
+ 
++                    // The architecture property needs the macOS 14 SDK, not just the macOS 14
++                    // runtime: a pre-14 SDK has no declaration, so @available alone still fails
++                    // to compile. The name fallback below is the documented path there.
++#if defined(MAC_OS_VERSION_14_0) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_14_0
+                     if (@available(macOS 14.0, *)) {
+                         const char * arch = dev->mtl_device.architecture.name.UTF8String;
+                         int gfx = 0;
+@@ -1864,6 +1868,7 @@
+                             snprintf(how, sizeof(how), "%s", arch);
+                         }
+                     }
++#endif
+                     if (!known) {
+                         const char * name = dev->mtl_device.name.UTF8String;
+                         tolerant = name != NULL &&

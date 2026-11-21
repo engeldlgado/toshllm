@@ -42,3 +42,55 @@ struct HoverTracker: NSViewRepresentable {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
+
+/// The continuous variant macOS 13 exposes as `onContinuousHover`: the same
+/// hit-test-free tracking view, but every move reports its position.
+struct ContinuousHoverTracker: NSViewRepresentable {
+    var onChange: (HoverPhase) -> Void
+
+    func makeNSView(context: Context) -> MoveView {
+        let view = MoveView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ view: MoveView, context: Context) {
+        view.onChange = onChange
+    }
+
+    enum HoverPhase {
+        case active(CGPoint)
+        case ended
+    }
+
+    final class MoveView: NSView {
+        var onChange: ((HoverPhase) -> Void)?
+        private var tracking: NSTrackingArea?
+
+        /// The point is handed to SwiftUI, whose origin is the top left.
+        override var isFlipped: Bool { true }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(rect: bounds,
+                                      options: [.mouseMoved, .mouseEnteredAndExited,
+                                                .activeInActiveApp, .inVisibleRect],
+                                      owner: self)
+            addTrackingArea(area)
+            tracking = area
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            onChange?(.active(convert(event.locationInWindow, from: nil)))
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            onChange?(.active(convert(event.locationInWindow, from: nil)))
+        }
+
+        override func mouseExited(with event: NSEvent) { onChange?(.ended) }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}

@@ -203,7 +203,7 @@ struct SubtitleStyleSheet: View {
         generator.maximumSize = CGSize(width: 1920, height: 1920)
         // The middle of the clip beats the first frame, which is often black.
         let at = (try? await asset.load(.duration)).map { CMTime(seconds: $0.seconds / 2, preferredTimescale: 600) }
-        guard let at, let cg = try? await generator.image(at: at).image else { render(); return }
+        guard let at, let cg = try? generator.copyCGImage(at: at, actualTime: nil) else { render(); return }
         frame = NSImage(cgImage: cg, size: .zero)
         render()
     }

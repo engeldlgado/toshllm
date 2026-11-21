@@ -93,7 +93,7 @@ struct MaskEditorView: View {
                 }
                 .glassButton(prominent: !erasing)
                 Button { erasing = true } label: {
-                    Label(loc.t("Borrador", "Eraser"), systemImage: "eraser")
+                    Label(loc.t("Borrador", "Eraser"), systemImage: "circle.slash")
                 }
                 .glassButton(prominent: erasing)
                 .help(loc.t("El pincel marca lo que se repinta; el borrador devuelve la zona a conservada.",

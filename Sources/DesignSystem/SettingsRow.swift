@@ -187,16 +187,7 @@ struct SettingsRowGroup<Content: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if #available(macOS 15, *) {
-                Group(subviews: content) { rows in
-                    ForEach(rows.indices, id: \.self) { index in
-                        if index > 0 { SettingsRowDivider() }
-                        rows[index]
-                    }
-                }
-            } else {
-                content
-            }
+            content
         }
         .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         // A Shape in an overlay hit-tests its filled path, so an undecorated

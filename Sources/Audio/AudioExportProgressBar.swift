@@ -11,7 +11,7 @@ struct AudioExportProgressBar: View {
     var body: some View {
         HStack(spacing: 10) {
             Label(loc.t("Creando vídeo subtitulado…", "Creating captioned video…"),
-                  systemImage: "film.stack")
+                  systemImage: "film")
                 .font(.caption)
             ProgressView(value: exporter.progress)
             Text(exporter.progress, format: .percent.precision(.fractionLength(0)))

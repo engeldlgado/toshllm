@@ -11,7 +11,9 @@ extension View {
         if #available(macOS 15.0, *) {
             toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         } else {
-            toolbarBackground(.hidden, for: .windowToolbar)
+            // WindowConfigurationView already makes the title bar transparent, so the
+            // macOS 13 toolbarBackground modifier would be redundant as well as gated.
+            self
         }
     }
 }

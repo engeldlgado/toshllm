@@ -1,3 +1,77 @@
+# gfx803 / Polaris Metal performance fork
+
+Work on **Apple's Metal driver for AMD Polaris (GCN 4, `gfx803`)**, carried as a fork of
+[engeldlgado/toshllm](https://github.com/engeldlgado/toshllm) — which is upstream, credited below,
+and not this project's name or claim. Host of record: an RX 580 (36 CUs, 8 GB) under macOS 12 on an
+Intel Xeon box, with the same card measured under Linux/RADV for comparison.
+
+One checkpoint (`Ornith-1.5-9B-heretic-Q4_K_M`), one `llama-bench` request, medians of four
+repetitions on a quiet, warmed card:
+
+| build | pp512 | tg128 |
+|---|---:|---:|
+| upstream engine, none of this branch's work | 100.5 | 22.4 |
+| **this branch** | **167.5** | **26.67** |
+| same card, Linux/RADV, official llama.cpp | 206.6 | 29.20 |
+
+`./scripts/build-engines.sh` is the whole build: it resets `vendor/llama.cpp` to the pinned commit,
+applies the engine series, and compiles. Nothing has to be exported first — on this host it reads
+AVX2 off the CPU and the deployment floor off the OS, which is what selects the SSE4.2 engine and the
+Polaris paths in it (`TOSH_NO_AVX2`/`DEPLOYMENT_TARGET` still override). Read
+`patches/llama/metal/0082-*.patch` for what the engine carries, and `patches/README.md` for the rule
+that keeps a fork's patches applying after upstream's — the series is ordered by file name alone, so
+a number that collides with an upstream one silently interleaves the two.
+
+## Polaris performance work (RX 580 / `gfx803`) 🧪
+
+> ⚠️ One card, one model, one branch. Measured on an **AMD Radeon RX 580 (GCN 4 / `gfx803`, 36 CUs,
+> 8 GB)** with `Ornith-1.5-9B-heretic-Q4_K_M` (5.23 GiB, q4_K weights + q6_K output/FFN-down),
+> Flash Attention on and a q4_0 KV cache. Not reproduced on any other card or driver.
+
+`llama-bench -ngl 99 -fa 1 -ctk q4_0 -ctv q4_0 -b 2048 -ub 1024 -pg 512,128 -r 4 -t 10`, on a quiet
+and warmed card, base and tuned alternated in one session:
+
+| build | pp512 | tg128 |
+|---|---:|---:|
+| upstream engine, no Polaris work | 100.5 | 22.4 |
+| this branch | **167.5** | **26.7** |
+| same card under Linux/RADV, official llama.cpp | 206.6 | 29.2 |
+
+So **+66.7% prefill and +19.0% decode** over what this branch started from, with 19% of prefill and
+8.7% of decode still to give before the Metal path matches Linux on identical silicon.
+
+**The kernel changes that got there.**
+
+- **Float accumulators in the tiled prefill matmul.** GCN4 round-trips a half-precision product
+  through the register file on every accumulate step; accumulating in fp32 is worth **+22%** on its
+  own — the largest single change in the whole effort.
+- **One wavefront per tile, eight output columns per lane, two loads prefetched** in that same
+  tile: 2.03 → 2.97 TFLOP/s standalone at `12288×4096`. Reordering the panel loads and splitting the
+  tile-order dependency added a further few percent in situ.
+- **16-byte vectorised activation reads in the wave64 decode mat-vec**, four `float4` instead of
+  sixteen scalars — the shape RADV's shader emits — for **+6.6% decode** at the same traffic.
+- **Decode geometry chosen per shape and type**: rows per group and lanes per block are not one
+  constant. q4_K wants sixteen lanes and four rows at the FFN widths, q6_K wants four rows and eight
+  rows at different row counts, and the wave64 kernels are separate entry points from the wave32
+  ones rather than the same code with a different warp size.
+- **Fusions on the decode path**: swiglu, RMS-norm and norm-add folded into the q4_K mat-vec itself
+  (worth +3.7%, +1.7% and +1.4% respectively when switched back off to measure), and a dispatch-fusion
+  pass over the tail of tiny elementwise kernels that a decode token issues several hundred of.
+- **A wave64 flash-attention path** covering quantized KV, plus shared-dequant multi-column mat-vec
+  kernels so a batched step reads and unpacks each weight block once instead of once per column.
+- **Alignment and architecture probed, never assumed.** Cards older than Vega return the aligned
+  bytes for a dword read on a word boundary, so the fast unaligned path is granted only to hardware
+  measured to tolerate it, by `amdgpu_gfx<N>` ISA target where the OS reports one and by device name
+  where it does not. Unknown hardware stays correct rather than fast.
+
+---
+
+# Upstream: ToshLLM
+
+The remainder of this file is the upstream README, kept
+intact and unedited for attribution and for how the engine is built and
+packaged.
+
 <div align="center">
 
 # ToshLLM
@@ -38,6 +112,7 @@ Most local-LLM tools on macOS only target Apple Silicon. Intel Macs with discret
 | Qwen3.6-35B (MoE) generation | unusable | **~29 t/s**, flat on long runs |
 
 It opens, detects your hardware, and recommends models that will actually run well — no guesswork.
+
 
 ## Features
 

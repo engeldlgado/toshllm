@@ -101,7 +101,7 @@ struct DashboardView: View {
             HStack {
                 Label(loc.t("ToshLLM %@ está disponible", "ToshLLM %@ is available", "\(version)"),
                       systemImage: "arrow.down.app")
-                    .fontWeight(.medium)
+                    .font(.body.weight(.medium))
                 Spacer()
                 if let error = updates.installError {
                     Text(error).font(.caption).foregroundStyle(.red)
@@ -182,7 +182,7 @@ struct DashboardView: View {
              trailing: { if !profileStore.profiles.isEmpty { profileMenu } }) {
             if routerMode {
                 HStack(spacing: 8) {
-                    Image(systemName: "shippingbox.and.arrow.backward").frame(width: 18).foregroundStyle(.secondary)
+                    Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Router: sirve los %@ modelos descargados", "Router: serves all %@ downloaded models", "\(models.models.count)"))
                         .font(.callout).foregroundStyle(.secondary)
                 }
@@ -252,12 +252,12 @@ struct DashboardView: View {
                 }
                 if !modelPath.isEmpty && !routerMode {
                     if ncmoe > 0 && ServerSettings.modelIsMoE(at: modelPath) {
-                        row("gauge.with.needle", loc.t("Límite: ancho de banda de RAM",
+                        row("speedometer", loc.t("Límite: ancho de banda de RAM",
                                                        "Limit: RAM bandwidth"))
                             .help(loc.t("Los expertos en CPU se leen desde la RAM en cada token, y eso marca la velocidad de generación: una GPU más potente no la mejora, RAM más rápida (DDR5) sí. La aceleración MTP y bajar ncmoe reducen esas lecturas.",
                                         "CPU experts are read from RAM on every token, and that sets generation speed: a stronger GPU won't raise it, faster RAM (DDR5) will. MTP acceleration and a lower ncmoe reduce those reads."))
                     } else {
-                        row("gauge.with.needle", loc.t("Límite: ancho de banda de VRAM",
+                        row("speedometer", loc.t("Límite: ancho de banda de VRAM",
                                                        "Limit: VRAM bandwidth"))
                             .help(loc.t("Con el modelo completo en la GPU, cada token relee los pesos desde la VRAM: la velocidad de generación depende del ancho de banda de la tarjeta y del tamaño del archivo (una cuantización menor genera más rápido).",
                                         "With the whole model on the GPU, every token re-reads the weights from VRAM: generation speed depends on the card's bandwidth and the file size (a smaller quantization generates faster)."))
@@ -491,7 +491,7 @@ struct MachineCard: View {
                 row("rectangle.on.rectangle", "\(gpu.name) · \(gpu.vramGB) GB VRAM")
             }
             if !machine.model.isEmpty { row("desktopcomputer", machine.model) }
-            if !machine.osVersion.isEmpty { row("apple.logo", machine.osVersion) }
+            if !machine.osVersion.isEmpty { row("macwindow", machine.osVersion) }
             row("bolt.fill", ServerSettings.isAppleSilicon
                 ? loc.t("Backend: Metal (Apple Silicon)", "Backend: Metal (Apple Silicon)")
                 : loc.t("Backend: Metal (build AMD parcheado)", "Backend: Metal (patched AMD build)"))
@@ -856,7 +856,7 @@ struct AddedServerCard: View {
         Card(title: manager.displayName(for: c, loc: loc), icon: "server.rack", trailing: { accessory }) {
             if routerMode {
                 HStack(spacing: 8) {
-                    Image(systemName: "shippingbox.and.arrow.backward").frame(width: 18).foregroundStyle(.secondary)
+                    Image(systemName: "shippingbox").frame(width: 18).foregroundStyle(.secondary)
                     Text(loc.t("Router: sirve los %@ modelos descargados", "Router: serves all %@ downloaded models", "\(models.models.count)"))
                         .font(.callout).foregroundStyle(.secondary)
                 }

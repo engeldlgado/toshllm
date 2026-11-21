@@ -3,9 +3,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import Darwin
 import CryptoKit
 import os
 import Security
+
+// The Command Line Tools SDK leaves libproc.h out of the Darwin module, so the three
+// calls the orphan reaper needs are bound straight to their libSystem symbols.
+@_silgen_name("proc_pidpath")
+private func proc_pidpath(_ pid: Int32, _ buffer: UnsafeMutablePointer<CChar>, _ buffersize: UInt32) -> Int32
+
+@_silgen_name("proc_listallpids")
+private func proc_listallpids(_ buffer: UnsafeMutablePointer<Int32>?, _ buffersize: Int32) -> Int32
+
+@_silgen_name("proc_pidinfo")
+private func proc_pidinfo(_ pid: Int32, _ flavor: Int32, _ arg: UInt64,
+                          _ buffer: UnsafeMutableRawPointer?, _ buffersize: Int32) -> Int32
 
 /// Defaults a product packaged from this tree sets differently (`TOSH_APP_DEFAULTS` in make-app.sh), registered
 /// at launch so that every `@AppStorage` falls back to them until the user changes the setting.

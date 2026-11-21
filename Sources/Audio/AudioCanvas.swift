@@ -29,60 +29,79 @@ struct AudioCanvas: View {
         AudioExportTrack(rawValue: exportTrackRaw) ?? .translated
     }
 
+    // The drop target and the observers are generic helpers instead of one chain:
+    // Swift 5.7 spends its whole type-check budget on the first one otherwise.
     var body: some View {
+        observers(dropTarget(pane))
+            .sheet(isPresented: $stylingSubtitles) {
+                SubtitleStyleSheet(sourceURL: studio.sourceURL,
+                                   cues: studio.exportCues(for: exportTrack))
+                    .environmentObject(loc)
+            }
+    }
+
+    private var pane: some View {
         Group {
             if studio.sourceURL == nil {
                 emptyDropZone
             } else {
-                GeometryReader { geometry in
-                    let showsTools = geometry.size.width >= 760
-                    HStack(alignment: .top, spacing: 14) {
-                        mainWorkspace(showInlineTools: !showsTools)
-                        if showsTools {
-                            toolsPanel
-                                .frame(width: min(270, max(230, geometry.size.width * 0.28)))
-                        }
-                    }
-                }
+                workspacePane
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .buttonStyle(GlassPillButtonStyle())
         .background(dropTargeted ? Color.appAccent.opacity(0.08) : Color.clear)
-        .dropDestination(for: URL.self) { urls, _ in
+    }
+
+    private func dropTarget<Content: View>(_ content: Content) -> some View {
+        content.dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first, Self.accepts(url), !studio.isBusy else { return false }
             studio.select(url)
             return true
         } isTargeted: { dropTargeted = $0 }
-        .alert(loc.t("No se pudo exportar", "Could not export"),
-               isPresented: $showExportError) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(exportError)
-        }
-        .onChange(of: transcriptModeRaw) { _, value in
-            studio.setTranscriptMode(AudioTranscriptMode(rawValue: value) ?? .original)
-        }
-        .onChange(of: studio.hasTranslation) { _, available in
-            guard available else { return }
-            let preferred = AudioTranscriptMode(rawValue: transcriptModeRaw) ?? .bilingual
-            studio.setTranscriptMode(preferred == .original ? .bilingual : preferred)
-            transcriptModeRaw = studio.transcriptMode.rawValue
-        }
-        .onChange(of: videoExporter.error) { _, message in
-            guard let message else { return }
-            exportError = message
-            showExportError = true
-        }
-        .onChange(of: videoExporter.completedURL) { _, url in
-            guard let url else { return }
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        }
-        .sheet(isPresented: $stylingSubtitles) {
-            SubtitleStyleSheet(sourceURL: studio.sourceURL,
-                               cues: studio.exportCues(for: exportTrack))
-                .environmentObject(loc)
+    }
+
+    private func observers<Content: View>(_ content: Content) -> some View {
+        content
+            .alert(loc.t("No se pudo exportar", "Could not export"),
+                   isPresented: $showExportError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(exportError)
+            }
+            .onChange(of: transcriptModeRaw) { _, value in
+                studio.setTranscriptMode(AudioTranscriptMode(rawValue: value) ?? .original)
+            }
+            .onChange(of: studio.hasTranslation) { _, available in
+                guard available else { return }
+                let preferred = AudioTranscriptMode(rawValue: transcriptModeRaw) ?? .bilingual
+                studio.setTranscriptMode(preferred == .original ? .bilingual : preferred)
+                transcriptModeRaw = studio.transcriptMode.rawValue
+            }
+            .onChange(of: videoExporter.error) { _, message in
+                guard let message else { return }
+                exportError = message
+                showExportError = true
+            }
+            .onChange(of: videoExporter.completedURL) { _, url in
+                guard let url else { return }
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+    }
+
+    /// Split out of body: the drop target plus the four observers leave Swift 5.7 no
+    /// type-check budget for the measured two-column layout.
+    private var workspacePane: some View {
+        GeometryReader { geometry in
+            let showsTools = geometry.size.width >= 760
+            HStack(alignment: .top, spacing: 14) {
+                mainWorkspace(showInlineTools: !showsTools)
+                if showsTools {
+                    toolsPanel
+                        .frame(width: min(270, max(230, geometry.size.width * 0.28)))
+                }
+            }
         }
     }
 
@@ -236,7 +255,7 @@ struct AudioCanvas: View {
             Text(loc.t("Bilingüe", "Bilingual")).tag(AudioExportTrack.bilingual.rawValue)
         }
         Divider()
-        Button(loc.t("Guardar subtítulos…", "Save subtitles…"), systemImage: "doc.badge.arrow.up", action: exportResult)
+        Button(loc.t("Guardar subtítulos…", "Save subtitles…"), systemImage: "arrow.up.doc", action: exportResult)
         if studio.isVideo {
             Button(loc.t("Apariencia de los subtítulos…", "Subtitle appearance…"),
                    systemImage: "textformat") { stylingSubtitles = true }
@@ -248,75 +267,92 @@ struct AudioCanvas: View {
 
     private var toolsPanel: some View {
         ScrollView {
+            // Three groups: macOS 12 result builders stop at ten children.
             VStack(alignment: .leading, spacing: 16) {
-                toolSectionTitle(loc.t("Herramientas", "Transcript tools"), icon: "sparkles")
-                toolButton(loc.t("Seguir reproducción", "Follow playback"),
-                           icon: "location.fill", active: followTranscript) {
-                    followTranscript.toggle()
-                }
-                toolButton(loc.t("Editar segmentos", "Edit segments"),
-                           icon: "pencil", active: editing) { editing.toggle() }
-                toolButton(loc.t("Copiar texto", "Copy text"), icon: "doc.on.doc") { copyText() }
-
-                Divider()
-                toolSectionTitle(loc.t("Proyecto", "Project"), icon: "folder.badge.gearshape")
-                toolButton(loc.t("Abrir proyecto…", "Open project…"), icon: "folder") { openProject() }
-                toolButton(loc.t("Guardar proyecto…", "Save project…"), icon: "square.and.arrow.down",
-                           disabled: studio.originalCues.isEmpty) { saveProject() }
-                if studio.hasRecoveryProject {
-                    toolButton(loc.t("Recuperar último trabajo", "Recover last work"),
-                               icon: "clock.arrow.circlepath") { recoverProject() }
-                }
-
-                Divider()
-                toolSectionTitle(loc.t("Formatos de exportación", "Export formats"),
-                                 icon: "square.and.arrow.up")
-                VStack(spacing: 7) {
-                    ForEach(AudioExportFormat.allCases) { format in
-                        Button {
-                            exportFormatRaw = format.rawValue
-                            exportResult()
-                        } label: {
-                            HStack {
-                                Text(format.rawValue.uppercased())
-                                    .font(.caption2.bold()).frame(width: 36)
-                                    .padding(.vertical, 4)
-                                    .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 6))
-                                Text(exportDescription(format)).font(.caption)
-                                Spacer()
-                                Image(systemName: "square.and.arrow.down").foregroundStyle(.secondary)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(studio.cues.isEmpty)
-                        .padding(8)
-                        .background(WorkspaceStyle.field, in: RoundedRectangle(cornerRadius: 9))
-                        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(WorkspaceStyle.border))
-                    }
-                }
-
-                Picker(loc.t("Contenido", "Content"), selection: $exportTrackRaw) {
-                    Text(loc.t("Original", "Original")).tag(AudioExportTrack.original.rawValue)
-                    Text(loc.t("Traducción", "Translation")).tag(AudioExportTrack.translated.rawValue)
-                    Text(loc.t("Bilingüe", "Bilingual")).tag(AudioExportTrack.bilingual.rawValue)
-                }
-
-                if studio.isVideo {
-                    Divider()
-                    toolSectionTitle(loc.t("Vídeo subtitulado", "Captioned video"), icon: "film")
-                    toolButton(loc.t("Apariencia", "Appearance"), icon: "textformat") { stylingSubtitles = true }
-                    toolButton(loc.t("Crear copia MOV…", "Create MOV copy…"), icon: "film.badge.plus",
-                               disabled: videoExporter.isExporting || studio.cues.isEmpty) {
-                        exportCaptionedVideo()
-                    }
-                }
+                transcriptTools
+                projectTools
+                exportTools
             }
             .padding(14)
         }
         .frame(maxHeight: .infinity)
         .background(WorkspaceStyle.surface, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(WorkspaceStyle.border))
+    }
+
+    private var transcriptTools: some View {
+        Group {
+            toolSectionTitle(loc.t("Herramientas", "Transcript tools"), icon: "sparkles")
+            toolButton(loc.t("Seguir reproducción", "Follow playback"),
+                       icon: "location.fill", active: followTranscript) {
+                followTranscript.toggle()
+            }
+            toolButton(loc.t("Editar segmentos", "Edit segments"),
+                       icon: "pencil", active: editing) { editing.toggle() }
+            toolButton(loc.t("Copiar texto", "Copy text"), icon: "doc.on.doc") { copyText() }
+        }
+    }
+
+    private var projectTools: some View {
+        Group {
+            Divider()
+            toolSectionTitle(loc.t("Proyecto", "Project"), icon: "folder.badge.gearshape")
+            toolButton(loc.t("Abrir proyecto…", "Open project…"), icon: "folder") { openProject() }
+            toolButton(loc.t("Guardar proyecto…", "Save project…"), icon: "square.and.arrow.down",
+                       disabled: studio.originalCues.isEmpty) { saveProject() }
+            if studio.hasRecoveryProject {
+                toolButton(loc.t("Recuperar último trabajo", "Recover last work"),
+                           icon: "clock.arrow.circlepath") { recoverProject() }
+            }
+        }
+    }
+
+    @ViewBuilder private var exportTools: some View {
+        Group {
+            Divider()
+            toolSectionTitle(loc.t("Formatos de exportación", "Export formats"),
+                             icon: "square.and.arrow.up")
+            VStack(spacing: 7) {
+                ForEach(AudioExportFormat.allCases) { format in
+                    Button {
+                        exportFormatRaw = format.rawValue
+                        exportResult()
+                    } label: {
+                        HStack {
+                            Text(format.rawValue.uppercased())
+                                .font(.caption2.bold()).frame(width: 36)
+                                .padding(.vertical, 4)
+                                .background(WorkspaceStyle.inset, in: RoundedRectangle(cornerRadius: 6))
+                            Text(exportDescription(format)).font(.caption)
+                            Spacer()
+                            Image(systemName: "square.and.arrow.down").foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(studio.cues.isEmpty)
+                    .padding(8)
+                    .background(WorkspaceStyle.field, in: RoundedRectangle(cornerRadius: 9))
+                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(WorkspaceStyle.border))
+                }
+            }
+
+            Picker(loc.t("Contenido", "Content"), selection: $exportTrackRaw) {
+                Text(loc.t("Original", "Original")).tag(AudioExportTrack.original.rawValue)
+                Text(loc.t("Traducción", "Translation")).tag(AudioExportTrack.translated.rawValue)
+                Text(loc.t("Bilingüe", "Bilingual")).tag(AudioExportTrack.bilingual.rawValue)
+            }
+
+            if studio.isVideo {
+                Divider()
+                toolSectionTitle(loc.t("Vídeo subtitulado", "Captioned video"), icon: "film")
+                toolButton(loc.t("Apariencia", "Appearance"), icon: "textformat") { stylingSubtitles = true }
+                toolButton(loc.t("Crear copia MOV…", "Create MOV copy…"), icon: "film",
+                           disabled: videoExporter.isExporting || studio.cues.isEmpty) {
+                    exportCaptionedVideo()
+                }
+            }
+        }
     }
 
     private func toolSectionTitle(_ title: String, icon: String) -> some View {

@@ -58,17 +58,20 @@ extension ChatStore {
         let question = conversations[i].messages[..<j].last(where: { $0.role == "user" })?.content ?? ""
         Task { [weak self] in
             let map = await Self.fetchMap(request: request, question: question, port: port)
-            await MainActor.run {
-                guard let self else { return }
-                self.mapLoading.remove(messageID)
-                guard let map, let (i, j) = self.messagePosition(messageID) else {
-                    self.mapFailed.insert(messageID)
-                    return
-                }
-                self.conversations[i].messages[j].map = map
-                self.save()
-            }
+            await self?.applyMap(map, to: messageID)
         }
+    }
+
+    /// A method rather than the write inline in a MainActor.run closure: Swift 5.7
+    /// refuses a deep mutation of an isolated property through that closure.
+    private func applyMap(_ map: ChatMap?, to messageID: UUID) {
+        mapLoading.remove(messageID)
+        guard let map, let (i, j) = messagePosition(messageID) else {
+            mapFailed.insert(messageID)
+            return
+        }
+        conversations[i].messages[j].map = map
+        save()
     }
 
     private func messagePosition(_ id: UUID) -> (Int, Int)? {

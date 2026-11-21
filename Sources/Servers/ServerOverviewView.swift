@@ -30,16 +30,18 @@ struct ServerOverviewView: View {
                 Spacer()
                 ServerStateBadge(state: server.state, phase: server.startupPhase, since: server.startupPhaseSince)
             }
-            ViewThatFits(in: .horizontal) {
+            ToshAdaptive(minWidth: 700) {
                 HStack(spacing: 24) {
                     identity(name, path: path, router: settings.routerMode)
                     Spacer(minLength: 10)
                     connection(settings)
                 }
+            } narrow: {
                 VStack(alignment: .leading, spacing: 16) {
                     identity(name, path: path, router: settings.routerMode)
                     connection(settings)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()
             HStack(spacing: 30) {

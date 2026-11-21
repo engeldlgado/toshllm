@@ -119,7 +119,7 @@ El interruptor **Chat / Imágenes** en la parte superior de la ventana cambia al
 
 **Hilos de CPU** — Para la parte que corre en CPU. Los núcleos físicos suelen ser el óptimo.
 """),
-        DocSection(title: "Motores de inferencia", icon: "engine.combustion", body: """
+        DocSection(title: "Motores de inferencia", icon: "gearshape.2", body: """
 La app incluye **dos motores** y admite externos (Ajustes → Avanzado):
 
 **Integrado (oficial)** — llama.cpp oficial con parches AMD. Recomendado para todo uso. Soporta las arquitecturas más recientes (Qwen 3.6, MTP).
@@ -265,7 +265,7 @@ curl http://127.0.0.1:8080/v1/chat/completions -H 'X-Tosh-Agent: on' \\
   -d '{"messages":[{"role":"user","content":"Integra x^3/(e^x-1) de 0 a infinito"}]}'
 ```
 """),
-        DocSection(title: "Rendimiento de referencia", icon: "gauge.high", body: """
+        DocSection(title: "Rendimiento de referencia", icon: "gauge", body: """
 Números medidos en el equipo de desarrollo (RX 6700 XT 12 GB, DDR4, macOS):
 
 **Qwen3-8B Q4** (todo en VRAM, con ToshGEMM): ~476 t/s prompt, ~60 t/s generación
@@ -386,7 +386,7 @@ The **Chat / Images** toggle at the top of the window switches to the image stud
 
 **CPU threads** — For the CPU-side work. Physical core count is usually optimal.
 """),
-        DocSection(title: "Inference engines", icon: "engine.combustion", body: """
+        DocSection(title: "Inference engines", icon: "gearshape.2", body: """
 The app ships **two engines** and supports external ones (Settings → Advanced):
 
 **Bundled (official)** — Official llama.cpp with AMD patches. Recommended for everything. Supports the newest architectures (Qwen 3.6, MTP).
@@ -534,7 +534,7 @@ curl http://127.0.0.1:8080/v1/chat/completions -H 'X-Tosh-Agent: on' \\
   -d '{"messages":[{"role":"user","content":"Integrate x^3/(e^x-1) from 0 to infinity"}]}'
 ```
 """),
-        DocSection(title: "Reference performance", icon: "gauge.high", body: """
+        DocSection(title: "Reference performance", icon: "gauge", body: """
 Numbers measured on the development machine (RX 6700 XT 12 GB, DDR4, macOS):
 
 **Qwen3-8B Q4** (fully in VRAM, with ToshGEMM): ~476 t/s prompt, ~60 t/s generation

@@ -17,8 +17,7 @@ struct DflashMemoryWarningSheet: View {
             Label(loc.t("DFlash está usando casi toda la VRAM",
                         "DFlash is using almost all VRAM"),
                   systemImage: "exclamationmark.triangle.fill")
-                .font(.title2)
-                .bold()
+                .font(.title2.bold())
                 .foregroundStyle(.orange)
 
             Text(loc.t("El servidor mantiene %@ de %@ GiB ocupados (%@). Esta configuración puede perder rendimiento, paginar memoria o fallar cuando crezca el contexto.", "The server is holding %@ of %@ GiB (%@). This configuration can lose performance, page memory, or fail as the context grows.", "\(usedText)", "\(totalText)", "\(fractionText)"))

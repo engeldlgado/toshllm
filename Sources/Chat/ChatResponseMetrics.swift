@@ -29,7 +29,7 @@ struct ChatResponseMetrics: View, Equatable {
                 metric("MTP \(Int((accept * 100).rounded()))%", icon: "arrow.triangle.2.circlepath")
             }
             if let tokens = message.timings?.generatedTokens {
-                metric(tokens.formatted() + " tokens", icon: "text.word.spacing")
+                metric(tokens.formatted() + " tokens", icon: "textformat")
             }
             if let duration {
                 metric(duration, icon: "timer")

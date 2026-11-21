@@ -10,6 +10,6 @@ enum DflashPolicy {
     }
 
     static func shouldWarn(fractions: [Double]) -> Bool {
-        fractions.count(where: { $0 >= 0.95 }) >= 3
+        fractions.filter { $0 >= 0.95 }.count >= 3
     }
 }

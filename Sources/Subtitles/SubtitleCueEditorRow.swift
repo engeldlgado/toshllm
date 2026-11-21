@@ -86,7 +86,8 @@ struct SubtitleCueEditorRow: View {
     @ViewBuilder
     private func cueText(_ text: String, translated: Bool, label: String) -> some View {
         if editing {
-            TextField(label, text: translated ? $translatedDraft : $originalDraft, axis: .vertical)
+            // Single-line: this field commits on Return, which a TextEditor cannot do.
+            TextField(label, text: translated ? $translatedDraft : $originalDraft)
                 .textFieldStyle(.plain)
                 .padding(8)
                 .workspaceFieldSurface()

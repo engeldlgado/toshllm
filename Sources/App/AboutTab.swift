@@ -176,24 +176,19 @@ struct AboutView: View {
     }
 
     private var benefits: some View {
-        AdaptiveTwoUp(threshold: 860, spacing: 0) {
-            HStack(spacing: 0) {
-                AboutBenefit(icon: "shield.checkered", color: .pink,
-                             title: loc.t("100% local", "100% Local"),
-                             detail: loc.t("Tus datos permanecen en tu equipo.", "Your data stays on your machine."))
-                AboutBenefit(icon: "bolt.fill", color: .pink,
-                             title: loc.t("Aceleración Metal", "Metal Acceleration"),
-                             detail: loc.t("Optimizado para Apple Silicon y GPU AMD.", "Optimized for Apple Silicon and AMD GPUs."))
-            }
-        } second: {
-            HStack(spacing: 0) {
-                AboutBenefit(icon: "shippingbox", color: .blue,
-                             title: loc.t("Código abierto", "Open Source"),
-                             detail: loc.t("Impulsado por la comunidad y modelos abiertos.", "Powered by the community and open models."))
-                AboutBenefit(icon: "lock", color: .green,
-                             title: loc.t("Privacidad primero", "Privacy First"),
-                             detail: loc.t("Sin telemetría ni seguimiento. No necesita la nube.", "No telemetry. No tracking. No cloud required."))
-            }
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 0), spacing: 0), count: 4), spacing: 0) {
+            AboutBenefit(icon: "lock.shield", color: .pink,
+                         title: loc.t("100% local", "100% Local"),
+                         detail: loc.t("Tus datos permanecen en tu equipo.", "Your data stays on your machine."))
+            AboutBenefit(icon: "bolt.fill", color: .pink,
+                         title: loc.t("Aceleración Metal", "Metal Acceleration"),
+                         detail: loc.t("Optimizado para Apple Silicon y GPU AMD.", "Optimized for Apple Silicon and AMD GPUs."))
+            AboutBenefit(icon: "shippingbox", color: .blue,
+                         title: loc.t("Código abierto", "Open Source"),
+                         detail: loc.t("Impulsado por la comunidad y modelos abiertos.", "Powered by the community and open models."))
+            AboutBenefit(icon: "lock", color: .green,
+                         title: loc.t("Privacidad primero", "Privacy First"),
+                         detail: loc.t("Sin telemetría ni seguimiento. No necesita la nube.", "No telemetry. No tracking. No cloud required."))
         }
         .padding(.vertical, 8)
         .cardSurface()
@@ -282,7 +277,7 @@ struct AboutView: View {
                 }
                 .padding(.top, -38)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 10)], spacing: 10) {
-                    AboutSystemMetric(icon: "apple.logo", title: "macOS", value: hardware.osVersion)
+                    AboutSystemMetric(icon: "macwindow", title: "macOS", value: hardware.osVersion)
                     AboutSystemMetric(icon: "cpu", title: loc.t("Chip", "Chip"),
                                       value: hardware.arch == "arm64" ? "Apple Silicon" : "Intel Mac")
                     AboutSystemMetric(icon: "display", title: "GPU", value: hardware.bestGPU?.name ?? "—")

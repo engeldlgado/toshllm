@@ -334,8 +334,8 @@ enum TranscriptRow: Identifiable {
     /// keeps its live bubble, which then mirrors the next pass.
     var id: ID {
         switch self {
-        case .message(let message): .message(message.id)
-        case .tools(let rounds): .tools(rounds[0].id)
+        case .message(let message): return .message(message.id)
+        case .tools(let rounds): return .tools(rounds[0].id)
         }
     }
 

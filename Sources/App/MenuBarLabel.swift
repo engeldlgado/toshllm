@@ -17,7 +17,7 @@ struct MenuBarLabel: View {
     private var iconName: String {
         switch server.state {
         case .running:  return "cpu.fill"
-        case .starting: return "cpu.badge.clock"
+        case .starting: return "clock"
         case .failed:   return "exclamationmark.triangle.fill"
         case .stopped:  return "cpu"
         }

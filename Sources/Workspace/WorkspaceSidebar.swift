@@ -30,26 +30,32 @@ struct WorkspaceSidebar: View {
                     heading(loc.t("Biblioteca", "Library"))
                     navigationRow(.models)
                     navigationRow(.benchmarks)
-                    heading(loc.t("Servidores", "Servers"))
-                    ForEach(manager.servers, id: \.id) { server in
-                        SidebarServerRow(server: server)
+                    Group {
+                        heading(loc.t("Servidores", "Servers"))
+                        ForEach(manager.servers, id: \.id) { server in
+                            SidebarServerRow(server: server)
+                        }
+                        Button {
+                            let server = manager.addServer(name: loc.t("Servidor %@", "Server %@", "\(manager.servers.count + 1)"), from: nil)
+                            animate { control.focusServer(server.id) }
+                        } label: {
+                            Label(loc.t("Agregar servidor", "Add server"), systemImage: "plus")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 14).padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    Button {
-                        let server = manager.addServer(name: loc.t("Servidor %@", "Server %@", "\(manager.servers.count + 1)"), from: nil)
-                        animate { control.focusServer(server.id) }
-                    } label: {
-                        Label(loc.t("Agregar servidor", "Add server"), systemImage: "plus")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 14).padding(.vertical, 10)
+                    Group {
+                        heading(loc.t("Herramientas", "Tools"))
+                        navigationRow(.logs)
+                        navigationRow(.docs)
                     }
-                    .buttonStyle(.plain)
-                    heading(loc.t("Herramientas", "Tools"))
-                    navigationRow(.logs)
-                    navigationRow(.docs)
-                    Divider().padding(.vertical, 16).padding(.horizontal, 12)
-                    navigationRow(.chatSettings)
-                    navigationRow(.settings)
-                    navigationRow(.about)
+                    Group {
+                        Divider().padding(.vertical, 16).padding(.horizontal, 12)
+                        navigationRow(.chatSettings)
+                        navigationRow(.settings)
+                        navigationRow(.about)
+                    }
                 }
                 .font(.system(size: 14))
                 .padding(.horizontal, 16)

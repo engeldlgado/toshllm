@@ -12,13 +12,13 @@ struct ModelSearchAndFilters<Filters: View>: View {
     @ViewBuilder let filters: Filters
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
+        ToshAdaptive(minWidth: 850) {
             HStack(spacing: 14) {
                 GlassSearchField(placeholder: placeholder, text: $text).frame(width: 310)
                 filters
             }
             .frame(minWidth: 850, alignment: .leading)
-
+        } narrow: {
             VStack(alignment: .leading, spacing: 9) {
                 GlassSearchField(placeholder: placeholder, text: $text)
                     .frame(maxWidth: .infinity)
@@ -104,7 +104,7 @@ struct ModelFilterBar<Value: Hashable>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        WrappingFilterLayout(spacing: 7) {
+        ToshFlowLayout(spacing: 7) {
             ForEach(filters) { filter in
                 let selected = selection == filter.value
                 Button { select(filter.value) } label: {
@@ -118,6 +118,7 @@ struct ModelFilterBar<Value: Hashable>: View {
                         }
                     }
                     .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                    .lineLimit(1).fixedSize()
                     .foregroundStyle(selected ? Color.white : Color.secondary)
                     .padding(.horizontal, 11).padding(.vertical, 6)
                     .background(selected ? Color.appAccent : WorkspaceStyle.inset,
@@ -134,61 +135,5 @@ struct ModelFilterBar<Value: Hashable>: View {
     private func select(_ value: Value) {
         if reduceMotion { selection = value }
         else { withAnimation(.easeOut(duration: 0.16)) { selection = value } }
-    }
-}
-
-/// A lightweight flow layout for short filter bars. It measures only the
-/// handful of visible chips and wraps complete controls instead of clipping
-/// labels or requiring horizontal scrolling in narrow windows.
-struct WrappingFilterLayout: Layout {
-    let spacing: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
-                     cache: inout ()) -> CGSize {
-        let rows = arrangement(width: proposal.width ?? .greatestFiniteMagnitude, subviews: subviews)
-        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0,
-                      height: rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) * spacing)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
-                       subviews: Subviews, cache: inout ()) {
-        let rows = arrangement(width: bounds.width, subviews: subviews)
-        var index = 0
-        var y = bounds.minY
-        for row in rows {
-            var x = bounds.minX
-            for _ in 0..<row.count {
-                let size = subviews[index].sizeThatFits(.unspecified)
-                subviews[index].place(at: CGPoint(x: x, y: y),
-                                      anchor: .topLeading, proposal: ProposedViewSize(size))
-                x += size.width + spacing
-                index += 1
-            }
-            y += row.height + spacing
-        }
-    }
-
-    private func arrangement(width: CGFloat, subviews: Subviews) -> [Row] {
-        var rows: [Row] = []
-        var row = Row()
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            let nextWidth = row.count == 0 ? size.width : row.width + spacing + size.width
-            if row.count > 0 && nextWidth > width {
-                rows.append(row)
-                row = Row()
-            }
-            row.width = row.count == 0 ? size.width : row.width + spacing + size.width
-            row.height = max(row.height, size.height)
-            row.count += 1
-        }
-        if row.count > 0 { rows.append(row) }
-        return rows
-    }
-
-    private struct Row {
-        var width: CGFloat = 0
-        var height: CGFloat = 0
-        var count = 0
     }
 }

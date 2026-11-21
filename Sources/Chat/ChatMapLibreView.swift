@@ -100,13 +100,13 @@ final class MapPageScheme: NSObject, WKURLSchemeHandler {
 
     private static func contentType(_ file: URL) -> String {
         switch file.pathExtension.lowercased() {
-        case "html": "text/html; charset=utf-8"
-        case "js": "text/javascript; charset=utf-8"
-        case "css": "text/css; charset=utf-8"
-        case "json": "application/json"
-        case "png": "image/png"
-        case "pbf": "application/x-protobuf"
-        default: "application/octet-stream"
+        case "html": return "text/html; charset=utf-8"
+        case "js": return "text/javascript; charset=utf-8"
+        case "css": return "text/css; charset=utf-8"
+        case "json": return "application/json"
+        case "png": return "image/png"
+        case "pbf": return "application/x-protobuf"
+        default: return "application/octet-stream"
         }
     }
 }
@@ -164,7 +164,7 @@ struct ChatMapLibreCanvas: NSViewRepresentable {
         }
         let config: [String: Any] = ["layers": layers, "style": MapBase.style, "regions": MapBase.regions,
                                      "labels": MapBase.labels, "dark": dark,
-                                     "lang": Locale.current.language.languageCode?.identifier ?? "en"]
+                                     "lang": (Locale.current.languageCode ?? "en")]
         guard let data = try? JSONSerialization.data(withJSONObject: config) else { return }
         let scripts = view.configuration.userContentController
         scripts.removeAllUserScripts()

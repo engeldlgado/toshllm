@@ -171,10 +171,11 @@ final class EngineChecker: ObservableObject {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.consume(text) }
+            let owner = self
+            Task { @MainActor in owner?.consume(text) }
         }
         p.terminationHandler = { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 pipe.fileHandleForReading.readabilityHandler = nil
                 var parsed = EngineCheck.parse(self.buffer)

@@ -30,7 +30,7 @@ struct GlassSegmentedControl<Value: Hashable>: View {
                 } label: {
                     label(for: segment)
                         .font(.callout)
-                        .foregroundStyle(selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(selected ? ToshStyle.primary : ToshStyle.secondary)
                         .padding(.horizontal, 13)
                         .padding(.vertical, 5)
                         .background {

@@ -99,7 +99,7 @@ struct BenchmarkShareCard: View {
                     title: loc.t("Modelo y medición", "Model and measurement"),
                     detail: loc.t("Nombre, cuantización, hashes, configuración y resultados. Los archivos no se suben.",
                                   "Name, quantization, hashes, configuration, and results. Files are not uploaded."),
-                    systemImage: "gauge.with.dots.needle.67percent")
+                    systemImage: "speedometer")
                 BenchmarkConsentInfoRow(
                     title: loc.t("Tu contenido queda fuera", "Your content stays private"),
                     detail: loc.t("Sin chats, prompts, cuenta, rutas locales ni contenido de archivos.",

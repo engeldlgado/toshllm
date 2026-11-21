@@ -183,7 +183,7 @@ struct MessageBubble: View, Equatable {
                         Button {
                             showingMetrics.toggle()
                         } label: {
-                            Label(loc.t("Métricas", "Metrics"), systemImage: "gauge.with.dots.needle.33percent")
+                            Label(loc.t("Métricas", "Metrics"), systemImage: "speedometer")
                                 .labelStyle(.iconOnly)
                         }
                         .buttonStyle(.plain)
@@ -274,7 +274,7 @@ struct MessageBubble: View, Equatable {
                     }
                 }
                 .padding(.horizontal, 13).padding(.vertical, 10)
-                .background(isUser ? AnyShapeStyle(.tint.opacity(0.17)) : AnyShapeStyle(.quaternary.opacity(0.5)),
+                .background(isUser ? ToshStyle.tint.toshOpacity(0.17) : ToshStyle.quaternary.toshOpacity(0.5),
                             in: RoundedRectangle(cornerRadius: 16))
 
                 if !streaming { actionsRow }

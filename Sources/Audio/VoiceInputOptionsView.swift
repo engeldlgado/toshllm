@@ -25,7 +25,7 @@ struct VoiceInputOptionsView: View {
                 methodLabel(
                     title: loc.t("Dictado de Apple", "Apple Dictation"),
                     detail: loc.t("En vivo · sin reservar VRAM", "Live · no VRAM reserved"),
-                    systemImage: "apple.logo",
+                    systemImage: "macwindow",
                     selected: methodRaw == SpeechInputMethod.apple.rawValue)
             }
             .buttonStyle(.plain)
@@ -38,7 +38,7 @@ struct VoiceInputOptionsView: View {
                 methodLabel(
                     title: "Whisper.cpp · GPU",
                     detail: loc.t("Privado · multilingüe · Radeon", "Private · multilingual · Radeon"),
-                    systemImage: "waveform.badge.mic",
+                    systemImage: "mic",
                     selected: methodRaw == SpeechInputMethod.whisper.rawValue)
             }
             .buttonStyle(.plain)
@@ -106,7 +106,7 @@ struct VoiceInputOptionsView: View {
                 .foregroundStyle(selected ? Color.accentColor : .secondary)
                 .accessibilityHidden(true)
         }
-        .contentShape(.rect)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }

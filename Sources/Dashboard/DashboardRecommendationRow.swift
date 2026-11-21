@@ -9,7 +9,7 @@ struct DashboardRecommendationRow: View {
     @EnvironmentObject private var loc: Localizer
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
+        ToshAdaptive(minWidth: 860) {
             HStack(spacing: 18) {
                 roleBadge.frame(width: 98, alignment: .leading)
                 identity.frame(minWidth: 165, maxWidth: .infinity, alignment: .leading)
@@ -20,6 +20,7 @@ struct DashboardRecommendationRow: View {
                 compatibility.frame(width: 110, alignment: .leading)
                 CatalogActionButton(model: rec.model, est: rec.est).frame(width: 112)
             }
+        } narrow: {
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 8) {
                     identity

@@ -132,7 +132,10 @@ enum ChatRoadRoute {
     private enum RouteError: Error, CustomStringConvertible {
         case none(String, String)
         var description: String {
-            switch self { case .none(let from, let to): "Apple Maps found no route from \(from) to \(to)" }
+            switch self {
+            case .none(let from, let to):
+                return "Apple Maps found no route from \(from) to \(to)"
+            }
         }
     }
 

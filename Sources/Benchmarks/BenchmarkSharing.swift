@@ -534,7 +534,7 @@ final class BenchmarkSharing: ObservableObject {
     // MARK: Process + parsing
 
     private func runProcess(_ path: String, _ args: [String], env: [String: String]) async throws -> String {
-        let outputURL = URL.temporaryDirectory.appending(path: "toshllm-benchmark-\(UUID().uuidString).log")
+        let outputURL = URL.toshTemporaryDirectory.appending(path: "toshllm-benchmark-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
             throw ShareError.workloadFailed("could not create temporary benchmark log")
         }

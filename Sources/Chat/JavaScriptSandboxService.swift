@@ -86,7 +86,7 @@ private final class JavaScriptSandboxSession: NSObject, WKScriptMessageHandler {
             webView.loadHTMLString(Self.harness(code: code), baseURL: nil)
 
             timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(timeoutMS))
+                try? await Task.sleep(nanoseconds: UInt64(timeoutMS) * 1_000_000)
                 guard !Task.isCancelled else { return }
                 self?.finish(ToolExecutionResult(
                     content: "Execution timed out after \(timeoutMS) ms", isError: true))
@@ -110,7 +110,7 @@ private final class JavaScriptSandboxSession: NSObject, WKScriptMessageHandler {
         finish(JavaScriptSandboxService.formatReply(logs: logs, result: result, error: error))
     }
 
-    private static func optionalString(_ value: Any) -> String? {
+    private nonisolated static func optionalString(_ value: Any) -> String? {
         value is NSNull ? nil : String(describing: value)
     }
 

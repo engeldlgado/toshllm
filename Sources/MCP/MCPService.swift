@@ -17,9 +17,27 @@ actor ToshMCPService {
     }
 
     private var sessions: [UUID: Session] = [:]
-    private var legacyListeners: [UUID: Task<Void, Never>] = [:]
-    private var legacyReady: [UUID: CheckedContinuation<URL, Error>] = [:]
-    private var legacyResponses: [UUID: [Int: CheckedContinuation<WireResponse, Error>]] = [:]
+    private let legacyListeners = SlotTable<UUID, Task<Void, Never>>()
+    private let legacyReady = SlotTable<UUID, CheckedContinuation<URL, Error>>()
+    private let legacyResponses = SlotTable<UUID, [Int: CheckedContinuation<WireResponse, Error>]>()
+
+    /// A class rather than a dictionary property: on Swift 5.7 the continuation closures
+    /// that register these are not actor-isolated, so they store through a captured reference.
+    private final class SlotTable<Key: Hashable, Value> {
+        private var byKey: [Key: Value] = [:]
+
+        subscript(_ key: Key) -> Value? {
+            get { byKey[key] }
+            set { byKey[key] = newValue }
+        }
+
+        subscript(_ key: Key, default fallback: @autoclosure () -> Value) -> Value {
+            get { byKey[key, default: fallback()] }
+            set { byKey[key] = newValue }
+        }
+
+        func removeValue(forKey key: Key) -> Value? { byKey.removeValue(forKey: key) }
+    }
 
     func discoverTools() async -> [BuiltinToolInfo] {
         var output: [BuiltinToolInfo] = []
@@ -375,9 +393,13 @@ actor ToshMCPService {
     }
 
     private func startLegacySSE(_ server: MCPServer) async throws {
+        // The tables are reached through locals: Swift 5.7 will not let the continuation
+        // closure touch an actor-isolated property, even a let of class type.
+        let ready = legacyReady
+        let listeners = legacyListeners
         _ = try await withCheckedThrowingContinuation { continuation in
-            legacyReady[server.id] = continuation
-            legacyListeners[server.id] = Task { [weak self] in
+            ready[server.id] = continuation
+            listeners[server.id] = Task { [weak self] in
                 await self?.listenLegacySSE(server)
             }
         }
@@ -438,8 +460,9 @@ actor ToshMCPService {
     }
 
     private func sendLegacy(serverID: UUID, payload: [String: Any], id: Int) async throws -> WireResponse {
-        try await withCheckedThrowingContinuation { continuation in
-            legacyResponses[serverID, default: [:]][id] = continuation
+        let responses = legacyResponses
+        return try await withCheckedThrowingContinuation { continuation in
+            responses[serverID, default: [:]][id] = continuation
             Task { [weak self] in
                 do { try await self?.postLegacy(serverID: serverID, payload: payload) }
                 catch { await self?.failLegacyResponse(serverID: serverID, id: id, error: error) }

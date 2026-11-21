@@ -122,7 +122,7 @@ actor MemoryArchiveHook {
                 try? FileManager.default.removeItem(at: file)
                 backoff = 1
             case .retry:
-                try? await Task.sleep(for: .seconds(min(backoff, 300)))
+                try? await Task.sleep(nanoseconds: UInt64(min(backoff, 300)) * 1_000_000_000)
                 backoff *= 2
             }
         }

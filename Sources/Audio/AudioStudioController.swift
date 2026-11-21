@@ -73,8 +73,8 @@ final class AudioStudioController: ObservableObject {
 
     var isBusy: Bool {
         switch stage {
-        case .preparing, .analyzingVAD, .transcribing, .translating: true
-        default: false
+        case .preparing, .analyzingVAD, .transcribing, .translating: return true
+        default: return false
         }
     }
 
@@ -113,7 +113,8 @@ final class AudioStudioController: ObservableObject {
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main
         ) { [weak self] time in
-            Task { @MainActor in self?.updatePlaybackTime(max(0, time.seconds)) }
+            let owner = self
+            Task { @MainActor in owner?.updatePlaybackTime(max(0, time.seconds)) }
         }
         Task { await loadDuration(url) }
     }
@@ -201,7 +202,7 @@ final class AudioStudioController: ObservableObject {
         converter.terminationHandler = { [weak self] completed in
             let data = diagnostics.fileHandleForReading.readDataToEndOfFile()
             let message = String(decoding: data, as: UTF8.self)
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.runID == id else { return }
                 self.process = nil
                 guard completed.terminationStatus == 0 else {
@@ -252,7 +253,7 @@ final class AudioStudioController: ObservableObject {
         converter.standardOutput = FileHandle.nullDevice
         converter.standardError = FileHandle.nullDevice
         converter.terminationHandler = { [weak self] completed in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.runID == id else { return }
                 guard completed.terminationStatus == 0 else {
                     self.finishVADPreview(.failed("No se pudo preparar la muestra / the sample could not be prepared."))
@@ -289,7 +290,7 @@ final class AudioStudioController: ObservableObject {
         preview.standardOutput = FileHandle.nullDevice
         preview.standardError = FileHandle.nullDevice
         preview.terminationHandler = { [weak self] completed in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.runID == id else { return }
                 guard completed.terminationStatus == 0 else {
                     self.finishVADPreview(.failed("VAD no pudo analizar la muestra / VAD could not analyze the sample."))
@@ -409,10 +410,11 @@ final class AudioStudioController: ObservableObject {
             let data = handle.availableData
             guard !data.isEmpty else { return }
             let chunk = String(decoding: data, as: UTF8.self)
-            Task { @MainActor in self?.consumeDiagnostics(chunk, runID: id) }
+            let owner = self
+            Task { @MainActor in owner?.consumeDiagnostics(chunk, runID: id) }
         }
         whisper.terminationHandler = { [weak self] completed in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.runID == id else { return }
                 self.stderrPipe?.fileHandleForReading.readabilityHandler = nil
                 self.stderrPipe = nil
@@ -944,11 +946,11 @@ final class AudioStudioController: ObservableObject {
     private func exportCues(track: AudioExportTrack) -> [SubtitleCue] {
         switch track {
         case .original:
-            originalCues
+            return originalCues
         case .translated:
-            translatedCues.isEmpty ? originalCues : translatedCues
+            return translatedCues.isEmpty ? originalCues : translatedCues
         case .bilingual:
-            originalCues.map { cue in
+            return originalCues.map { cue in
                 let translated = translatedCues.first { $0.id == cue.id }?.text
                 let text = translated.map { "\(cue.text)\n\($0)" } ?? cue.text
                 return SubtitleCue(id: cue.id, start: cue.start, end: cue.end, text: text)

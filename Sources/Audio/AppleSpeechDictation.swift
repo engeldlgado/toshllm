@@ -20,7 +20,7 @@ final class AppleSpeechDictationController: ObservableObject {
     private var onText: ((String) -> Void)?
     private var committed = ""
     private var stoppingByUser = false
-    private nonisolated(unsafe) var liveRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var liveRequest: SFSpeechAudioBufferRecognitionRequest?
 
     func toggle(onText: @escaping (String) -> Void) {
         if isDictating { stop() } else { Task { await start(onText: onText) } }
@@ -74,7 +74,7 @@ final class AppleSpeechDictationController: ObservableObject {
             let partial = result?.bestTranscription.formattedString
             let failure = error as NSError?
             let final = result?.isFinal ?? false
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.isDictating else { return }
                 if let partial { self.onText?(self.compose(partial)) }
                 if let failure, !self.stoppingByUser, !Self.isBenign(failure) {

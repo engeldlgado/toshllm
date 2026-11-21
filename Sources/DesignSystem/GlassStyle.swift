@@ -21,7 +21,7 @@ private struct GlassSurface<S: InsettableShape>: ViewModifier {
     func body(content: Content) -> some View {
         if reduceTransparency || contrast == .increased {
             content
-                .background(tint.map { AnyShapeStyle($0.opacity(0.28)) } ?? AnyShapeStyle(.clear),
+                .background(tint.map { ToshShape($0.opacity(0.28)) } ?? ToshShape(.clear),
                             in: shape)
                 .background(.background, in: shape)
                 .overlay(shape.strokeBorder(.primary.opacity(contrast == .increased ? 0.45 : 0.18)))
@@ -39,7 +39,7 @@ private struct GlassSurface<S: InsettableShape>: ViewModifier {
     }
 
     private func materialSurface(_ content: Content) -> some View {
-        content.background(tint.map { AnyShapeStyle($0.opacity(0.18)) } ?? AnyShapeStyle(.regularMaterial),
+        content.background(tint.map { ToshShape($0.opacity(0.18)) } ?? ToshMaterial.regular,
                            in: shape)
     }
 }
@@ -145,8 +145,8 @@ struct GlassPillButtonStyle: ButtonStyle {
             .lineLimit(1)
             .padding(.horizontal, 13)
             .frame(minHeight: 30)
-            .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .background(prominent ? AnyShapeStyle(accent.opacity(0.90)) : AnyShapeStyle(WorkspaceStyle.inset),
+            .foregroundStyle(prominent ? ToshShape(.white) : ToshStyle.primary)
+            .background(prominent ? ToshShape(accent.opacity(0.90)) : ToshShape(WorkspaceStyle.inset),
                         in: shape)
             .glassSurface(in: shape, tint: prominent ? accent : nil, interactive: true)
             .overlay(shape.strokeBorder(prominent ? Color.white.opacity(0.10) : WorkspaceStyle.border))
@@ -169,8 +169,8 @@ struct GlassIconButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 13, weight: .medium))
             .frame(width: 28, height: 28)
-            .foregroundStyle(active ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-            .background(active ? AnyShapeStyle(accent.opacity(0.88)) : AnyShapeStyle(.clear), in: Circle())
+            .foregroundStyle(active ? ToshShape(.white) : ToshStyle.secondary)
+            .background(active ? ToshShape(accent.opacity(0.88)) : ToshShape(.clear), in: Circle())
             .glassSurface(in: Circle(), tint: active ? accent : nil, interactive: true)
             .overlay(Circle().strokeBorder(.primary.opacity(0.07)))
             .contentShape(Circle())
@@ -251,8 +251,8 @@ extension View {
     /// so turning every card into a GPU-backed blur wastes rendering work.
     func cardSurface(tint: Color? = nil) -> some View {
         let shape = RoundedRectangle(cornerRadius: CardMetrics.corner)
-        return background(tint.map { AnyShapeStyle($0.opacity(0.10)) }
-                          ?? AnyShapeStyle(WorkspaceStyle.surface), in: shape)
+        return background(tint.map { ToshShape($0.opacity(0.10)) }
+                          ?? ToshShape(WorkspaceStyle.surface), in: shape)
             .overlay(shape.strokeBorder(tint?.opacity(0.35) ?? WorkspaceStyle.border))
     }
 

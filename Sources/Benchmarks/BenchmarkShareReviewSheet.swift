@@ -91,7 +91,7 @@ struct BenchmarkShareReviewSheet: View {
     }
 
     private var resultSummary: some View {
-        BenchmarkReviewSection(loc.t("Resultado medido", "Measured result"), systemImage: "gauge.with.dots.needle.67percent") {
+        BenchmarkReviewSection(loc.t("Resultado medido", "Measured result"), systemImage: "speedometer") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(review.modelName).font(.title3).bold()
