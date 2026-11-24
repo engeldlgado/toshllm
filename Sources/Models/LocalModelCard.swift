@@ -207,8 +207,8 @@ private struct LocalModelSettingsPopover: View {
                 } header: {
                     Text(loc.t("Argumentos extra", "Extra arguments"))
                 } footer: {
-                    Text(loc.t("Se añaden a los de Ajustes y solo se aplican a este modelo, por ejemplo un cabezal MTP en otro archivo.",
-                               "Added to the ones in Settings and applied to this model only, an MTP head in a separate file for instance."))
+                    Text(loc.t("Se añaden a los de Ajustes y solo se aplican a este modelo, también en el router: por ejemplo -c 65536 fija su contexto.",
+                               "Added to the ones in Settings and applied to this model only, in the router too: -c 65536 sets its context, for instance."))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

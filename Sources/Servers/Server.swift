@@ -465,7 +465,7 @@ struct ServerSettings {
         args += unauthenticatedToolsArguments(toolsEnabled: agentToolsEnabled || !sympyArguments.isEmpty || uiMcpProxy)
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         args += Self.chatUIArgs
-        args += extraArgTokens.cli
+        args += Self.splitExtraArgs(extraArgs).cli
         return args
     }
 
@@ -493,8 +493,7 @@ struct ServerSettings {
     }
 
     /// Builds the router's `--models-preset` INI: one `[alias]` section per model,
-    /// shared engine config plus per-path ncmoe/mmproj/MTP. `extraArgs` (free-form
-    /// CLI tokens) isn't representable generically here, so it's skipped.
+    /// shared engine config plus per-path ncmoe/mmproj/MTP and the model's own extra arguments.
     func routerPresetINI(modelPaths: [String], ncmoeByPath: [String: Int]) -> String {
         // Same FA policy as `arguments`: force only for quantized KV.
         let faValue = kvNeedsFlashAttention ? "on" : (effectiveFaAmd ? "auto" : flashAttn)
@@ -557,23 +556,72 @@ struct ServerSettings {
                     lines.append("spec-draft-n-max = \(n)")
                 }
             }
+            let own = Self.routerPresetOptions(Self.extraArgs(forModel: path))
+            let ownKeys = Set(own.map(\.key))
+            lines.removeAll { line in
+                guard let eq = line.range(of: " = ") else { return false }
+                let key = String(line[..<eq.lowerBound])
+                return key != "model" && ownKeys.contains(key)
+            }
+            lines += own.filter { $0.key != "model" }.map { "\($0.key) = \($0.value)" }
             sections.append(lines.joined(separator: "\n"))
         }
         return sections.joined(separator: "\n\n") + "\n"
+    }
+
+    /// Short and alternate names of the options the preset writes, so a model's own argument replaces that line.
+    nonisolated static let routerOptionAliases: [String: String] = [
+        "c": "ctx-size", "ngl": "n-gpu-layers", "gpu-layers": "n-gpu-layers", "t": "threads", "fa": "flash-attn",
+        "ncmoe": "n-cpu-moe", "lm": "load-mode", "mm": "mmproj", "ctk": "cache-type-k", "ctv": "cache-type-v",
+        "cram": "cache-ram", "np": "parallel", "kvu": "kv-unified", "sm": "split-mode",
+        "n": "n-predict", "predict": "n-predict",
+        "md": "model-draft", "spec-draft-model": "model-draft",
+        "ngld": "gpu-layers-draft", "spec-draft-ngl": "gpu-layers-draft", "n-gpu-layers-draft": "gpu-layers-draft",
+        "ctkd": "cache-type-k-draft", "spec-draft-type-k": "cache-type-k-draft",
+        "ctvd": "cache-type-v-draft", "spec-draft-type-v": "cache-type-v-draft",
+    ]
+
+    /// A model's own extra arguments as preset keys: the option name without dashes, and `true` for a flag
+    /// given alone. Environment variables stay process-wide, so they are left to the router.
+    nonisolated static func routerPresetOptions(_ args: String) -> [(key: String, value: String)] {
+        func isOption(_ token: String) -> Bool { token.count > 1 && token.hasPrefix("-") && Double(token) == nil }
+        let tokens = ShellWords.split(args)
+        var options: [(key: String, value: String)] = []
+        var i = 0
+        while i < tokens.count {
+            let token = tokens[i]
+            i += 1
+            guard isOption(token) else { continue }
+            var name = String(token.drop { $0 == "-" })
+            var value = "true"
+            if let eq = name.firstIndex(of: "=") {
+                value = String(name[name.index(after: eq)...])
+                name = String(name[..<eq])
+            } else if i < tokens.count, !isOption(tokens[i]) {
+                value = tokens[i]
+                i += 1
+            }
+            guard !name.isEmpty else { continue }
+            options.append((routerOptionAliases[name] ?? name, value))
+        }
+        return options
     }
 
     /// Splits the Extra arguments field: `KEY=VALUE` with an UPPERCASE name becomes an
     /// env var, everything else a CLI argument. The uppercase rule is what keeps
     /// lowercase flag values containing `=` (`--override-kv key=str:foo`) out of the env.
     var extraArgTokens: (env: [String: String], cli: [String]) {
+        // The model's own arguments come last so they win over the shared field.
+        Self.splitExtraArgs(extraArgs + " " + Self.extraArgs(forModel: modelPath))
+    }
+
+    nonisolated static func splitExtraArgs(_ combined: String) -> (env: [String: String], cli: [String]) {
         func isEnvName(_ s: Substring) -> Bool {
             guard let first = s.first, first == "_" || (first.isLetter && first.isUppercase) else { return false }
             return s.allSatisfy { $0 == "_" || $0.isNumber || ($0.isLetter && $0.isUppercase) }
         }
         var env: [String: String] = [:]
         var cli: [String] = []
-        // The model's own arguments come last so they win over the shared field.
-        let combined = extraArgs + " " + Self.extraArgs(forModel: modelPath)
         for tok in ShellWords.split(combined) {
             if let eq = tok.firstIndex(of: "="), eq != tok.startIndex, isEnvName(tok[..<eq]) {
                 env[String(tok[..<eq])] = String(tok[tok.index(after: eq)...])

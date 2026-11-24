@@ -2995,6 +2995,37 @@ final class RouterModeTests: XCTestCase {
             .contains("n-gpu-layers = 99"))
     }
 
+    func testRouterPresetTakesEachModelsOwnArguments() {
+        let path = "/models/qwen3.5-9b-\(UUID().uuidString).gguf"
+        ServerSettings.setExtraArgs("-c 65536 --no-mmproj-offload --temp=0.6", forModel: path)
+        defer { ServerSettings.setExtraArgs("", forModel: path) }
+        let ini = makeSettings().routerPresetINI(modelPaths: [path, "/models/dense-4b.gguf"], ncmoeByPath: [:])
+        let own = ini.components(separatedBy: "\n\n").first { $0.contains(path) } ?? ""
+        XCTAssertEqual(own.components(separatedBy: "ctx-size = ").count - 1, 1, "the model's context replaces the fitted one")
+        XCTAssertTrue(own.contains("ctx-size = 65536"))
+        XCTAssertTrue(own.contains("no-mmproj-offload = true"))
+        XCTAssertTrue(own.contains("temp = 0.6"))
+        let other = ini.components(separatedBy: "\n\n").first { $0.contains("dense-4b") } ?? ""
+        XCTAssertTrue(other.contains("ctx-size = 8192"))
+    }
+
+    func testRouterOptionsReadFlagsValuesAndNegativeNumbers() {
+        let options = ServerSettings.routerPresetOptions(#"-ngl 20 --mlock --seed -1 GGML_X=1 -md "/a b/head.gguf""#)
+        XCTAssertEqual(options.map { "\($0.key)=\($0.value)" },
+                       ["n-gpu-layers=20", "mlock=true", "seed=-1", "model-draft=/a b/head.gguf"])
+    }
+
+    func testTheRouterCommandLineLeavesAModelsOwnArgumentsToItsSection() {
+        var s = makeSettings()
+        s.modelPath = "/models/selected-\(UUID().uuidString).gguf"
+        s.extraArgs = "--verbose"
+        ServerSettings.setExtraArgs("-c 65536", forModel: s.modelPath)
+        defer { ServerSettings.setExtraArgs("", forModel: s.modelPath) }
+        let args = s.arguments
+        XCTAssertTrue(args.contains("--verbose"))
+        XCTAssertFalse(args.contains("-c"), "the selected model's arguments would reach every model")
+    }
+
     func testRouterPresetAliasCollisionIsDisambiguated() {
         let ini = makeSettings().routerPresetINI(
             modelPaths: ["/a/model.gguf", "/b/model.gguf"], ncmoeByPath: [:])

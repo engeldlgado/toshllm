@@ -375,8 +375,8 @@ struct DashboardView: View {
                         .labelsHidden().toggleStyle(.switch).controlSize(.small)
                         .disabled(serverBusy)
                 }
-                .help(loc.t("Un solo servidor sirve todos los modelos descargados: un cliente externo (VS Code, Continue…) o el chat interno eligen el modelo por petición y el servidor lo carga solo, sin reiniciar.",
-                            "One server serves every downloaded model: an external client (VS Code, Continue…) or the built-in chat picks the model per request and the server loads it on demand, no restart."))
+                .help(loc.t("Un solo servidor sirve todos los modelos descargados: un cliente externo (VS Code, Continue…) o el chat interno eligen el modelo por petición y el servidor lo carga solo, sin reiniciar. El contexto de cada modelo se reduce si no cabe en la VRAM; para fijarlo, pon -c en los argumentos extra de ese modelo, en Modelos.",
+                            "One server serves every downloaded model: an external client (VS Code, Continue…) or the built-in chat picks the model per request and the server loads it on demand, no restart. Each model's context shrinks when it doesn't fit in VRAM; to set it, put -c in that model's extra arguments, in Models."))
                 .padding(.top, 4)
                 if routerMode {
                     HStack(spacing: 8) {
