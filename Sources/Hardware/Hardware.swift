@@ -65,6 +65,16 @@ struct HardwareInfo {
         }
     }
 
+    /// The engine's own default thread count: performance cores where macOS reports them, else physical cores.
+    static let defaultThreads: Int = {
+        for name in ["hw.perflevel0.physicalcpu", "hw.physicalcpu"] {
+            var value: Int32 = 0
+            var size = MemoryLayout<Int32>.size
+            if sysctlbyname(name, &value, &size, nil, 0) == 0, value > 0 { return Int(value) }
+        }
+        return 6
+    }()
+
     static func detect() -> HardwareInfo {
         func sysctlString(_ name: String) -> String {
             var size = 0

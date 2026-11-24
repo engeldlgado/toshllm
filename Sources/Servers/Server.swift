@@ -893,7 +893,7 @@ struct ServerSettings {
             ncmoe: int(SettingsKeys.ncmoe, 0),
             ctx: int(SettingsKeys.ctx, 16384),
             contextAutomatic: bool(SettingsKeys.contextAutomatic, false),
-            threads: int(SettingsKeys.threads, 6),
+            threads: int(SettingsKeys.threads, HardwareInfo.defaultThreads),
             flashAttn: d.string(forKey: SettingsKeys.flashAttn) ?? "auto",
             noMmap: bool(SettingsKeys.noMmap, true),
             jinja: bool(SettingsKeys.jinja, true),

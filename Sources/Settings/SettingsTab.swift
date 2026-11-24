@@ -30,7 +30,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.ngl) private var ngl = 99
     @AppStorage(SettingsKeys.ncmoe) private var ncmoe = 0
     @AppStorage(SettingsKeys.ctx) private var ctx = 16384
-    @AppStorage(SettingsKeys.threads) private var threads = 6
+    @AppStorage(SettingsKeys.threads) private var threads = HardwareInfo.defaultThreads
     @AppStorage(SettingsKeys.flashAttn) private var flashAttn = "auto"
     @AppStorage(SettingsKeys.noMmap) private var noMmap = true
     @AppStorage(SettingsKeys.jinja) private var jinja = true
