@@ -26,4 +26,10 @@ struct StreamLiveness {
     func stalled(now: Date = Date()) -> Bool {
         now.timeIntervalSince(last) > (sawText ? Self.textLimit : Self.promptLimit)
     }
+
+    /// What the watchdog saw when it gave up, for the log.
+    func report(now: Date = Date()) -> String {
+        String(format: "%.0f s without output %@ (limit %.0f s)", now.timeIntervalSince(last),
+               sawText ? "after text" : "during the prompt", sawText ? Self.textLimit : Self.promptLimit)
+    }
 }

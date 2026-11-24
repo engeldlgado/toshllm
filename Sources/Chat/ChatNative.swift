@@ -403,6 +403,11 @@ final class StreamBuffer: @unchecked Sendable {
         return !done && liveness.stalled(now: now)
     }
 
+    func stallReport(now: Date = Date()) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return liveness.report(now: now)
+    }
+
     /// The latest snapshot if it changed since the last take (or the stream
     /// ended); nil when there is nothing new to render.
     func take() -> (reasoning: String, visible: String, speed: Double?, progress: Double?, done: Bool)? {
@@ -1103,6 +1108,8 @@ final class ChatStore: ObservableObject {
                         dropLeadingSpace = accumulator.visible.isEmpty
                     }
                     if let progress = event.progress { buffer.writeProgress(progress) }
+                    // tool call arguments stream without text, and a long one outlasts the text limit
+                    if event.receivedToolCall { buffer.note() }
                     if event.receivedContent {
                         let now = Date()
                         if tFirst == nil { tFirst = now }
@@ -1908,7 +1915,7 @@ final class ChatStore: ObservableObject {
                 try? await Task.sleep(for: .seconds(5))
                 guard let self, !Task.isCancelled, self.generating else { return }
                 if stream.stalled() {
-                    self.handleStreamStall()
+                    self.handleStreamStall(reason: stream.stallReport())
                     return
                 }
             }
@@ -1917,8 +1924,8 @@ final class ChatStore: ObservableObject {
 
     /// The engine stopped producing tokens while alive: treat it as a driver
     /// deadlock, stop the engine to free its memory, and tell the user.
-    private func handleStreamStall() {
-        AppLog.chat.error("stream stalled; stopping engine")
+    private func handleStreamStall(reason: String) {
+        AppLog.chat.error("stream stalled, \(reason, privacy: .public); stopping engine")
         task?.cancel()
         task = nil
         watchdog = nil

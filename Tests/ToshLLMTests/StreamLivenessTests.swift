@@ -59,4 +59,28 @@ final class StreamLivenessTests: XCTestCase {
         XCTAssertFalse(buffer.stalled(now: alive.addingTimeInterval(StreamLiveness.textLimit - 1)))
         XCTAssertTrue(buffer.stalled(now: alive.addingTimeInterval(StreamLiveness.textLimit + 1)))
     }
+    // a tool call writing a long file streams only arguments, no text, for longer than the text limit
+    func testToolCallArgumentsAreActivityNotText() throws {
+        var accumulator = ChatStreamAccumulator()
+        let line = #"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#
+        let event = try XCTUnwrap(try accumulator.consume(line))
+        XCTAssertTrue(event.receivedToolCall)
+        XCTAssertFalse(event.receivedContent)
+
+        let buffer = StreamBuffer()
+        let start = Date()
+        buffer.write(reasoning: "", visible: "I'll write both files.", speed: nil)
+        for second in stride(from: 1.0, through: 45, by: 1) {
+            buffer.note(now: start.addingTimeInterval(second))
+            XCTAssertFalse(buffer.stalled(now: start.addingTimeInterval(second + 0.5)))
+        }
+    }
+
+    func testTheStallReportSaysWhatLimitWasHit() {
+        let start = Date()
+        var liveness = StreamLiveness(now: start)
+        XCTAssertEqual(liveness.report(now: start.addingTimeInterval(190)), "190 s without output during the prompt (limit 180 s)")
+        liveness.note(text: true, now: start)
+        XCTAssertEqual(liveness.report(now: start.addingTimeInterval(31)), "31 s without output after text (limit 30 s)")
+    }
 }
