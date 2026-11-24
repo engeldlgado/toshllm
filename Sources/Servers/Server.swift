@@ -2615,6 +2615,11 @@ final class ServerController: ObservableObject {
         discoveryService = nil
     }
 
+    /// A line from the app in the engine's log, where users look when the engine stops.
+    func note(_ line: String) {
+        consume("\n[ToshLLM] \(line)\n")
+    }
+
     private func consume(_ text: String) {
         logBuffer.append(text)
         fileLog.append(text)

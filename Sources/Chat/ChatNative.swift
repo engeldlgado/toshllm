@@ -1932,6 +1932,7 @@ final class ChatStore: ObservableObject {
         task?.cancel()
         task = nil
         watchdog = nil
+        ServerManager.shared.active.note("the chat stopped the engine: \(reason)")
         ServerManager.shared.active.stop()
         lastError = Self.stallMessage(moe: ServerSettings.modelIsMoE(
             at: UserDefaults.standard.string(forKey: SettingsKeys.modelPath) ?? ""))
