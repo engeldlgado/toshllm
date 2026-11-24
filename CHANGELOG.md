@@ -14,7 +14,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- **Chat: a tool call that writes a long file no longer stops the engine as if it had hung (#184).** The watchdog counted only text, and a tool call's arguments arrive without any; the log now says which limit stopped a stream.
+- **Chat: a tool call that writes a long file no longer stops the engine as if it had hung (#184).** The watchdog counted only text, and a tool call's arguments arrive without any; the server log now says which limit stopped it.
 - **LLMs: an MTP head kept in the `MTP` folder beside its model is used.** On a disk that ignores case the folder was read twice, so the head looked like two and none was chosen.
 
 ## [0.88.0] - 2026-11-18
