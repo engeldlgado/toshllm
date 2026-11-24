@@ -11,6 +11,7 @@ struct ServerModelFacts: Equatable {
     let isMoE: Bool
     let supportsVision: Bool
     let usesMTP: Bool
+    let offersMTP: Bool
     let hasDflashDraft: Bool
     let supportsTurboKV: Bool
     let trainedContext: Int?
@@ -21,6 +22,7 @@ struct ServerModelFacts: Equatable {
         isMoE = ServerSettings.modelIsMoE(at: modelPath)
         supportsVision = ServerSettings.mightSupportVision(modelPath: modelPath)
         usesMTP = ServerSettings.modelUsesMTP(at: modelPath)
+        offersMTP = usesMTP || ServerSettings.modelOffersMTP(at: modelPath)
         hasDflashDraft = ServerSettings.dflashDraftPath(forModel: modelPath) != nil
         supportsTurboKV = !ServerSettings.isAppleSilicon && ServerSettings.modelSupportsTurboKV(at: modelPath)
         trainedContext = GGUFMetadataCache.metadata(at: modelPath)?.trainedContext

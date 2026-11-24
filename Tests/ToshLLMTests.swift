@@ -1736,6 +1736,33 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(args[args.firstIndex(of: "--spec-draft-sampling")! + 1], "probabilistic")
     }
 
+    func testSeveralMTPHeadsWaitForTheUserToPickOne() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-heads-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("MTP"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let base = dir.appendingPathComponent("Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf")
+        let q4 = dir.appendingPathComponent("MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf")
+        let q8 = dir.appendingPathComponent("MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf")
+        for url in [base, q4, q8] { try Data("gguf".utf8).write(to: url) }
+        defer { ServerSettings.setMTPHead(nil, forModel: base.path) }
+        func resolved(_ path: String?) -> String? { path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } }
+
+        XCTAssertEqual(ServerSettings.mtpHeadCandidates(forModel: base.path).count, 2)
+        XCTAssertNil(ServerSettings.mtpDraftPath(forModel: base.path), "no head is picked for the user")
+        XCTAssertFalse(ServerSettings.modelUsesMTP(at: base.path))
+        XCTAssertTrue(ServerSettings.modelOffersMTP(at: base.path), "the control still shows so the user can pick")
+
+        let chosen = try XCTUnwrap(ServerSettings.mtpHeadCandidates(forModel: base.path).first { $0.hasSuffix("Q8_0.gguf") })
+        ServerSettings.setMTPHead(chosen, forModel: base.path)
+        XCTAssertEqual(resolved(ServerSettings.mtpDraftPath(forModel: base.path)), resolved(q8.path))
+        XCTAssertTrue(ServerSettings.modelUsesMTP(at: base.path))
+
+        try FileManager.default.removeItem(at: q8)
+        XCTAssertEqual(resolved(ServerSettings.mtpDraftPath(forModel: base.path)), resolved(q4.path),
+                       "a chosen head that is gone falls back to the one left")
+    }
+
     func testModelPublishDateReadsCreationAndBaseModel() {
         let one = Data(#"{"createdAt": "2025-04-28T14:24:34.000Z", "cardData": {"base_model": "Qwen/Qwen3-8B"}}"#.utf8)
         let parsed = ModelPublishDate.parse(one)

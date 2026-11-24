@@ -155,6 +155,7 @@ enum SettingsKeys {
     /// Response token limit for requests that do not set one; 0 leaves it to the engine.
     static let serverDefaultMaxTokens = "serverDefaultMaxTokens"
     static let specMTP = "specMTP"
+    static let mtpHeadByModel = "mtpHeadByModel"
     static let faAmd = "faAmd"
     static let prefetchExperts = "prefetchExperts"
     /// Micro-batch size (--ubatch-size). 0 keeps the engine default of 512.
@@ -302,7 +303,7 @@ enum SettingsKeys {
         extraArgs, embeddings, agentToolsEnabled, toolsRuntime, jsSandboxEnabled, sympyEnabled, scientificEnabled, mathAgentEnabled, mathToolsAllowed, toolResultLimit,
         memoryToolsEnabled, chatMapToolEnabled, chatRoadRouteEnabled, mapStyle, mapFolder, toolsUnsupportedModels, mcpServers, uiMcpProxy,
         cacheTypeK, cacheTypeV, mlock, cacheRAM,
-        parallelSlots, separateKV, reasoningInline, serverDefaultReasoning, serverDefaultMaxTokens, specMTP, mtpDisabledModels, faAmd, prefetchExperts, ubatch,
+        parallelSlots, separateKV, reasoningInline, serverDefaultReasoning, serverDefaultMaxTokens, specMTP, mtpDisabledModels, mtpHeadByModel, faAmd, prefetchExperts, ubatch,
         dynamicMoeEnabled, dynamicMoeLeanRAM, routerMode, routerModelsMax,
         persistCache, multiGPU, multiGPUCount, splitMode, splitGroupSize, mgpuEvents, mgpuPeer,
         forcePrivateBuffers, cacheReuse, apiKeyEnabled, localNetworkDiscovery,

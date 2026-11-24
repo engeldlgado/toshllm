@@ -1189,23 +1189,22 @@ struct ServerSettings {
     /// above zero more of the draft is accepted, and at zero it is the same as taking the argmax.
     nonisolated static let mtpSamplingArgs = ["--spec-draft-sampling", "probabilistic"]
 
-    nonisolated static func mtpDraftPath(forModel modelPath: String) -> String? {
-        guard !modelPath.isEmpty, !GGUFFile.isDraft(modelPath) else { return nil }
+    /// Every head file that describes this model, sorted by name.
+    nonisolated static func mtpHeadCandidates(forModel modelPath: String) -> [String] {
+        guard !modelPath.isEmpty, !GGUFFile.isDraft(modelPath) else { return [] }
         let modelURL = URL(fileURLWithPath: modelPath)
         let dir = modelURL.deletingLastPathComponent()
         let modelStem = mtpStem(modelURL.lastPathComponent)
 
         let fm = FileManager.default
-        var files: [URL] = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        for sub in ["MTP", "mtp"] {
-            let subDir = dir.appendingPathComponent(sub)
-            var isDir: ObjCBool = false
-            if fm.fileExists(atPath: subDir.path, isDirectory: &isDir), isDir.boolValue {
-                files += (try? fm.contentsOfDirectory(at: subDir, includingPropertiesForKeys: nil)) ?? []
-            }
+        var files: [URL] = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        // the folder's real name only: on a case-insensitive volume "MTP" and "mtp" are the same files
+        for sub in files where sub.lastPathComponent.lowercased() == "mtp"
+            && (try? sub.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            files += (try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil)) ?? []
         }
 
-        let candidates = files.filter { file in
+        return files.filter { file in
             guard file.pathExtension.lowercased() == "gguf", file.path != modelPath else { return false }
             let name = file.lastPathComponent.lowercased()
             let looksLikeHead = name.hasPrefix("mtp-") || name.contains(".mtp.")
@@ -1215,16 +1214,33 @@ struct ServerSettings {
             guard stem == modelStem || modelStem.hasPrefix(stem) || stem.hasPrefix(modelStem) else { return false }
             return mtpHeadMatches(head: file.path, model: modelPath)
         }
+        .map(\.path)
+        .sorted { URL(fileURLWithPath: $0).lastPathComponent < URL(fileURLWithPath: $1).lastPathComponent }
+    }
 
-        let exact = candidates.filter { mtpStem($0.lastPathComponent) == modelStem }
+    nonisolated static func mtpDraftPath(forModel modelPath: String) -> String? {
+        let candidates = mtpHeadCandidates(forModel: modelPath)
+        if let chosen = mtpChosenHead(forModel: modelPath), candidates.contains(chosen) { return chosen }
+        let modelStem = mtpStem(URL(fileURLWithPath: modelPath).lastPathComponent)
+        let exact = candidates.filter { mtpStem(URL(fileURLWithPath: $0).lastPathComponent) == modelStem }
         let pool = exact.isEmpty ? candidates : exact
         guard pool.count <= 1 else {
             // several heads describe this model and nothing says which build to draft with:
             // picking one silently would ship a head the user did not choose
-            AppLog.server.error("MTP: \(pool.count) heads match \(modelURL.lastPathComponent), none selected")
+            AppLog.server.error("MTP: \(pool.count) heads match \(URL(fileURLWithPath: modelPath).lastPathComponent), none selected")
             return nil
         }
-        return pool.first?.path
+        return pool.first
+    }
+
+    nonisolated static func mtpChosenHead(forModel path: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: SettingsKeys.mtpHeadByModel) as? [String: String])?[path]
+    }
+
+    nonisolated static func setMTPHead(_ head: String?, forModel path: String) {
+        var heads = UserDefaults.standard.dictionary(forKey: SettingsKeys.mtpHeadByModel) as? [String: String] ?? [:]
+        heads[path] = head
+        UserDefaults.standard.set(heads, forKey: SettingsKeys.mtpHeadByModel)
     }
 
     /// Draft width for this model on this card. Flash-Next verifies three tokens faster than
@@ -1255,6 +1271,11 @@ struct ServerSettings {
 
     nonisolated static func modelUsesMTP(at path: String) -> Bool {
         modelHasMTP(at: path) || mtpDraftPath(forModel: path) != nil
+    }
+
+    /// True when the model has a head to draft with, even one still waiting for the user to pick it.
+    nonisolated static func modelOffersMTP(at path: String) -> Bool {
+        modelHasMTP(at: path) || !mtpHeadCandidates(forModel: path).isEmpty
     }
 
     nonisolated static func mtpEnabled(forModel path: String) -> Bool {

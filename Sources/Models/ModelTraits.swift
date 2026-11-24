@@ -17,7 +17,7 @@ struct ModelTraits {
     static func of(path: String) -> ModelTraits {
         ModelTraits(isMoE: ServerSettings.modelIsMoE(at: path),
                     hasVision: ServerSettings.mmprojPath(forModel: path) != nil,
-                    hasMTP: ServerSettings.modelUsesMTP(at: path),
+                    hasMTP: ServerSettings.modelOffersMTP(at: path),
                     hasDflash: ServerSettings.dflashDraftPath(forModel: path) != nil)
     }
 

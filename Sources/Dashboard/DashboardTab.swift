@@ -319,7 +319,7 @@ struct DashboardView: View {
                     .help(loc.t("Proyector de visión: elige un archivo, deja que se empareje solo, o 'Sin visión' para correr solo texto y liberar la VRAM del codificador.",
                                 "Vision projector: choose a file, let it auto-pair, or 'No vision' to run text-only and free the encoder's VRAM.") + restartNote)
                 }
-                if ServerSettings.modelUsesMTP(at: modelPath) {
+                if ServerSettings.modelOffersMTP(at: modelPath) {
                     HStack(spacing: 8) {
                         Image(systemName: "hare").frame(width: 18).foregroundStyle(.secondary)
                         Text(loc.t("Predicción MTP", "MTP prediction")).font(.callout)

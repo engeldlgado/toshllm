@@ -986,6 +986,13 @@ struct SettingsView: View {
                         .foregroundStyle(.green)
                         .infoTip(loc.t("MTP se activa automáticamente cuando el GGUF trae el cabezal, tanto en modelos densos como MoE.",
                                     "MTP turns on automatically whenever the GGUF includes the head, for both dense and MoE models."))
+                } else if !modelPath.isEmpty && ServerSettings.modelOffersMTP(at: modelPath) {
+                    Label(loc.t("Varios cabezales MTP: elige uno en la ficha del modelo", "Several MTP heads: choose one on the model's card"),
+                          systemImage: "hare")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .infoTip(loc.t("Hay más de un archivo de cabezal para este modelo y la app no elige por ti. Elígelo en Modelos o en la página del servidor.",
+                                    "More than one head file fits this model and the app does not pick for you. Choose it in Models or on the server page."))
                 }
                 if engineSelection.wrappedValue != "custom" {
                     Toggle(loc.t("Prefetch de expertos MoE (prompt)", "MoE expert prefetch (prompt)"), isOn: $prefetchExperts)

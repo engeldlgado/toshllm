@@ -647,7 +647,7 @@ private struct ServerConfigurationWorkspace: View {
                                     "Type of the KV cache values (-ctv). Without the AMD Flash Attention kernel, quantizing them moves attention to the CPU and generation slows a lot."))
                 }
             }
-            if showAdvanced && facts.usesMTP {
+            if showAdvanced && facts.offersMTP {
                 Divider()
                 ServerSettingRow(icon: "hare.fill", title: "MTP",
                                  detail: loc.t("Predicción de múltiples tokens", "Multi-token prediction")) {
@@ -662,7 +662,7 @@ private struct ServerConfigurationWorkspace: View {
                         .environmentObject(server)
                 }
             }
-            if showAdvanced && !facts.supportsVision && !facts.usesMTP && !facts.hasDflashDraft {
+            if showAdvanced && !facts.supportsVision && !facts.offersMTP && !facts.hasDflashDraft {
                 Label(loc.t("Este modelo no declara aceleradores opcionales.", "This model does not declare optional accelerators."),
                       systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary).padding(.vertical, 9)
