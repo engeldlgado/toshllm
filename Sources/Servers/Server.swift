@@ -917,7 +917,7 @@ struct ServerSettings {
             defaultReasoning: d.string(forKey: SettingsKeys.serverDefaultReasoning) ?? "model",
             // -1 is "same as the chat": the web chat and API clients get the in-app chat's limit
             defaultMaxTokens: int(SettingsKeys.serverDefaultMaxTokens, -1) < 0
-                ? int(SettingsKeys.chatMaxTokens, 2048) : int(SettingsKeys.serverDefaultMaxTokens, -1),
+                ? int(SettingsKeys.chatMaxTokens, ChatStore.defaultMaxTokens) : int(SettingsKeys.serverDefaultMaxTokens, -1),
             parallelSlots: int(SettingsKeys.parallelSlots, 1),
             separateKV: bool(SettingsKeys.separateKV, false),
             apiKeyEnabled: bool(SettingsKeys.apiKeyEnabled, false),

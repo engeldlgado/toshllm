@@ -442,6 +442,9 @@ private struct AgentRunContext {
 
 @MainActor
 final class ChatStore: ObservableObject {
+    /// Room for the medium reasoning budget and an answer after it.
+    nonisolated static let defaultMaxTokens = 8_192
+
     nonisolated static func reasoningBudget(for effort: String) -> Int? {
         switch effort {
         case "minimal": 128
@@ -2902,7 +2905,7 @@ struct NativeChatView: View {
     @EnvironmentObject var control: ControlPanelState
     @AppStorage(SettingsKeys.chatTemp) private var temperature = 0.7
     @AppStorage(SettingsKeys.chatWidth) private var chatWidth = ChatWidth.standard.rawValue
-    @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = 2048
+    @AppStorage(SettingsKeys.chatMaxTokens) private var maxTokens = ChatStore.defaultMaxTokens
     @AppStorage(SettingsKeys.chatSystem) private var systemPrompt = ""
     @AppStorage(SettingsKeys.chatThinking) private var thinkingEnabled = true
     @AppStorage(SettingsKeys.chatReasoningEffort) private var reasoningEffort = "medium"
@@ -2997,6 +3000,10 @@ struct NativeChatView: View {
 
     private var maxTokensIsLarge: Bool {
         contextLimit > 0 && Double(maxTokens) / Double(contextLimit) > 0.5
+    }
+
+    private var reasoningFillsMaxTokens: Bool {
+        thinkingEnabled && (ChatStore.reasoningBudget(for: reasoningEffort) ?? 0) >= maxTokens
     }
 
     /// Levels the loaded model's template validates; the usual four when it
@@ -4007,11 +4014,16 @@ struct NativeChatView: View {
                 Label(loc.t("Tokens de respuesta", "Response tokens"),
                       systemImage: "text.line.last.and.arrowtriangle.forward")
             }
-            .infoTip(loc.t("Máximo de tokens que el modelo puede generar en este turno, incluyendo razonamiento y respuesta visible. No aumenta el contexto. Recomendado: 2.048–4.096.",
-                        "Maximum tokens the model may generate this turn, including reasoning and visible answer. It does not increase context. Recommended: 2,048–4,096."))
+            .infoTip(loc.t("Máximo de tokens que el modelo puede generar en este turno, incluyendo razonamiento y respuesta visible. No aumenta el contexto. Recomendado: 8.192; un modelo que razona gasta buena parte en pensar.",
+                        "Maximum tokens the model may generate this turn, including reasoning and visible answer. It does not increase context. Recommended: 8,192; a reasoning model spends much of it thinking."))
             if maxTokensIsLarge {
                 Label(loc.t("Este límite reserva más de la mitad del contexto para una sola respuesta.",
                             "This limit reserves more than half the context for a single response."),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            } else if reasoningFillsMaxTokens {
+                Label(loc.t("El razonamiento puede gastar todo este límite y cortar la respuesta.",
+                            "Reasoning can use up this whole limit and cut the answer."),
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
