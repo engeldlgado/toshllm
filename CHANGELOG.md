@@ -9,7 +9,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **LLMs: the engine uses one thread per physical core by default, like llama.cpp, instead of 6 (#180).** It matters most with experts on the CPU of a Mac with many cores. A count set in Settings is kept.
 - **LLMs: when several MTP head files fit a model, its MTP setting lists them to choose one (#180).** The app still never picks one for you, and Settings points to the model's card.
-- **LLMs: in the multi-model router, a model's own extra arguments apply to that model (#175).** `-c 65536` there sets its context instead of the size fitted to VRAM, and they no longer reach the other models.
+- **LLMs: in the multi-model router, a model's own extra arguments apply to that model (#175).** `-c 65536` there sets its context instead of the size fitted to VRAM, without changing the other models.
 - **Chat: replies can be 8,192 tokens long by default instead of 2,048 (#180),** so a reasoning model at the medium level has room to answer after thinking. The setting warns when the reasoning budget can use the whole limit.
 
 ### Fixed
