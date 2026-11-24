@@ -3010,20 +3010,30 @@ final class RouterModeTests: XCTestCase {
     }
 
     func testRouterOptionsReadFlagsValuesAndNegativeNumbers() {
-        let options = ServerSettings.routerPresetOptions(#"-ngl 20 --mlock --seed -1 GGML_X=1 -md "/a b/head.gguf""#)
-        XCTAssertEqual(options.map { "\($0.key)=\($0.value)" },
-                       ["n-gpu-layers=20", "mlock=true", "seed=-1", "model-draft=/a b/head.gguf"])
+        let options = ServerSettings.routerPresetOptions(#"-ngl 20 --jinja --seed -1 GGML_X=1 -md "/a b/head.gguf""#)
+        XCTAssertEqual(options.preset.map { "\($0.key)=\($0.value)" },
+                       ["n-gpu-layers=20", "jinja=true", "seed=-1", "model-draft=/a b/head.gguf"])
+        XCTAssertEqual(options.rest, [], "an environment variable is not an option")
+    }
+
+    // the engine refuses the whole preset over one key it does not know
+    func testUnknownOptionsStayOffThePreset() {
+        let options = ServerSettings.routerPresetOptions("-ot a=CPU --made-up 3 -ot b=CPU --chat-template x#y")
+        XCTAssertEqual(options.preset.map { "\($0.key)=\($0.value)" }, ["override-tensor=a=CPU,b=CPU"])
+        XCTAssertEqual(options.rest, ["--made-up", "3", "--chat-template", "x#y"])
     }
 
     func testTheRouterCommandLineLeavesAModelsOwnArgumentsToItsSection() {
         var s = makeSettings()
         s.modelPath = "/models/selected-\(UUID().uuidString).gguf"
         s.extraArgs = "--verbose"
-        ServerSettings.setExtraArgs("-c 65536", forModel: s.modelPath)
+        ServerSettings.setExtraArgs("-c 65536 --made-up", forModel: s.modelPath)
         defer { ServerSettings.setExtraArgs("", forModel: s.modelPath) }
         let args = s.arguments
         XCTAssertTrue(args.contains("--verbose"))
-        XCTAssertFalse(args.contains("-c"), "the selected model's arguments would reach every model")
+        XCTAssertFalse(args.contains("-c"), "the selected model's context would reach every model")
+        XCTAssertTrue(args.contains("--made-up"), "what the preset can't carry keeps going where it went before")
+        XCTAssertFalse(s.routerPresetINI(modelPaths: [s.modelPath], ncmoeByPath: [:]).contains("made-up"))
     }
 
     func testRouterPresetAliasCollisionIsDisambiguated() {

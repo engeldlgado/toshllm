@@ -465,7 +465,7 @@ struct ServerSettings {
         args += unauthenticatedToolsArguments(toolsEnabled: agentToolsEnabled || !sympyArguments.isEmpty || uiMcpProxy)
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         args += Self.chatUIArgs
-        args += Self.splitExtraArgs(extraArgs).cli
+        args += Self.splitExtraArgs(extraArgs).cli + Self.routerPresetOptions(Self.extraArgs(forModel: modelPath)).rest
         return args
     }
 
@@ -556,24 +556,25 @@ struct ServerSettings {
                     lines.append("spec-draft-n-max = \(n)")
                 }
             }
-            let own = Self.routerPresetOptions(Self.extraArgs(forModel: path))
+            let own = Self.routerPresetOptions(Self.extraArgs(forModel: path)).preset
             let ownKeys = Set(own.map(\.key))
             lines.removeAll { line in
                 guard let eq = line.range(of: " = ") else { return false }
-                let key = String(line[..<eq.lowerBound])
-                return key != "model" && ownKeys.contains(key)
+                return ownKeys.contains(String(line[..<eq.lowerBound]))
             }
-            lines += own.filter { $0.key != "model" }.map { "\($0.key) = \($0.value)" }
+            lines += own.map { "\($0.key) = \($0.value)" }
             sections.append(lines.joined(separator: "\n"))
         }
         return sections.joined(separator: "\n\n") + "\n"
     }
 
-    /// Short and alternate names of the options the preset writes, so a model's own argument replaces that line.
+    /// Short and alternate names of the options a model's section takes, so its own argument replaces the app's line.
     nonisolated static let routerOptionAliases: [String: String] = [
         "c": "ctx-size", "ngl": "n-gpu-layers", "gpu-layers": "n-gpu-layers", "t": "threads", "fa": "flash-attn",
-        "ncmoe": "n-cpu-moe", "lm": "load-mode", "mm": "mmproj", "ctk": "cache-type-k", "ctv": "cache-type-v",
-        "cram": "cache-ram", "np": "parallel", "kvu": "kv-unified", "sm": "split-mode",
+        "ncmoe": "n-cpu-moe", "cmoe": "cpu-moe", "lm": "load-mode", "mm": "mmproj", "ctk": "cache-type-k",
+        "ctv": "cache-type-v", "cram": "cache-ram", "np": "parallel", "kvu": "kv-unified", "sm": "split-mode",
+        "ts": "tensor-split", "mg": "main-gpu", "dev": "device", "ub": "ubatch-size", "b": "batch-size",
+        "ot": "override-tensor", "fitt": "fit-target", "s": "seed", "temperature": "temp",
         "n": "n-predict", "predict": "n-predict",
         "md": "model-draft", "spec-draft-model": "model-draft",
         "ngld": "gpu-layers-draft", "spec-draft-ngl": "gpu-layers-draft", "n-gpu-layers-draft": "gpu-layers-draft",
@@ -581,17 +582,40 @@ struct ServerSettings {
         "ctvd": "cache-type-v-draft", "spec-draft-type-v": "cache-type-v-draft",
     ]
 
-    /// A model's own extra arguments as preset keys: the option name without dashes, and `true` for a flag
-    /// given alone. Environment variables stay process-wide, so they are left to the router.
-    nonisolated static func routerPresetOptions(_ args: String) -> [(key: String, value: String)] {
+    /// Options a model's section can carry. The engine refuses the whole preset over a key it does not know,
+    /// so any other option stays on the router's command line, as before.
+    nonisolated static let routerPresetKeys: Set<String> = [
+        "ctx-size", "n-gpu-layers", "n-cpu-moe", "cpu-moe", "threads", "flash-attn", "load-mode", "fit-target",
+        "cache-type-k", "cache-type-v", "cache-ram", "cache-reuse", "kv-unified", "swa-full", "parallel",
+        "ubatch-size", "batch-size", "split-mode", "tensor-split", "main-gpu", "device", "override-tensor",
+        "mmproj", "mmproj-offload", "no-mmproj-offload", "image-max-tokens", "image-min-tokens",
+        "model-draft", "spec-type", "spec-draft-n-max", "spec-draft-n-min", "spec-draft-sampling",
+        "gpu-layers-draft", "cache-type-k-draft", "cache-type-v-draft",
+        "temp", "top-k", "top-p", "min-p", "repeat-penalty", "presence-penalty", "frequency-penalty", "seed",
+        "n-predict", "chat-template", "chat-template-file", "chat-template-kwargs", "jinja", "no-jinja",
+        "reasoning-format", "reasoning-budget", "rope-scaling", "rope-scale", "rope-freq-base", "yarn-orig-ctx",
+        "lora", "dynamic-moe",
+    ]
+
+    /// Options that take a comma-separated list, so repeating one adds to it instead of replacing it.
+    nonisolated static let routerListKeys: Set<String> = ["override-tensor", "lora"]
+
+    /// A model's own extra arguments split for the router: the options its preset section can carry, keyed
+    /// without dashes and `true` for a flag given alone, and the rest of the tokens as they were.
+    nonisolated static func routerPresetOptions(_ args: String) -> (preset: [(key: String, value: String)], rest: [String]) {
         func isOption(_ token: String) -> Bool { token.count > 1 && token.hasPrefix("-") && Double(token) == nil }
-        let tokens = ShellWords.split(args)
-        var options: [(key: String, value: String)] = []
+        let tokens = splitExtraArgs(args).cli
+        var preset: [(key: String, value: String)] = []
+        var rest: [String] = []
         var i = 0
         while i < tokens.count {
             let token = tokens[i]
             i += 1
-            guard isOption(token) else { continue }
+            guard isOption(token) else {
+                rest.append(token)
+                continue
+            }
+            var consumed = [token]
             var name = String(token.drop { $0 == "-" })
             var value = "true"
             if let eq = name.firstIndex(of: "=") {
@@ -599,12 +623,22 @@ struct ServerSettings {
                 name = String(name[..<eq])
             } else if i < tokens.count, !isOption(tokens[i]) {
                 value = tokens[i]
+                consumed.append(tokens[i])
                 i += 1
             }
-            guard !name.isEmpty else { continue }
-            options.append((routerOptionAliases[name] ?? name, value))
+            let key = routerOptionAliases[name] ?? name
+            // the preset reads a value only up to a ; or #
+            guard routerPresetKeys.contains(key), !value.contains(where: { $0 == ";" || $0 == "#" }) else {
+                rest += consumed
+                continue
+            }
+            if let k = preset.firstIndex(where: { $0.key == key }) {
+                preset[k].value = routerListKeys.contains(key) ? preset[k].value + "," + value : value
+            } else {
+                preset.append((key, value))
+            }
         }
-        return options
+        return (preset, rest)
     }
 
     /// Splits the Extra arguments field: `KEY=VALUE` with an UPPERCASE name becomes an
