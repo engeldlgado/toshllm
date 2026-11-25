@@ -1,0 +1,32 @@
+name: Patch numbers
+
+# The engine applies patches/llama in file-name order across every area, so two
+# patches with the same number would land in an order nobody chose.
+on:
+  pull_request:
+    paths:
+      - "patches/llama/**"
+      - ".github/workflows/patch-numbers.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - "patches/llama/**"
+      - ".github/workflows/patch-numbers.yml"
+
+jobs:
+  check:
+    name: Patch numbers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: No two patches share a number
+        run: |
+          dups=$(find patches/llama -name '[0-9][0-9][0-9][0-9]-*.patch' -exec basename {} \; | cut -c1-4 | sort | uniq -d)
+          [ -z "$dups" ] && exit 0
+          for n in $dups; do
+            echo "::error::Patch number $n is used by more than one patch: $(find patches/llama -name "$n-*.patch" | sort | tr '\n' ' ')"
+          done
+          echo "Numbers are assigned in merge order; take the next free one after the last patch on main."
+          exit 1
