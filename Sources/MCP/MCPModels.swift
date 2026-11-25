@@ -66,10 +66,19 @@ struct MCPServer: Identifiable, Codable, Equatable {
     }
 }
 
+struct MCPImportedServer {
+    var server: MCPServer
+    var headersJSON: String?
+}
+
 /// The `mcpServers` object every other MCP client uses, so a configuration can be
 /// pasted in rather than retyped field by field.
 enum MCPConfigImport {
     static func servers(fromJSON text: String) throws -> [MCPServer] {
+        try entries(fromJSON: text).map(\.server)
+    }
+
+    static func entries(fromJSON text: String) throws -> [MCPImportedServer] {
         guard let data = text.data(using: .utf8),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw MCPError.invalidConfig("The text is not valid JSON.")
@@ -78,10 +87,11 @@ enum MCPConfigImport {
         let entries = (root["mcpServers"] as? [String: Any]) ?? (root["servers"] as? [String: Any]) ?? root
         guard !entries.isEmpty else { throw MCPError.invalidConfig("No servers found in the configuration.") }
 
-        var output: [MCPServer] = []
+        var output: [MCPImportedServer] = []
         for name in entries.keys.sorted() {
             guard let entry = entries[name] as? [String: Any] else { continue }
             var server = MCPServer(name: name, url: "")
+            var headersJSON: String?
             if let disabled = entry["disabled"] as? Bool { server.enabled = !disabled }
             let declared = (entry["type"] as? String) ?? (entry["transport"] as? String)
             let command = (entry["command"] as? String) ?? ""
@@ -100,10 +110,15 @@ enum MCPConfigImport {
                 case "http", "streamable-http", "streamableHttp": server.transport = .streamableHTTP
                 default: server.transport = .automatic
                 }
+                if let rawHeaders = entry["headers"] as? [String: String], !rawHeaders.isEmpty,
+                   let data = try? JSONSerialization.data(withJSONObject: rawHeaders, options: [.sortedKeys]),
+                   let encoded = String(data: data, encoding: .utf8) {
+                    headersJSON = encoded
+                }
             } else {
                 continue
             }
-            output.append(server)
+            output.append(MCPImportedServer(server: server, headersJSON: headersJSON))
         }
         guard !output.isEmpty else {
             throw MCPError.invalidConfig("No entry had a command or a url.")
