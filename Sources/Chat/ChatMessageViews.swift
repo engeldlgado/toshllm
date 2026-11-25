@@ -109,6 +109,9 @@ struct MessageBubble: View, Equatable {
                 copied = true
                 Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
             }
+            if !isUser && !isTool && !message.parts.body.isEmpty {
+                SpeakMessageButton(message: message)
+            }
             if isLastAssistant && canRegenerate {
                 actionButton("arrow.clockwise",
                              help: loc.t("Regenerar respuesta", "Regenerate response"),
