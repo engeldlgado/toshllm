@@ -1,0 +1,192 @@
+diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
+index 97042f7..1e3e510 100644
+--- a/common/tosh-plan.cpp
++++ b/common/tosh-plan.cpp
+@@ -52,16 +52,17 @@ struct moe_info {
+     bool   moe       = false;
+     int    n_layer   = 0;
+     int    n_moe     = 0;       // layers with an expert bank
+     int    n_expert  = 0;
+     int    n_used    = 0;
+     int    n_ctx_train = 0;
+     double bank_mib  = 0;       // every expert weight
+     double max_tensor_mib = 0;  // one layer's largest expert tensor: a prefill slot
++    double max_fused_gate_up_mib = 0; // combined gate+up size when wave64 fuses them at load
+     double embd_mib  = 0;       // token embeddings, kept in host memory
+     double lazy_mib  = 0;       // read from the file on demand: page cache, never resident or locked in full
+     double total_mib = 0;       // every tensor, across all shards
+     // the RAM cache keeps one pool per expert size and each must hold a whole layer
+     double warm_floor_mib = 0;
+     // sliding-window cache of one sequence per cache element size: what a context checkpoint holds
+     double swa_elems = 0;
+     int    n_swa     = 0;
+@@ -93,16 +94,28 @@ struct probe {
+     double host_model = 0, host_other = 0;
+ };
+ 
+ double env_mib(const char * k, double d) {
+     const char * v = getenv(k);
+     return v ? atof(v) : d;
+ }
+ 
++// Mirrors the models that call create_tensor_gate_up_exps() in src/models/*.cpp.
++static bool arch_fuses_gate_up(const std::string & arch) {
++    static constexpr const char * k_archs[] = {
++        "clover_moe", "cohere2moe", "deepseek2", "deepseek2-ocr",
++        "granite_swa", "hy_v3", "qwen35moe", "qwen3next", "qwen4exp", "xing4_0",
++    };
++    for (const char * a : k_archs) {
++        if (arch == a) return true;
++    }
++    return false;
++}
++
+ // metadata comes from the first shard, tensors from every shard of a split model
+ moe_info read_moe_info(const char * path, llama_lazy_mode lazy) {
+     moe_info mi;
+     gguf_init_params gp = { /*.no_alloc =*/ true, /*.ctx =*/ nullptr };
+     gguf_context * g = gguf_init_from_file(path, gp);
+     if (g == nullptr) {
+         mi.error = "cannot read the model file";
+         return mi;
+@@ -164,16 +177,29 @@ moe_info read_moe_info(const char * path, llama_lazy_mode lazy) {
+         for (int i = 1; i < mi.n_split; ++i) {
+             llama_split_path(shard, sizeof(shard), prefix, i, mi.n_split);
+             paths.push_back(shard);
+         }
+     }
+ 
+     const std::regex bank("^blk\\.([0-9]+)\\.ffn_(up|down|gate|gate_up)_exps\\.weight$");
+     std::vector<double> layer_mib(mi.n_layer + 1, 0.0);
++    const bool check_gate_up = arch_fuses_gate_up(arch);
++    struct gate_up_pair {
++        double    gate_mib   = 0;
++        double    up_mib     = 0;
++        ggml_type gate_type  = GGML_TYPE_COUNT;
++        ggml_type up_type    = GGML_TYPE_COUNT;
++        size_t    gate_shard = 0;
++        size_t    up_shard   = 0;
++        int64_t   gate_ne[4] = { 0, 0, 0, 0 };
++        int64_t   up_ne[4]   = { 0, 0, 0, 0 };
++        bool      has_fused  = false;
++    };
++    std::vector<gate_up_pair> pair_info(check_gate_up ? mi.n_layer + 1 : 0);
+     for (size_t f = 0; f < paths.size(); ++f) {
+         gguf_context * gs = f == 0 ? g : gguf_init_from_file(paths[f].c_str(), gp);
+         if (gs == nullptr) {
+             mi.error = string_format("SPLIT_GGUF_METADATA_ERROR: cannot read shard %zu of %d: %s", f + 1, mi.n_split, paths[f].c_str());
+             break;
+         }
+         for (int64_t i = 0; i < gguf_get_n_tensors(gs); ++i) {
+             const std::string name = gguf_get_tensor_name(gs, i);
+@@ -189,21 +215,50 @@ moe_info read_moe_info(const char * path, llama_lazy_mode lazy) {
+             }
+             std::smatch m;
+             if (!std::regex_match(name, m, bank)) {
+                 continue;
+             }
+             mi.bank_mib += mib;
+             mi.max_tensor_mib = std::max(mi.max_tensor_mib, mib);
+             const int il = std::stoi(m[1]);
+-            if (il >= 0 && il < (int) layer_mib.size()) layer_mib[il] += mib;
++            if (il >= 0 && il < (int) layer_mib.size()) {
++                layer_mib[il] += mib;
++                if (check_gate_up) {
++                    const std::string kind = m[2];
++                    auto & p = pair_info[il];
++                    if (kind == "gate_up") {
++                        p.has_fused = true;
++                    } else if (kind == "gate" || kind == "up") {
++                        const int64_t * ne = gguf_get_tensor_ne(gs, i);
++                        if (ne != nullptr) {
++                            double & dst_mib     = kind == "gate" ? p.gate_mib   : p.up_mib;
++                            ggml_type & dst_type = kind == "gate" ? p.gate_type  : p.up_type;
++                            size_t & dst_shard   = kind == "gate" ? p.gate_shard : p.up_shard;
++                            int64_t * dst_ne     = kind == "gate" ? p.gate_ne    : p.up_ne;
++                            dst_mib   = mib;
++                            dst_type  = gguf_get_tensor_type(gs, i);
++                            dst_shard = f;
++                            dst_ne[0] = ne[0]; dst_ne[1] = ne[1]; dst_ne[2] = ne[2]; dst_ne[3] = ne[3];
++                        }
++                    }
++                }
++            }
+         }
+         if (gs != g) gguf_free(gs);
+     }
+     gguf_free(g);
++    for (const auto & p : pair_info) {
++        if (!p.has_fused && p.gate_mib > 0 && p.up_mib > 0 &&
++            p.gate_type == p.up_type && p.gate_shard == p.up_shard &&
++            p.gate_ne[0] == p.up_ne[0] && p.gate_ne[1] == p.up_ne[1] &&
++            p.gate_ne[2] == p.up_ne[2] && p.gate_ne[3] == 1 && p.up_ne[3] == 1) {
++            mi.max_fused_gate_up_mib = std::max(mi.max_fused_gate_up_mib, p.gate_mib + p.up_mib);
++        }
++    }
+     std::vector<double> sizes;
+     for (double l : layer_mib) {
+         if (l <= 0) continue;
+         mi.n_moe++;
+         if (std::none_of(sizes.begin(), sizes.end(), [&](double s) { return std::fabs(s - l) < 1e-6; })) sizes.push_back(l);
+     }
+     for (double s : sizes) mi.warm_floor_mib += s;
+     mi.moe = mi.error.empty() && mi.n_expert > 0 && mi.n_used > 0 && mi.n_moe > 0;
+@@ -770,17 +825,29 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+                                                 bounded_warm, mi.warm_floor_mib);
+                 }
+                 bounded_warm = 0;
+             }
+         }
+         p.mlock = "required";
+     }
+ 
+-    const double slots    = 3.0*mi.max_tensor_mib;   // prefill uploads
++    // Wave64 Metal fuses separate gate/up expert tensors into one bank unless disabled,
++    // so the 3 prefill upload slots (matching llama_tosh_dmoe_budget's 3 * bank_max heuristic)
++    // see the combined tensor size at runtime when load_mode avoids mmap on CPU.
++    const char * simd_width = getenv("TOSH_METAL_SIMD_WIDTH");
++    const bool gate_up_fused = simd_width != nullptr && strcmp(simd_width, "64") == 0 &&
++                               getenv("TOSH_MOE_GATE_UP_DISABLE") == nullptr;
++    const double max_slot_mib = gate_up_fused
++        ? std::max(mi.max_tensor_mib, mi.max_fused_gate_up_mib)
++        : mi.max_tensor_mib;
++    const double slots = 3.0*max_slot_mib;   // prefill uploads (dmoe/dmoe_bounded never mmap)
++    const bool legacy_uses_mmap =
++        params.load_mode == LLAMA_LOAD_MODE_MMAP || params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
++    const double legacy_slots = legacy_uses_mmap ? 3.0*mi.max_tensor_mib : slots;
+     const double overhead = env_mib("TOSH_DMOE_OVERHEAD_MIB", 64);
+     const double weights_full = full[0].second.ok ? full[0].second.model : mi.bank_mib;
+     const bool weights_fit = weights_full + 512.0 <= p.vram_free_mib;
+ 
+     // the code of what rules a host mode out, from the checks above
+     auto host_limit = [&](const std::string & why) -> const char * {
+         return why.find("STATIC_LIMIT") != std::string::npos || why.find("reserve >") != std::string::npos ? "STATIC_RAM_LIMIT" :
+                why.find("WIRE_LIMIT") != std::string::npos || why.find("NOT_LOCKABLE") != std::string::npos ||
+@@ -835,25 +902,25 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+         }
+         // legacy: the fewest layers of experts on the host that leave the reserve
+         for (auto & [kv, pr] : full) {
+             tosh_plan_candidate c;
+             c.name = std::string("legacy+") + kv_name(kv); c.mode = "legacy_offload"; c.kv = kv; c.ubatch = ub_full;
+             const double per_layer = mi.bank_mib/std::max(1, mi.n_moe);
+             const double full_priv = pr.model + pr.context + pr.compute;
+             for (int n = 1; n <= mi.n_layer && pr.ok; ++n) {
+-                const double priv = full_priv - n*per_layer + slots;
++                const double priv = full_priv - n*per_layer + legacy_slots;
+                 if (p.vram_free_mib - priv >= R) {
+                     c.ncmoe = n; c.private_mib = priv; c.free_mib = p.vram_free_mib - priv; c.valid = true;
+                     break;
+                 }
+             }
+             c.kv_mib = pr.context; c.compute_mib = pr.compute;
+             const double host_legacy = mi.bank_mib*c.ncmoe/std::max(1, mi.n_moe) + p.host_weights_mib + 1024.0;
+-            c.need_vram_mib = (c.valid ? c.private_mib : full_priv - mi.bank_mib + slots) + R;
++            c.need_vram_mib = (c.valid ? c.private_mib : full_priv - mi.bank_mib + legacy_slots) + R;
+             c.need_host_mib = c.valid ? host_legacy : mi.bank_mib + p.host_weights_mib + 1024.0;
+             const bool host_ok = runtime ? p.host_pressure != "CRITICAL" && host_legacy <= p.effective_mib :
+                                  hi.available_mib <= 0 || host_legacy + HOST_MARGIN_MIB <= hi.available_mib;
+             const double host_allowed = runtime ? p.effective_mib : hi.available_mib - HOST_MARGIN_MIB;
+             c.reason = !c.valid ? "VRAM_LIMIT: does not fit" : !host_ok ?
+                 string_format("%s: %d layers of experts on the host need %.1f GiB, %.1f GiB allowed now",
+                               runtime && p.effective_mib == p.static_cap_mib ? "STATIC_RAM_LIMIT" : "CURRENT_RAM_LIMIT",
+                               c.ncmoe, host_legacy/1024, host_allowed/1024) :
