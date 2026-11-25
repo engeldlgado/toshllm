@@ -1928,7 +1928,7 @@
   "VRAM as Metal reports it, not the number on the box. It only adds up when you split a model across several GPUs; a model that is not split has to fit in one.\n\n%@": "Metal 报告的显存容量，而非包装上标的数字。只有把模型拆分到多个 GPU 时容量才会累加；未拆分的模型必须装进一张卡。\n\n%@",
   "VRAM in use (all GPUs).": "已使用的显存（全部 GPU）。",
   "VRAM in use on %@.": "%@ 上已使用的显存。",
-  "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card, between 768 and 1536 MB.": "为系统和界面保留的空闲显存。Dynamic MoE 内存规划、路由模式、自动模式下的 DFlash 以及自动模式下的 GPU 层数都会遵守。自动会保留显卡的 8%，介于 768 到 1536 MB 之间。",
+  "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card (768–1536 MB) for Dynamic MoE/router, and 4% (320–768 MB above the driver's real free VRAM) when auto-fitting dense layers on a discrete GPU.": "",
   "VRAM limited": "受显存限制",
   "VRAM reserve: %@ MB": "显存预留：%@ MB",
   "VRAM reserve: automatic": "显存预留：自动",

@@ -825,8 +825,8 @@ struct SettingsView: View {
                             : loc.t("Reserva de VRAM: %@ MB", "VRAM reserve: %@ MB", "\(vramReserve)"),
                         value: $vramReserve, in: 0...4096, step: 256)
                     .settingsGlyph("gauge.with.needle")
-                    .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. La respetan el plan de Dynamic MoE, el modo router, DFlash en Auto y las capas en GPU en Auto. Automática deja un 8% de la tarjeta, entre 768 y 1536 MB.",
-                                "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card, between 768 and 1536 MB."))
+                    .infoTip(loc.t("VRAM que se deja libre para el sistema y la interfaz. La respetan el plan de Dynamic MoE, el modo router, DFlash en Auto y las capas en GPU en Auto. Automática deja un 8% de la tarjeta (768–1536 MB) en Dynamic MoE/router y un 4% (320–768 MB sobre la VRAM libre real del driver) al ajustar capas densas en GPU dedicada.",
+                                "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card (768–1536 MB) for Dynamic MoE/router, and 4% (320–768 MB above the driver's real free VRAM) when auto-fitting dense layers on a discrete GPU."))
                 Toggle(loc.t("Copiar pesos a VRAM (--no-mmap, recomendado)",
                              "Copy weights to VRAM (--no-mmap, recommended)"), isOn: $noMmap)
                     .settingsGlyph("arrow.down.to.line")

@@ -1928,7 +1928,7 @@
   "VRAM as Metal reports it, not the number on the box. It only adds up when you split a model across several GPUs; a model that is not split has to fit in one.\n\n%@": "",
   "VRAM in use (all GPUs).": "",
   "VRAM in use on %@.": "",
-  "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card, between 768 and 1536 MB.": "",
+  "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card (768–1536 MB) for Dynamic MoE/router, and 4% (320–768 MB above the driver's real free VRAM) when auto-fitting dense layers on a discrete GPU.": "",
   "VRAM limited": "",
   "VRAM reserve: %@ MB": "",
   "VRAM reserve: automatic": "",

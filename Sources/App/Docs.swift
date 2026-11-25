@@ -101,7 +101,7 @@ El interruptor **Chat / Imágenes** en la parte superior de la ventana cambia al
 
 **Expertos MoE en CPU** — Ver sección de modelos MoE.
 
-**Reserva de VRAM** — Memoria que se deja libre para el sistema. 1024 MB es seguro.
+**Reserva de VRAM** — Memoria que se deja libre para el sistema. En modo automático, Dynamic MoE/router deja un 8% de la tarjeta (768–1536 MB) y el ajuste automático de capas densas en GPU dedicada deja un 4% (320–768 MB) sobre la VRAM libre real del driver.
 
 **Copiar pesos a VRAM (--no-mmap)** — Esencial en GPU dedicada: sin esto los pesos se leen por PCIe en cada token y la velocidad cae ~6×.
 
@@ -368,7 +368,7 @@ The **Chat / Images** toggle at the top of the window switches to the image stud
 
 **MoE experts on CPU** — See the MoE section.
 
-**VRAM reserve** — Memory left free for the system. Automatic leaves 8% of the card, between 768 and 1536 MB, as the engine does on its own.
+**VRAM reserve** — Memory left free for the system. Automatic leaves 8% of the card (768–1536 MB) under Dynamic MoE/router, and 4% (320–768 MB above the driver's real free VRAM) when auto-fitting dense layers on a discrete GPU.
 
 **Copy weights to VRAM (--no-mmap)** — Essential on discrete GPUs: without it, weights are read over PCIe on every token and speed drops ~6×.
 
