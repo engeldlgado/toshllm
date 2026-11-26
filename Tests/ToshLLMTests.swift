@@ -1070,6 +1070,18 @@ final class ServerSettingsTests: XCTestCase {
         s = makeSettings()
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-ngl")! + 1], "99")
         XCTAssertFalse(s.arguments.contains("--fit-target"))
+
+        // Automatic VRAM reserve (0) must still pass --fit-target auto so llama-bench triggers
+        // fitting and the engine keeps fit_params_target_explicit = false for dGPU calibration.
+        var autoRes = makeSettings()
+        autoRes.ngl = -1
+        autoRes.ncmoe = 0
+        autoRes.vramReserveMB = 0
+        let autoArgs = autoRes.arguments
+        XCTAssertEqual(autoArgs[autoArgs.firstIndex(of: "--fit-target")! + 1], "auto")
+        let autoBench = autoRes.benchmarkArguments
+        XCTAssertFalse(autoBench.contains("-ngl"))
+        XCTAssertEqual(autoBench[autoBench.firstIndex(of: "--fit-target")! + 1], "auto")
     }
 
     func testBaseArguments() {
@@ -2991,6 +3003,9 @@ final class RouterModeTests: XCTestCase {
         let ini = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
         XCTAssertTrue(ini.contains("n-gpu-layers = auto"))
         XCTAssertTrue(ini.contains("fit-target = 1024"))
+        s.vramReserveMB = 0
+        let autoIni = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+        XCTAssertTrue(autoIni.contains("fit-target = auto"))
         XCTAssertTrue(makeSettings().routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
             .contains("n-gpu-layers = 99"))
     }

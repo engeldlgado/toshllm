@@ -1930,7 +1930,7 @@
   "VRAM as Metal reports it, not the number on the box. It only adds up when you split a model across several GPUs; a model that is not split has to fit in one.\n\n%@": "Объём VRAM — такой, какой сообщает Metal, а не указанный на упаковке видеокарты. Суммирование объёмов имеет смысл только при распределении модели между несколькими GPU; неразделённая модель должна целиком помещаться в памяти одной видеокарты.\n\n%@",
   "VRAM in use (all GPUs).": "Используемая VRAM (по всем GPU).",
   "VRAM in use on %@.": "Используемая VRAM на %@.",
-  "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card, between 768 and 1536 MB.": "Видеопамять, которая остаётся свободной для системы и интерфейса. Её учитывают план Dynamic MoE, режим маршрутизатора, DFlash в режиме «Автоматически» и слои на GPU в режиме «Авто». Автоматически оставляется 8% памяти карты, от 768 до 1536 МБ.",
+  "VRAM left free for the system and UI. The Dynamic MoE plan, router mode, DFlash in Auto and GPU layers in Auto keep it. Automatic leaves 8% of the card (768–1536 MB) for Dynamic MoE/router, and 4% (320–768 MB above the driver's real free VRAM) when auto-fitting dense layers on a discrete GPU.": "",
   "VRAM limited": "Ограничено VRAM",
   "VRAM reserve: %@ MB": "Резерв VRAM: %@ МБ",
   "VRAM reserve: automatic": "Резерв VRAM: автоматически",

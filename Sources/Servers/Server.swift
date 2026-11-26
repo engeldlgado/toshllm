@@ -392,9 +392,12 @@ struct ServerSettings {
         return manualFullGPU ? "all" : "auto"
     }
 
-    /// Under Auto the fit keeps free the same VRAM reserve as the memory plan.
+    /// Passes `--fit-target auto` when VRAM reserve is Automatic so `llama-server`, the router
+    /// preset, and `llama-bench` all trigger fitting while letting the engine calibrate the
+    /// discrete-GPU margin (without marking it as an explicit user override).
     var fitTargetArguments: [String] {
         guard nglArgument == "auto" else { return [] }
+        guard vramReserveMB > 0 else { return ["--fit-target", "auto"] }
         let indices = selectedGPUIndices
         let vramMB = ServerController.availableGPUs().filter { indices.contains($0.index) }.map(\.vramMB).max() ?? 0
         return ["--fit-target", String(Self.effectiveVramReserveMB(vramReserveMB, vramMB: vramMB))]

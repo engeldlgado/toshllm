@@ -1,0 +1,651 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index 3c47f9b..c50126f 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -1663,16 +1663,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.n_batch = value;
+         }
+     ).set_env("LLAMA_ARG_BATCH"));
+     add_opt(common_arg(
+         {"-ub", "--ubatch-size"}, "N",
+         string_format("physical maximum batch size (default: %d)", params.n_ubatch),
+         [](common_params & params, int value) {
+             params.n_ubatch = value;
++            params.n_ubatch_explicit = true;
+         }
+     ).set_env("LLAMA_ARG_UBATCH"));
+     add_opt(common_arg(
+         {"--keep"}, "N",
+         string_format("number of tokens to keep from the initial prompt (default: %d, -1 = all)", params.n_keep),
+         [](common_params & params, int value) {
+             params.n_keep = value;
+         }
+@@ -2910,19 +2911,25 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+                 throw std::runtime_error(
+                     string_format("error: unknown value for --fit-print: '%s'\n", value.c_str()));
+             }
+         }
+     ).set_examples({LLAMA_EXAMPLE_FIT_PARAMS}).set_env("LLAMA_ARG_FIT_ESTIMATE"));
+     add_opt(common_arg(
+         { "-fitt", "--fit-target" }, "MiB0,MiB1,MiB2,...",
+         string_format("target margin per device for --fit, comma-separated list of values, "
+-            "single value is broadcast across all devices, default: %zu", params.fit_params_target[0]/(1024*1024)),
++            "single value is broadcast across all devices, or 'auto', default: %zu", params.fit_params_target[0]/(1024*1024)),
+         [](common_params & params, const std::string & value) {
+             std::string arg_next = value;
++            if (arg_next == "auto") {
++                params.fit_params_target_explicit = false;
++                std::fill(params.fit_params_target.begin(), params.fit_params_target.end(), 1024ull * 1024 * 1024);
++                return;
++            }
++            params.fit_params_target_explicit = true;
+ 
+             // split string by , and /
+             const std::regex regex{ R"([,/]+)" };
+             std::sregex_token_iterator it{ arg_next.begin(), arg_next.end(), regex, -1 };
+             std::vector<std::string> split_arg{ it, {} };
+             if (split_arg.size() >= llama_max_devices()) {
+                 throw std::invalid_argument(
+                     string_format("got %zu input configs, but system only has %zu devices", split_arg.size(), llama_max_devices())
+diff --git a/common/common.cpp b/common/common.cpp
+index a38a24a..20d0909 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1254,19 +1254,19 @@ common_gguf_info common_get_gguf_info(const std::string & fname) {
+     }
+ 
+     // same key as llama_model_chat_template(model, nullptr)
+     info.has_chat_tmpl = gguf_find_key(gguf_ctx.get(), "tokenizer.chat_template") >= 0;
+ 
+     return info;
+ }
+ 
+-void common_fit_apply(common_params & params, llama_model_params & mparams, llama_context_params & cparams) {
++bool common_fit_apply(common_params & params, llama_model_params & mparams, llama_context_params & cparams, uint32_t * out_full_ngl) {
+     if (!params.fit_params) {
+-        return;
++        return true;
+     }
+ 
+     COM_TRC("%s", "fitting params to device memory ...\n");
+     COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
+ 
+     // the draft context is created from the same base params and follows the main context, fit both together
+     const bool has_draft = params.speculative.has_dft();
+     const bool spec_mtp  = std::find(params.speculative.types.begin(), params.speculative.types.end(),
+@@ -1283,23 +1283,29 @@ void common_fit_apply(common_params & params, llama_model_params & mparams, llam
+ 
+     const common_fit_extra_model extra = {
+         /*.paths_model  =*/ params_dft.model.get_paths(),
+         /*.mparams      =*/ &mparams_dft,
+         /*.cparams      =*/ &cparams_dft,
+         /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
+     };
+ 
+-    common_fit_params(params.model.get_paths(), &mparams, &cparams,
++    const common_params_fit_status status = common_fit_params(params.model.get_paths(), &mparams, &cparams,
+         params.tensor_split,
+         params.tensor_buft_overrides.data(),
+         params.fit_params_target.data(),
+         params.fit_params_min_ctx,
+         has_draft || spec_mtp ? &extra : nullptr,
+-        params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
++        params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR,
++        params.fit_params_target_explicit,
++        params.n_ubatch_explicit,
++        out_full_ngl);
++
++    params.n_ubatch = cparams.n_ubatch;
++    return status == COMMON_PARAMS_FIT_STATUS_SUCCESS;
+ }
+ 
+ common_init_result::common_init_result(common_params & params, bool model_only) :
+     pimpl(new impl{}) {
+     {
+         tosh_plan plan;
+         const bool planned = tosh_plan_apply(params, &plan);
+         if (!planned && plan.state == TOSH_PLAN_NOT_PLANNED && !params.dynamic_moe && getenv("TOSH_AUTO") == nullptr) {
+diff --git a/common/common.h b/common/common.h
+index e72d4a0..284b82e 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -470,16 +470,17 @@ struct lr_opt {
+ 
+ struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
+ 
+ struct common_params {
+     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
+     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
+     int32_t n_batch               =  2048; // logical batch size for prompt processing (must be >=32 to use BLAS)
+     int32_t n_ubatch              =   512; // physical batch size for prompt processing (must be >=32 to use BLAS)
++    bool    n_ubatch_explicit     = false; // -ub/--ubatch-size was given explicitly: the fit never trims it
+     int32_t n_keep                =     0; // number of tokens to keep from initial prompt
+     int32_t n_chunks              =    -1; // max number of chunks to process (-1 = unlimited)
+     int32_t n_parallel            =     1; // number of parallel sequences to decode
+     int32_t n_sequences           =     1; // number of sequences to decode
+     int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
+     int32_t n_outputs_max_per_seq =     1; // max outputs per sequence
+     int32_t grp_attn_n            =     1; // group-attention factor
+     int32_t grp_attn_w            =   512; // group-attention width
+@@ -500,16 +501,17 @@ struct common_params {
+     float   tensor_split[128]  = {0};   // how split tensors should be distributed across GPUs
+     bool    fit_params         = true;  // whether to fit unset model/context parameters to free device memory
+     bool    dynamic_moe        = false; // Tosh plans MoE memory: expert residency, host RAM and fallback
+     bool    fit_params_print   = false; // print the estimated required memory to run the model
+     int32_t fit_params_min_ctx = 4096;  // minimum context size to set when trying to reduce memory use
+ 
+     // margin per device in bytes for fitting parameters to free memory:
+     std::vector<size_t> fit_params_target = std::vector<size_t>(llama_max_devices(), 1024 * 1024*1024);
++    bool fit_params_target_explicit = false; // --fit-target / LLAMA_ARG_FIT_TARGET was given: the fit never recalibrates it
+ 
+     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
+     enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_AUTO; // how to load the model
+ 
+     enum llama_lazy_mode lazy_mode = LLAMA_LAZY_MODE_AUTO; // on-demand reading of tensors marked by the arch
+ 
+     common_cpu_params cpuparams;
+     common_cpu_params cpuparams_batch;
+@@ -1042,18 +1044,19 @@ private:
+ 
+ using common_init_result_ptr = std::unique_ptr<common_init_result>;
+ 
+ common_init_result_ptr common_init_from_params(common_params & params, bool model_only = false);
+ 
+ struct llama_model_params   common_model_params_to_llama  (      common_params & params);
+ struct llama_context_params common_context_params_to_llama(const common_params & params);
+ 
+-// apply --fit to mparams and cparams, no-op if params.fit_params is false
+-void common_fit_apply(common_params & params, struct llama_model_params & mparams, struct llama_context_params & cparams);
++// apply --fit to mparams and cparams, no-op if params.fit_params is false.
++// returns true if fitting succeeded or was disabled, false on fit failure/error.
++bool common_fit_apply(common_params & params, struct llama_model_params & mparams, struct llama_context_params & cparams, uint32_t * out_full_ngl = nullptr);
+ 
+ struct llama_model * common_model_load(const std::vector<std::string> & paths, const struct llama_model_params & mparams);
+ 
+ // clear LoRA adapters from context, then apply new list of adapters
+ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
+ 
+ // model endpoint from env
+ std::string common_get_model_endpoint();
+diff --git a/common/fit.cpp b/common/fit.cpp
+index 584776b..7df2e6a 100644
+--- a/common/fit.cpp
++++ b/common/fit.cpp
+@@ -2,16 +2,17 @@
+ 
+ #include "common.h"
+ #include "json.h"
+ #include "llama-cpp.h"
+ #include "log.h"
+ 
+ #include "../src/llama-ext.h"
+ 
++#include <algorithm>
+ #include <array>
+ #include <cassert>
+ #include <stdexcept>
+ #include <cinttypes>
+ #include <set>
+ #include <string>
+ #include <vector>
+ 
+@@ -24,16 +25,45 @@ enum common_layer_fraction_t {
+     LAYER_FRACTION_GATE = 3, // attention + up + gate
+     LAYER_FRACTION_MOE  = 4, // everything but sparse MoE weights
+ };
+ 
+ class common_params_fit_exception : public std::runtime_error {
+     using std::runtime_error::runtime_error;
+ };
+ 
++bool common_fit_is_macos_discrete_metal(ggml_backend_dev_t dev) {
++#ifdef __APPLE__
++    if (dev == nullptr || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
++        return false;
++    }
++    // no string matching on the device name: every Metal device is "MTL<n>" and reports
++    // GGML_BACKEND_DEVICE_TYPE_GPU, so ask the Metal backend whether the card has its own
++    // VRAM (discrete/eGPU) or shares host memory (iGPU / Apple Silicon)
++    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
++    if (reg == nullptr) {
++        return false;
++    }
++    auto is_discrete = (bool (*)(ggml_backend_dev_t)) ggml_backend_reg_get_proc_address(
++        reg, "ggml_backend_metal_device_is_discrete");
++    return is_discrete != nullptr && is_discrete(dev);
++#else
++    (void) dev;
++    return false;
++#endif
++}
++
++int64_t common_fit_dgpu_margin_mib(ggml_backend_dev_t dev) {
++    struct ggml_backend_dev_props props;
++    ggml_backend_dev_get_props(dev, &props);
++    const int64_t total_mib = (int64_t) (props.memory_total / (1024*1024));
++    // 4% of the card, clamped: small dGPUs keep a 320 MiB floor, large eGPUs get up to 768 MiB
++    return std::clamp(total_mib / 25, (int64_t) 320, (int64_t) 768);
++}
++
+ // RAII: send llama logs below min_level to the debug log
+ struct common_fit_log_scope {
+     common_fit_log_scope(ggml_log_level min_level) : min_level(min_level) {
+         llama_log_get(&original_logger.callback, &original_logger.user_data);
+         llama_log_set([](ggml_log_level level, const char * text, void * user_data) {
+             const common_fit_log_scope * self = (const common_fit_log_scope *) user_data;
+             const ggml_log_level level_eff = level >= self->min_level ? level : GGML_LOG_LEVEL_DEBUG;
+             self->original_logger.callback(level_eff, text, self->original_logger.user_data);
+@@ -207,17 +237,18 @@ common_memory_reports common_measure_memory(common_params & params) {
+ 
+     auto mparams = common_model_params_to_llama(params);
+     auto cparams = common_context_params_to_llama(params);
+ 
+     // max: what --fit picks now, no-op with -fit off
+     {
+         auto mparams_fit = mparams;
+         auto cparams_fit = cparams;
+-        common_fit_apply(params, mparams_fit, cparams_fit);
++        auto params_fit  = params; // the dGPU cascade may trim n_ubatch; a measurement must not mutate the caller's params
++        common_fit_apply(params_fit, mparams_fit, cparams_fit);
+         res.info_max = common_fit_measure(paths_model, &mparams_fit, &cparams_fit, &res.n_ctx_train, &res.n_ctx_max, log_level);
+     }
+ 
+     // min: the smallest context --fit may pick (--fit only changes n_ctx when it is 0)
+     uint32_t n_ctx_min = cparams.n_ctx;
+     if (n_ctx_min == 0 && params.fit_params) {
+         const uint32_t n_streams = cparams.kv_unified ? 1 : std::max<uint32_t>(1, cparams.n_seq_max);
+         // -c 0 sets fit_params_min_ctx to UINT32_MAX, cap at n_ctx_train like --fit
+@@ -259,17 +290,18 @@ common_device_memory_data_vec common_get_device_memory_data(
+         ret[i].compute = impl[i].mb.compute;
+     }
+     return ret;
+ }
+ 
+ static void common_params_fit_impl(
+         const std::vector<std::string> & paths_model, struct llama_model_params * mparams, struct llama_context_params * cparams,
+         float * tensor_split, struct llama_model_tensor_buft_override * tensor_buft_overrides,
+-        size_t * margins_s, uint32_t n_ctx_min, const common_fit_extra_model * extra, enum ggml_log_level log_level) {
++        size_t * margins_s, uint32_t n_ctx_min, const common_fit_extra_model * extra, enum ggml_log_level log_level,
++        bool fit_target_explicit, bool n_ubatch_explicit, uint32_t * out_full_ngl) {
+     if (mparams->split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+         throw common_params_fit_exception("automatic fitting is not implemented for --split-mode tensor");
+     }
+     constexpr int64_t MiB = 1024*1024;
+     typedef std::vector<llama_device_memory_data> dmds_t;
+     const llama_model_params default_mparams = llama_model_default_params();
+ 
+     std::vector<ggml_backend_dev_t> devs;
+@@ -344,16 +376,20 @@ static void common_params_fit_impl(
+             dmds[id].mb.compute += dmds_extra[id].mb.compute;
+         }
+     };
+ 
+     // step 1: get data for default parameters and check whether any changes are necessary in the first place
+ 
+     LOG_TRC("%s: getting device memory data for initial parameters:\n", __func__);
+     dmds_t dmds_full = common_get_device_memory_data_impl(paths_model, mparams, cparams, devs, hp_ngl, hp_nsk, hp_nct, hp_nex, log_level);
++    const uint32_t full_ngl = hp_ngl + hp_nsk + 1;
++    if (out_full_ngl != nullptr) {
++        *out_full_ngl = full_ngl;
++    }
+ 
+     // saturate instead of overflowing, this also preserves the UINT32_MAX sentinel of n_ctx_min:
+     const uint32_t n_ctx_max       = (uint32_t) std::min<uint64_t>(uint64_t(hp_nct)    * n_streams, UINT32_MAX);
+     const uint32_t n_ctx_min_total = (uint32_t) std::min<uint64_t>(uint64_t(n_ctx_min) * n_streams, UINT32_MAX);
+ 
+     // llama_context would use only hp_nct in total for n_ctx == 0, resolve the context before measuring anything else:
+     if (n_ctx_auto) {
+         cparams->n_ctx = n_ctx_max;
+@@ -372,16 +408,33 @@ static void common_params_fit_impl(
+     if (nd == 0) {
+         margins.push_back(margins_s[0]);
+     } else {
+         for (size_t id = 0; id < nd; id++) {
+             margins.push_back(margins_s[id]);
+         }
+     }
+ 
++    constexpr int64_t UPSTREAM_DEFAULT_TARGET_MIB = 1024;
++
++    for (size_t id = 0; id < nd; id++) {
++        if (common_fit_is_macos_discrete_metal(devs[id])) {
++            // Only the untouched upstream default is calibrated, and only when the user did not
++            // pass --fit-target: an explicit target is a contract and is never rewritten.
++            if (!fit_target_explicit && margins[id] == UPSTREAM_DEFAULT_TARGET_MIB * MiB) {
++                const int64_t prev_mib  = margins[id] / MiB;
++                const int64_t margin_mib = common_fit_dgpu_margin_mib(devs[id]);
++                margins[id] = margin_mib * MiB;
++                LOG_INF("%s: macOS dGPU (%s): calibrating default fit target %" PRId64 " -> %" PRId64 " MiB\n",
++                        __func__, ggml_backend_dev_name(devs[id]),
++                        prev_mib, margin_mib);
++            }
++        }
++    }
++
+     std::vector<std::string> dev_names;
+     {
+         dev_names.reserve(nd);
+         size_t max_length = 0;
+         for (const auto & dev : devs) {
+             std::string name = ggml_backend_dev_name(dev);
+             name += " (";
+             name += ggml_backend_dev_description(dev);
+@@ -567,16 +620,57 @@ static void common_params_fit_impl(
+     }
+     if (!tensor_buft_overrides) {
+         throw common_params_fit_exception("did not provide buffer to set tensor_buft_overrides, abort");
+     }
+     if (mparams->tensor_buft_overrides && (mparams->tensor_buft_overrides->pattern || mparams->tensor_buft_overrides->buft)) {
+         throw common_params_fit_exception("model_params::tensor_buft_overrides already set by user, abort");
+     }
+ 
++    const bool is_single_dgpu = (nd == 1 && common_fit_is_macos_discrete_metal(devs[0]));
++    if (is_single_dgpu && !n_ubatch_explicit && projected_free_per_device[0] < margins[0]) {
++        const uint32_t orig_ubatch         = cparams->n_ubatch;
++        const int64_t  orig_projected_free = projected_free_per_device[0];
++
++        auto trial_fits = [&]() -> bool {
++            llama_model_params mparams_copy = *mparams;
++            mparams_copy.n_gpu_layers = static_cast<int32_t>(full_ngl);
++
++            dmds_t trial_dmd = common_get_device_memory_data_impl(
++                paths_model, &mparams_copy, cparams, devs, hp_ngl, hp_nsk, hp_nct, hp_nex, log_level);
++            add_extra_memory(trial_dmd);
++
++            const int64_t proj_used = trial_dmd[0].mb.total();
++            const int64_t proj_free = trial_dmd[0].free - proj_used;
++            projected_free_per_device[0] = proj_free;
++            return proj_free >= margins[0];
++        };
++
++        // Trim n_ubatch (512 -> 256 -> 128) to shrink the compute scratch buffer before spilling
++        // transformer layers to CPU. An explicit -ub/--ubatch-size is never trimmed.
++        for (uint32_t u : { 256u, 128u }) {
++            if (cparams->n_ubatch > u) {
++                const uint32_t prev_u = cparams->n_ubatch;
++                cparams->n_ubatch = u;
++                LOG_INF("%s: dGPU cascade: trimming n_ubatch %u -> %u\n", __func__, prev_u, u);
++                if (trial_fits()) {
++                    LOG_INF("%s: dGPU cascade succeeded! All %u layers stay on GPU (n_ubatch=%u, free=%" PRId64 " >= %" PRId64 " MiB)\n",
++                            __func__, full_ngl, cparams->n_ubatch, projected_free_per_device[0] / MiB, margins[0] / MiB);
++                    mparams->n_gpu_layers = static_cast<int32_t>(full_ngl);
++                    return;
++                }
++            }
++        }
++
++        // Cascade did not fit all layers: restore exact pre-cascade state so Step 3
++        // computes layer offloading from accurate VRAM and ubatch baselines.
++        cparams->n_ubatch            = orig_ubatch;
++        projected_free_per_device[0] = orig_projected_free;
++    }
++
+     // step 3: iteratively fill the back to front with "dense" layers
+     //   - for a dense model simply fill full layers, giving each device a contiguous slice of the model
+     //   - for a MoE model, same as dense model but with all MoE tensors in system memory
+ 
+     // utility function that returns a static C string matching the tensors for a specific layer index and layer fraction:
+     auto get_overflow_pattern = [&](const size_t il, const common_layer_fraction_t lf) -> const char * {
+         constexpr size_t n_strings = 1000;
+         if (il >= n_strings) {
+@@ -981,21 +1075,25 @@ enum common_params_fit_status common_fit_params(
+         const std::vector<std::string> & paths_model,
+         llama_model_params * mparams,
+         llama_context_params * cparams,
+         float * tensor_split,
+         llama_model_tensor_buft_override * tensor_buft_overrides,
+         size_t * margins,
+         uint32_t n_ctx_min,
+         const common_fit_extra_model * extra,
+-        ggml_log_level log_level) {
++        ggml_log_level log_level,
++        bool fit_target_explicit,
++        bool n_ubatch_explicit,
++        uint32_t * out_full_ngl) {
+     const int64_t t0_us = llama_time_us();
+     common_params_fit_status status = COMMON_PARAMS_FIT_STATUS_SUCCESS;
+     try {
+-        common_params_fit_impl(paths_model, mparams, cparams, tensor_split, tensor_buft_overrides, margins, n_ctx_min, extra, log_level);
++        common_params_fit_impl(paths_model, mparams, cparams, tensor_split, tensor_buft_overrides, margins, n_ctx_min, extra, log_level,
++            fit_target_explicit, n_ubatch_explicit, out_full_ngl);
+         LOG_TRC("%s: successfully fit params to free device memory\n", __func__);
+     } catch (const common_params_fit_exception & e) {
+         LOG_WRN("%s: not fitting params to free device memory: %s; continuing with the parameters as given\n", __func__, e.what());
+         status = COMMON_PARAMS_FIT_STATUS_FAILURE;
+     } catch (const std::runtime_error & e) {
+         LOG_ERR("%s: encountered an error while trying to fit params to free device memory: %s\n", __func__, e.what());
+         status = COMMON_PARAMS_FIT_STATUS_ERROR;
+     }
+diff --git a/common/fit.h b/common/fit.h
+index 431c418..c81d959 100644
+--- a/common/fit.h
++++ b/common/fit.h
+@@ -1,11 +1,12 @@
+ #pragma once
+ 
+ #include "ggml.h"
++#include "ggml-backend.h"
+ #include "llama.h"
+ 
+ #include <string>
+ #include <vector>
+ 
+ enum common_params_fit_status {
+     COMMON_PARAMS_FIT_STATUS_SUCCESS = 0, // found allocations that are projected to fit
+     COMMON_PARAMS_FIT_STATUS_FAILURE = 1, // could not find allocations that are projected to fit
+@@ -17,31 +18,43 @@ enum common_params_fit_status {
+ //   - shares_model tells the fit that the weights are already counted in the main model, as for an MTP context
+ struct common_fit_extra_model {
+     std::vector<std::string> paths_model;
+     llama_model_params * mparams;
+     llama_context_params * cparams;
+     bool shares_model;
+ };
+ 
++// true when dev is a macOS Metal device with its own VRAM (discrete AMD dGPU, eGPU);
++// false for unified-memory iGPUs (Apple Silicon, Intel iGPU) and non-Metal backends
++bool common_fit_is_macos_discrete_metal(ggml_backend_dev_t dev);
++
++// margin in MiB that --fit leaves free on a discrete macOS GPU: 4% of the card's VRAM,
++// clamped to [320, 768] MiB so small cards keep a floor and large eGPUs get a fair share
++int64_t common_fit_dgpu_margin_mib(ggml_backend_dev_t dev);
++
+ // fits mparams and cparams to free device memory (assumes system memory is unlimited)
+ //   - returns true if the parameters could be successfully modified to fit device memory
+ //   - this function is NOT thread safe because it modifies the global llama logger state
+ //   - only parameters that have the same value as in llama_default_model_params are modified
+ //     with the exception of the context size which is modified if and only if equal to 0
+ common_params_fit_status common_fit_params(
+      const std::vector<std::string> & paths_model,
+                  llama_model_params * mparams,
+                llama_context_params * cparams,
+                               float * tensor_split,          // writable buffer for tensor split, needs at least llama_max_devices elements
+    llama_model_tensor_buft_override * tensor_buft_overrides, // writable buffer for overrides, needs at least llama_max_tensor_buft_overrides elements
+                              size_t * margins,               // margins of memory to leave per device in bytes
+                            uint32_t   n_ctx_min,             // minimum context size to set when trying to reduce memory use
+        const common_fit_extra_model * extra,                  // model to fit alongside the main one, nullptr if there is none
+-                     ggml_log_level   log_level);            // minimum log level to print during fitting, lower levels go to debug log
++                     ggml_log_level   log_level,             // minimum log level to print during fitting, lower levels go to debug log
++                     bool             fit_target_explicit = false, // margins were set by the user (--fit-target): never recalibrated
++                     bool             n_ubatch_explicit   = false, // n_ubatch was set by the user (-ub): never trimmed by the fit
++                     uint32_t       * out_full_ngl        = nullptr // if non-null, receives the full-GPU layer count (hp_ngl + hp_nsk + 1)
++);
+ 
+ // print estimated memory to stdout
+ void common_fit_print(
+      const std::vector<std::string> & paths_model,
+                  llama_model_params * mparams,
+                llama_context_params * cparams);
+ 
+ void common_memory_breakdown_print(const llama_context * ctx);
+diff --git a/tools/fit-params/fit-params.cpp b/tools/fit-params/fit-params.cpp
+index 99082e5..1ae3ad1 100644
+--- a/tools/fit-params/fit-params.cpp
++++ b/tools/fit-params/fit-params.cpp
+@@ -28,17 +28,18 @@ int llama_fit_params(int argc, char ** argv) {
+ 
+     auto mparams = common_model_params_to_llama(params);
+     auto cparams = common_context_params_to_llama(params);
+ 
+     if (!params.fit_params_print) {
+         const common_params_fit_status status = common_fit_params(params.model.get_paths(), &mparams, &cparams,
+                 params.tensor_split, params.tensor_buft_overrides.data(), params.fit_params_target.data(), params.fit_params_min_ctx,
+                 nullptr,
+-                params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
++                params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR,
++                params.fit_params_target_explicit, params.n_ubatch_explicit);
+         if (status != COMMON_PARAMS_FIT_STATUS_SUCCESS) {
+             LOG_ERR("%s: failed to fit CLI arguments to free memory, exiting...\n", __func__);
+             exit(1);
+         }
+ 
+         LOG_INF("%s: printing fitted CLI arguments to stdout...\n", __func__);
+         common_log_flush(common_log_main());
+         printf("-c %" PRIu32 " -ngl %" PRIi32, cparams.n_ctx, mparams.n_gpu_layers);
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index 3c7043f..b3daf56 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -360,17 +360,17 @@ struct cmd_params {
+     std::vector<llama_flash_attn_type> flash_attn;
+     std::vector<std::vector<ggml_backend_dev_t>> devices;
+     std::vector<std::vector<float>>  tensor_split;
+     std::vector<std::vector<llama_model_tensor_buft_override>> tensor_buft_overrides;
+     std::vector<bool>                embeddings;
+     std::vector<bool>                no_op_offload;
+     std::vector<bool>                no_host;
+     std::vector<bool>                repack;
+-    std::vector<size_t>              fit_params_target;
++    std::vector<int64_t>             fit_params_target;
+     std::vector<uint32_t>            fit_params_min_ctx;
+     ggml_numa_strategy               numa;
+     int                              reps;
+     ggml_sched_priority              prio;
+     int                              delay;
+     bool                             verbose;
+     bool                             progress;
+     bool                             no_warmup;
+@@ -435,17 +435,17 @@ static void print_usage(int /* argc */, char ** argv) {
+     printf("  --prio <-1|0|1|2|3>                         process/thread priority (default: %d)\n", cmd_params_defaults.prio);
+     printf("  --delay <0...N> (seconds)                   delay between each test (default: %d)\n", cmd_params_defaults.delay);
+     printf("  -o, --output <csv|json|jsonl|md|sql>        output format printed to stdout (default: %s)\n", output_format_str(cmd_params_defaults.output_format));
+     printf("  -oe, --output-err <csv|json|jsonl|md|sql>   output format printed to stderr (default: %s)\n", output_format_str(cmd_params_defaults.output_format_stderr));
+     printf("  --list-devices                              list available devices and exit\n");
+     printf("  -v, --verbose                               verbose output\n");
+     printf("  --progress                                  print test progress indicators\n");
+     printf("  --no-warmup                                 skip warmup runs before benchmarking\n");
+-    printf("  -fitt, --fit-target <MiB>                   fit model to device memory with this margin per device in MiB (default: off)\n");
++    printf("  -fitt, --fit-target <MiB|auto>              fit model to device memory with this margin per device in MiB or 'auto' (default: off)\n");
+     printf("  -fitc, --fit-ctx <n>                        minimum ctx size for --fit-target (default: 0)\n");
+     if (llama_supports_rpc()) {
+         printf("  -rpc, --rpc <rpc_servers>                   register RPC devices (comma separated)\n");
+     }
+     printf("\n");
+     printf("test parameters:\n");
+     printf("  -m, --model <filename>                            (default: %s)\n", join(cmd_params_defaults.model, ",").c_str());
+     printf("  -hf, -hfr, --hf-repo <user>/<model>[:quant]       Hugging Face model repository; quant is optional, case-insensitive\n");
+@@ -1070,17 +1070,29 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
+                 params.no_warmup = true;
+             } else if (arg == "-fitt" || arg == "--fit-target") {
+                 if (++i >= argc) {
+                     invalid_param = true;
+                     break;
+                 }
+                 auto p = string_split<std::string>(argv[i], split_delim);
+                 for (const auto & v : p) {
+-                    params.fit_params_target.push_back(std::stoull(v));
++                    if (v == "auto") {
++                        params.fit_params_target.push_back(-1);
++                    } else {
++                        const int64_t val = std::stoll(v);
++                        if (val < 0) {
++                            invalid_param = true;
++                            break;
++                        }
++                        params.fit_params_target.push_back(val);
++                    }
++                }
++                if (invalid_param) {
++                    break;
+                 }
+             } else if (arg == "-fitc" || arg == "--fit-ctx") {
+                 if (++i >= argc) {
+                     invalid_param = true;
+                     break;
+                 }
+                 auto p = string_split<std::string>(argv[i], split_delim);
+                 for (const auto & v : p) {
+@@ -1243,17 +1255,17 @@ struct cmd_params_instance {
+     llama_flash_attn_type flash_attn;
+     std::vector<ggml_backend_dev_t> devices;
+     std::vector<float> tensor_split;
+     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
+     bool               embeddings;
+     bool               no_op_offload;
+     bool               no_host;
+     bool               repack;
+-    size_t             fit_target;
++    int64_t            fit_target;
+     uint32_t           fit_min_ctx;
+ 
+     llama_model_params to_llama_mparams() const {
+         llama_model_params mparams = llama_model_default_params();
+ 
+         mparams.n_gpu_layers = n_gpu_layers;
+         if (!devices.empty()) {
+             mparams.devices = const_cast<ggml_backend_dev_t *>(devices.data());
+@@ -1510,17 +1522,17 @@ struct test {
+     llama_flash_attn_type    flash_attn;
+     std::vector<ggml_backend_dev_t> devices;
+     std::vector<float>       tensor_split;
+     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
+     bool                     embeddings;
+     bool                     no_op_offload;
+     bool                     no_host;
+     bool                     repack;
+-    size_t                   fit_target;
++    int64_t                  fit_target;
+     uint32_t                 fit_min_ctx;
+     int                      n_prompt;
+     int                      n_gen;
+     int                      n_depth;
+     std::string              test_time;
+     std::vector<uint64_t>    samples_ns;
+ 
+     test(const cmd_params_instance & inst, const llama_model * lmodel, const llama_context * ctx) :
+@@ -2355,29 +2367,33 @@ int llama_bench(int argc, char ** argv) {
+             }
+ 
+             // use default n_gpu_layers and n_ctx so common_fit_params can adjust them
+             mparams.n_gpu_layers          = llama_model_default_params().n_gpu_layers;
+             mparams.tensor_split          = fit_tensor_split.data();
+             mparams.tensor_buft_overrides = fit_overrides.data();
+             cparams.n_ctx                 = 0;
+ 
+-            std::vector<size_t> margins(llama_max_devices(), inst.fit_target * 1024 * 1024);
++            const bool   fit_auto   = inst.fit_target < 0;
++            const size_t margin_mib = fit_auto ? 1024 : static_cast<size_t>(inst.fit_target);
++            std::vector<size_t> margins(llama_max_devices(), margin_mib * 1024 * 1024);
+ 
+             // fit at least the requested minimum context size, not just the tokens the benchmark processes
+             uint32_t n_ctx_needed = std::max<uint32_t>(inst.n_prompt + inst.n_gen + inst.n_depth, inst.fit_min_ctx);
+             cparams.n_ctx = std::max(cparams.n_ctx, n_ctx_needed);
+ 
+             common_fit_params({ inst.model }, &mparams, &cparams,
+                 fit_tensor_split.data(),
+                 fit_overrides.data(),
+                 margins.data(),
+                 inst.fit_min_ctx,
+                 nullptr,
+-                params.verbose ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
++                params.verbose ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR,
++                /*fit_target_explicit=*/ !fit_auto && inst.fit_target != cmd_params_defaults.fit_params_target[0],
++                /*n_ubatch_explicit=*/ true); // bench keeps inst.n_ubatch fixed so reported results match the requested config
+        }
+ 
+         // keep the same model between tests when possible
+         if (!lmodel || !prev_inst || !inst.equal_mparams(*prev_inst)) {
+             if (lmodel) {
+                 llama_model_free(lmodel);
+             }
+ 

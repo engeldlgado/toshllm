@@ -1,0 +1,147 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index a41f494..3bb4e32 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1338,42 +1338,141 @@ private:
+         if (has_mmproj) {
+             int64_t t_start = ggml_time_us();
+             mmproj_usage = mtmd_get_memory_usage(mmproj_path.c_str(), mparams);
+             mmproj_usage_t_us = ggml_time_us() - t_start;
+         }
+ 
+         // optionally fit mmproj memory usage
+         // on resume params_base already holds the margin from the first load
++        const auto saved_fit_params_target     = params_base.fit_params_target;
++        const auto saved_n_gpu_layers          = params_base.n_gpu_layers;
++        const auto saved_n_ctx                 = params_base.n_ctx;
++        const auto saved_n_ubatch              = params_base.n_ubatch;
++        const auto saved_tensor_buft_overrides = params_base.tensor_buft_overrides;
++        bool       mmproj_added_to_fit_target  = false;
++        bool       mmproj_uses_dgpu            = false;
++        double     mmproj_added_mib            = 0.0;
++
+         if (has_mmproj && params_base.fit_params && !is_resume) {
+             const auto & mmproj_mem = mmproj_usage.backend_mem_usage;
+             const int64_t t_elapsed = mmproj_usage_t_us;
+             if (!mmproj_mem.empty()) {
+                 size_t total = 0;
+                 for (auto & [dev, size] : mmproj_mem) {
+                     total += size;
+                 }
+                 SRV_TRC("[mtmd] estimated worst-case memory usage of mmproj is %.2f MiB (took %.2f ms)\n", total / (1024.0 * 1024.0), t_elapsed / 1000.0);
+                 GGML_ASSERT(!params_base.fit_params_target.empty());
+                 for (auto & [dev, size] : mmproj_mem) {
+                     for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+                         if (ggml_backend_dev_get(i) == dev) {
+                             if (i < params_base.fit_params_target.size()) {
+-                                SRV_DBG("[mtmd] adding %.2f MiB to fit_params_target for device %s\n", size / (1024.0 * 1024.0), ggml_backend_dev_name(dev));
++                                const bool is_dgpu = common_fit_is_macos_discrete_metal(dev);
++                                // only the untouched upstream default (1024 MiB) is calibrated on a
++                                // discrete macOS GPU, and only when the user did not pass --fit-target
++                                if (size > 0 &&
++                                    !params_base.fit_params_target_explicit &&
++                                    params_base.fit_params_target[i] == 1024ull * 1024ull * 1024ull &&
++                                    is_dgpu) {
++                                    params_base.fit_params_target[i] =
++                                        (size_t) common_fit_dgpu_margin_mib(dev) * 1024ull * 1024ull;
++                                }
++                                const double add_mib = size / (1024.0 * 1024.0);
++                                SRV_DBG("[mtmd] adding %.2f MiB to fit_params_target for device %s\n", add_mib, ggml_backend_dev_name(dev));
+                                 params_base.fit_params_target[i] += size;
++                                if (size > 0) {
++                                    mmproj_added_to_fit_target = true;
++                                    mmproj_added_mib += add_mib;
++                                    if (is_dgpu) {
++                                        mmproj_uses_dgpu = true;
++                                    }
++                                }
+                             }
+                             break;
+                         }
+                     }
+                 }
+             } else {
+                 SRV_ERR("%s", "[mtmd] failed to get memory usage of mmproj\n");
+             }
+         }
+ 
++        // Only evaluate mmproj CPU demotion on discrete macOS GPUs under -ngl auto (-1), where
++        // fitting may offload layers and overcommitting VRAM causes severe PCIe spills.
++        if (mmproj_added_to_fit_target && params_base.mmproj_use_gpu && mmproj_uses_dgpu &&
++            params_base.n_gpu_layers == llama_model_default_params().n_gpu_layers) {
++            try {
++            // First evaluate how LLM fits WITHOUT mmproj taking GPU memory
++            auto clean_params = params_base;
++            clean_params.fit_params_target = saved_fit_params_target;
++            auto mparams_clean = common_model_params_to_llama(clean_params);
++            auto cparams_clean = common_context_params_to_llama(clean_params);
++            uint32_t clean_full_ngl = 0;
++            const bool clean_ok = common_fit_apply(clean_params, mparams_clean, cparams_clean, &clean_full_ngl);
++
++            // Second evaluate how LLM fits WITH mmproj added to GPU target
++            auto trial_params = params_base;
++            auto mparams_trial = common_model_params_to_llama(trial_params);
++            auto cparams_trial = common_context_params_to_llama(trial_params);
++            uint32_t trial_full_ngl = 0;
++            const bool trial_ok = common_fit_apply(trial_params, mparams_trial, cparams_trial, &trial_full_ngl);
++
++            auto count_blk_overrides = [](const llama_model_params & mp) -> size_t {
++                size_t cnt = 0;
++                if (mp.tensor_buft_overrides != nullptr) {
++                    for (const auto * p = mp.tensor_buft_overrides; p->pattern != nullptr; ++p) {
++                        // step-3 overflow patterns are regexes like "blk\\.5\\.ffn_...", so match "blk"
++                        if (strstr(p->pattern, "blk") != nullptr) {
++                            ++cnt;
++                        }
++                    }
++                }
++                return cnt;
++            };
++            // Negative n_gpu_layers (-1 auto / -2 all) that survived common_fit_apply means an early return
++            // (everything fit on GPU), so normalize to the resolved full-GPU layer count before comparing.
++            auto resolve_ngl = [](int32_t ngl, uint32_t full_ngl) -> int32_t {
++                if (ngl < 0) {
++                    return full_ngl > 0 ? static_cast<int32_t>(full_ngl) : INT32_MAX;
++                }
++                return ngl;
++            };
++            const int32_t clean_ngl = resolve_ngl(mparams_clean.n_gpu_layers, clean_full_ngl);
++            const int32_t trial_ngl = resolve_ngl(mparams_trial.n_gpu_layers, trial_full_ngl);
++
++            const size_t clean_blk_spills     = count_blk_overrides(mparams_clean);
++            const size_t trial_blk_spills     = count_blk_overrides(mparams_trial);
++            const bool trial_failed           = (clean_ok && !trial_ok);
++            const bool spilled_compute_layers = (trial_blk_spills > clean_blk_spills);
++            const bool lost_layers            = (trial_ngl < clean_ngl);
++            const bool shrunk_ctx             = (cparams_trial.n_ctx < cparams_clean.n_ctx);
++            const bool no_gpu_layers          = (mparams_trial.n_gpu_layers == 0);
++
++            if (trial_failed || lost_layers || spilled_compute_layers || shrunk_ctx || no_gpu_layers) {
++                SRV_WRN("[mtmd] GPU mmproj (%.2f MiB) forced LLM layer/ctx offload (%d -> %d layers, %zu -> %zu blk spills) — "
++                        "demoting mmproj to CPU to keep LLM on GPU\n",
++                        mmproj_added_mib, clean_ngl, trial_ngl,
++                        clean_blk_spills, trial_blk_spills);
++
++                params_base.mmproj_use_gpu        = false;
++                mparams.use_gpu                   = false;
++                params_base.fit_params_target     = saved_fit_params_target;
++                params_base.n_gpu_layers          = saved_n_gpu_layers;
++                params_base.n_ctx                 = saved_n_ctx;
++                params_base.n_ubatch              = saved_n_ubatch;
++                params_base.tensor_buft_overrides = saved_tensor_buft_overrides;
++            }
++            } catch (const std::exception & e) {
++                // a failed trial fit must not abort the load: keep mmproj on the GPU and let the
++                // single main fit below decide the placement
++                SRV_WRN("[mtmd] trial fit failed (%s) - keeping mmproj on GPU, fitting the LLM once\n", e.what());
++            }
++        }
++
+         // note: the draft / MTP context is fitted together with the target model, see common_fit_extra_model
+ 
+         // attach a progress callback
+         {
+             params_base.load_progress_callback = load_progress_callback;
+             params_base.load_progress_callback_user_data = &load_progress_text;
+         }
+ 
