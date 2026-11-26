@@ -1,0 +1,533 @@
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index acff9692c9..3e9ba92e17 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -1291,16 +1291,18 @@ struct ggml_backend_sched {
+     bool prefetch_experts;
+     ggml_backend_t prefetch_backend;
+     int prefetch_n_slots;
+     ggml_backend_buffer_t prefetch_slots[GGML_SCHED_MAX_PREFETCH_SLOTS];
+     ggml_backend_event_t prefetch_ready[GGML_SCHED_MAX_PREFETCH_SLOTS];
+     ggml_backend_event_t prefetch_free[GGML_SCHED_MAX_PREFETCH_SLOTS];
+     bool prefetch_used[GGML_SCHED_MAX_PREFETCH_SLOTS];
+     int prefetch_cur;
++    bool * split_expert_shared; // [n_splits] the split's first MUL_MAT_ID weight is also read by another split, see ggml_backend_sched_mark_shared_experts
++    int split_expert_shared_cap;
+ 
+     // slot the current split's expert tensor was uploaded to, -1 if none, and the copy that points at it
+     int expert_slot;
+     struct ggml_tensor * expert_slot_cpy;
+     ggml_backend_buffer_t expert_slot_saved_buffer;
+     void * expert_slot_saved_data;
+ 
+     struct ggml_backend_sched_expert_ids * expert_ids;
+@@ -1542,16 +1544,18 @@ static bool ggml_backend_sched_buffer_supported(ggml_backend_sched_t sched, stru
+ static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, struct ggml_tensor * node, int cur_backend_id, int * node_backend_id) {
+     if (ggml_backend_supports_op(sched->backends[cur_backend_id], node)) {
+         *node_backend_id = cur_backend_id;
+         SET_CAUSE(node, "2.sup");
+     }
+ }
+ 
+ // assigns backends to ops and splits the graph into subgraphs that can be computed on the same backend
++static void ggml_backend_sched_mark_shared_experts(ggml_backend_sched_t sched);
++
+ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+     // reset splits
+     sched->n_splits = 0;
+     sched->n_graph_inputs = 0;
+     sched->is_reset = false;
+ 
+     struct ggml_init_params params = {
+         /* .mem_size =   */ sched->context_buffer_size,
+@@ -2086,16 +2090,21 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+         assert(graph_copy->size > graph_copy->n_leafs);
+         graph_copy->leafs[graph_copy->n_leafs++] = leaf;
+     }
+ 
+     // set ids for all splits
+     for (int i = 0; i < sched->n_splits; ++i) {
+         sched->splits[i].graph.uid = ggml_graph_next_uid();
+     }
++
++    // the splits only change here, so the shared weights are found once per split graph and not on every compute
++    if (sched->prefetch_experts) {
++        ggml_backend_sched_mark_shared_experts(sched);
++    }
+ }
+ 
+ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+     bool backend_ids_changed = false;
+     for (int i = 0; i < sched->graph.n_nodes; i++) {
+         if (sched->node_backend_ids[i] != sched->prev_node_backend_ids[i] &&
+             sched->bufts[sched->node_backend_ids[i]] != sched->bufts[sched->prev_node_backend_ids[i]]) {
+             backend_ids_changed = true;
+@@ -2263,16 +2272,46 @@ static struct ggml_tensor * ggml_backend_sched_expert_ids_src(ggml_backend_sched
+         if (node->src[2] == tensor_copy(split->inputs[i], split->backend_id, sched->cur_copy)) {
+             *ids_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[i]);
+             return split->inputs[i];
+         }
+     }
+     return node->src[2];
+ }
+ 
++// one pass over the splits each time the graph is split: flag the splits whose first MUL_MAT_ID weight is read by more than one split
++static void ggml_backend_sched_mark_shared_experts(ggml_backend_sched_t sched) {
++    if (sched->split_expert_shared_cap < sched->n_splits) {
++        free(sched->split_expert_shared);
++        sched->split_expert_shared     = (bool *) malloc(sched->n_splits * sizeof(bool));
++        sched->split_expert_shared_cap = sched->n_splits;
++    }
++    memset(sched->split_expert_shared, 0, sched->n_splits * sizeof(bool));
++
++    std::unordered_map<const ggml_tensor *, int> n_splits_reading; // weight copy -> number of splits with a MUL_MAT_ID reading it
++    for (int i = 0; i < sched->n_splits; i++) {
++        const struct ggml_cgraph & g = sched->splits[i].graph;
++        std::vector<const ggml_tensor *> seen; // the distinct weights this split reads, to count a split once
++        for (int k = 0; k < g.n_nodes; k++) {
++            const ggml_tensor * w = g.nodes[k]->op == GGML_OP_MUL_MAT_ID ? g.nodes[k]->src[0] : NULL;
++            if (w == NULL || std::find(seen.begin(), seen.end(), w) != seen.end()) {
++                continue;
++            }
++            seen.push_back(w);
++            n_splits_reading[w]++;
++        }
++    }
++    for (int i = 0; i < sched->n_splits; i++) {
++        const struct ggml_cgraph & g = sched->splits[i].graph;
++        if (g.n_nodes > 0 && g.nodes[0]->op == GGML_OP_MUL_MAT_ID) {
++            sched->split_expert_shared[i] = n_splits_reading[g.nodes[0]->src[0]] > 1;
++        }
++    }
++}
++
+ // with a large batch virtually every expert is used, so instead of waiting for the routing ids,
+ // upload the full tensor through the prefetch backend and let the copy overlap compute of the previous split;
+ // it waits for its slot instead of the split backend, so it is queued before the other inputs of the split
+ static void ggml_backend_sched_prefetch_expert(ggml_backend_sched_t sched, struct ggml_backend_sched_split * split) {
+     sched->expert_slot = -1;
+     if (!sched->prefetch_experts || sched->callback_eval || split->graph.n_nodes == 0 || split->graph.nodes[0]->op != GGML_OP_MUL_MAT_ID) {
+         return;
+     }
+@@ -2284,16 +2323,22 @@ static void ggml_backend_sched_prefetch_expert(ggml_backend_sched_t sched, struc
+             input = split->inputs[i];
+             break;
+         }
+     }
+     if (input == NULL || !ggml_backend_sched_is_host_weight(input) || !sched->hv_tensor_requires_copy[hash_id(input)]) {
+         return;
+     }
+ 
++    // a weight read by the MUL_MAT_ID of several splits (the looped layers of Inkling) is copied once for the graph:
++    // the prefetch only fills a temporary slot, so the later splits would read an empty copy; use the regular path
++    if (sched->split_expert_shared != NULL && sched->split_expert_shared[split - sched->splits]) {
++        return;
++    }
++
+     ggml_backend_t split_backend = sched->backends[split->backend_id];
+     const ggml_tensor * ids = node->src[2];
+     const int64_t n_expert = input->ne[2];
+     const bool compact = tosh_dmoe_compact();
+     if (!(compact || ids->ne[0]*ids->ne[1] >= 2*n_expert) ||
+         !ggml_backend_sched_prefetch_init(sched, split_backend, ggml_nbytes(input))) {
+         return;
+     }
+@@ -2861,16 +2906,17 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
+     for (int i = 0; i < sched->splits_capacity; i++) {
+         free(sched->splits[i].inputs);
+     }
+     free(sched->splits);
+     free(sched->graph_inputs);
+     free(sched->hv_tensor_backend_ids);
+     free(sched->hv_tensor_copies);
+     free(sched->hv_tensor_requires_copy);
++    free(sched->split_expert_shared);
+     free(sched->node_backend_ids);
+     free(sched->leaf_backend_ids);
+     free(sched->prev_node_backend_ids);
+     free(sched->prev_leaf_backend_ids);
+     free(sched->context_buffer);
+     free(sched->graph.nodes);
+     free(sched->graph.leafs);
+     free(sched);
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index c7495d3200..a7e0b76032 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -983,17 +983,17 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
+     {LLM_TENSOR_ATTN_K,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_ATTN_V,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_ATTN_QKV,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_ATTN_OUT,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_ATTN_GATE,                  {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_ATTN_RESID_ALPHA,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_RESID_BETA,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_REL,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+-    {LLM_TENSOR_ATTN_REL_BIAS,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_ATTN_REL_BIAS,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_Q_CLIP,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_REL_CLIP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_SINK_PROJ,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_ATTN_Q_INP_NORM,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_K_INP_NORM,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_V_INP_NORM,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_ATTN_K_CONV,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
+     {LLM_TENSOR_ATTN_V_CONV,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 190a2e9368..d7b26364ba 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -3295,16 +3295,28 @@ ggml_status llama_context::graph_compute(
+     }
+ 
+     // set the number of threads for all the backends
+     for (const auto & set_n_threads_fn : set_n_threads_fns) {
+         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
+     }
+ 
+     copy_experts.reset();
++    if (model.arch == LLM_ARCH_INKLING2_LOOP) {
++        // only the looped layers of Inkling read one expert weight in several MUL_MAT_ID nodes, so no other
++        // model pays for this walk. the scheduler copies the device weights of the graph's inputs: find those
++        // read by several MUL_MAT_ID nodes
++        std::unordered_set<const ggml_tensor *> seen;
++        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
++            const ggml_tensor * node = ggml_graph_node(gf, i);
++            if (node->op == GGML_OP_MUL_MAT_ID && !seen.insert(node->src[0]).second) {
++                copy_experts.shared.insert(node->src[0]);
++            }
++        }
++    }
+ 
+     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+     if (status != GGML_STATUS_SUCCESS) {
+         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
+     }
+ 
+     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
+ 
+@@ -3347,16 +3359,20 @@ bool llama_context::sched_copy_experts(ggml_backend_t backend, const ggml_tensor
+         for (int64_t i1 = 0; i1 < ids->ne[1]; i1++) {
+             for (int64_t i0 = 0; i0 < ids->ne[0]; i0++) {
+                 const int32_t id = st.ids_data[i1*ids->nb[1]/sizeof(int32_t) + i0*ids->nb[0]/sizeof(int32_t)];
+                 GGML_ASSERT(id >= 0 && id < n_expert);
+                 st.used[id] = true;
+             }
+         }
+ 
++        if (st.shared.count(dst)) {
++            st.used.assign(n_expert, true);
++        }
++
+         st.ids = ids;
+     }
+ 
+     // group consecutive experts and copy them together
+     for (int64_t first = 0; first < n_expert; ) {
+         if (!st.used[first]) {
+             first++;
+             continue;
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 9f3b5d487b..4f058a2779 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -11,16 +11,17 @@
+ 
+ #include "ggml-cpp.h"
+ #include "ggml-opt.h"
+ 
+ #include <array>
+ #include <atomic>
+ #include <map>
+ #include <vector>
++#include <unordered_set>
+ 
+ struct llama_model;
+ class llama_batch_allocr;
+ class llama_moe_cache;
+ 
+ class llama_io_read_i;
+ class llama_io_write_i;
+ 
+@@ -431,20 +432,25 @@ private:
+     bool graph_has_logits = true;
+ 
+     // state of sched_copy_experts, reset before each graph compute
+     struct copy_experts_info {
+         const ggml_tensor *  ids = nullptr;
+         std::vector<int32_t> ids_data;
+         std::vector<bool>    used;
+ 
++        // device copies of expert weights read by more than one MUL_MAT_ID of the graph (e.g. the looped layers of
++        // Inkling): the scheduler uploads a weight once per graph, so all of its experts are needed
++        std::unordered_set<const ggml_tensor *> shared;
++
+         void reset() {
+             ids = nullptr;
+             ids_data.clear();
+             used.clear();
++            shared.clear();
+         }
+     };
+ 
+     copy_experts_info copy_experts;
+ 
+     // graph reallocations during inference where the backend assignments did not change, split by whether the
+     // graph size is the same as the previously scheduled one (unexpected) or different
+     int32_t n_reallocs_same = 0;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 716aabb92b..922177394f 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -4828,22 +4828,31 @@ ggml_tensor * llm_graph_context::build_attn(
+     const auto & attn_mask = is_swa ? inp_attn->self_attn_mask_swa : inp_attn->self_attn_mask;
+ 
+     // TODO: support kv_rows - fill the distances over the kv_rows cell lists and pass the rows to build_attn_mha,
+     //       needs a kv_rows flash attention with a per-head mask (CUDA has none)
+     GGML_ASSERT(attn_mask.rows == nullptr);
+ 
+     // a mask per head, in the dense layout of the input mask, which flash attention takes in F16
+     ggml_tensor * kq_mask = attn_mask.raw;
+-    if (kq_mask->type != GGML_TYPE_F32) {
+-        kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F32);
+-    }
+-    kq_mask = ggml_add(ctx0, kq_b, kq_mask);
+-    if (cparams.flash_attn) {
+-        kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
++    if (kq_b->type == GGML_TYPE_F16 && kq_mask->type == GGML_TYPE_F16) {
++        // both already F16 (flash attention): the mask holds 0/-inf, so adding in F16 equals adding in F32 and rounding
++        kq_mask = ggml_add(ctx0, kq_b, kq_mask);
++    } else {
++        // mixed types: ADD needs matching types, so both go to F32
++        if (kq_b->type != GGML_TYPE_F32) {
++            kq_b = ggml_cast(ctx0, kq_b, GGML_TYPE_F32);
++        }
++        if (kq_mask->type != GGML_TYPE_F32) {
++            kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F32);
++        }
++        kq_mask = ggml_add(ctx0, kq_b, kq_mask);
++        if (cparams.flash_attn) {
++            kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
++        }
+     }
+     cb(kq_mask, "kq_mask_rel_pos", il);
+ 
+     return build_attn_iswa_impl(*this, inp_attn, wo, wo_b, wo_s, q_cur, k_cur, v_cur, nullptr, kq_mask, nullptr, sinks, nullptr, kq_scale, il);
+ }
+ 
+ void llm_graph_context::build_dense_out(
+     ggml_tensor * dense_2,
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index c5dfe55498..74f6e7640d 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2178,17 +2178,23 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+ 
+     // load tensor data
+     for (auto & [ctx, bufs] : ctx_bufs) {
+         if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
+             return false;
+         }
+     }
+ 
+-    llama_tosh_dmoe_init(layers, hparams);
++    if (arch == LLM_ARCH_INKLING2_LOOP) {
++        // Dynamic MoE gave a wrong output on a looped model (checked on a Radeon VII, the plan chose full host Dynamic MoE),
++        // where the layers of the core are the same expert tensors once per pass; off until that is understood
++        llama_tosh_dmoe_unsupported("the looped layers of inkling2_loop share their experts across passes");
++    } else {
++        llama_tosh_dmoe_init(layers, hparams);
++    }
+ 
+     if (use_mmap_buffer) {
+         for (auto & mapping : ml.mappings) {
+             pimpl->mappings.emplace_back(std::move(mapping));
+         }
+     }
+ 
+     load_tensors_hadamard();
+diff --git a/src/llama-tosh-dmoe.cpp b/src/llama-tosh-dmoe.cpp
+index 56f85f7420..4fa7384670 100644
+--- a/src/llama-tosh-dmoe.cpp
++++ b/src/llama-tosh-dmoe.cpp
+@@ -46,16 +46,17 @@ const llama_tosh_dmoe_layer * llama_tosh_dmoe_layer_of(const ggml_tensor * gate_
+     }
+     const auto it = g_layers.find(gate_exps);
+     return it == g_layers.end() ? nullptr : &it->second;
+ }
+ 
+ #ifndef TOSH_ENABLE_DYNAMIC_MOE
+ 
+ void llama_tosh_dmoe_init(std::vector<llama_layer> &, const llama_hparams &) {}
++void llama_tosh_dmoe_unsupported(const char *) {}
+ bool llama_tosh_dmoe_budget_pending() { return false; }
+ void llama_tosh_dmoe_budget(size_t) {}
+ bool llama_tosh_dmoe_rebudget_possible() { return false; }
+ void llama_tosh_dmoe_context_opened() {}
+ void llama_tosh_dmoe_context_closed() {}
+ void llama_tosh_dmoe_shutdown() {}
+ bool llama_tosh_dmoe_observe_prefill() { return false; }
+ bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer *, int, float, float, bool, bool) { return false; }
+@@ -1720,16 +1721,27 @@ void llama_tosh_dmoe_init(std::vector<llama_layer> & layers, const llama_hparams
+     if (path == nullptr && strcmp(cache_mib, "auto") == 0) {
+         g_defer_layers  = &layers;
+         g_defer_hparams = &hparams;
+         return;
+     }
+     dmoe_init_or_off(layers, hparams, path, cache_mib ? atof(cache_mib) : 0.0);
+ }
+ 
++void llama_tosh_dmoe_unsupported(const char * why) {
++    if (getenv("TOSH_DMOE_RESIDENCY") == nullptr && getenv("TOSH_DMOE_CACHE_MIB") == nullptr) {
++        return;
++    }
++    if (tosh_hostcache_on()) {
++        throw std::runtime_error(std::string("DMOE_UNSUPPORTED_MODEL: ") + why);
++    }
++    LLAMA_LOG_WARN("%s: mixed expert execution stays off: %s\n", __func__, why);
++    dmoe_status(false, "DMOE_UNSUPPORTED_MODEL", why, 0.0);
++}
++
+ bool llama_tosh_dmoe_budget_pending() {
+     return g_defer_layers != nullptr && g_exec == nullptr;
+ }
+ 
+ // an automatic arena is sized again when a context with another footprint is created alone
+ static std::vector<llama_layer> * g_auto_layers  = nullptr;
+ static const llama_hparams *      g_auto_hparams = nullptr;
+ static int                        g_contexts     = 0;
+diff --git a/src/llama-tosh-dmoe.h b/src/llama-tosh-dmoe.h
+index 2ae3adf062..acc7884888 100644
+--- a/src/llama-tosh-dmoe.h
++++ b/src/llama-tosh-dmoe.h
+@@ -18,16 +18,20 @@ struct llama_tosh_dmoe_layer {
+     ggml_tensor * residency  = nullptr; // [n_expert] i32, slot or -1
+ 
+     int n_slots = 0;
+ };
+ 
+ // Enabled by TOSH_DMOE_RESIDENCY=<file of "layer expert" lines>. No-op otherwise.
+ void llama_tosh_dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & hparams);
+ 
++// Dynamic MoE is not available for this model: it stays off and the status file says why when it was requested.
++// With a bounded host cache there is no model without it, so that load fails like any other unsupported model.
++void llama_tosh_dmoe_unsupported(const char * why);
++
+ // Whether the host executor can run this layer's experts: act 0 is silu, 1 swiglu_oai(alpha, limit), 2 gelu,
+ // and the gate/up biases the graph adds must be the ones copied at load.
+ bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer * dl, int act, float alpha, float limit, bool gate_b, bool up_b);
+ 
+ // Whether wide batches report their routing to the residency policy.
+ bool llama_tosh_dmoe_observe_prefill();
+ 
+ // Wide batches: experts routed to at most this many rows of the chunk and not resident run on
+diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
+index 3e43ef4184..6af5f8be32 100644
+--- a/src/models/inkling2.cpp
++++ b/src/models/inkling2.cpp
+@@ -1,12 +1,33 @@
++#include <algorithm>
++#include <cstdlib>
++#include <cstring>
+ #include "models.h"
+ #include "../llama-memory-hybrid-iswa.h"
+ 
++// the Metal backend on a 64-lane GPU (AMD GCN/Vega) does not run a mul_mat with few columns, which would put whole
++// layers on the CPU; the graph below avoids those shapes only there, every other device keeps the plain form.
++// the width is measured by the Metal backend when it opens the device, see ggml-metal-device.m
++static bool inkling2_wave64() {
++    const char * simd_width = getenv("TOSH_METAL_SIMD_WIDTH");
++    return simd_width != nullptr && strcmp(simd_width, "64") == 0;
++}
++
+ void llama_model_inkling2::load_arch_hparams(llama_model_loader & ml) {
++    // an early looped GGUF layout (arch inkling2 with num_loops and loop.core_start/core_end, every pass listed in block_count)
++    // is not the inkling2_loop layout: its loop tensors are named differently, so say so instead of failing on a missing blk.N
++    uint32_t n_loops = 0;
++    if (arch == LLM_ARCH_INKLING2 && ml.get_key(LLM_KV_NUM_LOOPS, n_loops, false)) {
++        throw std::runtime_error(format(
++                "inkling2: this file stores a looped model (num_loops = %u) in a layout that is not supported; "
++                "use an inkling2_loop file (loop.start, loop.end and loop.count keys, only the physical blocks in block_count), "
++                "for example the Unsloth Inkling-2-Mini GGUFs from the repository root or from Mainline_Support/, not from Old_Support/", n_loops));
++    }
++
+     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+     ml.get_key(LLM_KV_ATTENTION_QK_CLIP,           hparams.f_qk_clip);
+     ml.get_key(LLM_KV_ATTN_RES_BLOCK_SIZE,         hparams.attn_res_block_size);
+     ml.get_key(LLM_KV_SHORTCONV_L_CACHE,           hparams.n_shortconv_l_cache);
+ 
+     // relative-position bias, and the log-scaled positions of the full-attention layers
+     ml.get_key(LLM_KV_ATTENTION_RELATIVE_LENGTH, hparams.n_relative);
+     ml.get_key(LLM_KV_ATTENTION_RELATIVE_EXTENT, hparams.n_relative_extent);
+@@ -182,17 +203,30 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *>
+     }
+     states = ggml_rms_norm(ctx0, states, 1e-6f);
+ 
+     ggml_tensor * queries = ggml_repeat(ctx0, query, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd, query->ne[1], n_tokens));
+ 
+     ggml_tensor * scores = ggml_mul_mat(ctx0, states, queries);
+     scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f/sqrtf(n_embd), 0.0f);
+ 
+-    return ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, states)), scores);
++    if (!inkling2_wave64()) {
++        return ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, states)), scores);
++    }
++
++    // weighted sum over the blocks as mul + sum_rows, one query at a time: a mul_mat with so few columns (n_blocks)
++    // is not run by the wave64 Metal backend and forces a CPU split in every layer
++    ggml_tensor * out = nullptr;
++    for (int64_t q = 0; q < scores->ne[1]; ++q) {
++        ggml_tensor * sq = ggml_view_3d(ctx0, scores, 1, scores->ne[0], n_tokens, scores->nb[0], scores->nb[2], q*scores->nb[1]);
++        ggml_tensor * w  = ggml_sum_rows(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, ggml_mul(ctx0, states, sq))));
++        w = ggml_reshape_3d(ctx0, w, n_embd, 1, n_tokens);
++        out = out ? ggml_concat(ctx0, out, w, 1) : w;
++    }
++    return out;
+ }
+ 
+ // causal short convolution with a residual; dynamic adds input-dependent taps per head
+ // the last n_conv - 1 inputs of each sequence live in the recurrent state at channel offset `offset`
+ ggml_tensor * llama_model_inkling2::graph::convolve(
+         ggml_tensor * cur,
+         ggml_tensor * weight,
+         ggml_tensor * dynamic,
+@@ -349,25 +383,37 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+         ggml_tensor * rel_pos = is_swa ? inp->self_rel_pos_swa : inp->self_rel_pos;
+ 
+         const int64_t n_stream = (is_swa ? attn->self_attn_mask_swa.raw : attn->self_attn_mask.raw)->ne[3];
+         const int64_t n_kv     = rel_pos->ne[0];
+ 
+         ggml_tensor * sinks = build_lora_mm(layer.attn_sink_proj, inputs[0]);
+ 
+         // project r on the bias table first, then gather by distance: only the gathered bias is n_kv x n_tokens x n_head
+-        ggml_tensor * table = ggml_mul_mat(ctx0, ggml_pad(ctx0, layer.attn_rel_bias, 0, 1, 0, 0), Rcur);
++        // on a wave64 device both operands are zero-padded to 64 columns: the Metal backend does not run a mul_mat with fewer
++        // (n_relative is 16), which would put the whole layer's bias projection on the CPU
++        // (other devices keep the plain mul_mat on the table padded by one row)
++        const int64_t n_pad = inkling2_wave64() ? std::max<int64_t>(0, 64 - hparams.n_relative) : 0;
++        ggml_tensor * table = ggml_mul_mat(ctx0,
++                ggml_pad(ctx0, layer.attn_rel_bias, n_pad, 1, 0, 0),
++                n_pad > 0 ? ggml_pad(ctx0, Rcur, n_pad, 0, 0, 0) : Rcur);
+ 
+         // the sink logit t is per query: exp(s - t)/(1 + sum(exp(s - t))) = exp(s)/(exp(t) + sum(exp(s))), with a zero sink
+         table = ggml_sub(ctx0, table, ggml_reshape_3d(ctx0, sinks, 1, n_head, n_tokens));
+         table = ggml_cont(ctx0, ggml_permute(ctx0, table, 1, 0, 2, 3));
+ 
+         ggml_tensor * kq_b = ggml_get_rows(ctx0, table, rel_pos);
+         kq_b = ggml_reshape_4d(ctx0, kq_b, n_head, n_kv, n_tokens/n_stream, n_stream);
+-        kq_b = ggml_cont(ctx0, ggml_permute(ctx0, kq_b, 2, 0, 1, 3));
++        // with flash attention the bias is folded into an F16 mask: convert while permuting (a strided copy), so the
++        // permuted F32 copy of the whole n_kv x n_tokens x n_head bias is never materialized
++        // this saving (~416 MiB of compute buffer) only exists with flash attention (on wave64 Metal: TOSH_FA_AMD=1);
++        // without it the bias stays F32. the projected rows are clamped by attn_rel_clip (see clip() above), which
++        // keeps the bias small for the F16 add; not proven to be bounded for arbitrary weights, only checked by PPL/output
++        kq_b = cparams.flash_attn ? ggml_cast(ctx0, ggml_permute(ctx0, kq_b, 2, 0, 1, 3), GGML_TYPE_F16)
++                                  : ggml_cont(ctx0, ggml_permute(ctx0, kq_b, 2, 0, 1, 3));
+         cb(kq_b, "kq_b", il);
+ 
+         sinks = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_head), 0.0f);
+ 
+         cur = build_attn(inp,
+                 nullptr, nullptr, nullptr,
+                 Qcur, Kcur, Vcur, kq_b, sinks, 1.0f/sqrtf(n_embd_head), il);
+ 
