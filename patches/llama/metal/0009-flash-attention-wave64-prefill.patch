@@ -43,13 +43,13 @@ index 8773f14d7..cff6be5c7 100644
      X(SOFTMAX,         softmax)        \
      X(NORM,            norm)           \
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index ea6b2a85b..14e57b0e9 100644
+index e0af52f9d..8099b153d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4033,42 +4033,109 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
-         // MLA keeps K wider than V; the tile kernel it used to fall back to measures ~26% slower
-         static const bool pfmla = TOSH_ENV("TOSH_FA_PF_MLA_DISABLE") == nullptr;
-         const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
+@@ -4035,42 +4035,109 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         // wave32 cards take the dk512 kernel by default; wave64 has not been measured with it
+         const bool fa_pf_512 = ne00 == 512 && ne00 == ne20 && TOSH_ENV("TOSH_FA_PF_DK512_DISABLE") == nullptr &&
+                                (pf512 || (props_dev->simd_width == 32 && !props_dev->has_unified_memory));
          const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
                                 op->src[2]->type == GGML_TYPE_F16;
          const bool fa_pf_mla320 = ne00 == 320 && ne20 == 256 && op->src[1]->type == op->src[2]->type;

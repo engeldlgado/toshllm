@@ -55,7 +55,7 @@ index e44e3d3cc..8773f14d7 100644
                  !(op->src[1]->ne[0] == 192 && op->src[2]->ne[0] == 128) &&
                  !(op->src[1]->ne[0] == 320 && op->src[2]->ne[0] == 256) &&
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index cfe0b5dcb..ea6b2a85b 100644
+index cfe0b5dcb..e0af52f9d 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -9,16 +9,18 @@
@@ -161,7 +161,7 @@ index cfe0b5dcb..ea6b2a85b 100644
          : props_dev->wave64_decode;
      if (TOSH_ENV("TOSH_FA_AMD") != NULL && fa_amd_pipeline[0] != '\0' &&
          !props_dev->has_simdgroup_mm && fa_amd_width_ok &&
-@@ -3981,32 +4025,59 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -3981,32 +4025,61 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              /*.m1            =*/ m1,
              /*.n_head_log2   =*/ n_head_log2,
              /*.logit_softcap =*/ logit_softcap,
@@ -172,7 +172,9 @@ index cfe0b5dcb..ea6b2a85b 100644
          static const bool pf512 = TOSH_ENV("TOSH_FA_PF_DK512") != nullptr;
 +        // MLA keeps K wider than V; the tile kernel it used to fall back to measures ~26% slower
          static const bool pfmla = TOSH_ENV("TOSH_FA_PF_MLA_DISABLE") == nullptr;
-+        const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
++        // wave32 cards take the dk512 kernel by default; wave64 has not been measured with it
++        const bool fa_pf_512 = ne00 == 512 && ne00 == ne20 && TOSH_ENV("TOSH_FA_PF_DK512_DISABLE") == nullptr &&
++                               (pf512 || (props_dev->simd_width == 32 && !props_dev->has_unified_memory));
 +        const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
 +                               op->src[2]->type == GGML_TYPE_F16;
 +        const bool fa_pf_mla320 = ne00 == 320 && ne20 == 256 && op->src[1]->type == op->src[2]->type;
@@ -221,7 +223,7 @@ index cfe0b5dcb..ea6b2a85b 100644
                  ggml_metal_encoder_set_buffer  (enc, bid_dst,  7);
  
                  ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + fa_pf_bq - 1)/fa_pf_bq, ne02, ne03,
-@@ -4015,30 +4086,57 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4015,30 +4088,57 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
                  return 1;
              }
          }
@@ -279,7 +281,7 @@ index cfe0b5dcb..ea6b2a85b 100644
          }
          // the simdgroup count per head was never swept on either width; the pipeline caps it,
          // so an override that overruns is dropped below rather than dispatched
-@@ -4061,35 +4159,63 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4061,35 +4161,63 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              fa_amd_nsg = nsg_env;
          }
  

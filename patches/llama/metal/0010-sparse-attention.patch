@@ -193,7 +193,7 @@ index edd3dedc8..fe79b99bd 100644
      uint64_t nb32;
      uint64_t nb33;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index 14e57b0e9..38c623b13 100644
+index 8099b153d..ceb750a26 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -1445,16 +1445,32 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
@@ -305,10 +305,10 @@ index 14e57b0e9..38c623b13 100644
          static const bool pf512 = TOSH_ENV("TOSH_FA_PF_DK512") != nullptr;
          // MLA keeps K wider than V; the tile kernel it used to fall back to measures ~26% slower
          static const bool pfmla = TOSH_ENV("TOSH_FA_PF_MLA_DISABLE") == nullptr;
-         const bool fa_pf_512 = pf512 && ne00 == 512 && ne00 == ne20;
-         const bool fa_pf_mla = pfmla && ne00 == 576 && ne20 == 512 &&
-                                op->src[2]->type == GGML_TYPE_F16;
-@@ -4252,16 +4277,51 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+         // wave32 cards take the dk512 kernel by default; wave64 has not been measured with it
+         const bool fa_pf_512 = ne00 == 512 && ne00 == ne20 && TOSH_ENV("TOSH_FA_PF_DK512_DISABLE") == nullptr &&
+                                (pf512 || (props_dev->simd_width == 32 && !props_dev->has_unified_memory));
+@@ -4254,16 +4279,51 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              (props_dev->simd_width == 32 || props_dev->simd_width == 64) &&
              (wg_dk128 || ne11 >= 1024) &&
              TOSH_ENV("TOSH_FA_WG_DISABLE") == NULL ? 32 : 1;
@@ -360,7 +360,7 @@ index 14e57b0e9..38c623b13 100644
              char lds_pipeline[112];
              snprintf(lds_pipeline, sizeof(lds_pipeline), "%s_lds32", fa_amd_nwg > 1 ? fa_amd_wg_pipeline : fa_amd_pipeline);
              auto lds = ggml_metal_fa_amd_pipeline(lib, lds_pipeline);
-@@ -4287,16 +4347,18 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4289,16 +4349,18 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
          ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
          ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
          ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
@@ -379,7 +379,7 @@ index 14e57b0e9..38c623b13 100644
              ggml_metal_kargs_flash_attn_ext_vec_reduce args0 = { (int32_t) (ne1*ne2*ne3) };
  
              auto pipeline0 = ggml_metal_library_get_pipeline_flash_attn_ext_vec_reduce(lib, op, ne20, fa_amd_nwg);
-@@ -4802,17 +4864,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
+@@ -4804,17 +4866,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
              auto pipeline0 = ggml_metal_library_get_pipeline_flash_attn_ext_vec_idx(lib, op);
  
              ggml_metal_encoder_set_pipeline(enc, pipeline0);
