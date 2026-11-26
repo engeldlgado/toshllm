@@ -19,6 +19,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 - **MCP: importing a remote server's configuration keeps its headers (#189),** so a server that needs an `Authorization` header connects instead of failing with 401. Contributed by [andruwa13](https://github.com/andruwa13) in [#190](https://github.com/engeldlgado/toshllm/pull/190).
 - **LLMs on Polaris and Vega cards: a model with F8 or TQ weights no longer aborts while reading the prompt;** what those cards have no kernel for runs on the CPU. Contributed by [andruwa13](https://github.com/andruwa13) in [#173](https://github.com/engeldlgado/toshllm/pull/173).
 - **LLMs on Polaris and Vega cards: Dynamic MoE leaves room for the gate and up experts the card fuses (#187),** so the bounded mode no longer fails at start and mixed execution no longer turns itself off. Contributed by [andruwa13](https://github.com/andruwa13) in [#188](https://github.com/engeldlgado/toshllm/pull/188).
+- **LLMs: Dynamic MoE no longer crashes the engine when one layer's experts are in a format the card can't multiply in a batch, such as NVFP4;** that layer stays on the CPU. Models whose layers share their experts, like Inkling 2, now answer correctly with it, though the automatic plan keeps them on the classic split, which measured twice as fast.
 - **Ukrainian: clearer wording for prompt processing, voice detection and multi-GPU settings.** Contributed by [andruwa13](https://github.com/andruwa13) in [#186](https://github.com/engeldlgado/toshllm/pull/186).
 
 ## [0.88.1] - 2026-11-24
