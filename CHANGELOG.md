@@ -8,7 +8,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 
 - **Chat: a button reads an answer aloud with the Mac's own voices (#176).** It picks the best installed voice for the answer's language, leaves out the reasoning, code and link addresses, and stops when the chat it belongs to is left. Contributed by [andruwa13](https://github.com/andruwa13) in [#185](https://github.com/engeldlgado/toshllm/pull/185).
-- **LLMs: Inkling 2 models load and run (#174),** from files in the looped layout (the repository root or `Mainline_Support/` in Unsloth's repos). Dynamic MoE stays off for them, and a file in the old layout is named as such instead of looking damaged. Replies still end with a visible `<|end_message|>` (#183). Contributed by [eliasMan](https://github.com/eliasMan) in [#182](https://github.com/engeldlgado/toshllm/pull/182).
+- **LLMs: Inkling 2 models load and run (#174),** from files in the looped layout (the repository root or `Mainline_Support/` in Unsloth's repos). The automatic plan loads a file whole when it fits on the card, and otherwise moves the layers its passes don't repeat to the CPU first; experts stored in NVFP4 run on the CPU, since the card has no kernel for them. Dynamic MoE stays off for them, and a file in the old layout is named as such instead of looking damaged. Replies still end with a visible `<|end_message|>` (#183). Contributed by [eliasMan](https://github.com/eliasMan) in [#182](https://github.com/engeldlgado/toshllm/pull/182).
 
 ### Improved
 
