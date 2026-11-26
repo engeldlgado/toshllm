@@ -1,8 +1,8 @@
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
-index 1e3e510eb..1d4caf3d0 100644
+index 1e3e510eb..7ea5dbef0 100644
 --- a/common/tosh-plan.cpp
 +++ b/common/tosh-plan.cpp
-@@ -64,16 +64,19 @@ struct moe_info {
+@@ -64,16 +64,20 @@ struct moe_info {
      // the RAM cache keeps one pool per expert size and each must hold a whole layer
      double warm_floor_mib = 0;
      // sliding-window cache of one sequence per cache element size: what a context checkpoint holds
@@ -14,6 +14,7 @@ index 1e3e510eb..1d4caf3d0 100644
 +    // passes over the same layers share their expert banks: mixed execution keeps one arena per pass,
 +    // and measured slower than the classic split
 +    bool   looped    = false;
++    int    loop_start = 0, loop_end = 0; // the layers the passes repeat
      std::string error;          // the model's metadata could not be read completely
  };
  
@@ -22,7 +23,7 @@ index 1e3e510eb..1d4caf3d0 100644
      double wired_mib      = 0;
      double wire_limit_mib = 0;
      double available_mib  = 0;   // what the system can hand out now without compressing or swapping
-@@ -125,16 +128,17 @@ moe_info read_moe_info(const char * path, llama_lazy_mode lazy) {
+@@ -125,16 +129,21 @@ moe_info read_moe_info(const char * path, llama_lazy_mode lazy) {
          return id < 0 ? 0 : (int) gguf_get_val_u32(g, id);
      };
      const int64_t aid = gguf_find_key(g, "general.architecture");
@@ -32,6 +33,10 @@ index 1e3e510eb..1d4caf3d0 100644
      mi.n_used      = get_u32(arch + ".expert_used_count");
      mi.n_ctx_train = get_u32(arch + ".context_length");
 +    mi.looped      = get_u32(arch + ".loop.count") > 1;
++    if (mi.looped) {
++        mi.loop_start = get_u32(arch + ".loop.start");
++        mi.loop_end   = get_u32(arch + ".loop.end");
++    }
      // sliding-window layers: heads x (key + value) per token, over the window
      auto u32_or = [&](const std::string & k, int d) { const int64_t id = gguf_find_key(g, k.c_str()); return id < 0 ? d : (int) gguf_get_val_u32(g, id); };
      mi.n_swa = u32_or(arch + ".attention.sliding_window", 0);
@@ -40,7 +45,39 @@ index 1e3e510eb..1d4caf3d0 100644
          const int64_t pid = gguf_find_key(g, (arch + ".attention.sliding_window_pattern").c_str());
          const int kl = u32_or(arch + ".attention.key_length_swa", u32_or(arch + ".attention.key_length", 128));
          const int vl = u32_or(arch + ".attention.value_length_swa", u32_or(arch + ".attention.value_length", 128));
-@@ -666,21 +670,22 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -347,16 +356,31 @@ std::list<std::string> & pattern_store() {
+     return s;
+ }
+ 
+ const char * experts_pattern() {
+     // weights only: expert biases are small and stay next to the ops that add them
+     return "\\.ffn_(up|down|gate|gate_up)_exps\\.weight$";
+ }
+ 
++// the layers whose experts the classic split moves to the host, in order: a looped model moves the layers its passes
++// repeat last, since their experts are read once per pass
++std::vector<int> host_expert_layers(const moe_info & mi) {
++    std::vector<int> order;
++    for (int pass = 0; pass < 2; ++pass) {
++        for (int il = 0; il < mi.n_layer; ++il) {
++            const bool repeated = mi.looped && il >= mi.loop_start && il < mi.loop_end;
++            if (repeated == (pass == 1)) {
++                order.push_back(il);
++            }
++        }
++    }
++    return order;
++}
++
+ probe run_probe(const common_params & params, int n_ctx, ggml_type kv, int ub, bool experts_on_host, int ncmoe) {
+     probe p;
+     llama_model_params   mp = common_model_params_to_llama(const_cast<common_params &>(params));
+     llama_context_params cp = common_context_params_to_llama(params);
+     mp.n_gpu_layers = 999;
+     // repacked weights are not host memory the executor or the scheduler's uploads can read
+     mp.use_extra_bufts = !(experts_on_host || ncmoe > 0) && mp.use_extra_bufts;
+     std::vector<llama_model_tensor_buft_override> ov;
+@@ -666,21 +690,22 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
          return false;
      }
      if (getenv("TOSH_DMOE_CACHE_MIB") != nullptr || getenv("TOSH_DMOE_RESIDENCY") != nullptr) {
@@ -64,6 +101,100 @@ index 1e3e510eb..1d4caf3d0 100644
          p.limits = { "SPLIT_GGUF_METADATA_ERROR", "NO_SAFE_FALLBACK" };
          p.reason = mi.error;
          plan_emit(p);
+@@ -732,25 +757,30 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+     const int ubs[3] = { 512, 1024, 2048 };
+     const int ub_full = params.n_ubatch;
+     probe dm[4][4];
+     bool dmoe_built = false;
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+     dmoe_built = true;
+ #endif
+     std::vector<std::pair<ggml_type, probe>> full;
++    std::vector<probe> full_gpu;
+     auto probe_kv = [&](size_t k) {
+         for (int u = 0; u < 3; ++u) dm[k][u] = run_probe(params, p.n_ctx, kvs[k], ubs[u], true, 0);
+         int uf = -1;
+         for (int u = 0; u < 3; ++u) if (ubs[u] == ub_full) uf = u;
+         const probe pf = uf >= 0 ? dm[k][uf] : (dm[k][3] = run_probe(params, p.n_ctx, kvs[k], ub_full, true, 0));
+         probe f = pf;
+         f.model += mi.bank_mib;
+         f.host_model = std::max(0.0, f.host_model - mi.bank_mib);
+         full.push_back({ kvs[k], f });
++        // with the experts on the host the GPU holds a copy of each repeated layer's experts until its last pass,
++        // so the whole model on the GPU is measured as it is
++        full_gpu.push_back(mi.looped ? run_probe(params, p.n_ctx, kvs[k], ub_full, false, 0) : f);
++        if (!full_gpu.back().ok) full_gpu.back() = f;
+     };
+     for (size_t k = 0; k < kvs.size(); ++k) probe_kv(k);
+     bool turbo_probed = false;
+     if (!read_vram(p.vram_free_mib, p.vram_total_mib)) {
+         LOG_WRN("%s: no GPU memory reading, planning off\n", __func__);
+         return false;
+     }
+     // every weight the probe left in host memory besides the bank and what is read lazily
+@@ -854,17 +884,19 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+                why.find("LOCK_LIMIT") != std::string::npos ? "WIRE_LIMIT" :
+                why.find("STRUCTURAL_WARM") != std::string::npos ? "STRUCTURAL_WARM_TOO_SMALL" :
+                why.find("COVERAGE") != std::string::npos ? "COVERAGE_TOO_LOW" :
+                why.find("PRESSURE") != std::string::npos ? "HOST_MEMORY_PRESSURE_HIGH" : "CURRENT_RAM_LIMIT";
+     };
+     auto evaluate = [&](double R) {
+         p.candidates.clear();
+         p.reserve_mib = R;
+-        for (auto & [kv, pr] : full) {
++        for (size_t k = 0; k < full.size(); ++k) {
++            const ggml_type kv = full[k].first;
++            const probe & pr = full_gpu[k];
+             tosh_plan_candidate c;
+             c.name = std::string("full_gpu+") + kv_name(kv); c.mode = "full_gpu"; c.kv = kv; c.ubatch = ub_full;
+             c.private_mib = pr.model + pr.context + pr.compute;
+             c.free_mib    = p.vram_free_mib - c.private_mib;
+             c.kv_mib = pr.context; c.compute_mib = pr.compute;
+             c.valid  = pr.ok && c.free_mib >= R;
+             c.need_vram_mib = c.private_mib + R; c.need_host_mib = host_engine;
+             c.reason = !pr.ok ? "probe failed" : c.valid ? "fits with the reserve" :
+@@ -901,17 +933,18 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+             }
+         }
+         // legacy: the fewest layers of experts on the host that leave the reserve
+         for (auto & [kv, pr] : full) {
+             tosh_plan_candidate c;
+             c.name = std::string("legacy+") + kv_name(kv); c.mode = "legacy_offload"; c.kv = kv; c.ubatch = ub_full;
+             const double per_layer = mi.bank_mib/std::max(1, mi.n_moe);
+             const double full_priv = pr.model + pr.context + pr.compute;
+-            for (int n = 1; n <= mi.n_layer && pr.ok; ++n) {
++            const int max_host = (int) host_expert_layers(mi).size();
++            for (int n = 1; n <= max_host && pr.ok; ++n) {
+                 const double priv = full_priv - n*per_layer + legacy_slots;
+                 if (p.vram_free_mib - priv >= R) {
+                     c.ncmoe = n; c.private_mib = priv; c.free_mib = p.vram_free_mib - priv; c.valid = true;
+                     break;
+                 }
+             }
+             c.kv_mib = pr.context; c.compute_mib = pr.compute;
+             const double host_legacy = mi.bank_mib*c.ncmoe/std::max(1, mi.n_moe) + p.host_weights_mib + 1024.0;
+@@ -1268,18 +1301,19 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+             }
+         }
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+         tosh_dmoe_enable();
+ #endif
+     } else if (p.mode == "legacy_offload") {
+         // the host share is sized as anonymous memory, as with the expert bank
+         if (params.load_mode == LLAMA_LOAD_MODE_AUTO) params.load_mode = LLAMA_LOAD_MODE_NONE;
+-        for (int i = 0; i < p.ncmoe; ++i) {
+-            pattern_store().push_back(llm_ffn_block_regex(i, LLM_FFN_EXPS_REGEX));
++        const std::vector<int> order = host_expert_layers(mi);
++        for (int i = 0; i < p.ncmoe && i < (int) order.size(); ++i) {
++            pattern_store().push_back(llm_ffn_block_regex(order[i], LLM_FFN_EXPS_REGEX));
+             add_override(params, pattern_store().back().c_str());
+         }
+         setenv("GGML_SCHED_PREFETCH_EXPERTS", "1", 0);
+         setenv("GGML_CPU_NO_REPACK", "1", 0);
+     }
+     return true;
+ }
+ 
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
 index acff9692c..04af764fb 100644
 --- a/ggml/src/ggml-backend.cpp
