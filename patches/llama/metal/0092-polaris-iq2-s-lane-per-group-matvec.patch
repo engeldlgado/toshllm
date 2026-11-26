@@ -1,0 +1,138 @@
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+index ddf7a7d..6fddaa3 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+@@ -2401,90 +2401,85 @@ void kernel_mul_mv_iq2_s_f32_w64_impl(
+     const int first_row = (r0 * NSG + sgitg) * nr0;
+ 
+     const uint i12 = im%FC_mul_mv_ne12;
+     const uint i13 = im/FC_mul_mv_ne12;
+ 
+     const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
+     const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
+ 
+-    device const block_iq2_s * x = (device const block_iq2_s *) (src0 + offset0);
+-    device const float       * y = (device const float       *) (src1 + offset1);
++    device const char  * x = src0 + offset0;
++    device const float * y = (device const float *) (src1 + offset1);
+ 
+-    // Two lanes share a 32-element block instead of one holding all of it: each keeps half
+-    // the activations, and the halves already carry different scales, so the simdgroup
+-    // reduction at the end adds them without extra work.
+-    // four lanes fill the wave: one group of eight per lane, one grid lookup each
+-    float yl[8];
+     float sumf[nr0]={0.f};
+ 
+     const int nb32 = nb * (QK_K / 32);
+ 
+     // reading the 1024-entry grid straight out of constant memory costs 8 divergent loads per
+     // inner step; staging it once per threadgroup is what iq3_xxs already does
+     threadgroup uint64_t * svalues = (threadgroup uint64_t *)(shmem);
+     {
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         for (int i = gid; i < 1024; i += gsz) svalues[i] = iq2s_grid[i];
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+     }
++    const threadgroup uint2 * grid = (const threadgroup uint2 *) svalues;
+ 
+-    const short ix = tiisg/4;
+-    const short hg = tiisg%4;
+-
+-    device const float * y4 = y + 32 * ix + 8 * hg;
++    // one lane per group of 32 weights: its index bytes, sign bytes, high bits, scales and scale
++    // arrive as seven narrow reads where the eight-weight split spent twenty, and the 32
++    // activations as eight 16-byte reads. Every read stays on a 2-byte boundary: the block is 82 bytes.
++    for (int ib32 = tiisg; ib32 < nb32; ib32 += FC_mul_mv_nw) {
++        const int ibl = ib32 / (QK_K / 32);
++        const int ib  = ib32 % (QK_K / 32);
+ 
+-    for (int ib32 = ix; ib32 < nb32; ib32 += FC_mul_mv_nw/4) {
++        device const float4 * y4 = (device const float4 *) (y + 32 * ib32);
++        float4 yv[8];
+         for (short i = 0; i < 8; ++i) {
+-            yl[i] = y4[i];
++            yv[i] = y4[i];
+         }
+ 
+-        const int ibl = ib32 / (QK_K / 32);
+-        const int ib  = ib32 % (QK_K / 32);
++        for (short row = 0; row < nr0; ++row) {
++            device const block_iq2_s * xr = (device const block_iq2_s *) (x + (uint64_t) row * args.nb01) + ibl;
+ 
+-        device const block_iq2_s * xr = x + ibl;
+-        device const uint8_t * qs = xr->qs + 4 * ib;
+-        device const uint8_t * qh = xr->qh + ib;
+-        device const uint8_t * sc = xr->scales + ib;
+-        device const uint8_t * signs = qs + QK_K/8;
+-        device const half * dh = &xr->d;
++            device const ushort * qs16 = (device const ushort *) (xr->qs + 4 * ib);
++            device const ushort * sg16 = (device const ushort *) (xr->qs + QK_K/8 + 4 * ib);
+ 
+-        for (short row = 0; row < nr0; row++) {
+-            const float db = dh[0];
+-            const float dsc = hg < 2 ? db * (0.5f + (sc[0] & 0xf)) : db * (0.5f + (sc[0] >> 4));
++            const uint  qh = xr->qh[ib];
++            const uint  sc = xr->scales[ib];
++            const float db = float(xr->d);
+ 
+-            float sum = 0.f;
+-            {
+-                const short l = hg;
+-                //const threadgroup uint8_t * grid1 = (const threadgroup uint8_t *)(svalues + (qs[l + 2*hf] | ((qh[0] << (8 - 4*hf - 2*l)) & 0x300)));
+-                //const threadgroup uint8_t * grid2 = (const threadgroup uint8_t *)(svalues + (qs[l+2] | ((qh[0] << (4-2*l)) & 0x300)));
+-                // each grid entry is the eight bytes of this group, so one 64-bit read
+-                // replaces the eight byte reads the loop used to do
+-                // two 32-bit reads: RDNA2 has no native 64-bit shift, so a uint64 extract
+-                // is emulated and costs more than the byte reads it replaces
+-                const threadgroup uint32_t * p1 = (const threadgroup uint32_t *)(svalues + (qs[l] | ((qh[0] << (8 - 2*l)) & 0x300)));
+-                                const uint32_t g1a = p1[0], g1b = p1[1];
+-                const uint8_t s1 = signs[l];
+-                for (short j = 0; j < 8; ++j) {
+-                    const uint32_t w1 = j < 4 ? g1a : g1b;
+-                    const short sh = 8*(j & 3);
+-                    sum += yl[j] * (float)((w1 >> sh) & 0xFF) * select(1, -1, s1 & kmask_iq2xs[j]);
++            const uint q = (uint) qs16[0] | ((uint) qs16[1] << 16);
++            const uint s = (uint) sg16[0] | ((uint) sg16[1] << 16);
++
++            float accA = 0.f;   // weights 0..15, low scale nibble
++            float accB = 0.f;   // weights 16..31, high scale nibble
++
++            for (short k = 0; k < 4; ++k) {
++                const uint  idx = ((q >> (8*k)) & 0xff) | ((qh << (8 - 2*k)) & 0x300);
++                const uint2 g   = grid[idx];
++                const uint  sb  = s >> (8*k);
++
++                const float4 f1 = float4(as_type<uchar4>(g.x));
++                const float4 f2 = float4(as_type<uchar4>(g.y));
++                const uint4  m1 = (uint4(sb)      << uint4(31, 30, 29, 28)) & 0x80000000u;
++                const uint4  m2 = (uint4(sb >> 4) << uint4(31, 30, 29, 28)) & 0x80000000u;
++
++                const float t = dot(as_type<float4>(as_type<uint4>(f1) ^ m1), yv[2*k + 0])
++                              + dot(as_type<float4>(as_type<uint4>(f2) ^ m2), yv[2*k + 1]);
++
++                if (k < 2) {
++                    accA += t;
++                } else {
++                    accB += t;
+                 }
+             }
+-            sumf[row] += dsc * sum;
+ 
+-            dh    += args.nb01/2;
+-            qs    += args.nb01;
+-            qh    += args.nb01;
+-            sc    += args.nb01;
+-            signs += args.nb01;
++            sumf[row] += db * ((0.5f + (sc & 0xf)) * accA + (0.5f + (sc >> 4)) * accB);
+         }
+-
+-        y4 += 8 * FC_mul_mv_nw;
+     }
+ 
+     device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
+ 
+     for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
+         float sum_all = simd_sum(sumf[row]);
+         if (tiisg == 0) {
+             dst_f32[first_row + row] = sum_all * 0.25f;
