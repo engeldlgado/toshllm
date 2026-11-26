@@ -1,5 +1,5 @@
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 3c47f9b..c50126f 100644
+index 3c47f9b14..c50126fac 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -1663,16 +1663,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
@@ -48,7 +48,7 @@ index 3c47f9b..c50126f 100644
                  throw std::invalid_argument(
                      string_format("got %zu input configs, but system only has %zu devices", split_arg.size(), llama_max_devices())
 diff --git a/common/common.cpp b/common/common.cpp
-index a38a24a..20d0909 100644
+index a38a24aae..9ec7f9256 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -1254,19 +1254,19 @@ common_gguf_info common_get_gguf_info(const std::string & fname) {
@@ -73,7 +73,7 @@ index a38a24a..20d0909 100644
      // the draft context is created from the same base params and follows the main context, fit both together
      const bool has_draft = params.speculative.has_dft();
      const bool spec_mtp  = std::find(params.speculative.types.begin(), params.speculative.types.end(),
-@@ -1283,23 +1283,29 @@ void common_fit_apply(common_params & params, llama_model_params & mparams, llam
+@@ -1283,23 +1283,33 @@ void common_fit_apply(common_params & params, llama_model_params & mparams, llam
  
      const common_fit_extra_model extra = {
          /*.paths_model  =*/ params_dft.model.get_paths(),
@@ -95,7 +95,11 @@ index a38a24a..20d0909 100644
 +        params.n_ubatch_explicit,
 +        out_full_ngl);
 +
-+    params.n_ubatch = cparams.n_ubatch;
++    // a resume fits these params again: keep the trimmed size instead of trimming it further
++    if (cparams.n_ubatch != (uint32_t) params.n_ubatch) {
++        params.n_ubatch          = cparams.n_ubatch;
++        params.n_ubatch_explicit = true;
++    }
 +    return status == COMMON_PARAMS_FIT_STATUS_SUCCESS;
  }
  
@@ -106,7 +110,7 @@ index a38a24a..20d0909 100644
          const bool planned = tosh_plan_apply(params, &plan);
          if (!planned && plan.state == TOSH_PLAN_NOT_PLANNED && !params.dynamic_moe && getenv("TOSH_AUTO") == nullptr) {
 diff --git a/common/common.h b/common/common.h
-index e72d4a0..284b82e 100644
+index e72d4a035..284b82ee2 100644
 --- a/common/common.h
 +++ b/common/common.h
 @@ -470,16 +470,17 @@ struct lr_opt {
@@ -168,7 +172,7 @@ index e72d4a0..284b82e 100644
  // model endpoint from env
  std::string common_get_model_endpoint();
 diff --git a/common/fit.cpp b/common/fit.cpp
-index 584776b..7df2e6a 100644
+index 584776b72..7df2e6ae7 100644
 --- a/common/fit.cpp
 +++ b/common/fit.cpp
 @@ -2,16 +2,17 @@
@@ -417,7 +421,7 @@ index 584776b..7df2e6a 100644
          status = COMMON_PARAMS_FIT_STATUS_ERROR;
      }
 diff --git a/common/fit.h b/common/fit.h
-index 431c418..c81d959 100644
+index 431c41836..c81d95983 100644
 --- a/common/fit.h
 +++ b/common/fit.h
 @@ -1,11 +1,12 @@
@@ -479,7 +483,7 @@ index 431c418..c81d959 100644
  
  void common_memory_breakdown_print(const llama_context * ctx);
 diff --git a/tools/fit-params/fit-params.cpp b/tools/fit-params/fit-params.cpp
-index 99082e5..1ae3ad1 100644
+index 99082e51b..1ae3ad19a 100644
 --- a/tools/fit-params/fit-params.cpp
 +++ b/tools/fit-params/fit-params.cpp
 @@ -28,17 +28,18 @@ int llama_fit_params(int argc, char ** argv) {
@@ -503,7 +507,7 @@ index 99082e5..1ae3ad1 100644
          common_log_flush(common_log_main());
          printf("-c %" PRIu32 " -ngl %" PRIi32, cparams.n_ctx, mparams.n_gpu_layers);
 diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
-index 3c7043f..b3daf56 100644
+index 3c7043fa9..b3daf568f 100644
 --- a/tools/llama-bench/llama-bench.cpp
 +++ b/tools/llama-bench/llama-bench.cpp
 @@ -360,17 +360,17 @@ struct cmd_params {

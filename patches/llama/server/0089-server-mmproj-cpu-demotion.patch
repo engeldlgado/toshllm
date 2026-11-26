@@ -1,14 +1,22 @@
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index a41f494..3bb4e32 100644
+index a41f4948f..a482fef0e 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -1338,42 +1338,141 @@ private:
+@@ -1336,44 +1336,151 @@ private:
+         mtmd_memory_usage mmproj_usage = {{}, -1, false};
+         int64_t mmproj_usage_t_us = 0;
          if (has_mmproj) {
              int64_t t_start = ggml_time_us();
              mmproj_usage = mtmd_get_memory_usage(mmproj_path.c_str(), mparams);
              mmproj_usage_t_us = ggml_time_us() - t_start;
          }
  
++        // An image is decoded in one ubatch where the projector attends non-causally, so the
++        // fit must not trim it below an image's tokens.
++        if (has_mmproj) {
++            params_base.n_ubatch_explicit = true;
++        }
++
          // optionally fit mmproj memory usage
          // on resume params_base already holds the margin from the first load
 +        const auto saved_fit_params_target     = params_base.fit_params_target;
@@ -67,8 +75,10 @@ index a41f494..3bb4e32 100644
  
 +        // Only evaluate mmproj CPU demotion on discrete macOS GPUs under -ngl auto (-1), where
 +        // fitting may offload layers and overcommitting VRAM causes severe PCIe spills.
++        // The Dynamic MoE and Auto plans replace this placement when the model loads.
 +        if (mmproj_added_to_fit_target && params_base.mmproj_use_gpu && mmproj_uses_dgpu &&
-+            params_base.n_gpu_layers == llama_model_default_params().n_gpu_layers) {
++            params_base.n_gpu_layers == llama_model_default_params().n_gpu_layers &&
++            !params_base.dynamic_moe && getenv("TOSH_AUTO") == nullptr) {
 +            try {
 +            // First evaluate how LLM fits WITHOUT mmproj taking GPU memory
 +            auto clean_params = params_base;
@@ -117,7 +127,7 @@ index a41f494..3bb4e32 100644
 +            const bool no_gpu_layers          = (mparams_trial.n_gpu_layers == 0);
 +
 +            if (trial_failed || lost_layers || spilled_compute_layers || shrunk_ctx || no_gpu_layers) {
-+                SRV_WRN("[mtmd] GPU mmproj (%.2f MiB) forced LLM layer/ctx offload (%d -> %d layers, %zu -> %zu blk spills) — "
++                SRV_WRN("[mtmd] GPU mmproj (%.2f MiB) forced LLM layer/ctx offload (%d -> %d layers, %zu -> %zu blk spills); "
 +                        "demoting mmproj to CPU to keep LLM on GPU\n",
 +                        mmproj_added_mib, clean_ngl, trial_ngl,
 +                        clean_blk_spills, trial_blk_spills);
