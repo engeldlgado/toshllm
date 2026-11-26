@@ -1335,7 +1335,7 @@
   "Read aloud": "Читати вголос",
   "Read images": "Зчитування зображень",
   "Read, edit, and run.": "Читайте, редагуйте та запускайте.",
-  "Reading": "Обробка промпту",
+  "Reading": "Читання",
   "Reading the model from disk into the GPU.": "Зчитування моделі з диска в GPU.",
   "Reads images: its projector (mmproj) is paired.": "Зчитує зображення: його проєктор (mmproj) підключено.",
   "Reads the folder again.": "Зчитує папку знову.",
