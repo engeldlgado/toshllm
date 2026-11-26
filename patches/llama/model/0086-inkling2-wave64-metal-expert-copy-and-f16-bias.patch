@@ -1,5 +1,71 @@
+diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
+index 1e3e510eb..1d4caf3d0 100644
+--- a/common/tosh-plan.cpp
++++ b/common/tosh-plan.cpp
+@@ -64,16 +64,19 @@ struct moe_info {
+     // the RAM cache keeps one pool per expert size and each must hold a whole layer
+     double warm_floor_mib = 0;
+     // sliding-window cache of one sequence per cache element size: what a context checkpoint holds
+     double swa_elems = 0;
+     int    n_swa     = 0;
+     // recurrent state of one sequence, every recurrent layer: what a hybrid model's checkpoint holds
+     double recr_elems = 0;
+     int    n_split   = 1;
++    // passes over the same layers share their expert banks: mixed execution keeps one arena per pass,
++    // and measured slower than the classic split
++    bool   looped    = false;
+     std::string error;          // the model's metadata could not be read completely
+ };
+ 
+ struct host_mem {
+     double ram_mib        = 0;
+     double wired_mib      = 0;
+     double wire_limit_mib = 0;
+     double available_mib  = 0;   // what the system can hand out now without compressing or swapping
+@@ -125,16 +128,17 @@ moe_info read_moe_info(const char * path, llama_lazy_mode lazy) {
+         return id < 0 ? 0 : (int) gguf_get_val_u32(g, id);
+     };
+     const int64_t aid = gguf_find_key(g, "general.architecture");
+     const std::string arch = aid < 0 ? "" : gguf_get_val_str(g, aid);
+     mi.n_layer     = get_u32(arch + ".block_count");
+     mi.n_expert    = get_u32(arch + ".expert_count");
+     mi.n_used      = get_u32(arch + ".expert_used_count");
+     mi.n_ctx_train = get_u32(arch + ".context_length");
++    mi.looped      = get_u32(arch + ".loop.count") > 1;
+     // sliding-window layers: heads x (key + value) per token, over the window
+     auto u32_or = [&](const std::string & k, int d) { const int64_t id = gguf_find_key(g, k.c_str()); return id < 0 ? d : (int) gguf_get_val_u32(g, id); };
+     mi.n_swa = u32_or(arch + ".attention.sliding_window", 0);
+     if (mi.n_swa > 0 && mi.n_layer > 0) {
+         const int64_t hid = gguf_find_key(g, (arch + ".attention.head_count_kv").c_str());
+         const int64_t pid = gguf_find_key(g, (arch + ".attention.sliding_window_pattern").c_str());
+         const int kl = u32_or(arch + ".attention.key_length_swa", u32_or(arch + ".attention.key_length", 128));
+         const int vl = u32_or(arch + ".attention.value_length_swa", u32_or(arch + ".attention.value_length", 128));
+@@ -666,21 +670,22 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+         return false;
+     }
+     if (getenv("TOSH_DMOE_CACHE_MIB") != nullptr || getenv("TOSH_DMOE_RESIDENCY") != nullptr) {
+         LOG_WRN("%s: TOSH_DMOE_* set by hand, the auto plan steps aside\n", __func__);
+         return false;
+     }
+     std::string force = (strcmp(mode_env, "1") == 0 || strcmp(mode_env, "auto") == 0) ? "" : mode_env;
+     // nodmoe: auto without mixed execution, the retry after the expert bank could not be locked
+-    const bool no_dmoe = force == "nodmoe";
++    bool no_dmoe = force == "nodmoe";
+     if (no_dmoe) force.clear();
+ 
+     tosh_plan p;
+     const moe_info mi = read_moe_info(params.model.path.c_str(), params.lazy_mode);
++    if (mi.looped) no_dmoe = true;
+     p.n_split = mi.n_split; p.model_mib = mi.total_mib; p.warm_floor_mib = mi.warm_floor_mib;
+     if (!mi.error.empty()) {
+         p.state = TOSH_PLAN_UNSUPPORTED; p.mode = "none";
+         p.plan_mode = TOSH_PLAN_MODE_UNSUPPORTED; p.code = tosh_plan_mode_name(p.plan_mode);
+         p.primary_reason = "SPLIT_GGUF_METADATA_ERROR"; p.limiting_resource = "METADATA";
+         p.limits = { "SPLIT_GGUF_METADATA_ERROR", "NO_SAFE_FALLBACK" };
+         p.reason = mi.error;
+         plan_emit(p);
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index acff9692c9..3e9ba92e17 100644
+index acff9692c..04af764fb 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -1291,16 +1291,18 @@ struct ggml_backend_sched {
@@ -51,7 +117,7 @@ index acff9692c9..3e9ba92e17 100644
      }
 +
 +    // the splits only change here, so the shared weights are found once per split graph and not on every compute
-+    if (sched->prefetch_experts) {
++    if (sched->prefetch_experts || tosh_dmoe_compact() || tosh_hostcache_on()) {
 +        ggml_backend_sched_mark_shared_experts(sched);
 +    }
  }
@@ -132,7 +198,34 @@ index acff9692c9..3e9ba92e17 100644
          !ggml_backend_sched_prefetch_init(sched, split_backend, ggml_nbytes(input))) {
          return;
      }
-@@ -2861,16 +2906,17 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
+@@ -2379,17 +2424,25 @@ static bool ggml_backend_sched_copy_experts_tosh(ggml_backend_sched_t sched, str
+     if (ggml_nelements(node->src[2]) == 0) {
+         return true;
+     }
+ 
+     ggml_backend_sched_expert_ids & st = *sched->expert_ids;
+     ggml_backend_t ids_backend;
+     struct ggml_tensor * ids_tensor = ggml_backend_sched_expert_ids_src(sched, split, node, &ids_backend);
+ 
+-    if (ids_tensor != st.prev_ids_tensor) {
++    // a weight read by the MUL_MAT_ID of several splits (the looped layers of Inkling) is copied once for the graph,
++    // and the later splits route to experts not known yet: copy every expert
++    if (sched->split_expert_shared != NULL && sched->split_expert_shared[split - sched->splits]) {
++        st.used_ids.assign(ggml_bitset_size(n_expert), 0);
++        for (int64_t e = 0; e < n_expert; e++) {
++            ggml_bitset_set(st.used_ids.data(), e);
++        }
++        st.prev_ids_tensor = nullptr;
++    } else if (ids_tensor != st.prev_ids_tensor) {
+         st.ids.resize(ggml_nbytes(ids_tensor) / sizeof(int32_t));
+         ggml_backend_tensor_get_async(ids_backend, ids_tensor, st.ids.data(), 0, ggml_nbytes(ids_tensor));
+         ggml_backend_synchronize(ids_backend);
+ 
+         // find the used experts
+         st.used_ids.clear();
+         st.used_ids.resize(ggml_bitset_size(n_expert));
+         for (int64_t i1 = 0; i1 < ids_tensor->ne[1]; i1++) {
+@@ -2861,16 +2914,17 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
      for (int i = 0; i < sched->splits_capacity; i++) {
          free(sched->splits[i].inputs);
      }
@@ -151,7 +244,7 @@ index acff9692c9..3e9ba92e17 100644
      free(sched->graph.leafs);
      free(sched);
 diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
-index c7495d3200..a7e0b76032 100644
+index c7495d320..a7e0b7603 100644
 --- a/src/llama-arch.cpp
 +++ b/src/llama-arch.cpp
 @@ -983,17 +983,17 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
@@ -174,7 +267,7 @@ index c7495d3200..a7e0b76032 100644
      {LLM_TENSOR_ATTN_K_CONV,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
      {LLM_TENSOR_ATTN_V_CONV,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 190a2e9368..d7b26364ba 100644
+index 190a2e936..d7b26364b 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -3295,16 +3295,28 @@ ggml_status llama_context::graph_compute(
@@ -228,7 +321,7 @@ index 190a2e9368..d7b26364ba 100644
              first++;
              continue;
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 9f3b5d487b..4f058a2779 100644
+index 9f3b5d487..4f058a277 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -11,16 +11,17 @@
@@ -276,10 +369,70 @@ index 9f3b5d487b..4f058a2779 100644
      // graph size is the same as the previously scheduled one (unexpected) or different
      int32_t n_reallocs_same = 0;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 716aabb92b..922177394f 100644
+index 716aabb92..595fd4088 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -4828,22 +4828,31 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -2542,29 +2542,54 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     }
+ 
+     ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
+     cb(weights, "ffn_moe_weights", il);
+ 
+     ggml_tensor * expert_ids = selected_experts;
+ 
+     // mixed execution: resident experts run from the VRAM arena, the rest on the host
+-    const llama_tosh_dmoe_layer * dmoe = llama_tosh_dmoe_layer_of(gate_exps ? gate_exps : gate_up_exps);
++    const llama_tosh_dmoe_layer * dmoe = llama_tosh_dmoe_layer_of(gate_exps ? gate_exps : gate_up_exps, il);
+ #ifdef TOSH_ENABLE_DYNAMIC_MOE
+     const llama_tosh_dmoe_layer * dmoe_bank = dmoe;
+     bool dmoe_shape_ok = false;
+     if (dmoe != nullptr) {
+         const bool plain_swiglu = type_op == LLM_FFN_SILU && (il < 0 || hparams.swiglu_clamp_exp[il] <= 1e-6f);
+         const bool oai  = type_op == LLM_FFN_SWIGLU_OAI_MOE;
+         const bool gelu = type_op == LLM_FFN_GELU && (gate_exps || gate_up_exps);
++        const bool situ = type_op == LLM_FFN_SITU && (gate_exps || gate_up_exps);
+         const bool banks_ok = gate_up_exps ? (!up_exps && !gate_up_exps_b) : (up_exps && gate_exps);
+-        dmoe_shape_ok = banks_ok && down_exps && !up_exps_s && !gate_exps_s && !weight_before_ffn &&
+-            (plain_swiglu || oai || gelu) &&
+-            llama_tosh_dmoe_accept(dmoe, oai ? 1 : gelu ? 2 : 0, oai ? 1.702f : 0.0f, oai ? 7.0f : 0.0f,
+-                                   gate_exps_b != nullptr, up_exps_b != nullptr);
++        // the host applies a fused bank's gate/up scale; the down scale is applied after the join
++        const bool scales_ok = !gate_exps_s && (!up_exps_s || gate_up_exps);
++        dmoe_shape_ok = banks_ok && down_exps && scales_ok && !weight_before_ffn &&
++            (plain_swiglu || oai || gelu || situ) &&
++            llama_tosh_dmoe_accept(dmoe, oai ? 1 : gelu ? 2 : situ ? 3 : 0,
++                                   oai ? 1.702f : situ ? hparams.situ_beta : 0.0f,
++                                   oai ? 7.0f : situ ? hparams.situ_linear_beta : 0.0f,
++                                   gate_exps_b != nullptr, up_exps_b != nullptr, up_exps_s);
++        // the join runs on the GPU, so the GPU must multiply every expert bank of the layer at this batch size
++        // (a bank of a type it cannot run stays on the host, and the layer with it)
++        if (dmoe_shape_ok) {
++            ggml_backend_buffer_t buf = dmoe->arena_down->buffer;
++            ggml_backend_dev_t dev = buf ? ggml_backend_buft_get_device(ggml_backend_buffer_get_type(buf)) : nullptr;
++            ggml_init_params ip = { 8*ggml_tensor_overhead(), nullptr, true };
++            ggml_context * tmp = dev ? ggml_init(ip) : nullptr;
++            dmoe_shape_ok = tmp != nullptr;
++            ggml_tensor * ids = tmp ? ggml_new_tensor_2d(tmp, GGML_TYPE_I32, n_expert_used, n_tokens) : nullptr;
++            for (ggml_tensor * w : { dmoe->arena_gate, dmoe->arena_up, dmoe->arena_down }) {
++                if (w == nullptr || !dmoe_shape_ok) {
++                    continue;
++                }
++                ggml_tensor * b = ggml_new_tensor_3d(tmp, GGML_TYPE_F32, w->ne[0], w == dmoe->arena_down ? n_expert_used : 1, n_tokens);
++                dmoe_shape_ok = ggml_backend_dev_supports_op(dev, ggml_mul_mat_id(tmp, w, b, ids));
++            }
++            if (tmp) {
++                ggml_free(tmp);
++            }
++        }
+         if (!dmoe_shape_ok || n_tokens > TOSH_DMOE_MAX_TOKENS) {
+             dmoe = nullptr;
+         }
+     }
+     // a batch too wide for mixed execution still tells the residency policy what it routed
+     if (dmoe_bank != nullptr && dmoe == nullptr && n_tokens > TOSH_DMOE_MAX_TOKENS && llama_tosh_dmoe_observe_prefill()) {
+         ggml_build_forward_expand(gf, ggml_tosh_dmoe_observe(ctx0, selected_experts, il));
+     }
+@@ -4828,22 +4853,31 @@ ggml_tensor * llm_graph_context::build_attn(
      const auto & attn_mask = is_swa ? inp_attn->self_attn_mask_swa : inp_attn->self_attn_mask;
  
      // TODO: support kv_rows - fill the distances over the kv_rows cell lists and pass the rows to build_attn_mha,
@@ -317,49 +470,50 @@ index 716aabb92b..922177394f 100644
  
  void llm_graph_context::build_dense_out(
      ggml_tensor * dense_2,
-diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index c5dfe55498..74f6e7640d 100644
---- a/src/llama-model.cpp
-+++ b/src/llama-model.cpp
-@@ -2178,17 +2178,23 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
- 
-     // load tensor data
-     for (auto & [ctx, bufs] : ctx_bufs) {
-         if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
-             return false;
-         }
-     }
- 
--    llama_tosh_dmoe_init(layers, hparams);
-+    if (arch == LLM_ARCH_INKLING2_LOOP) {
-+        // Dynamic MoE gave a wrong output on a looped model (checked on a Radeon VII, the plan chose full host Dynamic MoE),
-+        // where the layers of the core are the same expert tensors once per pass; off until that is understood
-+        llama_tosh_dmoe_unsupported("the looped layers of inkling2_loop share their experts across passes");
-+    } else {
-+        llama_tosh_dmoe_init(layers, hparams);
-+    }
- 
-     if (use_mmap_buffer) {
-         for (auto & mapping : ml.mappings) {
-             pimpl->mappings.emplace_back(std::move(mapping));
-         }
-     }
- 
-     load_tensors_hadamard();
 diff --git a/src/llama-tosh-dmoe.cpp b/src/llama-tosh-dmoe.cpp
-index 56f85f7420..4fa7384670 100644
+index 56f85f742..91d983344 100644
 --- a/src/llama-tosh-dmoe.cpp
 +++ b/src/llama-tosh-dmoe.cpp
-@@ -46,16 +46,17 @@ const llama_tosh_dmoe_layer * llama_tosh_dmoe_layer_of(const ggml_tensor * gate_
+@@ -20,50 +20,52 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <fstream>
+ #include <map>
+ #include <memory>
+ #include <sstream>
+ #include <thread>
+ #include <unordered_map>
++#include <unordered_set>
+ 
+ #include <sys/mman.h>
+ #include <pthread.h>
+ #include <unistd.h>
+ #include <cerrno>
+ 
+ #if defined(__x86_64__)
+ #include <immintrin.h>
+ #define DMOE_PAUSE() _mm_pause()
+ #else
+ #define DMOE_PAUSE() do {} while (0)
+ #endif
+ 
+-static std::unordered_map<const ggml_tensor *, llama_tosh_dmoe_layer> g_layers;
++// by layer: the passes of a looped model read the same expert banks, each with its own arena and residency
++static std::unordered_map<int, llama_tosh_dmoe_layer> g_layers;
+ 
+-const llama_tosh_dmoe_layer * llama_tosh_dmoe_layer_of(const ggml_tensor * gate_exps) {
++const llama_tosh_dmoe_layer * llama_tosh_dmoe_layer_of(const ggml_tensor * gate_exps, int il) {
+     if (g_layers.empty() || gate_exps == nullptr) {
+         return nullptr;
      }
-     const auto it = g_layers.find(gate_exps);
+-    const auto it = g_layers.find(gate_exps);
++    const auto it = g_layers.find(il);
      return it == g_layers.end() ? nullptr : &it->second;
  }
  
  #ifndef TOSH_ENABLE_DYNAMIC_MOE
  
  void llama_tosh_dmoe_init(std::vector<llama_layer> &, const llama_hparams &) {}
-+void llama_tosh_dmoe_unsupported(const char *) {}
  bool llama_tosh_dmoe_budget_pending() { return false; }
  void llama_tosh_dmoe_budget(size_t) {}
  bool llama_tosh_dmoe_rebudget_possible() { return false; }
@@ -367,41 +521,205 @@ index 56f85f7420..4fa7384670 100644
  void llama_tosh_dmoe_context_closed() {}
  void llama_tosh_dmoe_shutdown() {}
  bool llama_tosh_dmoe_observe_prefill() { return false; }
- bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer *, int, float, float, bool, bool) { return false; }
-@@ -1720,16 +1721,27 @@ void llama_tosh_dmoe_init(std::vector<llama_layer> & layers, const llama_hparams
-     if (path == nullptr && strcmp(cache_mib, "auto") == 0) {
-         g_defer_layers  = &layers;
-         g_defer_hparams = &hparams;
+-bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer *, int, float, float, bool, bool) { return false; }
++bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer *, int, float, float, bool, bool, const ggml_tensor *) { return false; }
+ int  llama_tosh_dmoe_rare_rows() { return 0; }
+ int  llama_tosh_dmoe_rare_tail() { return 0; }
+ int  llama_tosh_dmoe_wide_min_tokens() { return 1 << 30; }
+ 
+ #else
+ 
+ namespace {
+ 
+@@ -76,24 +78,26 @@ static double us_since(clk::time_point t0) {
+ // The canonical bank of one layer, read in place by the host executor.
+ struct host_bank {
+     const ggml_tensor * gate = nullptr;
+     const ggml_tensor * up   = nullptr;
+     const ggml_tensor * down = nullptr;
+     bool fused = false;             // gate holds gate and up, one after the other, and up is null
+     // per-expert gate/up biases, copied at load; the down bias is added on the GPU after the join
+     std::vector<float> gate_b, up_b;
+-    // activation the graph registered for this layer: -1 none yet, 0 silu, 1 swiglu_oai, 2 gelu
++    // activation the graph registered for this layer: -1 none yet, 0 silu, 1 swiglu_oai, 2 gelu, 3 situ
+     std::atomic<int> act{-1};
+     float alpha = 0.0f, limit = 0.0f;
++    // per-expert scale of a fused gate/up bank, applied before the activation; the down scale follows the join
++    std::vector<float> gate_up_s;
+     // the router as floats, kept only when a bounded cache reads experts ahead of the layer
+     std::vector<float> router, router_b;
+     host_bank() = default;
+     host_bank(const host_bank & o) : gate(o.gate), up(o.up), down(o.down), fused(o.fused), gate_b(o.gate_b), up_b(o.up_b),
+-        act(o.act.load()), alpha(o.alpha), limit(o.limit), router(o.router), router_b(o.router_b) {}
++        act(o.act.load()), alpha(o.alpha), limit(o.limit), gate_up_s(o.gate_up_s), router(o.router), router_b(o.router_b) {}
+ };
+ 
+ // A layer's gate bank holds gate and up together when the model fuses them.
+ static ggml_tensor * dmoe_gate(const llama_layer & L) { return L.ffn_gate_exps ? L.ffn_gate_exps : L.ffn_gate_up_exps; }
+ static bool dmoe_has_bank(const llama_layer & L) {
+     return dmoe_gate(L) && L.ffn_down_exps && (L.ffn_gate_exps ? L.ffn_up_exps != nullptr : L.ffn_up_exps == nullptr);
+ }
+ 
+@@ -219,22 +223,29 @@ struct executor {
+         for (int c; (c = next1.fetch_add(1, std::memory_order_relaxed)) < n_grp*c1; ) {
+             const int i0 = grp[c/c1], i1 = grp[c/c1 + 1];
+             const miss & m = misses[i0];
+             const int r0 = (c % c1)*rows1;
+             const char * g = m.g ? m.g : (const char *) bank->gate->data + (size_t) m.e*bank->gate->nb[2];
+             const char * u = m.u ? m.u : (const char *) up_t->data + (size_t) m.e*up_t->nb[2] + up_off;
+             const float * gb = bank->gate_b.empty() ? nullptr : bank->gate_b.data() + (size_t) m.e*n_ff;
+             const float * ub = bank->up_b.empty()   ? nullptr : bank->up_b.data()   + (size_t) m.e*n_ff;
++            const float  gus = bank->gate_up_s.empty() ? 1.0f : bank->gate_up_s[m.e];
+             const int act = bank->act.load(std::memory_order_relaxed);
+             auto finish = [&](int i, int r, float sg, float su) {
+                 float * hr = h.data() + (size_t) i*n_ff;
++                sg *= gus;
++                su *= gus;
+                 if (gb) sg += gb[r];
+                 if (ub) su += ub[r];
+-                if (act == 1) {
++                if (act == 3) {
++                    // the form the graph builds: beta*tanh(g/beta)*sigmoid(g) * lb*tanh(u/lb)
++                    const float a = bank->alpha*tanhf(sg/bank->alpha)/(1.0f + expf(-sg));
++                    hr[r] = a*(bank->limit > 0.0f ? bank->limit*tanhf(su/bank->limit) : su);
++                } else if (act == 1) {
+                     // same form as ggml_swiglu_oai
+                     const float x = std::min(sg, bank->limit);
+                     const float y = std::clamp(su, -bank->limit, bank->limit);
+                     hr[r] = x/(1.0f + expf(-bank->alpha*x))*(y + 1.0f);
+                 } else if (act == 2) {
+                     // the tanh form ggml_geglu uses
+                     hr[r] = 0.5f*sg*(1.0f + tanhf(0.7978845608f*sg*(1.0f + 0.044715f*sg*sg)))*su;
+                 } else {
+@@ -1491,29 +1502,37 @@ static void dmoe_report_at_exit() {
+         if (g_policy) {
+             g_policy->report(tosh_dmoe_tick());
+         }
+     }
+ }
+ 
+ }
+ 
+-bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer * dl, int act, float alpha, float limit, bool gate_b, bool up_b) {
++bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer * dl, int act, float alpha, float limit, bool gate_b, bool up_b,
++                            const ggml_tensor * gate_up_s) {
+     if (g_exec == nullptr || dl == nullptr || dl->il < 0 || dl->il >= (int) g_exec->banks.size()) {
+         return false;
+     }
+     host_bank & b = g_exec->banks[dl->il];
+     if (b.gate == nullptr || gate_b != !b.gate_b.empty() || up_b != !b.up_b.empty()) {
+         return false;
+     }
+-    if (act < 0 || act > 2 || (act == 1 && !(alpha > 0.0f && limit > 0.0f))) {
++    if (act < 0 || act > 3 || (act == 1 && !(alpha > 0.0f && limit > 0.0f)) || (act == 3 && !(alpha > 0.0f))) {
+         return false;
+     }
+-    // graphs are built on one thread; the first one fixes the layer's activation
++    if (gate_up_s != nullptr && (!b.fused || gate_up_s->type != GGML_TYPE_F32 || ggml_nelements(gate_up_s) != b.gate->ne[2])) {
++        return false;
++    }
++    // graphs are built on one thread; the first one fixes the layer's activation, after its scales
+     if (b.act.load() < 0) {
++        if (gate_up_s != nullptr) {
++            b.gate_up_s.resize(ggml_nelements(gate_up_s));
++            ggml_backend_tensor_get(gate_up_s, b.gate_up_s.data(), 0, ggml_nbytes(gate_up_s));
++        }
+         b.alpha = alpha;
+         b.limit = limit;
+         b.act.store(act);
+     }
+     return b.act.load() == act && (act == 0 || (b.alpha == alpha && b.limit == limit));
+ }
+ 
+ int llama_tosh_dmoe_rare_rows() {
+@@ -1706,16 +1725,25 @@ static void dmoe_init_or_off(std::vector<llama_layer> & layers, const llama_hpar
+ 
+ // TOSH_DMOE_CACHE_MIB=auto: the arena waits for the context, so it is what the card has left
+ static std::vector<llama_layer> * g_defer_layers = nullptr;
+ static const llama_hparams *      g_defer_hparams = nullptr;
+ 
+ void llama_tosh_dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & hparams) {
+     const char * path      = getenv("TOSH_DMOE_RESIDENCY");
+     const char * cache_mib = getenv("TOSH_DMOE_CACHE_MIB");
++    // the passes of a looped model read every expert of the banks they share in one graph, more than a bounded cache holds
++    if (tosh_hostcache_on()) {
++        std::unordered_set<const ggml_tensor *> seen;
++        for (const llama_layer & L : layers) {
++            if (dmoe_gate(L) != nullptr && !seen.insert(dmoe_gate(L)).second) {
++                throw std::runtime_error("DMOE_UNSUPPORTED_MODEL: the layers of this model share their expert banks, which the bounded host cache cannot hold");
++            }
++        }
++    }
+     if (tosh_hostcache_on() && (cache_mib == nullptr || path != nullptr)) {
+         throw std::runtime_error("the bounded host cache needs TOSH_DMOE_CACHE_MIB (a VRAM arena) and no residency file");
+     }
+     if ((path == nullptr && cache_mib == nullptr) || g_exec != nullptr) {
          return;
      }
-     dmoe_init_or_off(layers, hparams, path, cache_mib ? atof(cache_mib) : 0.0);
- }
+     if (path == nullptr && strcmp(cache_mib, "auto") == 0) {
+         g_defer_layers  = &layers;
+@@ -1963,17 +1991,17 @@ static void dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & h
+             const int e = resident[il][s];
+             for (auto [bank, arena] : { std::pair{ dmoe_gate(L), dl.arena_gate }, { L.ffn_up_exps, dl.arena_up }, { L.ffn_down_exps, dl.arena_down } }) {
+                 if (bank == nullptr) continue;
+                 ggml_backend_tensor_set(arena, (const char *) bank->data + (size_t) e*bank->nb[2], (size_t) s*arena->nb[2], arena->nb[2]);
+             }
+         }
+         ggml_backend_tensor_set(dl.residency, slot_of[il].data(), 0, sizeof(int32_t)*n_expert);
+         n_resident += resident[il].size();
+-        g_layers[dmoe_gate(L)] = dl;
++        g_layers[il] = dl;
+     }
  
-+void llama_tosh_dmoe_unsupported(const char * why) {
-+    if (getenv("TOSH_DMOE_RESIDENCY") == nullptr && getenv("TOSH_DMOE_CACHE_MIB") == nullptr) {
-+        return;
-+    }
-+    if (tosh_hostcache_on()) {
-+        throw std::runtime_error(std::string("DMOE_UNSUPPORTED_MODEL: ") + why);
-+    }
-+    LLAMA_LOG_WARN("%s: mixed expert execution stays off: %s\n", __func__, why);
-+    dmoe_status(false, "DMOE_UNSUPPORTED_MODEL", why, 0.0);
-+}
-+
- bool llama_tosh_dmoe_budget_pending() {
-     return g_defer_layers != nullptr && g_exec == nullptr;
- }
+     const char * nt = getenv("TOSH_DMOE_THREADS");
+     ex->n_threads = std::max(1, nt ? atoi(nt) : (int) std::thread::hardware_concurrency()/2);
  
- // an automatic arena is sized again when a context with another footprint is created alone
- static std::vector<llama_layer> * g_auto_layers  = nullptr;
- static const llama_hparams *      g_auto_hparams = nullptr;
- static int                        g_contexts     = 0;
+     const ggml_type at = ggml_get_type_traits_cpu(ex->banks[made.front().first].gate->type)->vec_dot_type;
+     ex->act_q_row = ggml_row_size(at, ex->n_embd);
+     ex->h_q_row   = ggml_row_size(GGML_TYPE_F32, ex->n_ff);   // wide enough for any down vec_dot_type
+@@ -2038,17 +2066,17 @@ static void dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & h
+         pol->vmask_sync.assign(n_layer, 0);
+         pol->full.assign(n_layer, 7);
+         for (int il = 0; il < n_layer; ++il) {
+             if (layers[il].ffn_gate_exps == nullptr) pol->full[il] = 5;
+         }
+         pol->layers.assign(n_layer, nullptr);
+         pol->free_list.resize(n_layer);
+         for (auto & [il, dl] : made) {
+-            pol->layers[il] = &g_layers[dmoe_gate(layers[il])];
++            pol->layers[il] = &g_layers[il];
+             for (int s = quota - 1; s >= 0; --s) pol->free_list[il].push_back(s);
+         }
+         const size_t nk = (size_t) n_layer*n_expert;
+         pol->score.assign(nk, 0.0f);
+         pol->last_tick.assign(nk, 0);
+         pol->resident_slot.assign(nk, -1);
+         pol->pending.assign(nk, 0);
+         pol->evicted_tick.assign(nk, 0);
+@@ -2066,17 +2094,17 @@ static void dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & h
+                 __func__, quota, pol->decay, pol->budget);
+     }
+ 
+     g_n_expert = n_expert;
+     g_layer_by_il.assign(n_layer, nullptr);
+     g_fixed_slots = slot_of;
+     for (auto & [il, dl] : made) {
+         const llama_layer & L = layers[il];
+-        g_layer_by_il[il] = &g_layers[dmoe_gate(L)];
++        g_layer_by_il[il] = &g_layers[il];
+         g_bank_refs[dmoe_gate(L)->data] = { il, 0, dmoe_gate(L) };
+         if (L.ffn_up_exps) g_bank_refs[L.ffn_up_exps->data] = { il, 1, L.ffn_up_exps };
+         g_bank_refs[L.ffn_down_exps->data] = { il, 2, L.ffn_down_exps };
+     }
+     if (getenv("TOSH_DMOE_PREFILL_ARENA") == nullptr || atoi(getenv("TOSH_DMOE_PREFILL_ARENA")) != 0) {
+         tosh_dmoe_set_bank_planner(dmoe_bank_plan);
+     }
+ 
 diff --git a/src/llama-tosh-dmoe.h b/src/llama-tosh-dmoe.h
-index 2ae3adf062..acc7884888 100644
+index 2ae3adf06..125453523 100644
 --- a/src/llama-tosh-dmoe.h
 +++ b/src/llama-tosh-dmoe.h
-@@ -18,16 +18,20 @@ struct llama_tosh_dmoe_layer {
-     ggml_tensor * residency  = nullptr; // [n_expert] i32, slot or -1
+@@ -19,18 +19,20 @@ struct llama_tosh_dmoe_layer {
  
      int n_slots = 0;
  };
@@ -409,20 +727,36 @@ index 2ae3adf062..acc7884888 100644
  // Enabled by TOSH_DMOE_RESIDENCY=<file of "layer expert" lines>. No-op otherwise.
  void llama_tosh_dmoe_init(std::vector<llama_layer> & layers, const llama_hparams & hparams);
  
-+// Dynamic MoE is not available for this model: it stays off and the status file says why when it was requested.
-+// With a bounded host cache there is no model without it, so that load fails like any other unsupported model.
-+void llama_tosh_dmoe_unsupported(const char * why);
-+
  // Whether the host executor can run this layer's experts: act 0 is silu, 1 swiglu_oai(alpha, limit), 2 gelu,
- // and the gate/up biases the graph adds must be the ones copied at load.
- bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer * dl, int act, float alpha, float limit, bool gate_b, bool up_b);
+-// and the gate/up biases the graph adds must be the ones copied at load.
+-bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer * dl, int act, float alpha, float limit, bool gate_b, bool up_b);
++// 3 situ(beta, linear beta), the gate/up biases the graph adds must be the ones copied at load, and a fused
++// bank may carry one gate/up scale per expert.
++bool llama_tosh_dmoe_accept(const llama_tosh_dmoe_layer * dl, int act, float alpha, float limit, bool gate_b, bool up_b,
++                            const ggml_tensor * gate_up_s);
  
  // Whether wide batches report their routing to the residency policy.
  bool llama_tosh_dmoe_observe_prefill();
  
  // Wide batches: experts routed to at most this many rows of the chunk and not resident run on
+ // the host (TOSH_DMOE_RARE_ROWS); 0 when off. Only batches the GPU takes, from the offload size.
+ int llama_tosh_dmoe_rare_rows();
+ // the last tokens of a chunk keep their experts on the GPU, where prefill can make them resident
+@@ -44,10 +46,10 @@ void llama_tosh_dmoe_budget(size_t gpu_bytes);
+ // A context created while no other is alive may resize an automatic arena; contexts are counted.
+ bool llama_tosh_dmoe_rebudget_possible();
+ void llama_tosh_dmoe_context_opened();
+ void llama_tosh_dmoe_context_closed();
+ 
+ // Stops the host executor and the residency policy before the model's buffers go away.
+ void llama_tosh_dmoe_shutdown();
+ 
+-// The mixed-execution state for the layer whose gate bank is `gate_exps`, or null.
+-const llama_tosh_dmoe_layer * llama_tosh_dmoe_layer_of(const ggml_tensor * gate_exps);
++// The mixed-execution state for layer `il`, whose gate bank is `gate_exps`, or null.
++const llama_tosh_dmoe_layer * llama_tosh_dmoe_layer_of(const ggml_tensor * gate_exps, int il);
 diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
-index 3e43ef4184..6af5f8be32 100644
+index 3e43ef418..6af5f8be3 100644
 --- a/src/models/inkling2.cpp
 +++ b/src/models/inkling2.cpp
 @@ -1,12 +1,33 @@
