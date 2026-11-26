@@ -1,5 +1,5 @@
 diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
-index 1e3e510eb..7ea5dbef0 100644
+index 1e3e510eb..c5e774e43 100644
 --- a/common/tosh-plan.cpp
 +++ b/common/tosh-plan.cpp
 @@ -64,16 +64,20 @@ struct moe_info {
@@ -153,27 +153,51 @@ index 1e3e510eb..7ea5dbef0 100644
              c.valid  = pr.ok && c.free_mib >= R;
              c.need_vram_mib = c.private_mib + R; c.need_host_mib = host_engine;
              c.reason = !pr.ok ? "probe failed" : c.valid ? "fits with the reserve" :
-@@ -901,17 +933,18 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+@@ -896,26 +928,37 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+                 c.reason = !pr.ok ? "probe failed" : !host_reason.empty() ? host_reason :
+                            c.valid ? (dmoe_block.empty() ? "context and reserve kept" :
+                                       string_format("context and reserve kept, %.1f GiB of the bank in RAM", bounded_warm/1024)) :
+                            string_format("VRAM_LIMIT: arena %.0f MiB under the useful minimum %.0f", c.arena_mib, p.min_arena_mib);
+                 p.candidates.push_back(c);
              }
          }
          // legacy: the fewest layers of experts on the host that leave the reserve
-         for (auto & [kv, pr] : full) {
+-        for (auto & [kv, pr] : full) {
++        for (size_t k = 0; k < full.size(); ++k) {
++            const ggml_type kv = full[k].first;
++            const probe & pr = full[k].second;
              tosh_plan_candidate c;
              c.name = std::string("legacy+") + kv_name(kv); c.mode = "legacy_offload"; c.kv = kv; c.ubatch = ub_full;
              const double per_layer = mi.bank_mib/std::max(1, mi.n_moe);
              const double full_priv = pr.model + pr.context + pr.compute;
 -            for (int n = 1; n <= mi.n_layer && pr.ok; ++n) {
+-                const double priv = full_priv - n*per_layer + legacy_slots;
+-                if (p.vram_free_mib - priv >= R) {
+-                    c.ncmoe = n; c.private_mib = priv; c.free_mib = p.vram_free_mib - priv; c.valid = true;
+-                    break;
 +            const int max_host = (int) host_expert_layers(mi).size();
-+            for (int n = 1; n <= max_host && pr.ok; ++n) {
-                 const double priv = full_priv - n*per_layer + legacy_slots;
-                 if (p.vram_free_mib - priv >= R) {
-                     c.ncmoe = n; c.private_mib = priv; c.free_mib = p.vram_free_mib - priv; c.valid = true;
-                     break;
++            // the layers a looped model does not repeat leave no copy held across passes, so while only they go to
++            // the host the whole-GPU measure holds; past them the measure with every expert on the host does
++            const int n_unrepeated = mi.looped ? mi.n_layer - (mi.loop_end - mi.loop_start) : 0;
++            for (int pass = mi.looped ? 0 : 1; pass < 2 && !c.valid; ++pass) {
++                const probe & base = pass == 0 ? full_gpu[k] : pr;
++                const double base_priv = base.model + base.context + base.compute;
++                const int n_max = pass == 0 ? n_unrepeated : max_host;
++                for (int n = 1; n <= n_max && base.ok; ++n) {
++                    const double priv = base_priv - n*per_layer + legacy_slots;
++                    if (p.vram_free_mib - priv >= R) {
++                        c.ncmoe = n; c.private_mib = priv; c.free_mib = p.vram_free_mib - priv; c.valid = true;
++                        break;
++                    }
                  }
              }
              c.kv_mib = pr.context; c.compute_mib = pr.compute;
              const double host_legacy = mi.bank_mib*c.ncmoe/std::max(1, mi.n_moe) + p.host_weights_mib + 1024.0;
-@@ -1268,18 +1301,19 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+             c.need_vram_mib = (c.valid ? c.private_mib : full_priv - mi.bank_mib + legacy_slots) + R;
+             c.need_host_mib = c.valid ? host_legacy : mi.bank_mib + p.host_weights_mib + 1024.0;
+             const bool host_ok = runtime ? p.host_pressure != "CRITICAL" && host_legacy <= p.effective_mib :
+                                  hi.available_mib <= 0 || host_legacy + HOST_MARGIN_MIB <= hi.available_mib;
+@@ -1268,18 +1311,19 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
              }
          }
  #ifdef TOSH_ENABLE_DYNAMIC_MOE
