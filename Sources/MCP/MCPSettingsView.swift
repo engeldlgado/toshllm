@@ -99,11 +99,17 @@ struct MCPSettingsSection: View {
         .onAppear { servers = MCPServerStore.load() }
         .sheet(isPresented: $importing) {
             MCPConfigImportSheet { imported in
-                for server in imported {
-                    if let index = servers.firstIndex(where: { $0.name == server.name }) {
-                        servers[index] = server
+                for item in imported {
+                    if let index = servers.firstIndex(where: { $0.name == item.server.name }) {
+                        let previous = servers[index]
+                        MCPServerStore.deleteCredentials(for: previous)
+                        servers[index] = item.server
+                        Task { await ToshMCPService.shared.disconnect(previous.id) }
                     } else {
-                        servers.append(server)
+                        servers.append(item.server)
+                    }
+                    if let headersJSON = item.headersJSON {
+                        Keychain.set(headersJSON, account: item.server.credentialAccount)
                     }
                 }
                 persist()
@@ -412,7 +418,7 @@ private struct MCPConfigImportSheet: View {
     @EnvironmentObject private var loc: Localizer
     @State private var text = ""
     @State private var error: String?
-    let add: ([MCPServer]) -> Void
+    let add: ([MCPImportedServer]) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -466,7 +472,7 @@ private struct MCPConfigImportSheet: View {
 
     private func load() {
         do {
-            add(try MCPConfigImport.servers(fromJSON: text))
+            add(try MCPConfigImport.entries(fromJSON: text))
             dismiss()
         } catch {
             self.error = error.localizedDescription
