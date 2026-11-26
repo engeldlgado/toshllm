@@ -458,9 +458,13 @@ final class ChatStore: ObservableObject {
         max(1, UserDefaults.standard.object(forKey: SettingsKeys.chatAgenticMaxTurns) as? Int ?? 10)
     }
 
-    @Published var conversations: [Conversation] = []
+    @Published var conversations: [Conversation] = [] {
+        didSet { stopReadingIfGone() }
+    }
     @Published var projects: [ChatProject] = []
-    @Published var currentID: UUID?
+    @Published var currentID: UUID? {
+        didSet { stopReadingIfGone() }
+    }
     @Published var generating = false {
         didSet { keepAwake = KeepAwake.update(keepAwake, active: generating, reason: "Writing an answer") }
     }
@@ -651,6 +655,13 @@ final class ChatStore: ObservableObject {
 
     var currentIndex: Int? { conversations.firstIndex { $0.id == currentID } }
     var current: Conversation? { currentIndex.map { conversations[$0] } }
+
+    /// A reply read aloud stops once it leaves the chat on screen, since its button goes with it.
+    private func stopReadingIfGone() {
+        guard let id = MessageSpeech.shared.speakingMessageID,
+              current?.messages.contains(where: { $0.id == id }) != true else { return }
+        MessageSpeech.shared.stop()
+    }
 
     func newConversation(in projectID: UUID? = nil) {
         // Reuse an existing empty conversation in the same scope instead of

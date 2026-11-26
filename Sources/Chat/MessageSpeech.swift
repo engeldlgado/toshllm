@@ -6,9 +6,7 @@ import AVFoundation
 import NaturalLanguage
 import SwiftUI
 
-/// Reads assistant replies aloud with the system speech synthesizer. It runs
-/// on-device inside the system speech service, so it adds no process of its
-/// own and does not compete with the model for the GPU or the CPU cores.
+/// Reads assistant replies aloud with the system's on-device speech synthesizer.
 @MainActor
 final class MessageSpeech: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     static let shared = MessageSpeech()
@@ -22,10 +20,8 @@ final class MessageSpeech: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     }
 
     private let synthesizer = AVSpeechSynthesizer()
-    /// Utterances queued or playing. They are retained until their delegate
-    /// callback arrives so an address cannot be reused by a newer utterance,
-    /// and `active` is cleared by `stop()` so late callbacks of a cancelled
-    /// reading cannot reset the state of the next one.
+    /// Held until their callback so an address isn't reused; `stop()` clears `active`
+    /// so late callbacks from a cancelled reading can't reset the next one.
     private var tracked: [ObjectIdentifier: Tracked] = [:]
 
     private override init() {
