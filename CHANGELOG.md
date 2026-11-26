@@ -3,6 +3,17 @@
 All notable changes to ToshLLM are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **Chat: a button reads an answer aloud with the Mac's own voices (#176).** It picks the best installed voice for the answer's language, leaves out the reasoning, code and link addresses, and stops when the chat it belongs to is left. Contributed by [andruwa13](https://github.com/andruwa13) in [#185](https://github.com/engeldlgado/toshllm/pull/185).
+
+### Fixed
+
+- **MCP: importing a remote server's configuration keeps its headers (#189),** so a server that needs an `Authorization` header connects instead of failing with 401. Contributed by [andruwa13](https://github.com/andruwa13) in [#190](https://github.com/engeldlgado/toshllm/pull/190).
+- **Ukrainian: clearer wording for prompt processing, voice detection and multi-GPU settings.** Contributed by [andruwa13](https://github.com/andruwa13) in [#186](https://github.com/engeldlgado/toshllm/pull/186).
+
 ## [0.88.1] - 2026-11-24
 
 ### Improved
