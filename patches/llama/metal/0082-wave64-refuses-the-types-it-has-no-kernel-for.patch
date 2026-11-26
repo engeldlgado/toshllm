@@ -1,0 +1,175 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 2b6b996..ce4f894 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -2521,16 +2521,70 @@ static bool ggml_metal_supports_mul_mat_op(
+ }
+ 
+ // TQ1_0/TQ2_0 have no Metal kernels at all: claiming them compiles a pipeline that does
+ // not exist, which aborts instead of falling back to the CPU backend
+ static bool ggml_metal_type_is_ternary(enum ggml_type t) {
+     return t == GGML_TYPE_TQ1_0 || t == GGML_TYPE_TQ2_0;
+ }
+ 
++// Supported src0 types on wave64 (AMD Polaris/Vega) for mul_mat / mul_mat_id.
++static bool ggml_metal_supports_wave64_mul_mat_type(enum ggml_type t) {
++    switch (t) {
++        case GGML_TYPE_F16:
++        case GGML_TYPE_F32:
++        case GGML_TYPE_BF16:
++        case GGML_TYPE_Q8_0:
++        case GGML_TYPE_Q4_K:
++        case GGML_TYPE_Q5_K:
++        case GGML_TYPE_Q6_K:
++        case GGML_TYPE_Q2_K:
++        case GGML_TYPE_Q3_K:
++        case GGML_TYPE_MXFP4:
++        case GGML_TYPE_IQ2_XXS:
++        case GGML_TYPE_IQ2_XS:
++        case GGML_TYPE_IQ3_XXS:
++        case GGML_TYPE_IQ3_S:
++        case GGML_TYPE_IQ2_S:
++        case GGML_TYPE_IQ1_S:
++        case GGML_TYPE_IQ1_M:
++        case GGML_TYPE_IQ4_NL:
++        case GGML_TYPE_IQ4_XS:
++        case GGML_TYPE_Q4_0:
++        case GGML_TYPE_Q4_1:
++        case GGML_TYPE_Q5_0:
++        case GGML_TYPE_Q5_1:
++        case GGML_TYPE_Q1_0:
++        case GGML_TYPE_Q2_0:
++        case GGML_TYPE_PQ2_0:
++        case GGML_TYPE_PTQ1_0:
++            return true;
++        default:
++            return false;
++    }
++}
++
++// Wave64 type and src1 precision gate mirroring ggml_metal_supports_mul_mat_op:
++// mm / mm_id support F32 and F16 src1 (except BF16 weights); mv accepts F16 src1 only for F16 x F16.
++static bool ggml_metal_supports_wave64_mul_mat_op(
++        const struct ggml_tensor * op,
++        bool src0_f16_has_mv,
++        bool mm_path) {
++    if (!ggml_metal_supports_wave64_mul_mat_type(op->src[0]->type)) {
++        return false;
++    }
++    if (op->src[1]->type == GGML_TYPE_F32) {
++        return true;
++    }
++    if (op->src[1]->type != GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_BF16) {
++        return false;
++    }
++    return mm_path || (src0_f16_has_mv && op->src[0]->type == GGML_TYPE_F16);
++}
++
+ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_tensor * op) {
+     const bool has_simdgroup_mm        = dev->props.has_simdgroup_mm;
+     const bool has_simdgroup_reduction = dev->props.has_simdgroup_reduction;
+     const bool use_mm_manual           = dev->props.use_mm_manual;
+     const bool wave64_decode           = dev->props.wave64_decode;
+     const bool has_bfloat              = dev->props.has_bfloat;
+ 
+     // No bfloat in Metal: bf16 runs on the kernels that widen the raw bits by hand, and only
+@@ -3111,88 +3165,41 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+             }
+             // wave64 prefill: the manual tiled mul_mm (batched). Mirror the dispatch check.
+             const bool prefill =
+                 use_mm_manual &&
+                 !ggml_is_transposed(op->src[0]) && !ggml_is_transposed(op->src[1]) &&
+                 op->src[0]->ne[0] >= 64 && op->src[1]->ne[1] > 8;
+             // wave64 decode (experimental, opt-in): the width-parameterized mat-vec kernels.
+             const bool decode =
+-                wave64_decode && op->src[0]->ne[0] >= 32 &&
+-                (op->src[0]->type == GGML_TYPE_F16 ||
+-                 op->src[0]->type == GGML_TYPE_F32 ||
+-                 op->src[0]->type == GGML_TYPE_BF16 ||
+-                 op->src[0]->type == GGML_TYPE_Q8_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q4_K ||
+-                 op->src[0]->type == GGML_TYPE_Q5_K ||
+-                 op->src[0]->type == GGML_TYPE_Q6_K ||
+-                 op->src[0]->type == GGML_TYPE_Q2_K ||
+-                 op->src[0]->type == GGML_TYPE_Q3_K ||
+-                 op->src[0]->type == GGML_TYPE_MXFP4 ||
+-                 op->src[0]->type == GGML_TYPE_IQ2_XXS ||
+-                 op->src[0]->type == GGML_TYPE_IQ2_XS ||
+-                 op->src[0]->type == GGML_TYPE_IQ3_XXS ||
+-                 op->src[0]->type == GGML_TYPE_IQ3_S ||
+-                 op->src[0]->type == GGML_TYPE_IQ2_S ||
+-                 op->src[0]->type == GGML_TYPE_IQ1_S ||
+-                 op->src[0]->type == GGML_TYPE_IQ1_M ||
+-                 op->src[0]->type == GGML_TYPE_IQ4_NL ||
+-                 op->src[0]->type == GGML_TYPE_IQ4_XS ||
+-                 op->src[0]->type == GGML_TYPE_Q4_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q4_1 ||
+-                 op->src[0]->type == GGML_TYPE_Q5_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q5_1 ||
+-                 op->src[0]->type == GGML_TYPE_Q1_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q2_0 ||
+-                 op->src[0]->type == GGML_TYPE_PQ2_0 ||
+-                 op->src[0]->type == GGML_TYPE_PTQ1_0);
+-            return prefill || decode;
++                wave64_decode && op->src[0]->ne[0] >= 32;
++            return (prefill || decode) &&
++                ggml_metal_supports_wave64_mul_mat_op(op, true, prefill);
+         }
+         case GGML_OP_MUL_MAT_ID: {
+             if (!ggml_metal_supports_mul_mat_src1_prec(op, dev->props.has_tensor)) {
+                 return false;
+             }
+             if (op->src[0]->type == GGML_TYPE_NVFP4 || ggml_metal_type_is_ternary(op->src[0]->type)) {
+                 return false;
+             }
+             if (has_simdgroup_reduction) {
+                 return ggml_metal_supports_mul_mat_op(
+                         has_simdgroup_reduction, op, false,
+                         ggml_metal_op_mul_mat_id_use_mm(op, has_simdgroup_mm));
+             }
+             // wave64: mul_mv_id reuses the width-parameterized decode impls and the
+-            // manual mm_id prefill uses virtual 32-wide indices; both run on the GPU.
+-            return wave64_decode && op->src[0]->ne[0] >= 32 &&
+-                (op->src[0]->type == GGML_TYPE_F16 ||
+-                 op->src[0]->type == GGML_TYPE_F32 ||
+-                 op->src[0]->type == GGML_TYPE_BF16 ||
+-                 op->src[0]->type == GGML_TYPE_Q8_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q4_K ||
+-                 op->src[0]->type == GGML_TYPE_Q5_K ||
+-                 op->src[0]->type == GGML_TYPE_Q6_K ||
+-                 op->src[0]->type == GGML_TYPE_Q2_K ||
+-                 op->src[0]->type == GGML_TYPE_Q3_K ||
+-                 op->src[0]->type == GGML_TYPE_MXFP4 ||
+-                 op->src[0]->type == GGML_TYPE_IQ2_XXS ||
+-                 op->src[0]->type == GGML_TYPE_IQ2_XS ||
+-                 op->src[0]->type == GGML_TYPE_IQ3_XXS ||
+-                 op->src[0]->type == GGML_TYPE_IQ3_S ||
+-                 op->src[0]->type == GGML_TYPE_IQ2_S ||
+-                 op->src[0]->type == GGML_TYPE_IQ1_S ||
+-                 op->src[0]->type == GGML_TYPE_IQ1_M ||
+-                 op->src[0]->type == GGML_TYPE_IQ4_NL ||
+-                 op->src[0]->type == GGML_TYPE_IQ4_XS ||
+-                 op->src[0]->type == GGML_TYPE_Q4_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q4_1 ||
+-                 op->src[0]->type == GGML_TYPE_Q5_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q5_1 ||
+-                 op->src[0]->type == GGML_TYPE_Q1_0 ||
+-                 op->src[0]->type == GGML_TYPE_Q2_0 ||
+-                 op->src[0]->type == GGML_TYPE_PQ2_0 ||
+-                 op->src[0]->type == GGML_TYPE_PTQ1_0);
++            // manual mm_id prefill uses virtual 32-wide indices; both stay gated on wave64_decode.
++            if (!wave64_decode || op->src[0]->ne[0] < 32) {
++                return false;
++            }
++            const bool mm_id =
++                TOSH_ENV("TOSH_W64_MMID_PREFILL_DISABLE") == NULL &&
++                ggml_metal_op_mul_mat_id_use_mm(op, use_mm_manual);
++            return ggml_metal_supports_wave64_mul_mat_op(op, false, mm_id);
+         }
+         case GGML_OP_SET:
+         case GGML_OP_CPY:
+         case GGML_OP_DUP:
+         case GGML_OP_CONT:
+             {
+                 switch (op->src[0]->type) {
+                     case GGML_TYPE_F32:
