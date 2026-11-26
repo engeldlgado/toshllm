@@ -1,0 +1,28 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 9e9c80157..a4b61d91c 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1363,18 +1363,22 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+             case GGML_TYPE_F16:
+             case GGML_TYPE_Q8_0:
+             case GGML_TYPE_Q5_0:
+             case GGML_TYPE_Q5_1:
+             case GGML_TYPE_Q2_K:
+             case GGML_TYPE_Q3_K:
+             case GGML_TYPE_Q4_K:
+             case GGML_TYPE_Q5_K:
+-            case GGML_TYPE_PQ2_0:
+             case GGML_TYPE_PTQ1_0: break;
++            // pq2_0 has no dequantize_words, so it decodes in the generic dequantize_pq2_0
++            // (emulated half2 math on gfx803) and that costs the wide tile its registers:
++            // 4096x512x14336 measures 116.6 ms wide against 49.8 ms narrow. 32 lanes are
++            // left alone; only the wave64 tile was measured.
++            case GGML_TYPE_PQ2_0: wide = simd_width != 64; break;
+             // the wide bf16 tile was built and measured on 32 lanes only
+             case GGML_TYPE_BF16: wide = simd_width == 32; break;
+             // these leave the registers the 64 accumulators need; iq3_xxs, iq2_xs,
+             // iq2_xxs and iq1_m do not, so they keep the narrow tile
+ 
+             case GGML_TYPE_Q6_K:
+             case GGML_TYPE_Q4_0:
+             case GGML_TYPE_Q4_1:

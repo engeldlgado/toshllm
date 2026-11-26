@@ -1,0 +1,100 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index a4b61d91c..c3af3813b 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1442,31 +1442,32 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     // one wave per tile does not do. Keeping it there sent the GQA k/v pair (1024 x 4096) and the
+     // two 256-row SSM projections to the base 32-lane kernel, at 0.07 to 0.97 TF/s in the 10.7
+     // profile against 0.55 to 1.51 for this tile at the same shapes. Only the row floor is
+     // dropped; the token floor, the type gates and the byte gates below all still apply.
+     const bool mw_rows = use_mm_manual && !has_tensor && !wide && op->ne[0] >= 32 &&
+                          op->ne[1] >= wide_floor && !bc_inp &&
+                          TOSH_ENV("TOSH_MM_MW_ROWS_DISABLE") == nullptr;
+     const bool mw = simd_width == 64 && polaris && use_mm_manual && !has_tensor && (wide || mw_rows) && !w64 &&
+-                    (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q6_K) &&
++                    (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q6_K || tsrc0 == GGML_TYPE_PQ2_0) &&
+                     tsrc1 == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                     !bc_inp && op->src[0]->ne[0] % 256 == 0 &&
+                     (tsrc0 != GGML_TYPE_Q4_K || op->src[0]->nb[1] % 16 == 0) &&
+                     TOSH_ENV("TOSH_MM_MW_DISABLE") == nullptr;
+ 
+     // a gradient can pass the half range: its f32 operand goes through the bfloat tile instead
+     const bool grad_bf16 = acc_f32 && !w64 && ggml_get_op_params_i32(op, 1) == GGML_HINT_GRADIENT &&
+                            ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_bfloat &&
+                            tsrc1 == GGML_TYPE_F32 && (tsrc0 == GGML_TYPE_F32 || tsrc0 == GGML_TYPE_F16) &&
+                            !(wide && tsrc0 == GGML_TYPE_F32) &&
+                            TOSH_ENV("TOSH_MM_GRAD_BF16_DISABLE") == nullptr;
+ 
+         if (mw) {
+-        snprintf(base, 256, tsrc0 == GGML_TYPE_Q4_K ? "kernel_mul_mm_mw" : "kernel_mul_mm_mw6");
++        snprintf(base, 256, tsrc0 == GGML_TYPE_Q4_K ? "kernel_mul_mm_mw" :
++                            tsrc0 == GGML_TYPE_Q6_K ? "kernel_mul_mm_mw6" : "kernel_mul_mm_mw2");
+     } else {
+         snprintf(base, 256, "kernel_mul_mm_%s_%s%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1),
+                  grad_bf16 ? "_gb" : "", wide ? "_w" : "", w64 ? "_w64" : "");
+     }
+     // measured on 32 lanes only; the 64-lane tile lives in its own kernel
+     const bool uniform_scale = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K) && wide && !w64 &&
+                                use_mm_manual && !has_tensor && simd_width == 32 &&
+                                TOSH_ENV("TOSH_MM_UNIFORM_SCALE_DISABLE") == nullptr;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+index e007be1fe..a036e7c55 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+@@ -968,21 +968,44 @@ static inline void mw_load_a6(device const char * wrow, int loop_k, bool rowok,
+     #pragma unroll
+     for (int i = 0; i < MW_KT; i++) {
+         const uint qlb = (lw[i >> 2] >> (8*(i & 3))) & 0xFFu;
+         const uint qhb = (hw[i >> 2] >> (8*(i & 3))) & 0xFFu;
+         q[i] = (uchar) (((qlb >> nib) & 0xFu) | (((qhb >> qs) & 3u) << 4));
+     }
+ }
+ 
++// one 16-k panel of a PQ2_0 row.  The block is 128 weights with one fp16 scale, so a panel is
++// exactly one il slice: 4 quant bytes at a 2-byte offset, and the scale read once per 8 panels.
++// The values carry no bias, so the -1 of the codec moves into dbia and the store stays one fma.
++static inline void mw_load_a2(device const char * wrow, int loop_k, bool rowok,
++                              thread float & dsc, thread float & dbia, thread uchar * q) {
++    const int bi = loop_k / 128;
++    const int il = (loop_k % 128) / 16;
++    device const block_pq2_0 * blk = (device const block_pq2_0 *) (wrow + (uint64_t) bi*sizeof(block_pq2_0));
++
++    device const ushort * wq = (device const ushort *) (blk->qs + 4*il);
++    const uint w = (uint) wq[0] | ((uint) wq[1] << 16);
++
++    const float d = rowok ? (float) blk->d : 0.f;
++    dsc  = d;
++    dbia = -d;
++
++    #pragma unroll
++    for (int i = 0; i < MW_KT; i++) {
++        q[i] = (uchar) ((w >> (2*i)) & 3u);
++    }
++}
++
+ template<int QT>
+ static inline void mw_load_a(device const char * wrow, int loop_k, bool rowok,
+                              thread float & dsc, thread float & dbia, thread uchar * q) {
+-    if (QT == 1) mw_load_a6(wrow, loop_k, rowok, dsc, dbia, q);
+-    else         mw_load_a4(wrow, loop_k, rowok, dsc, dbia, q);
++    if      (QT == 1) mw_load_a6(wrow, loop_k, rowok, dsc, dbia, q);
++    else if (QT == 2) mw_load_a2(wrow, loop_k, rowok, dsc, dbia, q);
++    else              mw_load_a4(wrow, loop_k, rowok, dsc, dbia, q);
+ }
+ 
+ static inline void mw_store_a(threadgroup float * sa, const thread uchar * q, int arow,
+                               float dsc, float dbia) {
+     #pragma unroll
+     for (int i = 0; i < MW_KT; i++) sa[i*64 + arow] = dsc*(float) q[i] + dbia;
+ }
+ 
+@@ -1143,8 +1166,9 @@ kernel void NAME(
+         ushort tiitg[[thread_index_in_threadgroup]]) {                              \
+     if (tiitg >= 64) return;                                                        \
+     mw_tile<QT>(args, src0, src1, dst, (threadgroup float *) shmem,                  \
+                 tgpig, tgpg, (int) tiitg);                                          \
+ }
+ 
+ MW_KERNEL(kernel_mul_mm_mw,  0)
+ MW_KERNEL(kernel_mul_mm_mw6, 1)
++MW_KERNEL(kernel_mul_mm_mw2, 2)

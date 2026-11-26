@@ -46,6 +46,34 @@ because its decode block does not match at wider context. The build script asser
 are expected to reject and stops instead of shipping a backend missing one. Do not remove that
 check.
 
+## The Polaris series (`0082`-`0092`)
+
+This fork's AMD work for Polaris (`gfx803`, GCN 4, wave64) follows the upstream series at the
+`b1b770d` pin. Every path below is reached only through `is_polaris` (`simd_width == 64` and a
+gfx8xx device), so Vega, RDNA and Apple Silicon keep the code they had; only `acc_f32` widens an
+existing condition rather than replacing it, and the two cases that already accumulated in float
+there (a non-contiguous `src0`, `GGML_HINT_GRADIENT`) still do.
+
+| patch | what it changes |
+|---|---|
+| `0082` | `MTLDevice.architecture` needs the macOS 14 SDK, not just the runtime: guarded, name fallback below 14 |
+| `0083` | the Polaris host side: float accumulation OR'd in, the `mw`/`w64` tile choice, the fused norm/swiglu decode tails, the deep staging ring and the per-device pipeline cache key |
+| `0084` | `kernel_mul_mm_mw`: one wave per 64x64 tile, eight rows and columns per lane, panel staged ahead of the fma loop |
+| `0085` | the wave64 decode mat-vec geometry per shape and type, with the fused swiglu tail |
+| `0086` | `kernel_concat_f32_t`: the conv input concat writes by tiles |
+| `0087` | the prefill GEMM's K loop unrolled |
+| `0088` | 16-byte activation reads in the wave64 decode mat-vec |
+| `0089` | PQ2_0 prefill keeps the narrow tile on wave64 |
+| `0090` | PQ2_0 prefill uses the `mw` kernel |
+| `0091` | the `w64` tile keeps its place where `mw` is absent |
+| `0092` | PTQ1_0 prefill uses the `mw` kernel; `mw_trit4` unpacks one byte per lane |
+
+No instrumentation switch, no `build/` output and no app-side change is part of the series; the
+macOS 12 backport of the app, the Westmere CPU dots and SenseNova Loop live on `polaris_full`.
+The switches the series does carry are kill switches for its own paths (`TOSH_MM_MW_DISABLE`,
+`TOSH_MM_W64_ENABLE`, `TOSH_MV_Q4K_R8`, `TOSH_MV_Q6K_R4`); every one of them defaults to the
+behaviour the measurements picked.
+
 ## Changing one
 
 The vendor tree carries every patch at once, so `git diff` there is all of them, and it may also

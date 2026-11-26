@@ -1,0 +1,1234 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-context.m b/ggml/src/ggml-metal/ggml-metal-context.m
+index ffa78f7e0..438b5e0df 100644
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -4126,17 +4126,16 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
+     // the split was tuned on unified memory; TOSH_N_MAIN overrides it to A/B the share here
+     static int n_main_env = -2;
+     if (n_main_env == -2) {
+         const char * v = TOSH_ENV("TOSH_N_MAIN");
+         n_main_env = v ? atoi(v) : -1;
+     }
+     int n_main = n_main_env >= 0 ? n_main_env : MAX(64, 0.1*gf->n_nodes);
+ 
+-    // number of threads in addition to the main thread
+     const int n_cb = ctx->n_cb;
+ 
+     if (n_main_env < 0 && ctx->adapt_n_main) {
+         n_main = ggml_metal_adapt_n_main(ctx, gf->n_nodes, n_main);
+     }
+ 
+     // keep the memory wired
+     ggml_metal_device_rsets_keep_alive(ctx->dev);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 050c6f136..9e9c80157 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -274,17 +274,21 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_concat(ggml_meta
+     char name[256];
+ 
+     const auto * props = ggml_metal_device_get_props(ggml_metal_library_get_device(lib));
+ 
+     // only the block types that are not a multiple of four bytes have an aligned variant
+     const bool align = props->needs_aligned_loads &&
+         (tsrc == GGML_TYPE_Q4_0 || tsrc == GGML_TYPE_Q5_0 || tsrc == GGML_TYPE_Q8_0);
+ 
+-    snprintf(base, 256, "kernel_concat_%s%s", ggml_type_name(tsrc), align ? "_al" : "");
++    // f32 concat in these hybrid layers is the SSM conv-input transpose, and the generic
++    // element walk costs 5.9 ms a dispatch for it: see kernel_concat_f32_t in quantize.metal,
++    // which is the same op through an LDS tile at 0.63 ms
++    const char * tiled = (tsrc == GGML_TYPE_F32 && props->simd_width == 64) ? "_t" : "";
++    snprintf(base, 256, "kernel_concat_%s%s%s", ggml_type_name(tsrc), align ? "_al" : "", tiled);
+     snprintf(name, 256, "%s", base);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+     if (!res.pipeline) {
+         res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+     }
+ 
+     return res;
+@@ -1239,16 +1243,19 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+ 
+     const bool bc_inp = op->src[0]->ne[0] % 32 != 0;
+ 
+     constexpr int NRA = SZ_SIMDGROUP * N_MM_BLOCK_Y * N_MM_SIMD_GROUP_Y;
+     constexpr int NRB = SZ_SIMDGROUP * N_MM_BLOCK_X * N_MM_SIMD_GROUP_X;
+ 
+     const bool has_tensor    = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_tensor;
+     const bool use_mm_manual = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->use_mm_manual;
++    // the tuned paths below were measured on gfx803 (Polaris) only, so they are gated on it and
++    // Vega/RDNA keep the shipped defaults until someone measures them there
++    const bool polaris = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->is_polaris;
+     const bool use_mm_double_buffer = use_mm_manual && TOSH_ENV("GGML_METAL_MM_DOUBLE_BUFFER_DISABLE") == nullptr;
+ 
+     const bool bc_out = has_tensor
+         ? (op->ne[0] % NRA != 0 || op->ne[1] % NRB != 0)
+         : (op->ne[0] % 64  != 0 || op->ne[1] % 32  != 0);
+ 
+     GGML_ASSERT(op->src[1]->ne[2] <= INT16_MAX && op->src[1]->ne[3] <= INT16_MAX);
+     const int16_t ne12 = (int16_t) op->src[1]->ne[2];
+@@ -1386,56 +1393,96 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+                 wide = op->ne[0] >= wide_ext_floor && TOSH_ENV("TOSH_MM_WIDE_EXT_DISABLE") == nullptr; break;
+             // f32 has never been through this gate; the override opens it so the exclusion can
+             // be measured instead of inherited
+             default: wide = TOSH_ENV("TOSH_MM_WIDE_ALL") != nullptr && op->ne[0] >= wide_ext_floor; break;
+         }
+     }
+ 
+     // attention matmuls read a permuted KV cache view and can exceed half range in the packed
+-    // accumulator. bf16 weights already reach the tile as half, so they sum like f16.
++    // accumulator; bfloat has no native arithmetic here, so float is faster for it too.
++    // gfx803 has no packed half arithmetic at all, so the half accumulator was costing a pair of
++    // converts around every product: float is the default there (11.3 -> 10.3 s prefill at 1156
++    // tokens). RDNA and Vega do have packed half math and were never measured, so they keep the
++    // half accumulator; TOSH_MM_ACC_F32=1 opts in, TOSH_MM_ACC_F32_DISABLE=1 opts out.
+     const bool acc_f32 = use_mm_manual &&
+-                         (!ggml_is_contiguous(op->src[0]) ||
++                         (polaris ||
++                          !ggml_is_contiguous(op->src[0]) ||
+                           ggml_get_op_params_i32(op, 1) == GGML_HINT_GRADIENT ||
+-                          (tsrc0 == GGML_TYPE_BF16 && TOSH_ENV("TOSH_MM_BF16_ACC_F32") != nullptr)) &&
++                          (tsrc0 == GGML_TYPE_BF16 && TOSH_ENV("TOSH_MM_BF16_ACC_F32") != nullptr) ||
++                          TOSH_ENV("TOSH_MM_ACC_F32") != nullptr) &&
+                          TOSH_ENV("TOSH_MM_ACC_F32_DISABLE") == nullptr;
+ 
+     // the 64-lane GEMM lives in mul_mm_w64.metal: one wave is one tile there, so it needs the
+     // dispatch to hand it whole waves instead of the 32-thread groups the shared kernel expects
+     // iq4_nl is the one type this kernel does not suit at every batch: it costs 3.9% at 256
+     // tokens and gains 1.0% at 512, so it takes a floor rather than lose the gain.
+     static const int w64_floor_env = []() {
+         const char * s = TOSH_ENV("TOSH_MM_W64_FLOOR");
+         return s ? atoi(s) : 0;
+     }();
+     const int w64_floor = w64_floor_env ? w64_floor_env :
+                           (tsrc0 == GGML_TYPE_IQ4_NL ? 384 : 0);
+ 
+     const bool w64 = simd_width == 64 && use_mm_manual && !has_tensor &&
+                      op->ne[1] >= w64_floor &&
++                     (!acc_f32 || TOSH_ENV("TOSH_MM_W64_ENABLE") != nullptr) &&
+                      TOSH_ENV("TOSH_MM_W64_DISABLE") == nullptr;
+ 
++    // q4_K x f32 prefill tile in mul_mm_w64.metal (kernel_mul_mm_mw): one wave per 64x64 tile,
++    // 8 rows and 8 columns per lane, the next panel staged into registers before the fma loop
++    // that consumes the current one. Standalone at 12288x1088x4096: 2970 GFLOPS against 2236
++    // for the same tile with the loads left behind the barrier and 2030 for the current path.
++    // It needs 64 float accumulators plus a staged panel, so it only takes shapes the wide tile
++    // already handles. q4_K and q6_K are 96% of the prefill GEMM bytes on a Q4_K_M file.
++    // The row floor above belongs to the wide tile, not to this one: it exists because halving the
++    // simdgroups per threadgroup needs enough rows to keep the GPU busy, which a kernel that is
++    // one wave per tile does not do. Keeping it there sent the GQA k/v pair (1024 x 4096) and the
++    // two 256-row SSM projections to the base 32-lane kernel, at 0.07 to 0.97 TF/s in the 10.7
++    // profile against 0.55 to 1.51 for this tile at the same shapes. Only the row floor is
++    // dropped; the token floor, the type gates and the byte gates below all still apply.
++    const bool mw_rows = use_mm_manual && !has_tensor && !wide && op->ne[0] >= 32 &&
++                         op->ne[1] >= wide_floor && !bc_inp &&
++                         TOSH_ENV("TOSH_MM_MW_ROWS_DISABLE") == nullptr;
++    const bool mw = simd_width == 64 && polaris && use_mm_manual && !has_tensor && (wide || mw_rows) && !w64 &&
++                    (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q6_K) &&
++                    tsrc1 == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
++                    !bc_inp && op->src[0]->ne[0] % 256 == 0 &&
++                    (tsrc0 != GGML_TYPE_Q4_K || op->src[0]->nb[1] % 16 == 0) &&
++                    TOSH_ENV("TOSH_MM_MW_DISABLE") == nullptr;
++
+     // a gradient can pass the half range: its f32 operand goes through the bfloat tile instead
+     const bool grad_bf16 = acc_f32 && !w64 && ggml_get_op_params_i32(op, 1) == GGML_HINT_GRADIENT &&
+                            ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_bfloat &&
+                            tsrc1 == GGML_TYPE_F32 && (tsrc0 == GGML_TYPE_F32 || tsrc0 == GGML_TYPE_F16) &&
+                            !(wide && tsrc0 == GGML_TYPE_F32) &&
+                            TOSH_ENV("TOSH_MM_GRAD_BF16_DISABLE") == nullptr;
+ 
+-    snprintf(base, 256, "kernel_mul_mm_%s_%s%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1),
+-             grad_bf16 ? "_gb" : "", wide ? "_w" : "", w64 ? "_w64" : "");
++        if (mw) {
++        snprintf(base, 256, tsrc0 == GGML_TYPE_Q4_K ? "kernel_mul_mm_mw" : "kernel_mul_mm_mw6");
++    } else {
++        snprintf(base, 256, "kernel_mul_mm_%s_%s%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1),
++                 grad_bf16 ? "_gb" : "", wide ? "_w" : "", w64 ? "_w64" : "");
++    }
+     // measured on 32 lanes only; the 64-lane tile lives in its own kernel
+     const bool uniform_scale = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K) && wide && !w64 &&
+                                use_mm_manual && !has_tensor && simd_width == 32 &&
+                                TOSH_ENV("TOSH_MM_UNIFORM_SCALE_DISABLE") == nullptr;
+ 
+     snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d_mm=%d_db=%d_af=%d_us=%d",
+              base, bc_inp, bc_out, ne12, ne13, r2, r3, use_mm_manual + 2*narrow, use_mm_double_buffer, acc_f32, uniform_scale);
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
++    if (!res.pipeline && mw) {
++        // kernel_mul_mm_mw takes no function constants: its tile, staging and accumulation
++        // widths are fixed at the source
++        ggml_metal_cv_t cv = ggml_metal_cv_init();
++        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
++        ggml_metal_cv_free(cv);
++    }
+     if (!res.pipeline) {
+         ggml_metal_cv_t cv = ggml_metal_cv_init();
+ 
+         ggml_metal_cv_set_bool(cv, narrow, FC_MUL_MM + 7);
+         ggml_metal_cv_set_bool(cv, bc_inp, FC_MUL_MM + 0);
+         ggml_metal_cv_set_bool(cv, bc_out, FC_MUL_MM + 1);
+         ggml_metal_cv_set_int16(cv, ne12,  FC_MUL_MM + 2);
+         ggml_metal_cv_set_int16(cv, ne13,  FC_MUL_MM + 3);
+@@ -1452,16 +1499,25 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     }
+ 
+     if (has_tensor) {
+         res.nr0 = NRA;
+         res.nr1 = NRB;
+ 
+         const size_t smem_a = NRA * N_MM_NK_TOTAL * sizeof(ggml_fp16_t);
+         res.smem = smem_a;
++    } else if (mw) {
++        // one wave per tile: 64 rows, 64 columns, MW_BUF floats of staged operands
++        res.nr0  = 64;
++        res.nr1  = 64;
++        res.smem = 8192;
++        res.sgw  = 64;
++        res.nsg  = 1;
++
++        return res;
+     } else {
+         res.nr0 = 64;
+         res.nr1 = use_mm_manual ? (narrow ? 32 : 64) : 32;
+ 
+         res.smem = use_mm_double_buffer ? 16384 : ((bc_out || use_mm_manual) ? 8192 : (4096 + 2048));
+     }
+ 
+     res.nsg = (!has_tensor && use_mm_manual) ? ((wide || narrow) ? 4 : 8) : N_MM_SIMD_GROUP_X * N_MM_SIMD_GROUP_Y;
+@@ -1595,29 +1651,49 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id_mxfp4_
+ // a pair of columns shares one read of each block, where one pass per column would read and
+ // unpack the weights twice. Four columns go as two pairs where that measured faster.
+ // TOSH_MV_NC2_PROBE=R opens the untuned widths with R rows, for measuring
+ static int nc2_probe() {
+     static const int r = TOSH_ENV("TOSH_MV_NC2_PROBE") ? atoi(TOSH_ENV("TOSH_MV_NC2_PROBE")) : 0;
+     return r;
+ }
+ 
+-int ggml_metal_mv_nc2_rows(ggml_type type, int simd_width, int ne11, int ne01, int ne00) {
++int ggml_metal_mv_nc2_rows(ggml_type type, int simd_width, int ne11, int ne01, int ne00, bool polaris) {
+     static const bool disabled = TOSH_ENV("TOSH_MV_NC2_DISABLE") != nullptr;
+     if (disabled || ne11 < 2 || ne11 > 4) {
+         return 0;
+     }
+     const bool w64 = simd_width == 64;
+     // three columns in one pass, where that beat the batched kernel
+     if (ne11 == 3) {
+         static const bool nc3_off = TOSH_ENV("TOSH_MV_NC3_DISABLE") != nullptr;
+         if (nc3_off) {
+             return 0;
+         }
+         if (w64) {
++            // q5_K only ever had a two-column shared-dequant kernel on 64 lanes, so a three-column
++            // batch fell back to ext. TOSH_MV_Q5K_C3=R selects the c3_rR instantiation for measuring.
++            if (type == GGML_TYPE_Q5_K) {
++                // measured +6.3% at three columns (10.19), so it is the default now; TOSH_MV_Q5K_C3=R
++                // re-tries another row width and =0 puts the old batched kernel back
++                static const int r = TOSH_ENV("TOSH_MV_Q5K_C3") ? atoi(TOSH_ENV("TOSH_MV_Q5K_C3")) : (polaris ? 4 : 0);
++                if (r == 2 || r == 4 || r == 8) {
++                    return r;
++                }
++                return 0;
++            }
++            // q4_K is the bulk of the shipped checkpoint and had only a two-column instantiation,
++            // so its three-column batch fell through to ext exactly where q5_K did
++            if (type == GGML_TYPE_Q4_K) {
++                static const int r = TOSH_ENV("TOSH_MV_Q4K_C3") ? atoi(TOSH_ENV("TOSH_MV_Q4K_C3")) : 0;
++                if (r == 2 || r == 4 || r == 8) {
++                    return r;
++                }
++                return 0;
++            }
+             // q8_0 on 64 lanes: few rows want more groups, a short row stays on the batched kernel
+             if (type == GGML_TYPE_Q8_0) {
+                 return ne01 < 2048 ? 2 : (ne00 >= 2048 || ne01 >= 8192 ? 8 : 0);
+             }
+             return 0;
+         }
+         switch (type) {
+             case GGML_TYPE_Q5_K:    return 4;
+@@ -1640,20 +1716,60 @@ int ggml_metal_mv_nc2_rows(ggml_type type, int simd_width, int ne11, int ne01, i
+         case GGML_TYPE_IQ3_XXS: return w64 ? nc2_probe() : 8;
+         // 64 lanes only gain on matrices of few rows, with two rows per simdgroup
+         case GGML_TYPE_Q5_K: return w64 ? (nc2_probe() ? nc2_probe() : (ne11 == 2 && ne01 <= 5120 ? 2 : 0)) : 4;
+         case GGML_TYPE_Q6_K: return w64 ? nc2_probe() : (ne11 == 2 ? 2 : 0);
+         default: return 0;
+     }
+ }
+ 
+-ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_metal_library_t lib, const ggml_tensor * op) {
++// The mat-vec pipeline is chosen from a formatted name: two snprintf calls, a type-name helper,
++// the library lock and a string-hash map probe. A decode token issues a few hundred mat-vecs
++// over roughly a dozen distinct shapes, so nearly every one of those is a repeat lookup.
++// Remember the resolved pipeline per shape tuple; only the first dispatch of a shape pays.
++struct mul_mv_cache_ent {
++    ggml_metal_library_t lib;   // a pipeline belongs to one device's library; two cards share this cache
++    ggml_type t0;
++    ggml_type t1;
++    int32_t   ne00, ne01, ne02, ne03;
++    int32_t   ne11, ne12, ne13;
++    uint32_t  al;
++    uint32_t  mode;
++    ggml_metal_pipeline_with_params res;
++};
++
++static thread_local mul_mv_cache_ent g_mul_mv_cache[64];
++
++ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_metal_library_t lib, const ggml_tensor * op, int mode) {
+     GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+     GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
+ 
++    const ggml_type cache_t0 = op->src[0]->type;
++    const ggml_type cache_t1 = op->src[1]->type;
++
++    // every name decision below reads these four byte strides and nothing else about the layout
++    const uint32_t cache_al = (uint32_t) ((op->src[0]->nb[1] & 1) | ((op->src[0]->nb[1] & 3) == 0 ? 2 : 0) |
++                                          ((op->src[0]->nb[2] & 1) == 0 ? 4 : 0) | ((op->src[0]->nb[2] & 3) == 0 ? 8 : 0));
++
++    const uint32_t cache_h = (uint32_t) (((uintptr_t) lib >> 4)*41u) + (uint32_t) cache_t0*7u + (uint32_t) cache_t1*13u + (uint32_t) ne00*3u +
++                             (uint32_t) ne01*5u + (uint32_t) ne02*11u + (uint32_t) ne03*23u +
++                             (uint32_t) ne11*17u + (uint32_t) ne12*19u + (uint32_t) ne13*29u + cache_al*31u +
++                             (uint32_t) mode*37u;
++
++    mul_mv_cache_ent & cache_e = g_mul_mv_cache[cache_h & 63];
++    if (cache_e.res.pipeline &&
++        cache_e.lib == lib &&
++        cache_e.t0 == cache_t0 && cache_e.t1 == cache_t1 &&
++        cache_e.ne00 == ne00 && cache_e.ne01 == ne01 && cache_e.ne02 == ne02 && cache_e.ne03 == ne03 &&
++        cache_e.ne11 == ne11 && cache_e.ne12 == ne12 && cache_e.ne13 == ne13 && cache_e.al == cache_al &&
++        cache_e.mode == mode) {
++        return cache_e.res;
++    }
++    cache_e.lib = lib;
++
+     char base[256];
+     char name[256];
+ 
+     int nsg = 0; // number of simdgroups
+     int nr0 = 0; // number of src0 rows per simdgroup
+     int nr1 = 1; // number of src1 rows per threadgroup
+ 
+     size_t smem = 0; // shared memory
+@@ -1886,18 +2002,25 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+ 
+                 // 64 lanes have their own decomposition: sixteen cover a block instead of
+                 // eight, which brings the kernel from 246 registers down to 184. It does not
+                 // cover the small-matrix case, which still wants one group with four rows.
+                 // Sixteen lanes with four rows each: +5.8% over eight lanes. Sixteen lanes
+                 // with the inherited rows loses, so the win lives in the crossing of the two.
+                 if (simd_width == 64 && !q4k_small && TOSH_ENV("TOSH_MV_Q4K_W64_DISABLE") == nullptr) {
+                     nsg    = 1;
+-                    nr0    = 4;
+-                    suffix = "_L16r4";
++                    // eight rows per threadgroup halves the activation re-reads; +8.5% of
++                    // the 12288x4096 matvec bandwidth and +25% at 49152 rows (bmv, warm)
++                    if (TOSH_ENV("TOSH_MV_Q4K_R8") != nullptr && TOSH_ENV("TOSH_MV_Q4K_R8_DISABLE") == nullptr) {
++                        nr0    = 8;
++                        suffix = "_L16r8";
++                    } else {
++                        nr0    = 4;
++                        suffix = "_L16r4";
++                    }
+                     w64    = true;
+                     break;
+                 }
+                 if (q4k_small) {
+                     nsg = 1;
+                     nr0 = 4;
+                     suffix = "_r4";
+                 } else {
+@@ -1929,18 +2052,33 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+                     w64    = true;
+                 }
+             } break;
+         case GGML_TYPE_Q6_K:
+             {
+                 // 64 lanes want four rows in one group (+16.3% tg); 32 keep the shipped pair
+                 if ((simd_width == 64 || TOSH_ENV("TOSH_MV_R8") != nullptr) && TOSH_ENV("TOSH_MV_R8_DISABLE") == nullptr) {
+                     nsg = 1;
+-                    nr0 = 4;
+-                    suffix = "_r4";
++                    // same story as q4_K: eight rows beat four by 8% at 12288 rows and 14%
++                    // at the 248320-row output layer, which is the widest matvec in decode
++                    // Eight rows per group reuses every y value over twice as many rows. The
++                    // L8/L32 forms are gone: they were 15-20% faster and produced wrong results.
++                    if (ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->is_polaris &&
++                        TOSH_ENV("TOSH_MV_Q6K_R4") == nullptr) {
++                        // Eight rows per group reuses every y value over twice as many rows.
++                        // Sustained over 3000 dispatches that is 121-124 GB/s at all three decode
++                        // shapes against 108-112 for four rows, and in-engine 21.3 against 20.9
++                        // tok/s with a byte-identical reply. TOSH_MV_Q6K_R4=1 restores the old
++                        // kernel.
++                        nr0    = 8;
++                        suffix = "_r8";
++                    } else {
++                        nr0 = 4;
++                        suffix = "_r4";
++                    }
+                 } else {
+                     nsg = N_SG_Q6_K;
+                     nr0 = N_R0_Q6_K;
+                 }
+                 // the 64-lane twin of this kernel lives in mul_mv_w64.metal
+                 if (simd_width == 64 && TOSH_ENV("TOSH_MV_W64_DISABLE") == nullptr) {
+                     w64 = true;
+                 }
+@@ -2173,17 +2311,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+             }
+ 
+             if (sns != nullptr) {
+                 nsg = atoi(sns);
+             }
+         }
+     }
+ 
+-    if (const int rows = ggml_metal_mv_nc2_rows(tsrc0, simd_width, ne11, ne01, ne00); rows > 0) {
++    if (const int rows = ggml_metal_mv_nc2_rows(tsrc0, simd_width, ne11, ne01, ne00,
++                                                ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->is_polaris); rows > 0) {
+         nr0 = rows;
+         nr1 = ne11 == 3 ? 3 : (ne11 == 4 && tsrc0 == GGML_TYPE_Q8_0 && simd_width == 64 ? 4 : 2);
+         nsg = simd_width == 64 ? 1 : 2;
+         static thread_local char nc_sfx[16];
+         snprintf(nc_sfx, sizeof(nc_sfx), "_c%d_r%d", nr1, rows);
+         suffix = nc_sfx;
+         // q4_K and q5_K have a 64-lane twin; the others run their one kernel at either width
+         w64 = simd_width == 64 && (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K);
+@@ -2193,17 +2332,39 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     }
+ 
+     char sfx[64];
+     if (w64) {
+         snprintf(sfx, sizeof(sfx), "%s_w64", suffix);
+         suffix = sfx;
+     }
+ 
+-    snprintf(base, 256, "kernel_mul_mv_%s_%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix);
++    // the fused variants are entry points of their own, so a shape that would not land on one
++    // declines instead of compiling a name that does not exist
++    char sfx2[32] = {0};
++    if (mode != 0) {
++        static const char * const fused[6] = {
++            "", "_swiglu", "_norm", "_normadd", "_swiglu_norm", "_swiglu_normadd",
++        };
++        // the fused entry points exist for both row widths now, so the wide q4_K kernel keeps
++        // its fusions instead of quietly losing 32 dispatches per decode token
++        const std::string fsfx = suffix;
++        if (mode < 0 || mode > 5 ||
++            !w64 || tsrc0 != GGML_TYPE_Q4_K || tsrc1 != GGML_TYPE_F32 ||
++            (fsfx != "_L16r4_w64" && fsfx != "_L16r8_w64")) {
++            // nsg < 0 is "no fused kernel for this shape", which is not a failed compile
++            ggml_metal_pipeline_with_params none = {};
++            none.nsg = -1;
++            return none;
++        }
++        snprintf(sfx2, sizeof(sfx2), "%s", fused[mode]);
++    }
++
++    snprintf(base, 256, "kernel_mul_mv_%s_%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1), suffix, sfx2);
++    snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d_al=%d", base, nsg, ne12, r2, r3, nw, row4, row8, align);
+     const bool mxfp4_lut = ggml_metal_mxfp4_lut(lib, tsrc0);
+     snprintf(name, 256, "%s_nsg=%d_ne12=%d_r2=%d_r3=%d_nw=%d_a4=%d_a8=%d_al=%d_lut=%d", base, nsg, ne12, r2, r3, nw, row4, row8, align, mxfp4_lut);
+ 
+     if (TOSH_ENV("TOSH_SWEEP_DEBUG") != nullptr) {
+         fprintf(stderr, "SWEEP pipeline = %s (nsg=%d nr0=%d)\n", name, nsg, nr0);
+     }
+ 
+     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+@@ -2233,16 +2394,29 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
+     // a grid kernel stages its table once per threadgroup, which measured worth amortizing from
+     // 2 KB up except on iq2_xxs; 640 threadgroups still fill the largest cards it runs on.
+     // TOSH_MV_NTG overrides, 0 is no cap
+     if (strncmp(suffix, "_v2", 3) == 0 && smem > 0) {
+         static const int ntg_env = TOSH_ENV("TOSH_MV_NTG") ? atoi(TOSH_ENV("TOSH_MV_NTG")) : -1;
+         res.ntg = ntg_env >= 0 ? ntg_env : (smem >= 2048 && tsrc0 != GGML_TYPE_IQ2_XXS ? 640 : 0);
+     }
+ 
++    cache_e.t0   = cache_t0;
++    cache_e.t1   = cache_t1;
++    cache_e.ne00 = ne00;
++    cache_e.ne01 = ne01;
++    cache_e.ne02 = ne02;
++    cache_e.ne03 = ne03;
++    cache_e.ne11 = ne11;
++    cache_e.ne12 = ne12;
++    cache_e.ne13 = ne13;
++    cache_e.al   = cache_al;
++    cache_e.mode = (uint32_t) mode;
++    cache_e.res  = res;
++
+     return res;
+ }
+ 
+ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0(ggml_metal_library_t lib, int ne02, int ne20) {
+     char base[256];
+     char name[256];
+ 
+     snprintf(base, 256, "kernel_mul_mm_id_map0_ne20_%d", ne20);
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.h b/ggml/src/ggml-metal/ggml-metal-device.h
+index b58e7a263..fdcc2801b 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.h
++++ b/ggml/src/ggml-metal/ggml-metal-device.h
+@@ -101,16 +101,19 @@ void ggml_metal_encoder_set_buffer(ggml_metal_encoder_t encoder, struct ggml_met
+ void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder, size_t size, int idx);
+ 
+ void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int tg0, int tg1, int tg2, int tptg0, int tptg1, int tptg2);
+ 
+ // ends the encoder, signals or waits on `ev` at `value` in the command buffer, and reopens it
+ void ggml_metal_encoder_event(ggml_metal_encoder_t encoder, ggml_metal_cmd_buf_t cmd_buf, void * ev, uint64_t value, bool signal);
+ 
+ void ggml_metal_encoder_memory_barrier(ggml_metal_encoder_t encoder);
++// closes the current encoder and opens a fresh one of the same dispatch type: the only ordering
++// between two concurrent dispatch groups this driver actually enforces
++void ggml_metal_encoder_restart(ggml_metal_encoder_t encoder, ggml_metal_cmd_buf_t cmd_buf);
+ 
+ void ggml_metal_encoder_end_encoding(ggml_metal_encoder_t encoder);
+ 
+ //
+ // MTLLibrary wrapper
+ //
+ 
+ typedef struct ggml_metal_library * ggml_metal_library_t;
+@@ -163,21 +166,21 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_del
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_turbo_wht         (ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_solve_tri         (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net_back(ggml_metal_library_t lib, const char * stage);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_ta(ggml_metal_library_t lib, const struct ggml_tensor * op, bool cs);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext        (ggml_metal_library_t lib, const struct ggml_tensor * op, int nsg, int nxpsg, int r1ptg, int nr0);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_mma        (ggml_metal_library_t lib, const struct ggml_tensor * op, int nsg, int nt, int rt, bool add);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_mma_auto   (ggml_metal_library_t lib, const struct ggml_tensor * op, bool add);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+-struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv            (ggml_metal_library_t lib, const struct ggml_tensor * op);
++struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv            (ggml_metal_library_t lib, const struct ggml_tensor * op, int mode);
+ 
+ // rows per simdgroup of the few-column mat-vec for this type, lane width and column count,
+ // 0 if the batch does not take it
+-int ggml_metal_mv_nc2_rows(enum ggml_type type, int simd_width, int ne11, int ne01, int ne00);
++int ggml_metal_mv_nc2_rows(enum ggml_type type, int simd_width, int ne11, int ne01, int ne00, bool polaris);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0    (ggml_metal_library_t lib, int ne02, int ne20);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_zero    (ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argmax            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_tosh_topk_moe     (ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argmax_part       (ggml_metal_library_t lib);
+ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argmax_final      (ggml_metal_library_t lib);
+@@ -355,16 +358,20 @@ struct ggml_metal_device_props {
+     // Apple Silicon and AMD RDNA report 32; AMD GCN/Vega report 64. The Metal
+     // kernels assume 32, so a non-32 width signals a wave64 device.
+     int simd_width;
+ 
+     // GCN before Vega reads a dword off a word boundary as the aligned one, so the mat-vec
+     // kernels take a pair of shorts there instead
+     bool needs_aligned_loads;
+ 
++    // gfx8xx: the Polaris family, the only cards the tuned decode/prefill paths were measured
++    // on. False on Apple Silicon, RDNA and Vega.
++    bool is_polaris;
++
+     bool has_bfloat;
+     bool has_tensor;
+     bool use_residency_sets;
+     bool use_shared_buffers;
+ 
+     enum ggml_metal_device_id device_id;
+     int gpu_family;
+ 
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 38d8ca442..54b3186a1 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -19,16 +19,23 @@
+ 
+ #include <stdatomic.h>
+ #include <unistd.h>
+ 
+ #import <IOKit/IOKitLib.h>
+ #import <CommonCrypto/CommonDigest.h>
+ #import <CoreFoundation/CoreFoundation.h>
+ 
++// Upload ring depth: one staging buffer plus its blit command buffer per slot. The blit
++// shares the compute queue, so a slot may only be reused once its blit has finished, and
++// at four slots a decode token's uploads wrap the ring several times: every wrap waits for
++// the GPU to drain up to that point. Deep enough for a whole token, a slot is always free.
++#define GGML_METAL_STAGE_SLOTS_MAX 16
++#define GGML_METAL_STAGE_SLOTS     4
++
+ // The driver's own VRAM counters for this device: free, and in use by every process. Metal only
+ // reports this process's allocations and a working-set ceiling that host mappings also fill.
+ static bool ggml_metal_vram_stats(id<MTLDevice> d, int64_t * vfree, int64_t * vused) {
+     io_service_t e = IOServiceGetMatchingService(MACH_PORT_NULL, IORegistryEntryIDMatching(d.registryID));
+     if (e == 0) {
+         return false;
+     }
+     CFDictionaryRef ps = (CFDictionaryRef) IORegistryEntryCreateCFProperty(e, CFSTR("PerformanceStatistics"), kCFAllocatorDefault, 0);
+@@ -1132,16 +1139,30 @@ void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder
+ void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int tg0, int tg1, int tg2, int tptg0, int tptg1, int tptg2) {
+     [encoder->obj dispatchThreadgroups:MTLSizeMake(tg0, tg1, tg2) threadsPerThreadgroup:MTLSizeMake(tptg0, tptg1, tptg2)];
+ }
+ 
+ void ggml_metal_encoder_memory_barrier(ggml_metal_encoder_t encoder) {
+     [encoder->obj memoryBarrierWithScope:MTLBarrierScopeBuffers];
+ }
+ 
++void ggml_metal_encoder_restart(ggml_metal_encoder_t encoder, ggml_metal_cmd_buf_t cmd_buf_raw) {
++    id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
++
++    [encoder->obj endEncoding];
++    [encoder->obj release];
++
++    if (encoder->concurrent) {
++        encoder->obj = [cmd_buf computeCommandEncoderWithDispatchType: MTLDispatchTypeConcurrent];
++    } else {
++        encoder->obj = [cmd_buf computeCommandEncoder];
++    }
++    [encoder->obj retain];
++}
++
+ void ggml_metal_encoder_end_encoding(ggml_metal_encoder_t encoder) {
+     [encoder->obj endEncoding];
+ }
+ 
+ void ggml_metal_encoder_event(ggml_metal_encoder_t encoder, ggml_metal_cmd_buf_t cmd_buf_raw, void * ev, uint64_t value, bool signal) {
+     id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>) cmd_buf_raw;
+ 
+     [encoder->obj endEncoding];
+@@ -1184,19 +1205,20 @@ void ggml_metal_encoder_event(ggml_metal_encoder_t encoder, ggml_metal_cmd_buf_t
+     atomic_uintptr_t addr_virt;
+ 
+     // reused host-visible staging buffer for small private-buffer transfers;
+     // wrapping the caller's pointer allocates a fresh kernel resource per call,
+     // which on AMD accumulates across long runs until transfers crawl
+     id<MTLBuffer> stage_buf;
+     NSRecursiveLock * stage_lock;   // recursive: a read batch holds it across stage_get calls
+     // upload ring: the blit shares the compute queue, so the only wait is slot reuse
+-    id<MTLBuffer>        stage_set_bufs[4];
+-    id<MTLCommandBuffer> stage_set_cmds[4];
++    id<MTLBuffer>        stage_set_bufs[GGML_METAL_STAGE_SLOTS_MAX];
++    id<MTLCommandBuffer> stage_set_cmds[GGML_METAL_STAGE_SLOTS_MAX];
+     int                  stage_set_cur;
++    int                  stage_n_slots;   // ring depth: the four slots, or the deep Polaris ring
+     // open read batch: blits accumulate into one command buffer, one wait at end
+     bool                       stage_batch_open;
+     id<MTLCommandBuffer>       stage_batch_cmd;   // created by the first read, released on flush
+     id<MTLBlitCommandEncoder>  stage_batch_enc;
+     size_t                     stage_batch_used;
+     int                        stage_batch_n;
+     struct { void * dst; size_t off; size_t size; } stage_batch_items[16];
+ 
+@@ -1851,46 +1873,66 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+                 {
+                     // amdgpu_gfx<N> names the ISA target: gfx6xx-8xx are GCN 1 to 4, gfx9xx is
+                     // Vega. Older than Vega reads a dword off a word boundary as the aligned
+                     // one. The name is the fallback for macOS 12 and 13, which have no
+                     // architecture property, and it grants the fast path rather than the safe
+                     // one so an unknown card stays correct.
+                     bool tolerant = false;
+                     bool known    = false;
++                    bool polaris  = false;
+                     char how[64]  = "unknown";
+ 
+                     // The architecture property needs the macOS 14 SDK, not just the macOS 14
+                     // runtime: a pre-14 SDK has no declaration, so @available alone still fails
+                     // to compile. The name fallback below is the documented path there.
+ #if defined(MAC_OS_VERSION_14_0) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_14_0
+                     if (@available(macOS 14.0, *)) {
+                         const char * arch = dev->mtl_device.architecture.name.UTF8String;
+                         int gfx = 0;
+                         if (arch != NULL && sscanf(arch, "amdgpu_gfx%d", &gfx) == 1 && gfx > 0) {
+                             tolerant = gfx >= 900;
+                             known    = true;
++                            polaris  = gfx >= 800 && gfx < 900;
+                             snprintf(how, sizeof(how), "%s", arch);
+                         }
+                     }
+ #endif
+                     if (!known) {
+                         const char * name = dev->mtl_device.name.UTF8String;
+                         tolerant = name != NULL &&
+                             (strstr(name, "Vega")          != NULL ||
+                              strstr(name, "Radeon VII")    != NULL ||
+                              strstr(name, "Radeon Pro VII")!= NULL ||
+                              strstr(name, "WX 8200")       != NULL ||
+                              strstr(name, "WX 9100")       != NULL ||
+                              strstr(name, "Instinct MI25") != NULL ||
+                              strstr(name, "Instinct MI50") != NULL ||
+                              strstr(name, "Instinct MI60") != NULL);
++                        // gfx8xx covers RX 470/480/570/580/590, the Radeon Pro 4xx/5xx in the
++                        // 2016-2019 iMacs (580X included) and the WX 4100/5100/7100
++                        polaris = name != NULL &&
++                            (strstr(name, "Polaris")        != NULL ||
++                             strstr(name, "Radeon RX 4")    != NULL ||
++                             strstr(name, "Radeon RX 5")    != NULL ||
++                             strstr(name, "Radeon Pro 4")   != NULL ||
++                             strstr(name, "Radeon Pro 5")   != NULL ||
++                             strstr(name, "Radeon Pro WX 4")!= NULL ||
++                             strstr(name, "Radeon Pro WX 5")!= NULL ||
++                             strstr(name, "Radeon Pro WX 7")!= NULL);
+                         snprintf(how, sizeof(how), "name (no architecture before macOS 14)");
+                     }
+                     dev->props.needs_aligned_loads = is_wave64 && !tolerant;
++                    dev->props.is_polaris = is_wave64 && polaris;
++                    // a decode token's small uploads wrap a four-slot ring on this card
++                    dev->stage_n_slots = dev->props.is_polaris ? GGML_METAL_STAGE_SLOTS_MAX : GGML_METAL_STAGE_SLOTS;
++                    if (dev->props.is_polaris) {
++                        fprintf(stderr, "ggml_metal: Polaris (gfx8xx) by %s: float-accumulator and "
++                                        "tuned gfx803 paths enabled\n", how);
++                    }
+ 
+                     // the macOS 12 driver misreads unaligned mat-vec loads on RDNA too
+                     const bool monterey = [[NSProcessInfo processInfo] operatingSystemVersion].majorVersion < 13 &&
+                                           ![dev->mtl_device supportsFamily:MTLGPUFamilyApple1];
+                     if (monterey && !dev->props.needs_aligned_loads) {
+                         dev->props.needs_aligned_loads = true;
+                         snprintf(how, sizeof(how), "macOS 12");
+                     }
+@@ -2206,17 +2248,17 @@ void ggml_metal_device_free(ggml_metal_device_t dev) {
+         dev->library = NULL;
+ 
+         if (dev->stage_buf) {
+             [dev->stage_buf release];
+             dev->stage_buf = nil;
+         }
+ 
+         ggml_metal_device_upload_drain(dev);
+-        for (int i = 0; i < 4; i++) {
++        for (int i = 0; i < dev->stage_n_slots; i++) {
+             [dev->stage_set_bufs[i] release];
+             dev->stage_set_bufs[i] = nil;
+         }
+ 
+         if (dev->stage_lock) {
+             [dev->stage_lock release];
+             dev->stage_lock = nil;
+         }
+@@ -3090,17 +3132,19 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+             return true;
+         case GGML_OP_GATED_DELTA_NET:
+             // wave64: the kernel reduces within 32-lane halves (gdn_sum32).
+             return (has_simdgroup_reduction || wave64_decode) && op->src[2]->ne[0] % 32 == 0;
+         case GGML_OP_TURBO_WHT:
+             // 128-element group WHT rotation; head_dim must be a multiple of 128.
+             return op->src[0]->type == GGML_TYPE_F32 && op->src[0]->ne[0] % 128 == 0;
+         case GGML_OP_SOLVE_TRI:
+-            return has_simdgroup_reduction && op->src[0]->type == GGML_TYPE_F32;
++            // wave64: the kernel pads each row to the real width, stages 256/nw groups
++            // and reduces with simd_sum, so it is width-agnostic like norm/rms_norm.
++            return (has_simdgroup_reduction || wave64_decode) && op->src[0]->type == GGML_TYPE_F32;
+         case GGML_OP_MUL_MAT: {
+             if (!ggml_metal_supports_mul_mat_src1_prec(op, dev->props.has_tensor)) {
+                 return false;
+             }
+             // the FWHT kernels read an F16 source directly; every other F16 src1 path
+             // still goes through ggml_metal_supports_mul_mat_op
+             if (op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F16 &&
+                 ggml_metal_op_mul_mat_use_fwht(op, dev->props.max_theadgroup_memory_size)) {
+@@ -3843,17 +3887,17 @@ static void tosh_prof_add(int idx, size_t size, uint64_t t0) {
+         dev->stage_buf = [dev->mtl_device newBufferWithLength:GGML_METAL_STAGE_BUF_MAX
+                                                       options:MTLResourceStorageModeShared];
+     }
+     return dev->stage_buf;
+ }
+ 
+ // waits out and releases every in-flight upload; caller must hold stage_lock
+ static void ggml_metal_device_stage_set_drain(ggml_metal_device_t dev) {
+-    for (int i = 0; i < 4; i++) {
++    for (int i = 0; i < dev->stage_n_slots; i++) {
+         if (dev->stage_set_cmds[i]) {
+             [dev->stage_set_cmds[i] waitUntilCompleted];
+             [dev->stage_set_cmds[i] release];
+             dev->stage_set_cmds[i] = nil;
+         }
+     }
+ }
+ 
+@@ -3871,17 +3915,17 @@ bool ggml_metal_device_stage_set(ggml_metal_device_t dev, struct ggml_metal_buff
+         return false;
+     }
+ 
+     const uint64_t t0 = tosh_prof_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+ 
+     [dev->stage_lock lock];
+ 
+     const int slot = dev->stage_set_cur;
+-    dev->stage_set_cur = (slot + 1) % 4;
++    dev->stage_set_cur = (slot + 1) % dev->stage_n_slots;
+ 
+     if (dev->stage_set_cmds[slot]) {
+         [dev->stage_set_cmds[slot] waitUntilCompleted];
+         [dev->stage_set_cmds[slot] release];
+         dev->stage_set_cmds[slot] = nil;
+     }
+ 
+     id<MTLBuffer> stage = dev->stage_set_bufs[slot];
+@@ -3946,17 +3990,17 @@ bool ggml_metal_device_stage_set_2d(ggml_metal_device_t dev, struct ggml_metal_b
+ 
+     [dev->stage_lock lock];
+ 
+     for (size_t i = 0; i < n_copies;) {
+         const size_t k    = MIN(per_batch, n_copies - i);
+         const size_t need = k*size;
+ 
+         const int slot = dev->stage_set_cur;
+-        dev->stage_set_cur = (slot + 1) % 4;
++        dev->stage_set_cur = (slot + 1) % dev->stage_n_slots;
+ 
+         if (dev->stage_set_cmds[slot]) {
+             [dev->stage_set_cmds[slot] waitUntilCompleted];
+             [dev->stage_set_cmds[slot] release];
+             dev->stage_set_cmds[slot] = nil;
+         }
+ 
+         id<MTLBuffer> stage = dev->stage_set_bufs[slot];
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index d6c250400..1e7d2e297 100644
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -608,16 +608,18 @@ typedef struct {
+     uint64_t nb11;
+     uint64_t nb12;
+     uint64_t nb13;
+     int32_t  ne0;
+     int32_t  ne1;
+     int32_t  nr0;
+     int16_t  r2;
+     int16_t  r3;
++    // the fused norm in front of the mat-vec carries its own epsilon
++    float    eps;
+ } ggml_metal_kargs_mul_mv;
+ 
+ // Three independent decode projections sharing the same activation. The Metal
+ // backend recognizes adjacent Q/V/K MUL_MAT nodes and launches them as one grid;
+ // each segment retains its own strides because mixed GGUF quants are common.
+ typedef struct {
+     ggml_metal_kargs_mul_mv q;
+     ggml_metal_kargs_mul_mv v;
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 4d53881e1..a508348c6 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -249,16 +249,17 @@ static bool ggml_metal_op_concurrency_add(ggml_metal_op_t ctx, const ggml_tensor
+     }
+ 
+     return ggml_mem_ranges_add(ctx->mem_ranges, node);
+ }
+ 
+ static int32_t ggml_metal_use_count(const ggml_cgraph * gf, const ggml_tensor * t);
+ static const ggml_tensor * ggml_metal_unwrap_reshape(const ggml_cgraph * gf, const ggml_tensor * t);
+ static int ggml_metal_op_rms_norm_fwht(ggml_metal_op_t ctx, int idx);
++static int ggml_metal_op_norm_mv      (ggml_metal_op_t ctx, int idx);
+ static bool ggml_metal_ranges_overlap(const ggml_tensor * a, const ggml_tensor * b);
+ static bool ggml_metal_gdn_state_fusion_on(ggml_metal_op_t ctx);
+ static bool ggml_metal_gdn_state_skip(ggml_metal_op_t ctx, int idx);
+ 
+ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+     struct ggml_tensor * node = ctx->node(idx);
+ 
+     //GGML_LOG_INFO("%s: encoding node %3d, op = %8s\n", __func__, idx, ggml_op_name(node->op));
+@@ -391,16 +392,21 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+     }
+ 
+     if ((node->op == GGML_OP_GET_ROWS || node->op == GGML_OP_CPY) &&
+         ggml_metal_gdn_state_fusion_on(ctx) && ggml_metal_gdn_state_skip(ctx, idx)) {
+         return 1;
+     }
+ 
+     if ((node->op == GGML_OP_RMS_NORM || node->op == GGML_OP_ADD) && ctx->use_fusion() && !ctx->use_concurrency) {
++        const int n_mv = ggml_metal_op_norm_mv(ctx, idx);
++        if (n_mv > 0) {
++            return n_mv;
++        }
++
+         const int n = ggml_metal_op_rms_norm_fwht(ctx, idx);
+         if (n > 0) {
+             return n;
+         }
+     }
+ 
+     const int n_fwht = ctx->use_fusion() && (node->op == GGML_OP_MUL || node->op == GGML_OP_CONT) ?
+         ggml_metal_op_fwht_fused(ctx, idx) : 0;
+@@ -3712,32 +3718,223 @@ static int ggml_metal_op_mul_mat_mma(ggml_metal_op_t ctx, int idx) {
+     const int rows1 = pipeline.nr1;
+ 
+     ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + rows0 - 1)/rows0, (ne11 + rows1 - 1)/rows1, ne12*ne13, 32, pipeline.nsg, 1);
+ 
+     return n_fuse;
+ }
+ 
+ // the generic mat-vec kernel, or its 2-row Q4_0 variant if nc
++// rms_norm -> mat-vec of one token, with the residual add in front of the norm folded in when
++// nothing else reads its result: the kernel forms the product from the un-normalized activation,
++// so the norm leaves a scale on the finished row sums and one sum of squares over the same pass.
++// The MLP's gate and up share that pass, so their swiglu follows in the same kernel.
++static int ggml_metal_op_norm_mv(ggml_metal_op_t ctx, int idx) {
++    static const bool disabled = TOSH_ENV("TOSH_NORM_MV_FUSION_DISABLE") != nullptr;
++    if (disabled || !ctx->use_fusion() || ctx->use_concurrency) {
++        return 0;
++    }
++
++    const ggml_cgraph * gf = ctx->graph();
++
++    // the residual add is the node the encoder sees first, so a decline here still lets the
++    // norm at the next node fuse without it
++    const ggml_tensor * add = ctx->node(idx)->op == GGML_OP_ADD ? ctx->node(idx) : nullptr;
++    const bool fold_add = add != nullptr;
++    if (add) {
++        const bool fold =
++            ggml_metal_use_count(gf, add) == 1 && !(add->flags & GGML_TENSOR_FLAG_OUTPUT) &&
++            add->type == GGML_TYPE_F32 && add->src[0] && add->src[1] &&
++            add->src[0]->type == GGML_TYPE_F32 && add->src[1]->type == GGML_TYPE_F32 &&
++            ggml_are_same_shape(add->src[0], add) && ggml_are_same_shape(add->src[1], add) &&
++            ggml_is_contiguous(add->src[0]) && ggml_is_contiguous(add->src[1]);
++        if (!fold) {
++            return 0;
++        }
++    }
++
++    int i = idx + (add ? 1 : 0);
++    if (i + 2 >= ctx->n_nodes()) {
++        return 0;
++    }
++
++    const ggml_tensor * nrm = ctx->node(i);
++    if (nrm->op != GGML_OP_RMS_NORM || (add && nrm->src[0] != add)) {
++        return 0;
++    }
++    i++;
++
++    // the norm's weight is the node the engine already folds into the norm's own dispatch, and
++    // the fused kernel applies it where the mat-vec reads the activation. Two mat-vecs read it
++    // when the MLP's gate and up follow, which is the usual case in this model
++    const ggml_tensor * mul = nullptr;
++    if (ctx->node(i)->op == GGML_OP_MUL && nrm->src[1] == nullptr &&
++        (ctx->node(i)->src[0] == nrm || ctx->node(i)->src[1] == nrm)) {
++        mul = ctx->node(i);
++        i++;
++    }
++
++    if (i + 1 >= ctx->n_nodes()) {
++        return 0;
++    }
++
++    const ggml_tensor * mv = ctx->node(i);
++    const ggml_tensor * y  = mul ? mul : nrm;
++    const ggml_tensor * wn = mul ? (mul->src[0] == nrm ? mul->src[1] : mul->src[0]) : nrm->src[1];
++    const ggml_tensor * x  = nrm->src[0];
++    if (mv->op != GGML_OP_MUL_MAT || mv->src[0] == nullptr || wn == nullptr ||
++        ggml_get_op_params_i32(mv, 1) != 0 || ggml_metal_unwrap_reshape(gf, mv->src[1]) != y) {
++        return 0;
++    }
++    const ggml_tensor * w = mv->src[0];
++
++    const int64_t ne00 = x->ne[0];
++    const float   eps  = ggml_get_op_params_f32(nrm, 0);
++
++    const bool ok =
++        x->type == GGML_TYPE_F32 && ggml_is_contiguous(x) &&
++        x->ne[1] == 1 && x->ne[2] == 1 && x->ne[3] == 1 && ne00 >= 2048 && ne00 % 256 == 0 &&
++        ggml_are_same_shape(nrm, x) && nrm->type == GGML_TYPE_F32 && ggml_is_contiguous(nrm) &&
++        wn->type == GGML_TYPE_F32 && ggml_is_contiguous(wn) && ggml_nelements(wn) == ne00 &&
++        w->type == GGML_TYPE_Q4_K && ggml_is_contiguous(w) && w->ne[0] == ne00 &&
++        w->ne[2] == 1 && w->ne[3] == 1 &&
++        mv->type == GGML_TYPE_F32 && ggml_is_contiguous(mv) && ggml_nelements(mv) == w->ne[1] &&
++        ggml_metal_use_count(gf, nrm) == 1 && !(nrm->flags & GGML_TENSOR_FLAG_OUTPUT) &&
++        eps > 0.0f &&
++        !ggml_metal_ranges_overlap(mv, w) && !ggml_metal_ranges_overlap(mv, wn) &&
++        !ggml_metal_ranges_overlap(mv, x) &&
++        (!add || (!ggml_metal_ranges_overlap(mv, add->src[0]) && !ggml_metal_ranges_overlap(mv, add->src[1])));
++    if (!ok) {
++        return 0;
++    }
++
++    // the MLP's gate and up: their swiglu is in the same dispatch as the mat-vecs
++    const ggml_tensor * mv2 = nullptr;
++    const ggml_tensor * glu = nullptr;
++    const ggml_tensor * wu  = nullptr;
++    const ggml_tensor * dst = mv;
++    int n_fused = (i - idx) + 1;
++
++    if (i + 2 < ctx->n_nodes()) {
++        mv2 = ctx->node(i + 1);
++        glu = ctx->node(i + 2);
++    }
++    // the gate/up variant carries the norm too, but it measured slower than the two dispatches
++    // it replaces on this card (more state per lane), so it stays behind a switch
++    static const bool swiglu_on = TOSH_ENV("TOSH_NORM_MV_SWIGLU") != nullptr;
++    if (swiglu_on && mv2 && glu && mv2->op == GGML_OP_MUL_MAT && glu->op == GGML_OP_GLU &&
++        ggml_get_glu_op(glu) == GGML_GLU_OP_SWIGLU && ggml_get_op_params_i32(glu, 1) == 0 &&
++        glu->src[0] == mv && glu->src[1] == mv2 && mv2->src[1] == mv->src[1] && mv2->src[0] &&
++        mv2->src[0]->type == GGML_TYPE_Q4_K && ggml_is_contiguous(mv2->src[0]) &&
++        ggml_are_same_shape(mv2->src[0], w) && mv2->src[0]->nb[1] == w->nb[1] &&
++        ggml_get_op_params_i32(mv2, 1) == 0 &&
++        ggml_metal_use_count(gf, mv) == 1 && ggml_metal_use_count(gf, mv2) == 1 &&
++        !(mv->flags & GGML_TENSOR_FLAG_OUTPUT) && !(mv2->flags & GGML_TENSOR_FLAG_OUTPUT) &&
++        glu->type == GGML_TYPE_F32 && ggml_is_contiguous(glu) && ggml_nelements(glu) == w->ne[1] &&
++        !ggml_metal_ranges_overlap(glu, w) && !ggml_metal_ranges_overlap(glu, wn) &&
++        !ggml_metal_ranges_overlap(glu, x) &&
++        !ggml_metal_ranges_overlap(glu, mv2->src[0])) {
++        wu = mv2->src[0];
++        dst = glu;
++        n_fused = (i - idx) + 3;
++    }
++
++    // the normalized activation is skipped, so nothing beyond the mat-vecs may read it
++    if (mul && ggml_metal_use_count(gf, mul) != (wu ? 2 : 1)) {
++        return 0;
++    }
++
++    // a pipeline that will not build would be retried on every token, so it is latched once
++    static bool compile_failed = false;
++    if (compile_failed) {
++        return 0;
++    }
++
++    const int mode = (wu ? 4 : 2) + (fold_add ? 1 : 0);
++
++    auto pipeline = ggml_metal_library_get_pipeline_mul_mv(ctx->lib, mv, mode);
++    if (!pipeline.pipeline) {
++        if (pipeline.nsg < 0) {
++            return 0;
++        }
++        compile_failed = true;
++        GGML_LOG_WARN("%s: fused q4_K norm mat-vec kernel unavailable, keeping the walk\n", __func__);
++        return 0;
++    }
++
++    ggml_metal_kargs_mul_mv args = {
++        /*.ne00 =*/ (int32_t) w->ne[0],
++        /*.ne01 =*/ (int32_t) w->ne[1],
++        /*.ne02 =*/ 1,
++        /*.nb00 =*/ w->nb[0],
++        /*.nb01 =*/ w->nb[1],
++        /*.nb02 =*/ w->nb[2],
++        /*.nb03 =*/ w->nb[3],
++        /*.ne10 =*/ (int32_t) x->ne[0],
++        /*.ne11 =*/ 1,
++        /*.ne12 =*/ 1,
++        /*.nb10 =*/ x->nb[0],
++        /*.nb11 =*/ x->nb[1],
++        /*.nb12 =*/ x->nb[2],
++        /*.nb13 =*/ x->nb[3],
++        /*.ne0  =*/ (int32_t) w->ne[1],
++        /*.ne1  =*/ 1,
++        /*.nr0  =*/ pipeline.nr0,
++        /*.r2   =*/ 1,
++        /*.r3   =*/ 1,
++        /*.eps  =*/ eps,
++    };
++
++    // the activation is one vector, or the two the add was given
++    const ggml_tensor * a0 = fold_add ? add->src[0] : x;
++    const ggml_tensor * a1 = fold_add ? add->src[1] : x;
++
++    ggml_metal_encoder_t enc = ctx->enc;
++    ggml_metal_encoder_set_pipeline(enc, pipeline);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(w),   1);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(a0),  2);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(dst), 3);
++    if (wu) {
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(wu), 4);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(a1), 5);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(wn), 6);
++    } else {
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(a1), 4);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(wn), 5);
++    }
++
++    const int nr0 = pipeline.nr0;
++    const int nsg = pipeline.nsg;
++
++    // same threadgroup the generic mat-vec would have dispatched this kernel with
++    const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
++    const int nth = props_dev->wave64_decode ? props_dev->simd_width : 32;
++
++    ggml_metal_encoder_dispatch_threadgroups(enc, (int) ((w->ne[1] + nr0*nsg - 1)/(nr0*nsg)), 1, 1, nth, nsg, 1);
++
++    return n_fused;
++}
++
+ static int ggml_metal_op_mul_mat_mv(ggml_metal_op_t ctx, int idx) {
+     ggml_tensor * op = ctx->node(idx);
+ 
+     ggml_metal_library_t lib = ctx->lib;
+     ggml_metal_encoder_t enc = ctx->enc;
+ 
+     GGML_TENSOR_LOCALS( int32_t, ne0, op->src[0], ne);
+     GGML_TENSOR_LOCALS(uint64_t, nb0, op->src[0], nb);
+     GGML_TENSOR_LOCALS( int32_t, ne1, op->src[1], ne);
+     GGML_TENSOR_LOCALS(uint64_t, nb1, op->src[1], nb);
+     GGML_TENSOR_LOCALS( int32_t, ne,  op,         ne);
+ 
+     const int16_t r2 = ne12/ne02;
+     const int16_t r3 = ne13/ne03;
+ 
+-    auto pipeline = ggml_metal_library_get_pipeline_mul_mv(lib, op);
++    auto pipeline = ggml_metal_library_get_pipeline_mul_mv(lib, op, 0);
+ 
+     const int nr0 = pipeline.nr0;
+     const int nr1 = pipeline.nr1;
+     const int nsg = pipeline.nsg;
+ 
+     const size_t smem = pipeline.smem;
+ 
+     ggml_metal_kargs_mul_mv args = {
+@@ -4137,16 +4334,121 @@ static int ggml_metal_op_mul_mat_swiglu(ggml_metal_op_t ctx, int idx) {
+             ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
+         }
+         ggml_metal_encoder_dispatch_threadgroups(enc, (w->ne[1] + nr0*nsg - 1)/(nr0*nsg), 1, 1, pipeline.nr1, nsg, 1);
+     }
+ 
+     return 3;
+ }
+ 
++// q4_K gate and up mat-vecs of one token with their swiglu: one kernel reads both weight
++// streams over a single pass of the activations and writes the swiglu result, replacing two
++// mat-vec dispatches and the GLU with one. The adjacency argument is the pq2 fusion's above.
++static int ggml_metal_op_mul_mat_swiglu_mv(ggml_metal_op_t ctx, int idx) {
++    static const bool disabled = TOSH_ENV("TOSH_SWIGLU_FUSION_DISABLE") != nullptr;
++    if (disabled || !ctx->use_fusion() || idx + 2 >= ctx->n_nodes()) {
++        return 0;
++    }
++
++    const ggml_tensor * a   = ctx->node(idx);
++    const ggml_tensor * b   = ctx->node(idx + 1);
++    const ggml_tensor * glu = ctx->node(idx + 2);
++
++    if (a->op != GGML_OP_MUL_MAT || b->op != GGML_OP_MUL_MAT || glu->op != GGML_OP_GLU ||
++        ggml_get_glu_op(glu) != GGML_GLU_OP_SWIGLU || ggml_get_op_params_i32(glu, 1) != 0 || !glu->src[1]) {
++        return 0;
++    }
++
++    // the kernel takes the first mat-vec as the gate, so only this order fits it
++    const ggml_tensor * gate = glu->src[0];
++    const ggml_tensor * up   = glu->src[1];
++    if (gate != a || up != b) {
++        return 0;
++    }
++
++    const ggml_tensor * wg = gate->src[0];
++    const ggml_tensor * wu = up->src[0];
++    const ggml_tensor * x  = gate->src[1];
++
++    const ggml_cgraph * gf = ctx->graph();
++
++    const bool ok =
++        wg->type == GGML_TYPE_Q4_K && wu->type == GGML_TYPE_Q4_K && ggml_are_same_shape(wg, wu) &&
++        wg->nb[1] == wu->nb[1] && wg->nb[2] == wu->nb[2] && wg->nb[3] == wu->nb[3] &&
++        ggml_is_contiguous(wg) && ggml_is_contiguous(wu) &&
++        wg->ne[2] == 1 && wg->ne[3] == 1 && wg->ne[0] % 256 == 0 &&
++        up->src[1] == x && x->type == GGML_TYPE_F32 && ggml_is_contiguous(x) &&
++        x->ne[1] == 1 && x->ne[2] == 1 && x->ne[3] == 1 &&
++        ggml_get_op_params_i32(gate, 1) == 0 && ggml_get_op_params_i32(up, 1) == 0 &&
++        glu->type == GGML_TYPE_F32 && ggml_is_contiguous(glu) && ggml_nelements(glu) == gate->ne[0] &&
++        ggml_metal_use_count(gf, gate) == 1 && ggml_metal_use_count(gf, up) == 1 &&
++        !(gate->flags & GGML_TENSOR_FLAG_OUTPUT) && !(up->flags & GGML_TENSOR_FLAG_OUTPUT) &&
++        !ggml_metal_ranges_overlap(glu, x);
++    if (!ok) {
++        return 0;
++    }
++
++    // a pipeline that will not build would be retried on every token, so it is latched once
++    static bool compile_failed = false;
++    if (compile_failed) {
++        return 0;
++    }
++
++    auto pipeline = ggml_metal_library_get_pipeline_mul_mv(ctx->lib, gate, 1);
++    if (!pipeline.pipeline) {
++        if (pipeline.nsg < 0) {
++            return 0;
++        }
++        compile_failed = true;
++        GGML_LOG_WARN("%s: fused q4_K swiglu kernel unavailable, keeping the three-node path\n", __func__);
++        return 0;
++    }
++
++    ggml_metal_kargs_mul_mv args = {
++        /*.ne00 =*/ (int32_t) wg->ne[0],
++        /*.ne01 =*/ (int32_t) wg->ne[1],
++        /*.ne02 =*/ 1,
++        /*.nb00 =*/ wg->nb[0],
++        /*.nb01 =*/ wg->nb[1],
++        /*.nb02 =*/ wg->nb[2],
++        /*.nb03 =*/ wg->nb[3],
++        /*.ne10 =*/ (int32_t) x->ne[0],
++        /*.ne11 =*/ 1,
++        /*.ne12 =*/ 1,
++        /*.nb10 =*/ x->nb[0],
++        /*.nb11 =*/ x->nb[1],
++        /*.nb12 =*/ x->nb[2],
++        /*.nb13 =*/ x->nb[3],
++        /*.ne0  =*/ (int32_t) gate->ne[0],
++        /*.ne1  =*/ 1,
++        /*.nr0  =*/ pipeline.nr0,
++        /*.r2   =*/ 1,
++        /*.r3   =*/ 1,
++    };
++
++    ggml_metal_encoder_t enc = ctx->enc;
++    ggml_metal_encoder_set_pipeline(enc, pipeline);
++    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(wg),  1);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(x),   2);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(glu), 3);
++    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(wu),  4);
++
++    const int nr0 = pipeline.nr0;
++    const int nsg = pipeline.nsg;
++
++    // same threadgroup the generic mat-vec would have dispatched this kernel with
++    const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
++    const int nth = props_dev->wave64_decode ? props_dev->simd_width : 32;
++
++    ggml_metal_encoder_dispatch_threadgroups(enc, (wg->ne[1] + nr0*nsg - 1)/(nr0*nsg), 1, 1, nth, nsg, 1);
++
++    return 3;
++}
++
+ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+     ggml_tensor * op = ctx->node(idx);
+ 
+     ggml_metal_library_t lib = ctx->lib;
+     ggml_metal_encoder_t enc = ctx->enc;
+ 
+     const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
+ 
+@@ -4161,16 +4463,20 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+     if (const int n_fuse = ggml_metal_op_mul_mat_qvk(ctx, idx)) {
+         return n_fuse;
+     }
+ 
+     if (const int n_fuse = ggml_metal_op_mul_mat_swiglu(ctx, idx)) {
+         return n_fuse;
+     }
+ 
++    if (const int n_fuse = ggml_metal_op_mul_mat_swiglu_mv(ctx, idx)) {
++        return n_fuse;
++    }
++
+     // few rows over a long k: the GEMM tile would leave most rows empty and too few threadgroups busy
+     if (props_dev->simd_width == 32 && !props_dev->has_unified_memory &&
+         op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+         op->src[0]->ne[1] <= 16 && op->src[0]->ne[0] >= 256 &&
+         op->src[0]->nb[0] == sizeof(float) && op->src[1]->nb[0] == sizeof(float) &&
+         TOSH_ENV("TOSH_MM_SKINNY_DISABLE") == nullptr) {
+         static const int nc = []() { const char * e = TOSH_ENV("TOSH_MM_SKINNY_NC"); return e ? atoi(e) : 2; }();
+         char sname[64];
+@@ -4268,17 +4574,17 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+     // first try to use small-batch mat-mv kernels
+     // these should be efficient for BS [2, ~8]
+     // ext kernel derives its row split from the simdgroup width, so it runs on both
+     // wave32 and wave64. wave64 rides on wave64_decode (matches the mat-vec gating).
+     static const bool ext_disabled = TOSH_ENV("TOSH_EXT_DISABLE") != nullptr;
+     if (!ext_disabled &&
+         (props_dev->simd_width == 32 || (props_dev->simd_width == 64 && props_dev->wave64_decode)) &&
+         !(props_dev->simd_width == 64 && ext_loses_w64(op->src[0]->type, ne11)) &&
+-        ggml_metal_mv_nc2_rows(op->src[0]->type, props_dev->simd_width, ne11, ne01, ne00) == 0 &&
++        ggml_metal_mv_nc2_rows(op->src[0]->type, props_dev->simd_width, ne11, ne01, ne00, props_dev->is_polaris) == 0 &&
+         op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
+         (
+          (
+           (
+            op->src[0]->type == GGML_TYPE_F32  || // TODO: helper function
+            op->src[0]->type == GGML_TYPE_F16  ||
+            op->src[0]->type == GGML_TYPE_BF16 ||
+            op->src[0]->type == GGML_TYPE_Q1_0 ||

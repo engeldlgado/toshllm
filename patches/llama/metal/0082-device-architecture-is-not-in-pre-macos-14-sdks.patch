@@ -1,0 +1,35 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 2b6b99614..38d8ca442 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -1853,25 +1853,30 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+                     // Vega. Older than Vega reads a dword off a word boundary as the aligned
+                     // one. The name is the fallback for macOS 12 and 13, which have no
+                     // architecture property, and it grants the fast path rather than the safe
+                     // one so an unknown card stays correct.
+                     bool tolerant = false;
+                     bool known    = false;
+                     char how[64]  = "unknown";
+ 
++                    // The architecture property needs the macOS 14 SDK, not just the macOS 14
++                    // runtime: a pre-14 SDK has no declaration, so @available alone still fails
++                    // to compile. The name fallback below is the documented path there.
++#if defined(MAC_OS_VERSION_14_0) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_14_0
+                     if (@available(macOS 14.0, *)) {
+                         const char * arch = dev->mtl_device.architecture.name.UTF8String;
+                         int gfx = 0;
+                         if (arch != NULL && sscanf(arch, "amdgpu_gfx%d", &gfx) == 1 && gfx > 0) {
+                             tolerant = gfx >= 900;
+                             known    = true;
+                             snprintf(how, sizeof(how), "%s", arch);
+                         }
+                     }
++#endif
+                     if (!known) {
+                         const char * name = dev->mtl_device.name.UTF8String;
+                         tolerant = name != NULL &&
+                             (strstr(name, "Vega")          != NULL ||
+                              strstr(name, "Radeon VII")    != NULL ||
+                              strstr(name, "Radeon Pro VII")!= NULL ||
+                              strstr(name, "WX 8200")       != NULL ||
+                              strstr(name, "WX 9100")       != NULL ||

@@ -1,0 +1,59 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index c3af3813b..13d96cd43 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1421,19 +1421,34 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     // tokens and gains 1.0% at 512, so it takes a floor rather than lose the gain.
+     static const int w64_floor_env = []() {
+         const char * s = TOSH_ENV("TOSH_MM_W64_FLOOR");
+         return s ? atoi(s) : 0;
+     }();
+     const int w64_floor = w64_floor_env ? w64_floor_env :
+                           (tsrc0 == GGML_TYPE_IQ4_NL ? 384 : 0);
+ 
++    // with float accumulators the 64-lane tile's extra registers cost more than its wider LDS
++    // reuse buys, but only on gfx803 is the wide tile the one that cannot afford them: there
++    // this tile measures 39.7 ms against 119.6 wide at 4096x512x14336 on q4_0 (40-46 ms
++    // against 115-120 on q8_0, q2_K, iq4_xs, q5_0, q5_1, q3_K, mxfp4, iq4_nl, f16), and it
++    // also wins below the wide floor. The types the mw kernel covers stand down only where mw
++    // exists, so every other card keeps the w64 tile; TOSH_MM_W64_ENABLE reaches it either way.
++    // the wide 64-lane tile is instantiated for the quantized types and f16, not for bf16, f32,
++    // q1_0, q2_0 or tq2_0: asking for one of those aborts in the library lookup, so they keep the
++    // narrow kernel
++    const bool w64_wide_ok = !wide || (tsrc0 != GGML_TYPE_BF16 && tsrc0 != GGML_TYPE_F32 &&
++                                       tsrc0 != GGML_TYPE_Q1_0 && tsrc0 != GGML_TYPE_Q2_0 &&
++                                       tsrc0 != GGML_TYPE_TQ2_0);
++    const bool mw_type = tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q6_K || tsrc0 == GGML_TYPE_PQ2_0;
++
+     const bool w64 = simd_width == 64 && use_mm_manual && !has_tensor &&
+                      op->ne[1] >= w64_floor &&
+-                     (!acc_f32 || TOSH_ENV("TOSH_MM_W64_ENABLE") != nullptr) &&
++                     (!(acc_f32 && polaris && mw_type) || TOSH_ENV("TOSH_MM_W64_ENABLE") != nullptr) &&
++                     w64_wide_ok &&
+                      TOSH_ENV("TOSH_MM_W64_DISABLE") == nullptr;
+ 
+     // q4_K x f32 prefill tile in mul_mm_w64.metal (kernel_mul_mm_mw): one wave per 64x64 tile,
+     // 8 rows and 8 columns per lane, the next panel staged into registers before the fma loop
+     // that consumes the current one. Standalone at 12288x1088x4096: 2970 GFLOPS against 2236
+     // for the same tile with the loads left behind the barrier and 2030 for the current path.
+     // It needs 64 float accumulators plus a staged panel, so it only takes shapes the wide tile
+     // already handles. q4_K and q6_K are 96% of the prefill GEMM bytes on a Q4_K_M file.
+@@ -1442,17 +1457,17 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     // one wave per tile does not do. Keeping it there sent the GQA k/v pair (1024 x 4096) and the
+     // two 256-row SSM projections to the base 32-lane kernel, at 0.07 to 0.97 TF/s in the 10.7
+     // profile against 0.55 to 1.51 for this tile at the same shapes. Only the row floor is
+     // dropped; the token floor, the type gates and the byte gates below all still apply.
+     const bool mw_rows = use_mm_manual && !has_tensor && !wide && op->ne[0] >= 32 &&
+                          op->ne[1] >= wide_floor && !bc_inp &&
+                          TOSH_ENV("TOSH_MM_MW_ROWS_DISABLE") == nullptr;
+     const bool mw = simd_width == 64 && polaris && use_mm_manual && !has_tensor && (wide || mw_rows) && !w64 &&
+-                    (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q6_K || tsrc0 == GGML_TYPE_PQ2_0) &&
++                    mw_type &&
+                     tsrc1 == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                     !bc_inp && op->src[0]->ne[0] % 256 == 0 &&
+                     (tsrc0 != GGML_TYPE_Q4_K || op->src[0]->nb[1] % 16 == 0) &&
+                     TOSH_ENV("TOSH_MM_MW_DISABLE") == nullptr;
+ 
+     // a gradient can pass the half range: its f32 operand goes through the bfloat tile instead
+     const bool grad_bf16 = acc_f32 && !w64 && ggml_get_op_params_i32(op, 1) == GGML_HINT_GRADIENT &&
+                            ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_bfloat &&

@@ -1,0 +1,162 @@
+diff --git a/ggml/src/ggml-metal/kernels/quantize.metal b/ggml/src/ggml-metal/kernels/quantize.metal
+index bec1d903c..6e7d91e81 100644
+--- a/ggml/src/ggml-metal/kernels/quantize.metal
++++ b/ggml/src/ggml-metal/kernels/quantize.metal
+@@ -274,16 +274,157 @@ kernel void kernel_concat(
+         }
+ 
+         device T * y = (device T *)(dst + i3*args.nb3 + i2*args.nb2 + i1*args.nb1 + i0*args.nb0);
+ 
+         *y = *x;
+     }
+ }
+ 
++// The hybrid layers' SSM conv-input concat is dst[c][t] = (t < st) ? src0[c][t] : src1[t-st][c]
++// with dst contiguous along t and src1 contiguous along c: a 761 x 8192 f32 transpose plus the
++// three state frames, 24 dispatches per prefill.  kernel_concat walks i0 (tokens) per thread
++// with the lane axis on the token index, so each load is one word per 32 KB stride and the
++// dispatch costs 5.9 ms.  This walks a 32 x 32 LDS tile instead, lanes on the channel axis for
++// the read and on the token axis for the write: 0.63 ms, same output.
++//
++// The grid belongs to the host, so tiles are strided over the threadgroup count the encoder
++// picked - ne1/count when rows are batched into a 2D threadgroup, ne1*nc0 when one row is one
++// threadgroup.  Anything this does not describe (another concat dimension, a higher rank, or
++// strides that are not contiguous where it needs them) takes the shipped element walk.
++#define CAT_TT 32
++#define CAT_TC 32
++
++static inline void kernel_concat_f32_scalar(
++        constant ggml_metal_kargs_concat & args,
++        device  const char * src0,
++        device  const char * src1,
++        device        char * dst,
++        uint3   tgpig, ushort3 tpitg, ushort3 ntg) {
++
++    const int i3 = tgpig.z;
++    const int i2 = tgpig.y;
++    const int i1 = ntg.y == 1 ? tgpig.x/args.nc0 : tgpig.x*ntg.y + tpitg.y;
++    const int ic = ntg.y == 1 ? tgpig.x%args.nc0 : 0;
++
++    if (i1 >= args.ne1) {
++        return;
++    }
++
++    int o[4] = {0, 0, 0, 0};
++    o[args.dim] = args.dim == 0 ? args.ne00 : (args.dim == 1 ? args.ne01 : (args.dim == 2 ? args.ne02 : args.ne03));
++
++    const int n0  = (args.ne0 + args.nc0 - 1)/args.nc0;
++    const int i0e = min(args.ne0, (ic + 1)*n0);
++
++    for (int i0 = ic*n0 + tpitg.x; i0 < i0e; i0 += ntg.x) {
++        device const float * x;
++
++        if (i0 < args.ne00 && i1 < args.ne01 && i2 < args.ne02 && i3 < args.ne03) {
++            x = (device const float *)(src0 + (i3       )*args.nb03 + (i2       )*args.nb02 + (i1       )*args.nb01 + (i0       )*args.nb00);
++        } else {
++            x = (device const float *)(src1 + (i3 - o[3])*args.nb13 + (i2 - o[2])*args.nb12 + (i1 - o[1])*args.nb11 + (i0 - o[0])*args.nb10);
++        }
++
++        device float * y = (device float *)(dst + i3*args.nb3 + i2*args.nb2 + i1*args.nb1 + i0*args.nb0);
++
++        *y = *x;
++    }
++}
++
++static inline void kernel_concat_f32_tile(
++        constant ggml_metal_kargs_concat & args,
++        device  const char * src0,
++        device  const char * src1,
++        device        char * dst,
++        threadgroup float * tile,
++        int g, int tid, int nthreads) {
++
++    const int ntc  = (args.ne1 + CAT_TC - 1)/CAT_TC;
++    const int ct   = g % ntc;
++    const int tt   = g / ntc;
++    const int c0   = ct*CAT_TC;
++    const int t0   = tt*CAT_TT;
++    const int st   = args.ne00;              // state frames
++    const int nnew = args.ne0 - st;          // rows coming from src1
++
++    // read: lanes along the channel axis, the unit stride of src1
++    {
++        const int c  = tid % CAT_TC;
++        const int r  = tid / CAT_TC;
++        const int sc = nthreads/CAT_TC;
++        const int cg = c0 + c;
++        if (r < sc && cg < args.ne1) {
++            for (int t = r; t < CAT_TT; t += sc) {
++                const int tg = t0 + t;
++                if (tg >= args.ne0) break;
++                if (tg < st) {
++                    tile[c*(CAT_TT + 1) + t] = *(device const float *)(src0 + (uint64_t) cg*args.nb01
++                                                                      + (uint64_t) tg*args.nb00);
++                } else if (tg - st < nnew) {
++                    tile[c*(CAT_TT + 1) + t] = *(device const float *)(src1 + (uint64_t) cg*args.nb11
++                                                                      + (uint64_t) (tg - st)*args.nb10);
++                } else {
++                    break;
++                }
++            }
++        }
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    // write: lanes along the token axis, the unit stride of dst
++    {
++        const int t   = tid % CAT_TT;
++        const int r   = tid / CAT_TT;
++        const int stw = nthreads/CAT_TT;
++        const int tg  = t0 + t;
++        if (r < stw && tg < args.ne0) {
++            for (int c = r; c < CAT_TC; c += stw) {
++                const int cg = c0 + c;
++                if (cg >= args.ne1) break;
++                *(device float *)(dst + (uint64_t) cg*args.nb1 + (uint64_t) tg*args.nb0) =
++                    tile[c*(CAT_TT + 1) + t];
++            }
++        }
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++}
++
++kernel void kernel_concat_f32_t(
++        constant ggml_metal_kargs_concat & args,
++        device  const char * src0,
++        device  const char * src1,
++        device        char * dst,
++        uint3   tgpig[[threadgroup_position_in_grid]],
++        ushort3 tpitg[[thread_position_in_threadgroup]],
++        ushort3   ntg[[threads_per_threadgroup]]) {
++
++    const bool fast = args.dim == 0 && args.ne2 == 1 && args.ne3 == 1 &&
++                      args.nb0 == 4 && args.nb11 == 4 && args.nb00 == 4;
++
++    if (!fast) {
++        kernel_concat_f32_scalar(args, src0, src1, dst, tgpig, tpitg, ntg);
++        return;
++    }
++
++    const int groups = ntg.y > 1 ? (args.ne1 + ntg.y - 1)/ntg.y
++                                 : args.ne1*max(1, args.nc0);
++    const int nthreads = ntg.x*ntg.y*ntg.z;
++    const int tid = tpitg.x + ntg.x*(tpitg.y + ntg.y*tpitg.z);
++
++    threadgroup float tile[CAT_TC*(CAT_TT + 1)];
++
++    const int ntiles = ((args.ne1 + CAT_TC - 1)/CAT_TC)*((args.ne0 + CAT_TT - 1)/CAT_TT);
++    for (int g = tgpig.x; g < ntiles; g += groups) {
++        kernel_concat_f32_tile(args, src0, src1, dst, tile, g, tid, nthreads);
++    }
++}
++
+ typedef decltype(kernel_concat<float>) kernel_concat_t;
+ 
+ template [[host_name("kernel_concat_f32")]]  kernel kernel_concat_t kernel_concat<float>;
+ template [[host_name("kernel_concat_f16")]]  kernel kernel_concat_t kernel_concat<half>;
+ #if defined(GGML_METAL_HAS_BF16)
+ template [[host_name("kernel_concat_bf16")]] kernel kernel_concat_t kernel_concat<bfloat>;
+ #endif
+ template [[host_name("kernel_concat_i8")]]   kernel kernel_concat_t kernel_concat<char>;

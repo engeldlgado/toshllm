@@ -1,0 +1,160 @@
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
+index 13d96cd43..14a6397e8 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-device.cpp
+@@ -1433,17 +1433,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     // also wins below the wide floor. The types the mw kernel covers stand down only where mw
+     // exists, so every other card keeps the w64 tile; TOSH_MM_W64_ENABLE reaches it either way.
+     // the wide 64-lane tile is instantiated for the quantized types and f16, not for bf16, f32,
+     // q1_0, q2_0 or tq2_0: asking for one of those aborts in the library lookup, so they keep the
+     // narrow kernel
+     const bool w64_wide_ok = !wide || (tsrc0 != GGML_TYPE_BF16 && tsrc0 != GGML_TYPE_F32 &&
+                                        tsrc0 != GGML_TYPE_Q1_0 && tsrc0 != GGML_TYPE_Q2_0 &&
+                                        tsrc0 != GGML_TYPE_TQ2_0);
+-    const bool mw_type = tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q6_K || tsrc0 == GGML_TYPE_PQ2_0;
++    const bool mw_type = tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q6_K ||
++                         tsrc0 == GGML_TYPE_PQ2_0 || tsrc0 == GGML_TYPE_PTQ1_0;
+ 
+     const bool w64 = simd_width == 64 && use_mm_manual && !has_tensor &&
+                      op->ne[1] >= w64_floor &&
+                      (!(acc_f32 && polaris && mw_type) || TOSH_ENV("TOSH_MM_W64_ENABLE") != nullptr) &&
+                      w64_wide_ok &&
+                      TOSH_ENV("TOSH_MM_W64_DISABLE") == nullptr;
+ 
+     // q4_K x f32 prefill tile in mul_mm_w64.metal (kernel_mul_mm_mw): one wave per 64x64 tile,
+@@ -1471,18 +1472,19 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     // a gradient can pass the half range: its f32 operand goes through the bfloat tile instead
+     const bool grad_bf16 = acc_f32 && !w64 && ggml_get_op_params_i32(op, 1) == GGML_HINT_GRADIENT &&
+                            ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_bfloat &&
+                            tsrc1 == GGML_TYPE_F32 && (tsrc0 == GGML_TYPE_F32 || tsrc0 == GGML_TYPE_F16) &&
+                            !(wide && tsrc0 == GGML_TYPE_F32) &&
+                            TOSH_ENV("TOSH_MM_GRAD_BF16_DISABLE") == nullptr;
+ 
+         if (mw) {
+-        snprintf(base, 256, tsrc0 == GGML_TYPE_Q4_K ? "kernel_mul_mm_mw" :
+-                            tsrc0 == GGML_TYPE_Q6_K ? "kernel_mul_mm_mw6" : "kernel_mul_mm_mw2");
++        snprintf(base, 256, tsrc0 == GGML_TYPE_Q4_K  ? "kernel_mul_mm_mw"  :
++                            tsrc0 == GGML_TYPE_Q6_K  ? "kernel_mul_mm_mw6" :
++                            tsrc0 == GGML_TYPE_PTQ1_0 ? "kernel_mul_mm_mw1" : "kernel_mul_mm_mw2");
+     } else {
+         snprintf(base, 256, "kernel_mul_mm_%s_%s%s%s%s", ggml_metal_tname_pair(lib, tsrc0, tsrc1), ggml_type_name(tsrc1),
+                  grad_bf16 ? "_gb" : "", wide ? "_w" : "", w64 ? "_w64" : "");
+     }
+     // measured on 32 lanes only; the 64-lane tile lives in its own kernel
+     const bool uniform_scale = (tsrc0 == GGML_TYPE_Q4_K || tsrc0 == GGML_TYPE_Q5_K) && wide && !w64 &&
+                                use_mm_manual && !has_tensor && simd_width == 32 &&
+                                TOSH_ENV("TOSH_MM_UNIFORM_SCALE_DISABLE") == nullptr;
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+index a036e7c55..15dbe7e36 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm_w64.metal
+@@ -808,16 +808,17 @@ template [[host_name("kernel_mul_mm_id_tq2_0_f16_w64")]]   kernel mul_mm_id_w64_
+ 
+ #define MW_NCOLS 8
+ #define MW_KT    16
+ #define MW_TW    (MW_NCOLS*8)            // 64 columns per wave
+ #define MW_NV4   (MW_KT*MW_NCOLS/32)     // 4 float4 per lane on the B side
+ #define MW_KGRP  (MW_KT/4)               // 4 lanes share a B column
+ #define MW_CSTEP (MW_TW/MW_NV4)          // 16 columns apart
+ #define MW_BUF   (MW_KT*(64 + MW_TW))    // 2048 floats
++constant uint MW_P3[5] = {1u, 3u, 9u, 27u, 81u}; // 3^n mod 256, the PTQ1_0 trit planes
+ 
+ // 16 bytes at an arbitrary byte offset: read the two aligned words that cover it and shift
+ static inline void mw_span16(device const uchar * p, uint al,
+                              thread uint & w0, thread uint & w1,
+                              thread uint & w2, thread uint & w3) {
+     const device uint4 * q = (const device uint4 *) (p - al);
+     const uint4 a = q[0], b = q[1];
+     const ulong u0 = ((ulong) a.y << 32) | (ulong) a.x;
+@@ -990,21 +991,81 @@ static inline void mw_load_a2(device const char * wrow, int loop_k, bool rowok,
+     dbia = -d;
+ 
+     #pragma unroll
+     for (int i = 0; i < MW_KT; i++) {
+         q[i] = (uchar) ((w >> (2*i)) & 3u);
+     }
+ }
+ 
++// one 16-k panel of a PTQ1_0 row. The block is 128 weights behind one fp16 scale and the trits
++// sit in planes: qs[0..15] carry trit n of elements 16n..16n+15 for n = 0..4, qs[16..23] trit n of
++// elements 80+8n.., and qh two bytes of four trits each for elements 120..127. A 16-value panel is
++// therefore a contiguous byte run decoded at one power of three, so every lane runs the same path,
++// and the -1 of the codec moves into dbia the way PQ2_0's does.
++static inline uchar4 mw_trit4(uint u, uint p) {
++    // one byte per lane: as_type<ushort2> keeps two bytes in each lane and the 0xFF mask then
++    // drops the odd bytes, so the unpack goes through uchar4
++    const ushort4 b = ushort4(as_type<uchar4>(u));
++    const ushort4 t = (((b*ushort4(p)) & ushort4(0xFFu))*ushort4(3u)) >> 8;
++    return uchar4(t);
++}
++
++static inline uchar mw_trit(uint b, uint p) {
++    return (uchar) ((((b*p) & 0xFFu)*3u) >> 8);
++}
++
++static inline void mw_load_a1(device const char * wrow, int loop_k, bool rowok,
++                              thread float & dsc, thread float & dbia, thread uchar * q) {
++    const int bi = loop_k / 128;
++    const int il = (loop_k % 128) / 16;
++    device const block_ptq1_0 * blk = (device const block_ptq1_0 *) (wrow + (uint64_t) bi*sizeof(block_ptq1_0));
++
++    const float d = rowok ? (float) blk->d : 0.f;
++    dsc  = d;
++    dbia = -d;
++
++    if (il < 5) {
++        const uint p = MW_P3[il];
++        #pragma unroll
++        for (int i = 0; i < 4; i++) {
++            const uchar4 c = mw_trit4(*(device const uint *) (blk->qs + 4*i), p);
++            q[4*i + 0] = c.x; q[4*i + 1] = c.y; q[4*i + 2] = c.z; q[4*i + 3] = c.w;
++        }
++    } else if (il < 7) {
++        // elements 80..119: the same eight bytes carry two trit planes per panel
++        const uint b0 = *(device const uint *) (blk->qs + 16);
++        const uint b1 = *(device const uint *) (blk->qs + 20);
++        const uchar4 c0 = mw_trit4(b0, MW_P3[2*(il - 5)]);
++        const uchar4 c1 = mw_trit4(b1, MW_P3[2*(il - 5)]);
++        const uchar4 c2 = mw_trit4(b0, MW_P3[2*(il - 5) + 1]);
++        const uchar4 c3 = mw_trit4(b1, MW_P3[2*(il - 5) + 1]);
++        q[ 0] = c0.x; q[ 1] = c0.y; q[ 2] = c0.z; q[ 3] = c0.w;
++        q[ 4] = c1.x; q[ 5] = c1.y; q[ 6] = c1.z; q[ 7] = c1.w;
++        q[ 8] = c2.x; q[ 9] = c2.y; q[10] = c2.z; q[11] = c2.w;
++        q[12] = c3.x; q[13] = c3.y; q[14] = c3.z; q[15] = c3.w;
++    } else {
++        // elements 112..119 are trit 4 of the same eight bytes, 120..127 the four trits of qh
++        const uchar4 c0 = mw_trit4(*(device const uint *) (blk->qs + 16), 81u);
++        const uchar4 c1 = mw_trit4(*(device const uint *) (blk->qs + 20), 81u);
++        q[ 0] = c0.x; q[ 1] = c0.y; q[ 2] = c0.z; q[ 3] = c0.w;
++        q[ 4] = c1.x; q[ 5] = c1.y; q[ 6] = c1.z; q[ 7] = c1.w;
++        #pragma unroll
++        for (int i = 0; i < 8; i++) {
++            q[8 + i] = mw_trit((uint) blk->qh[i & 1], MW_P3[i >> 1]);
++        }
++    }
++}
++
+ template<int QT>
+ static inline void mw_load_a(device const char * wrow, int loop_k, bool rowok,
+                              thread float & dsc, thread float & dbia, thread uchar * q) {
+     if      (QT == 1) mw_load_a6(wrow, loop_k, rowok, dsc, dbia, q);
+     else if (QT == 2) mw_load_a2(wrow, loop_k, rowok, dsc, dbia, q);
++    else if (QT == 3) mw_load_a1(wrow, loop_k, rowok, dsc, dbia, q);
+     else              mw_load_a4(wrow, loop_k, rowok, dsc, dbia, q);
+ }
+ 
+ static inline void mw_store_a(threadgroup float * sa, const thread uchar * q, int arow,
+                               float dsc, float dbia) {
+     #pragma unroll
+     for (int i = 0; i < MW_KT; i++) sa[i*64 + arow] = dsc*(float) q[i] + dbia;
+ }
+@@ -1167,8 +1228,9 @@ kernel void NAME(
+     if (tiitg >= 64) return;                                                        \
+     mw_tile<QT>(args, src0, src1, dst, (threadgroup float *) shmem,                  \
+                 tgpig, tgpg, (int) tiitg);                                          \
+ }
+ 
+ MW_KERNEL(kernel_mul_mm_mw,  0)
+ MW_KERNEL(kernel_mul_mm_mw6, 1)
+ MW_KERNEL(kernel_mul_mm_mw2, 2)
++MW_KERNEL(kernel_mul_mm_mw1, 3)

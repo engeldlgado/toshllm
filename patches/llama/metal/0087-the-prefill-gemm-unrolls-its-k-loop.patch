@@ -1,0 +1,42 @@
+diff --git a/ggml/src/ggml-metal/kernels/mul_mm.metal b/ggml/src/ggml-metal/kernels/mul_mm.metal
+index ea9447a0a..54f2d9375 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mm.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mm.metal
+@@ -397,17 +397,17 @@ kernel void kernel_mul_mm(
+ 
+         if (FC_mul_mm_manual) {
+             // packed rank-1 updates on (k, k+1) pairs, flushed to float once per NK. The
+             // accumulator is half for weights; attention products overflow it, so those use float.
+             if (FC_mul_mm_acc_f32) {
+                 vec<float,2> pacc[NLR][4];
+                 for (short rr = 0; rr < NLR; rr++) { for (short cc = 0; cc < 4; cc++) { pacc[rr][cc] = 0; } }
+ 
+-                for (short ik = 0; ik < NK/8; ik++) {
++                FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
+                     FOR_UNROLL (short k = 0; k < 8; k += 2) {
+                         vec<S0,2> av[NLR];
+                         vec<S1,2> bv[4];
+                         for (short rr = 0; rr < NLR; rr++) {
+                             av[rr] = *(threadgroup const vec<S0,2> *)(lsma + 64*rr + 8*lr + k);
+                         }
+                         for (short cc = 0; cc < 4; cc++) {
+                             const short col = lc + 4*cc;
+@@ -969,17 +969,17 @@ kernel void kernel_mul_mm_id(
+         // load matrices from threadgroup memory and conduct outer products
+         threadgroup const S0 * lsma = (sa + (NLR == 8 ? 0 : 4*64*(vsg%2)));
+         threadgroup const S1 * lsmb = (sb + 2*64*(NLR == 8 ? vsg : vsg/2));
+ 
+         constexpr short bstride = (NLR == 8 ? 8 : 4)*64;
+ 
+         if (FC_mul_mm_manual && sg_live) {
+             if (FC_mul_mm_acc_f32) {
+-                for (short ik = 0; ik < NK/8; ik++) {
++                FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
+                     // packed rank-1 updates on (k, k+1) pairs: half the instructions of the
+                     // scalar loop; partials flush to float every 8-deep slice for precision
+                     vec<float,2> pacc[NLR][4];
+ 
+                     FOR_UNROLL (short k = 0; k < 8; k += 2) {
+                         vec<S0,2> av[NLR];
+                         vec<S1,2> bv[4];
+                         for (short rr = 0; rr < NLR; rr++) {
