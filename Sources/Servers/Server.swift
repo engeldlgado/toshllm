@@ -392,15 +392,20 @@ struct ServerSettings {
         return manualFullGPU ? "all" : "auto"
     }
 
-    /// Passes `--fit-target auto` when VRAM reserve is Automatic so `llama-server`, the router
-    /// preset, and `llama-bench` all trigger fitting while letting the engine calibrate the
-    /// discrete-GPU margin (without marking it as an explicit user override).
+    /// Under Auto the fit keeps free the same VRAM reserve as the memory plan, except on a
+    /// discrete card, where the engine sizes the margin from the free VRAM the driver reports.
     var fitTargetArguments: [String] {
         guard nglArgument == "auto" else { return [] }
-        guard vramReserveMB > 0 else { return ["--fit-target", "auto"] }
         let indices = selectedGPUIndices
-        let vramMB = ServerController.availableGPUs().filter { indices.contains($0.index) }.map(\.vramMB).max() ?? 0
-        return ["--fit-target", String(Self.effectiveVramReserveMB(vramReserveMB, vramMB: vramMB))]
+        let gpus = ServerController.availableGPUs().filter { indices.contains($0.index) }
+        let discrete = !Self.isAppleSilicon && !gpus.isEmpty && gpus.allSatisfy { !$0.isIntegrated }
+        return ["--fit-target", Self.fitTarget(reserveMB: vramReserveMB,
+                                               vramMB: gpus.map(\.vramMB).max() ?? 0, discrete: discrete)]
+    }
+
+    /// Unified memory has no engine calibration, so there `auto` would mean a fixed 1024 MiB.
+    nonisolated static func fitTarget(reserveMB: Int, vramMB: Int, discrete: Bool) -> String {
+        reserveMB == 0 && discrete ? "auto" : String(effectiveVramReserveMB(reserveMB, vramMB: vramMB))
     }
 
     /// llama-bench takes no `-ngl auto`, but fits with a target. The server's fit leaves the

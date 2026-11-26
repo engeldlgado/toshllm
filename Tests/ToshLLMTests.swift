@@ -1071,17 +1071,24 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.arguments[s.arguments.firstIndex(of: "-ngl")! + 1], "99")
         XCTAssertFalse(s.arguments.contains("--fit-target"))
 
-        // Automatic VRAM reserve (0) must still pass --fit-target auto so llama-bench triggers
-        // fitting and the engine keeps fit_params_target_explicit = false for dGPU calibration.
+        // An Automatic reserve still passes --fit-target, so llama-bench fits too.
         var autoRes = makeSettings()
         autoRes.ngl = -1
         autoRes.ncmoe = 0
         autoRes.vramReserveMB = 0
         let autoArgs = autoRes.arguments
-        XCTAssertEqual(autoArgs[autoArgs.firstIndex(of: "--fit-target")! + 1], "auto")
+        let autoTarget = autoArgs[autoArgs.firstIndex(of: "--fit-target")! + 1]
+        XCTAssertTrue(autoTarget == "auto" || Int(autoTarget) != nil, autoTarget)
         let autoBench = autoRes.benchmarkArguments
         XCTAssertFalse(autoBench.contains("-ngl"))
-        XCTAssertEqual(autoBench[autoBench.firstIndex(of: "--fit-target")! + 1], "auto")
+        XCTAssertEqual(autoBench[autoBench.firstIndex(of: "--fit-target")! + 1], autoTarget)
+    }
+
+    func testOnlyADiscreteCardLetsTheEngineSizeTheAutomaticReserve() {
+        XCTAssertEqual(ServerSettings.fitTarget(reserveMB: 0, vramMB: 12288, discrete: true), "auto")
+        // unified memory keeps the app's 8%, since the engine would fall back to a fixed 1024 MiB
+        XCTAssertEqual(ServerSettings.fitTarget(reserveMB: 0, vramMB: 12288, discrete: false), "983")
+        XCTAssertEqual(ServerSettings.fitTarget(reserveMB: 2048, vramMB: 12288, discrete: true), "2048")
     }
 
     func testBaseArguments() {
@@ -3005,7 +3012,9 @@ final class RouterModeTests: XCTestCase {
         XCTAssertTrue(ini.contains("fit-target = 1024"))
         s.vramReserveMB = 0
         let autoIni = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
-        XCTAssertTrue(autoIni.contains("fit-target = auto"))
+        let autoLine = autoIni.split(separator: "\n").first { $0.hasPrefix("fit-target = ") }
+        let autoValue = autoLine.map { String($0.dropFirst("fit-target = ".count)) } ?? ""
+        XCTAssertTrue(autoValue == "auto" || Int(autoValue) != nil, autoIni)
         XCTAssertTrue(makeSettings().routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
             .contains("n-gpu-layers = 99"))
     }
