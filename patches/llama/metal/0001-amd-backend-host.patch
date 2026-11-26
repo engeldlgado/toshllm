@@ -4793,11 +4793,100 @@ index 9bed6421b..120723c01 100644
  
              reg = {
                  /* .api_version = */ GGML_BACKEND_API_VERSION,
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 9066e061e..d74c8c3b0 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -387,16 +387,18 @@ llama_context::llama_context(
+         if (!LLAMA_KV_ROWS_DISABLE) {
+             cparams.auto_fkvr = cparams.kv_unified;
+         } else {
+             LLAMA_LOG_INFO("%s: LLAMA_KV_ROWS_DISABLE set, disabling kv_rows\n", __func__);
+             cparams.auto_fkvr = false;
+         }
+     }
+ 
++    cparams.amd_prefill_decomposed = -1;
++
+     // initialized later
+     cparams.pipeline_parallel = false;
+     cparams.training = false;
+ 
+     {
+         const char * LLAMA_GRAPH_REUSE_DISABLE = getenv("LLAMA_GRAPH_REUSE_DISABLE");
+         graph_reuse_disable = LLAMA_GRAPH_REUSE_DISABLE ? (atoi(LLAMA_GRAPH_REUSE_DISABLE) != 0) : graph_reuse_disable;
+ 
+@@ -844,16 +846,43 @@ void llama_context::sched_reserve() {
+ 
+     int n_splits_tg        = -1;
+     int n_nodes_tg         = -1;
+     int n_inputs_tg        = -1;
+     int n_input_tensors_tg = -1;
+ 
+     const uint32_t n_outputs_pp = std::min(n_tokens, cparams.n_outputs_max);
+ 
++    // the decomposed AMD prefill holds whole score matrices; on a discrete card that cannot fit
++    // them, flash attention runs the same prefill in far less memory. Decided on the first real load.
++    if (cparams.amd_prefill_decomposed < 0 && !model.no_alloc()) {
++        cparams.amd_prefill_decomposed = 1;
++        if (cparams.flash_attn && getenv("TOSH_FA_AMD") != nullptr) {
++            std::vector<size_t> sizes(backend_ptrs.size(), 0);
++            graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(), true, sizes.data());
++            for (size_t i = 0; i < backend_ptrs.size(); ++i) {
++                ggml_backend_dev_t dev = ggml_backend_get_device(backend_ptrs[i]);
++                ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
++                auto is_discrete = reg ? (bool (*)(ggml_backend_dev_t))
++                    ggml_backend_reg_get_proc_address(reg, "ggml_backend_metal_device_is_discrete") : nullptr;
++                if (is_discrete == nullptr || !is_discrete(dev)) {
++                    continue;
++                }
++                size_t free = 0;
++                size_t total = 0;
++                ggml_backend_dev_memory(dev, &free, &total);
++                if (sizes[i] > free) {
++                    cparams.amd_prefill_decomposed = 0;
++                    LLAMA_LOG_INFO("%s: %s: decomposed prefill attention needs %zu MiB, %zu MiB free: using flash attention\n",
++                            __func__, ggml_backend_dev_name(dev), sizes[i] / (1024*1024), free / (1024*1024));
++                }
++            }
++        }
++    }
++
+     // reserve pp (prompt processing) graph first so that buffers are only allocated once
+     {
+         auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(),
+                 model.no_alloc(), model.no_alloc() ? backend_buf_exp_size.data() : nullptr);
+         if (!gf) {
+             if (cparams.pipeline_parallel) {
+                 LLAMA_LOG_WARN("%s: compute buffer allocation failed, retrying without pipeline parallelism\n", __func__);
+                 cparams.pipeline_parallel = false;
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index 52c85bdd2..429bec44c 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -44,16 +44,17 @@ struct llama_cparams {
+     bool fused_dsv4_hc_pre;
+     bool fused_dsv4_hc_comb;
+     bool fused_dsv4_hc_post;
+     bool auto_fhc;
+     bool fused_top_k_mask;   // use fused top-k sparse attention mask
+     bool auto_ftkm;
+     bool fused_kv_rows;      // unified cache: attend to the cells of each sequence only (ggml_flash_attn_ext_rows)
+     bool auto_fkvr;
++    int8_t amd_prefill_decomposed; // AMD prefill may take the decomposed attention: -1 not decided yet
+     bool no_perf;
+     bool op_offload;
+     bool kv_unified;
+     bool pipeline_parallel;
+     bool training;           // set by llama_opt_init()
+ 
+     size_t moe_cache_size;
+     float  moe_cache_cpu_share;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 3cee72df0..9dd85ce5f 100644
+index 3cee72df0..ef9901312 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -3076,33 +3076,82 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+@@ -3076,33 +3076,83 @@ ggml_tensor * llm_graph_context::build_attn_mha(
           ggml_tensor * kq_b,
           ggml_tensor * kq_mask,
           ggml_tensor * kv_rows,
@@ -4861,6 +4950,7 @@ index 3cee72df0..9dd85ce5f 100644
 +        (v_alloc != nullptr && !ggml_backend_buft_is_host(ggml_backend_buffer_get_type(v_alloc->buffer)));
 +    // the decomposed route reads the whole cache, so per-sequence rows keep flash attention
 +    const bool amd_prefill_decomposed =
++        cparams.amd_prefill_decomposed != 0 &&
 +        getenv("TOSH_FA_AMD") != nullptr &&
 +        kv_rows == nullptr &&
 +        decomposed_v_on_device &&
@@ -4881,7 +4971,7 @@ index 3cee72df0..9dd85ce5f 100644
              v = ggml_transpose(ctx0, v);
          }
  
-@@ -3124,16 +3173,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+@@ -3124,16 +3174,17 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          }
          res->add_fused_node({kv_rows ? LLM_FUSED_OP_FLASH_ATTN_KV_ROWS : LLM_FUSED_OP_FLASH_ATTN, cur, il});
  
@@ -4899,7 +4989,7 @@ index 3cee72df0..9dd85ce5f 100644
              cur = ggml_mul_mat(ctx0, v_mla, cur);
  #else
              // It's preferable to do the calculation as a matrix-matrix multiplication with n_tokens in dimension 1.
-@@ -3143,16 +3193,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+@@ -3143,16 +3194,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
              cb(cur, "fattn_mla", il);
              cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
              cur = ggml_cont(ctx0, cur); // Needed because ggml_reshape_2d expects contiguous inputs.
@@ -4921,7 +5011,7 @@ index 3cee72df0..9dd85ce5f 100644
          if (model.arch == LLM_ARCH_GROK) {
              // need to do the following:
              // multiply by attn_output_multiplier
-@@ -3181,16 +3236,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+@@ -3181,16 +3237,21 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          }
  
          kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
