@@ -3300,6 +3300,23 @@ extension ServerSettingsTests {
         XCTAssertTrue(hint.contains("por capas"), hint)
         XCTAssertTrue(hint.contains("by layers"), hint)
     }
+
+    @MainActor func testDiagnoseSendsAnOldInklingFileToTheSupportedLayout() {
+        let log = """
+        llama_model_load: error loading model: error loading model hyperparameters: inkling2: this file stores a looped model (num_loops = 3) in a layout that is not supported
+        llama_model_load_from_file_impl: failed to load model
+        """
+        let hint = ServerController.diagnose(log, exitCode: 1)
+        XCTAssertTrue(hint.contains("Mainline_Support"), hint)
+        XCTAssertFalse(hint.contains("re-download"), hint)
+    }
+
+    @MainActor func testDiagnoseNamesDynamicMoEWhenItRefusesTheModel() {
+        let log = "llama_model_load: error loading model: DMOE_UNSUPPORTED_MODEL: looped layers share their experts\nfailed to load model"
+        let hint = ServerController.diagnose(log, exitCode: 1)
+        XCTAssertTrue(hint.contains("turn it off"), hint)
+        XCTAssertFalse(hint.contains("re-download"), hint)
+    }
 }
 
 @MainActor

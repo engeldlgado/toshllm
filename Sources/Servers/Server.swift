@@ -2317,6 +2317,13 @@ final class ServerController: ObservableObject {
         if tail.contains("prism.hadamard") || tail.contains("Hadamard") {
             return "El modelo pide una rotación de Hadamard que este motor no admite: usa otra versión del GGUF / the model asks for a Hadamard rotation this engine does not support: use another build of the GGUF"
         }
+        // Both say what to do instead, so they must not fall through to "damaged file".
+        if tail.contains("stores a looped model") {
+            return "Este Inkling 2 usa el formato antiguo (Old_Support): descarga el GGUF de la raíz del repositorio o de Mainline_Support / this Inkling 2 file uses the old layout (Old_Support): download the GGUF from the repository root or Mainline_Support"
+        }
+        if tail.contains("error loading model: dmoe_unsupported_model") {
+            return "Dynamic MoE no admite este modelo: desactívalo en Ajustes / Dynamic MoE does not support this model: turn it off in Settings"
+        }
         if tail.contains("invalid magic") || tail.contains("failed to load model")
             || tail.contains("error loading model") {
             return "Modelo dañado o incompleto: vuelve a descargarlo / model file damaged or incomplete: re-download it"
