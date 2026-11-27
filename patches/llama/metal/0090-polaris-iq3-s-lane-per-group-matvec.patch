@@ -1,0 +1,124 @@
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+index 87d6030..e01d6e7 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+@@ -2528,80 +2528,79 @@ void kernel_mul_mv_iq3_s_f32_w64_impl(
+     const int first_row = (r0 * NSG + sgitg) * nr0;
+ 
+     const uint i12 = im%FC_mul_mv_ne12;
+     const uint i13 = im/FC_mul_mv_ne12;
+ 
+     const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
+     const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
+ 
+-    device const block_iq3_s * x = (device const block_iq3_s *) (src0 + offset0);
+-    device const float       * y = (device const float       *) (src1 + offset1);
++    device const char  * x = src0 + offset0;
++    device const float * y = (device const float *) (src1 + offset1);
+ 
+-    // two lanes share the block: each folds half of its groups
+-    // four lanes fill the wave: one group of eight per lane, one grid lookup each
+-    float yl[8];
+     float sumf[nr0]={0.f};
+ 
+     const int nb32 = nb * (QK_K / 32);
+ 
+     threadgroup uint32_t * svalues = (threadgroup uint32_t *) shmem;
+     {
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+         const int gsz = FC_mul_mv_nw*FC_mul_mv_nsg;
+         for (int i = gid; i < 512; i += gsz) svalues[i] = iq3s_grid[i];
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+     }
+ 
+-    const int   ix = tiisg/4;
+-    const short hg = tiisg%4;
+-
+-    device const float * y4 = y + 32 * ix + 8 * hg;
++    // one lane per group of 32 weights. The 13.75 bytes of a group arrive as nine narrow reads
++    // where the eight-weight split spent twenty-four on the same bytes, and the 32 activations
++    // as eight 16-byte reads. Every read stays on a 2-byte boundary: the block is 110 bytes.
++    for (int ib32 = tiisg; ib32 < nb32; ib32 += FC_mul_mv_nw) {
++        const int ibl = ib32 / (QK_K / 32);
++        const int ib  = ib32 % (QK_K / 32);
+ 
+-    for (int ib32 = ix; ib32 < nb32; ib32 += FC_mul_mv_nw/4) {
++        device const float4 * y4 = (device const float4 *) (y + 32 * ib32);
++        float4 yv[8];
+         for (short i = 0; i < 8; ++i) {
+-            yl[i] = y4[i];
++            yv[i] = y4[i];
+         }
+ 
+-        const int ibl = ib32 / (QK_K / 32);
+-        const int ib  = ib32 % (QK_K / 32);
++        for (short row = 0; row < nr0; ++row) {
++            device const block_iq3_s * xr = (device const block_iq3_s *) (x + (uint64_t) row * args.nb01) + ibl;
+ 
+-        device const block_iq3_s * xr = x + ibl;
+-        device const uint8_t * qs = xr->qs + 8 * ib;
+-        device const uint8_t * qh = xr->qh + ib;
+-        device const uint8_t * sc = xr->scales + (ib/2);
+-        device const uint8_t * signs = xr->signs + 4 * ib;
+-        device const half * dh = &xr->d;
++            device const ushort * qs16 = (device const ushort *) (xr->qs + 8 * ib);
++            device const ushort * sg16 = (device const ushort *) (xr->signs + 4 * ib);
+ 
+-        for (short row = 0; row < nr0; row++) {
+-            const float db = dh[0];
+-            const float d = db * (1 + 2*((sc[0] >> 4*(ib%2)) & 0xf));
++            const uint qh = xr->qh[ib];
++            const uint sc = xr->scales[ib/2];
++            const float d = float(xr->d) * (1 + 2*((sc >> 4*(ib%2)) & 0xf));
+ 
+-            float2 sum = {0};
+-            {
+-                const short l = hg;
+-                const threadgroup uint32_t * table1 = qh[0] & kmask_iq2xs[2*l+0] ? svalues + 256 : svalues;
+-                const threadgroup uint32_t * table2 = qh[0] & kmask_iq2xs[2*l+1] ? svalues + 256 : svalues;
+-                const threadgroup uint8_t * grid1 = (const threadgroup uint8_t *)(table1 + qs[2*l+0]);
+-                const threadgroup uint8_t * grid2 = (const threadgroup uint8_t *)(table2 + qs[2*l+1]);
+-                for (short j = 0; j < 4; ++j) {
+-                    sum[0] += yl[j + 0] * grid1[j] * select(1, -1, signs[l] & kmask_iq2xs[j+0]);
+-                    sum[1] += yl[j + 4] * grid2[j] * select(1, -1, signs[l] & kmask_iq2xs[j+4]);
++            const uint2 q = uint2((uint) qs16[0] | ((uint) qs16[1] << 16),
++                                  (uint) qs16[2] | ((uint) qs16[3] << 16));
++            const uint  s = (uint) sg16[0] | ((uint) sg16[1] << 16);
++
++            float acc0 = 0.f;
++            float acc1 = 0.f;
++
++            for (short k = 0; k < 8; ++k) {
++                const uint qb  = ((k < 4 ? q.x : q.y) >> (8*(k%4))) & 0xff;
++                const uint idx = qb | ((qh << (8 - k)) & 0x100);
++                const uint g   = svalues[idx];
++
++                const float4 gf   = float4(as_type<uchar4>(g));
++                const uint4  flip = (uint4(s >> (4*k)) << uint4(31, 30, 29, 28)) & 0x80000000u;
++                const float4 w    = as_type<float4>(as_type<uint4>(gf) ^ flip);
++
++                if (k % 2 == 0) {
++                    acc0 += dot(w, yv[k]);
++                } else {
++                    acc1 += dot(w, yv[k]);
+                 }
+             }
+-            sumf[row] += d * (sum[0] + sum[1]);
+ 
+-            dh    += args.nb01/2;
+-            qs    += args.nb01;
+-            qh    += args.nb01;
+-            sc    += args.nb01;
+-            signs += args.nb01;
++            sumf[row] += d * (acc0 + acc1);
+         }
+-
+-        y4 += 8 * FC_mul_mv_nw;
+     }
+ 
+     device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
+ 
+     for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
+         float sum_all = simd_sum(sumf[row]);
+         if (tiisg == 0) {
+             dst_f32[first_row + row] = sum_all;

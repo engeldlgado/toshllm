@@ -1,0 +1,88 @@
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+index e01d6e7..ddf7a7d 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv_w64.metal
+@@ -2880,17 +2880,17 @@ void kernel_mul_mv_iq3_xxs_f32_w64_impl(
+     const uint64_t offset0 = first_row*args.nb01 + (i12/FC_mul_mv_r2)*args.nb02 + (i13/FC_mul_mv_r3)*args.nb03;
+     const uint64_t offset1 =        r1*args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
+ 
+     device const block_iq3_xxs * x = (device const block_iq3_xxs *) (src0 + offset0);
+     device const float         * y = (device const float         *) (src1 + offset1);
+ 
+     // the block header is one word for all four groups, so splitting it across lanes
+     // duplicates that read; one lane per block, with each grid entry read as a word
+-    float yl[32];
++    float4 yv[8];
+     float sumf[nr0]={0.f};
+ 
+     const int nb32 = nb * (QK_K / 32);
+ 
+     threadgroup uint32_t * svalues = (threadgroup uint32_t *)(shmem);
+     threadgroup uint8_t  * ssigns  = (threadgroup uint8_t  *)(svalues + 256);
+     {
+         const int gid = FC_mul_mv_nw*sgitg + tiisg;
+@@ -2900,18 +2900,19 @@ void kernel_mul_mv_iq3_xxs_f32_w64_impl(
+         threadgroup_barrier(mem_flags::mem_threadgroup);
+     }
+ 
+     const int ix = tiisg;
+ 
+     device const float * y4 = y + 32 * ix;
+ 
+     for (int ib32 = ix; ib32 < nb32; ib32 += FC_mul_mv_nw) {
+-        for (short i = 0; i < 32; ++i) {
+-            yl[i] = y4[i];
++        // eight 16-byte reads of the group's activations in place of thirty-two scalar ones
++        for (short i = 0; i < 8; ++i) {
++            yv[i] = ((device const float4 *) y4)[i];
+         }
+ 
+         const int ibl = ib32 / (QK_K / 32);
+         const int ib  = ib32 % (QK_K / 32);
+ 
+         device const block_iq3_xxs * xr = x + ibl;
+         device const uint8_t  * q3 = xr->qs + 8 * ib;
+         device const uint16_t * gas = (device const uint16_t *)(xr->qs + QK_K/4) + 2 * ib;
+@@ -2924,31 +2925,34 @@ void kernel_mul_mv_iq3_xxs_f32_w64_impl(
+             // whole block header comes in as three words instead of ten narrow reads
+             const uint2 q3w = mv_ld_u32x2(q3);
+             const uint32_t aux32 = mv_ld_u32(gas);
+ 
+             thread const uint8_t * q3b = (thread const uint8_t *)&q3w;
+ 
+             const float d = db * (0.5f + (aux32 >> 28));
+ 
+-            float2 sum = {0};
++            float sum0 = 0.f;
++            float sum1 = 0.f;
+             for (short l = 0; l < 4; ++l) {
+                 // each grid entry is four bytes, so one word read replaces four byte reads
+                 const uint32_t g1 = svalues[q3b[2*l+0]];
+                 const uint32_t g2 = svalues[q3b[2*l+1]];
+-                const uint8_t signs = ssigns[(aux32 >> 7*l) & 127];
++                const uint     sg = ssigns[(aux32 >> 7*l) & 127];
+ 
+-                for (short j = 0; j < 4; ++j) {
+-                    const short sh = 8*j;
++                // the grid bytes convert in one step each and the sign goes straight into the sign bit
++                const float4 f1 = float4(as_type<uchar4>(g1));
++                const float4 f2 = float4(as_type<uchar4>(g2));
++                const uint4  m1 = (uint4(sg)      << uint4(31, 30, 29, 28)) & 0x80000000u;
++                const uint4  m2 = (uint4(sg >> 4) << uint4(31, 30, 29, 28)) & 0x80000000u;
+ 
+-                    sum[0] += yl[8*l + j + 0] * (float)((g1 >> sh) & 0xFF) * (signs & kmask_iq2xs[j+0] ? -1.f : 1.f);
+-                    sum[1] += yl[8*l + j + 4] * (float)((g2 >> sh) & 0xFF) * (signs & kmask_iq2xs[j+4] ? -1.f : 1.f);
+-                }
++                sum0 += dot(as_type<float4>(as_type<uint4>(f1) ^ m1), yv[2*l + 0]);
++                sum1 += dot(as_type<float4>(as_type<uint4>(f2) ^ m2), yv[2*l + 1]);
+             }
+-            sumf[row] += d * (sum[0] + sum[1]);
++            sumf[row] += d * (sum0 + sum1);
+ 
+             dh  += args.nb01/2;
+             q3  += args.nb01;
+             gas += args.nb01/2;
+         }
+ 
+         y4 += 32 * FC_mul_mv_nw;
+     }
