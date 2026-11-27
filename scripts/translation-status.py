@@ -50,6 +50,15 @@ def filled(code: str, keys: list[str]) -> int:
     return sum(1 for k in keys if data.get(k, "").strip())
 
 
+def percentage(done: int, total: int) -> int:
+    """Rounded completion percentage, reserving 0% for none and 100% for all."""
+    if total <= 0 or done <= 0:
+        return 0
+    if done >= total:
+        return 100
+    return min(99, max(1, round(done * 100 / total)))
+
+
 def main() -> None:
     keys = list(json.loads(TEMPLATE.read_text(encoding="utf-8")))
     total = len(keys)
@@ -68,7 +77,7 @@ def main() -> None:
             status = "Built-in (100%)"
         else:
             done = filled(code, keys)
-            pct = round(done * 100 / total) if total else 0
+            pct = percentage(done, total)
             status = "not started" if done == 0 else f"{pct}% ({done}/{total})"
         lines.append(f"| {en_name} ({native}) | `{code}` | {status} |")
     table = "\n".join(lines)
