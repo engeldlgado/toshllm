@@ -1,0 +1,671 @@
+diff --git a/common/chat.cpp b/common/chat.cpp
+index 0558258a3c..85f96df81b 100644
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -1470,16 +1470,22 @@ static common_chat_params_init_fn common_chat_template_detect_params_init(const
+         src.find("<function=") != std::string::npos &&
+         src.find("<parameter=") != std::string::npos &&
+         // Exclude models that don't use \n between tags
+         src.find("'<tool_call><function=' ~ tool_call.name ~ '>'") == std::string::npos) {
+         LOG_DBG("Using specialized template: Qwen3-Coder\n");
+         return common_chat_params_init_qwen3_coder;
+     }
+ 
++    // Inkling 1 and 2
++    if (is_inkling_template(src)) {
++        LOG_DBG("Using specialized template: Inkling\n");
++        return common_chat_params_init_inkling;
++    }
++
+     return nullptr;
+ }
+ 
+ common_chat_template::common_chat_template(const std::string & src, const std::string & bos_token, const std::string & eos_token) {
+     jinja::lexer lexer;
+     auto lexer_res = lexer.tokenize(src);
+     this->prog = jinja::parse_from_tokens(lexer_res);
+ 
+diff --git a/common/parsers/inkling.cpp b/common/parsers/inkling.cpp
+new file mode 100644
+index 0000000000..9c30cdb879
+--- /dev/null
++++ b/common/parsers/inkling.cpp
+@@ -0,0 +1,165 @@
++#include "parsers.h"
++
++bool is_inkling_template(const std::string & src) {
++    return src.find("<|message_user|>") != std::string::npos &&
++           src.find("<|content_image|>") != std::string::npos;
++}
++
++// the template makes one message block per content part, but a media marker comes inside the text of a message
++// <header><|content_text|>{media}text<|end_message|> --> <header>{media}<|end_message|><header><|content_text|>text<|end_message|>
++static void inkling_split_media(common_chat_prompt & prompt) {
++    const std::string TEXT      = "<|content_text|>";
++    const std::string END       = "<|end_message|>";
++    const std::string MEDIA_BEG = "<__media_";
++    const std::string MEDIA_END = "__>";
++
++    std::vector<common_chat_prompt_part> out;
++    for (size_t i = 0; i < prompt.parts.size(); i++) {
++        const auto & part = prompt.parts[i];
++        const bool in_text_block = part.is_input && part.text.find(MEDIA_BEG) != std::string::npos &&
++            !out.empty() && !out.back().is_input && string_ends_with(out.back().text, TEXT) &&
++            i + 1 < prompt.parts.size() && !prompt.parts[i + 1].is_input && string_starts_with(prompt.parts[i + 1].text, END);
++        const size_t header_pos = in_text_block ? out.back().text.rfind("<|message_") : std::string::npos;
++        if (header_pos == std::string::npos) {
++            out.push_back(part);
++            continue;
++        }
++        const std::string header = out.back().text.substr(header_pos, out.back().text.size() - TEXT.size() - header_pos);
++
++        std::string rest = part.text;
++        for (bool first = true; !rest.empty(); first = false) {
++            const size_t beg      = rest.find(MEDIA_BEG);
++            const size_t end      = beg == std::string::npos ? beg : rest.find(MEDIA_END, beg);
++            const bool   is_media = beg == 0 && end != std::string::npos;
++            const size_t len      = is_media ? end + MEDIA_END.size() : (end == std::string::npos ? rest.size() : beg);
++            if (!first) {
++                out.push_back({ END + header + (is_media ? "" : TEXT), false });
++            } else if (is_media) {
++                // mtmd opens the media block
++                out.back().text.resize(out.back().text.size() - TEXT.size());
++            }
++            out.push_back({ rest.substr(0, len), true });
++            rest.erase(0, len);
++        }
++    }
++    prompt.parts = std::move(out);
++}
++
++// Inkling 1 and 2 - the assistant turn is a list of blocks, all closed by <|end_message|>:
++//   <|message_model|><|content_thinking|>...<|end_message|>
++//   <|message_model|><|content_text|>...<|end_message|>
++//   <|message_model|>NAME<|content_invoke_tool_json|>{"name":"NAME","args":{...}}<|end_message|>
++common_chat_params common_chat_params_init_inkling(const common_chat_template &          tmpl,
++                                                   const autoparser::generation_params & inputs) {
++    common_chat_params data;
++
++    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
++    data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
++    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
++    data.supports_thinking = true;
++
++    inkling_split_media(data.prompt);
++
++    const std::string HEADER    = "<|message_model|>";
++    const std::string THINK     = "<|content_thinking|>";
++    const std::string TEXT      = "<|content_text|>";
++    const std::string TOOL_JSON = "<|content_invoke_tool_json|>";
++    const std::string END       = "<|end_message|>";
++
++    data.preserved_tokens = { HEADER, THINK, TEXT, TOOL_JSON, END };
++
++    data.thinking_start_tag = THINK;
++    data.thinking_end_tags  = { END };
++
++    data.message_delimiters = {
++        { COMMON_CHAT_ROLE_ASSISTANT, HEADER               },
++        { COMMON_CHAT_ROLE_USER,      "<|message_user|>"   },
++        { COMMON_CHAT_ROLE_SYSTEM,    "<|message_system|>" },
++        { COMMON_CHAT_ROLE_TOOL,      "<|message_tool|>"   },
++    };
++
++    if (inputs.has_continuation()) {
++        const auto & msg = inputs.continue_msg;
++
++        data.generation_prompt.clear();
++        if (!msg.reasoning_content.empty()) {
++            data.generation_prompt = HEADER + THINK + msg.reasoning_content;
++        }
++        if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
++            if (!data.generation_prompt.empty()) {
++                data.generation_prompt += END;
++            }
++            data.generation_prompt += HEADER + TEXT + msg.render_content();
++        }
++
++        data.prompt.append(data.generation_prompt);
++    }
++
++    auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
++    auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
++    auto use_tools           = has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
++    auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
++
++    data.parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
++        auto header = p.literal(HEADER);
++        auto end    = p.literal(END);
++
++        auto think    = p.literal(THINK);
++        auto thinking = p.rule("thinking", extract_reasoning ? think + p.reasoning(p.until(END)) + end :
++                                                               p.atomic(p.content(think)) + p.content(p.until(END) + end));
++        auto text     = p.rule("text", p.literal(TEXT) + p.content(p.until(END)) + end);
++
++        if (has_response_format) {
++            auto response_format = p.rule("response-format", p.content(p.schema(p.json(), "response-format-schema", inputs.json_schema)));
++            return p.zero_or_more(header + thinking) + header + p.literal(TEXT) + response_format + end;
++        }
++
++        auto blocks = p.zero_or_more(header + (thinking | text));
++
++        if (!use_tools) {
++            return blocks;
++        }
++
++        auto tool_choice = p.choice();
++        foreach_function(inputs.tools, [&](size_t tool_index, const json & tool) {
++            const auto & function = tool.at("function");
++            std::string  name     = function.at("name");
++
++            auto open = p.tool_name(p.literal(name)) + p.literal(TOOL_JSON) + p.literal("{\"name\":" + json(name).dump() + ",\"args\":");
++            auto args = p.tool_args(p.json());
++
++            tool_choice |= p.rule("tool-" + std::to_string(tool_index), p.tool(p.tool_open(open) + args + p.tool_close(p.literal("}")) + end));
++        });
++
++        // tool calls are the last blocks of the turn
++        auto calls      = inputs.parallel_tool_calls ? tool_choice + p.zero_or_more(header + tool_choice) : tool_choice;
++        auto tool_calls = header + p.trigger_rule("tool-calls", calls);
++
++        if (inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED) {
++            return blocks + tool_calls;
++        }
++
++        return blocks + p.optional(tool_calls);
++    });
++
++    if (has_response_format || use_tools) {
++        data.grammar_lazy = !has_response_format && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_REQUIRED;
++        data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
++            data.parser.build_grammar(builder, data.grammar_lazy);
++        });
++
++        if (data.grammar_lazy) {
++            // a header followed by text and not by a content token is a tool call, the grammar starts at the name
++            data.grammar_triggers = {
++                { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|message_model\\|>([^<])" },
++            };
++            // Inkling 1: the first header is in the generation prompt, and a lazy grammar does not get the prompt.
++            // an output that starts with no content token is a tool call. not for a continuation, it starts with text
++            if (!inputs.has_continuation()) {
++                data.grammar_triggers.push_back({ COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL, "[^<]+" });
++            }
++        }
++    }
++
++    return data;
++}
+diff --git a/common/parsers/parsers.h b/common/parsers/parsers.h
+index 2e1c03ac05..8efda4f5c9 100644
+--- a/common/parsers/parsers.h
++++ b/common/parsers/parsers.h
+@@ -37,31 +37,35 @@ std::string common_chat_template_generation_prompt_impl(
+     const autoparser::generation_params & inputs,
+     const std::optional<json> & messages_override = std::nullopt,
+     const std::optional<json> & tools_override = std::nullopt,
+     const std::optional<json> & additional_context = std::nullopt);
+ 
+ bool is_llama4_template(const std::string & src);
+ bool is_lfm2_template(const std::string & src);
+ 
++bool is_inkling_template(const std::string & src);
++
+ common_chat_params common_chat_params_init_cohere2moe(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_deepseek_v3_2(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_functionary_v3_2(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ common_chat_params common_chat_params_init_glm4(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_gemma4(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_gigachat_v3(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_harmony_xml(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
++common_chat_params common_chat_params_init_inkling(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
++
+ common_chat_params common_chat_params_init_k2_horizon(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_kimi_k2(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_kimi_k3(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+ common_chat_params common_chat_params_init_ling3(const common_chat_template & tmpl, const autoparser::generation_params & inputs);
+ 
+diff --git a/common/parsers/sources.cmake b/common/parsers/sources.cmake
+index 86eadea1b8..7ff7280814 100644
+--- a/common/parsers/sources.cmake
++++ b/common/parsers/sources.cmake
+@@ -6,16 +6,17 @@ set(LLAMA_CHAT_PARSERS_SOURCES
+     ${CMAKE_CURRENT_LIST_DIR}/cohere2moe.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/deepseek.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/functionary-v3-2.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/gemma4.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/gigachat-v3.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/glm4.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/gpt-oss.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/harmony-xml.cpp
++    ${CMAKE_CURRENT_LIST_DIR}/inkling.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/k2-horizon.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/kimi-k2.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/kimi-k3.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/ling3.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/lfm2.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/llama4.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/llm-jp-harmony.cpp
+     ${CMAKE_CURRENT_LIST_DIR}/minicpm5.cpp
+diff --git a/models/templates/thinkingmachines-Inkling-2-Small.jinja b/models/templates/thinkingmachines-Inkling-2-Small.jinja
+new file mode 100644
+index 0000000000..85258f99ec
+--- /dev/null
++++ b/models/templates/thinkingmachines-Inkling-2-Small.jinja
+@@ -0,0 +1,130 @@
++{%- set effort_map = {"none": 0.0, "minimal": 0.1, "low": 0.2, "medium": 0.7, "high": 0.9, "xhigh": 0.99, "max": 0.99} -%}
++{%- set role_token = {"user": "<|message_user|>", "assistant": "<|message_model|>", "system": "<|message_system|>", "tool": "<|message_tool|>"} -%}
++
++{%- macro emit_thinking_effort() -%}
++    {%- set eff = reasoning_effort if reasoning_effort is defined and reasoning_effort is not none else 0.9 -%}
++    {%- if eff is string -%}
++        {%- set key = eff | trim -%}
++        {%- if key not in effort_map -%}
++            {{- raise_exception("Unknown reasoning_effort: " ~ eff) -}}
++        {%- endif -%}
++        {%- set num = effort_map[key] -%}
++    {%- else -%}
++        {%- set num = eff | float -%}
++    {%- endif -%}
++    {%- if num < 0.0 or num > 0.99 -%}
++        {{- raise_exception("reasoning_effort must be in [0.0, 0.99]") -}}
++    {%- endif -%}
++    {{- "<|message_system|><|content_text|>Thinking effort level: " -}}
++    {%- if num == 0.0 -%}0{%- else -%}{{ num }}{%- endif -%}
++    {{- "<|end_message|>" -}}
++{%- endmacro -%}
++
++{%- if tools -%}
++    {%- set tool_state = namespace(specs=[]) -%}
++    {%- for tool in tools -%}
++        {%- set fn = tool.function if tool.function is defined else tool -%}
++        {%- set spec = {
++            "description": (fn.description if fn.description is defined and fn.description else ""),
++            "name": fn.name,
++            "parameters": (fn.parameters if fn.parameters is defined and fn.parameters else {}),
++            "type": (tool.type if tool.type is defined and tool.type else "function"),
++        } -%}
++        {%- set tool_state.specs = tool_state.specs + [spec] -%}
++    {%- endfor -%}
++    {{- "<|message_system|>tool_declare<|content_xml|>" -}}
++    {{- tool_state.specs | tojson(sort_keys=true, separators=(",", ":")) -}}
++    {{- "<|end_message|>" -}}
++{%- endif -%}
++
++{%- set state = namespace(effort_emitted=false) -%}
++{%- for message in messages -%}
++    {%- if message.role not in role_token -%}
++        {{- raise_exception("Unknown message role: " ~ message.role) -}}
++    {%- endif -%}
++    {%- if not state.effort_emitted and message.role != "system" -%}
++        {{- emit_thinking_effort() -}}
++        {%- set state.effort_emitted = true -%}
++    {%- endif -%}
++
++    {%- set header = namespace(text=role_token[message.role]) -%}
++    {%- if message.role == "tool" -%}
++        {%- if message.name is defined and message.name -%}
++            {%- set header.text = header.text ~ message.name -%}
++        {%- elif message.tool_call_id is defined and message.tool_call_id -%}
++            {%- for prev in messages -%}
++                {%- if prev.role == "assistant" and prev.tool_calls -%}
++                    {%- for tc in prev.tool_calls -%}
++                        {%- if tc.id is defined and tc.id == message.tool_call_id and tc.function.name is defined -%}
++                            {%- set header.text = header.text ~ tc.function.name -%}
++                        {%- endif -%}
++                    {%- endfor -%}
++                {%- endif -%}
++            {%- endfor -%}
++        {%- endif -%}
++    {%- elif message.role == "assistant" and message.name is defined and message.name -%}
++        {%- set header.text = header.text ~ message.name -%}
++    {%- endif -%}
++    {%- set rtok = header.text -%}
++
++    {%- if message.role == "assistant" and message.reasoning_content is defined and message.reasoning_content -%}
++        {{- rtok ~ "<|content_thinking|>" ~ message.reasoning_content ~ "<|end_message|>" -}}
++    {%- endif -%}
++
++    {%- if message.content is string and (message.content or not (message.role == "assistant" and (message.tool_calls or message.reasoning_content))) -%}
++        {{- rtok ~ "<|content_text|>" ~ message.content ~ "<|end_message|>" -}}
++    {%- elif message.content -%}
++        {%- for part in message.content -%}
++            {%- if part is string -%}
++                {{- rtok ~ "<|content_text|>" ~ part ~ "<|end_message|>" -}}
++            {%- elif part.type is not defined or part.type in ("text", "input_text") -%}
++                {%- set text_part = (part.text if part.text is defined and part.text is string else "") -%}
++                {{- rtok ~ "<|content_text|>" ~ text_part ~ "<|end_message|>" -}}
++            {%- elif part.type in ("image", "input_image", "image_url") -%}
++                {%- if message.role not in ("user", "tool") -%}
++                    {{- raise_exception("Image content is only supported for user and tool messages") -}}
++                {%- endif -%}
++                {{- rtok ~ "<|content_image|><|unused_200054|><|end_message|>" -}}
++            {%- elif part.type in ("audio", "input_audio", "audio_url") -%}
++                {{- raise_exception("Inkling 2 does not accept audio input") -}}
++            {%- else -%}
++                {{- raise_exception("Unsupported content part type: " ~ part.type) -}}
++            {%- endif -%}
++        {%- endfor -%}
++    {%- endif -%}
++
++    {%- if message.role == "assistant" and message.tool_calls -%}
++        {%- for tc in message.tool_calls -%}
++            {%- set fn = tc.function -%}
++            {%- if fn.name is not defined or fn.name is not string -%}
++                {{- raise_exception("tool call function name must be a string") -}}
++            {%- endif -%}
++            {%- if message.name is defined and message.name and message.name != fn.name -%}
++                {{- raise_exception("assistant name " ~ message.name ~ " does not match its tool call " ~ fn.name) -}}
++            {%- endif -%}
++            {%- set args = fn.arguments if fn.arguments is defined and fn.arguments else {} -%}
++            {%- if args is string -%}
++                {{- raise_exception("tool call arguments must be a parsed object, not a JSON string; canonicalize upstream") -}}
++            {%- endif -%}
++            {%- if args is not mapping -%}
++                {{- raise_exception("tool call arguments must be an object") -}}
++            {%- endif -%}
++            {{- "<|message_model|>" ~ fn.name ~ "<|content_invoke_tool_json|>" -}}
++            {{- '{"name":' ~ (fn.name | tojson(sort_keys=true, separators=(",", ":"))) ~ ',"args":' -}}
++            {{- "{" -}}
++            {%- for key, value in args | dictsort(case_sensitive=true) -%}
++                {{- (key | tojson) ~ ":" ~ (value | tojson(separators=(",", ":"))) -}}
++                {%- if not loop.last -%},{%- endif -%}
++            {%- endfor -%}
++            {{- "}}<|end_message|>" -}}
++        {%- endfor -%}
++    {%- endif -%}
++
++    {%- if message.role == "assistant" -%}
++        {{- "<|content_model_end_sampling|>" -}}
++    {%- endif -%}
++{%- endfor -%}
++
++{%- if not state.effort_emitted -%}
++    {{- emit_thinking_effort() -}}
++{%- endif -%}
+diff --git a/models/templates/thinkingmachines-Inkling.jinja b/models/templates/thinkingmachines-Inkling.jinja
+new file mode 100644
+index 0000000000..04c53c7d1f
+--- /dev/null
++++ b/models/templates/thinkingmachines-Inkling.jinja
+@@ -0,0 +1,129 @@
++{%- set effort_map = {"none": 0.0, "minimal": 0.1, "low": 0.2, "medium": 0.7, "high": 0.9, "max": 0.99} -%}
++{%- set role_token = {"user": "<|message_user|>", "assistant": "<|message_model|>", "system": "<|message_system|>", "tool": "<|message_tool|>"} -%}
++
++{%- macro emit_thinking_effort() -%}
++    {%- set eff = reasoning_effort if reasoning_effort is defined and reasoning_effort is not none else 0.9 -%}
++    {%- if eff is string -%}
++        {%- set key = eff | trim -%}
++        {%- if key not in effort_map -%}
++            {{- raise_exception("Unknown reasoning_effort: " ~ eff) -}}
++        {%- endif -%}
++        {%- set num = effort_map[key] -%}
++    {%- else -%}
++        {%- set num = eff | float -%}
++    {%- endif -%}
++    {%- if num < 0.0 or num > 0.99 -%}
++        {{- raise_exception("reasoning_effort must be in [0.0, 0.99]") -}}
++    {%- endif -%}
++    {{- "<|message_system|><|content_text|>Thinking effort level: " -}}
++    {%- if num == 0.0 -%}0{%- else -%}{{ num }}{%- endif -%}
++    {{- "<|end_message|>" -}}
++{%- endmacro -%}
++
++{%- if tools -%}
++    {%- set tool_state = namespace(specs=[]) -%}
++    {%- for tool in tools -%}
++        {%- set fn = tool.function if tool.function is defined else tool -%}
++        {%- set spec = {
++            "description": (fn.description if fn.description is defined and fn.description else ""),
++            "name": fn.name,
++            "parameters": (fn.parameters if fn.parameters is defined and fn.parameters else {}),
++            "type": (tool.type if tool.type is defined and tool.type else "function"),
++        } -%}
++        {%- set tool_state.specs = tool_state.specs + [spec] -%}
++    {%- endfor -%}
++    {{- "<|message_system|>tool_declare<|content_xml|>" -}}
++    {{- tool_state.specs | tojson(sort_keys=true, separators=(",", ":")) -}}
++    {{- "<|end_message|>" -}}
++{%- endif -%}
++
++{%- set state = namespace(effort_emitted=false) -%}
++{%- for message in messages -%}
++    {%- if message.role not in role_token -%}
++        {{- raise_exception("Unknown message role: " ~ message.role) -}}
++    {%- endif -%}
++    {%- if not state.effort_emitted and message.role != "system" -%}
++        {{- emit_thinking_effort() -}}
++        {%- set state.effort_emitted = true -%}
++    {%- endif -%}
++
++    {%- set rtok = role_token[message.role] -%}
++
++    {%- if message.role == "tool" -%}
++        {%- set tool_name_state = namespace(name="") -%}
++        {%- if message.name is defined and message.name -%}
++            {%- set tool_name_state.name = message.name -%}
++        {%- elif message.tool_call_id is defined and message.tool_call_id -%}
++            {%- for prev in messages -%}
++                {%- if prev.role == "assistant" and prev.tool_calls -%}
++                    {%- for tc in prev.tool_calls -%}
++                        {%- if tc.id is defined and tc.id == message.tool_call_id and tc.function.name is defined -%}
++                            {%- set tool_name_state.name = tc.function.name -%}
++                        {%- endif -%}
++                    {%- endfor -%}
++                {%- endif -%}
++            {%- endfor -%}
++        {%- endif -%}
++        {{- rtok -}}
++        {%- if tool_name_state.name -%}{{- tool_name_state.name -}}{%- endif -%}
++        {{- "<|content_text|>" -}}
++        {%- if message.content is string -%}{{- message.content -}}{%- endif -%}
++        {{- "<|end_message|>" -}}
++
++    {%- else -%}
++        {%- if message.role == "assistant" and message.reasoning_content is defined and message.reasoning_content -%}
++            {{- "<|message_model|><|content_thinking|>" ~ message.reasoning_content ~ "<|end_message|>" -}}
++        {%- endif -%}
++
++        {%- if message.content is string -%}
++            {{- rtok ~ "<|content_text|>" ~ message.content ~ "<|end_message|>" -}}
++        {%- elif message.content -%}
++            {%- for part in message.content -%}
++                {%- if part is string -%}
++                    {{- rtok ~ "<|content_text|>" ~ part ~ "<|end_message|>" -}}
++                {%- elif part.type is not defined or part.type in ("text", "input_text") -%}
++                    {%- set text_part = (part.text if part.text is defined and part.text is string else "") -%}
++                    {{- rtok ~ "<|content_text|>" ~ text_part ~ "<|end_message|>" -}}
++                {%- elif part.type in ("image", "input_image", "image_url") -%}
++                    {{- rtok ~ "<|content_image|><|unused_200054|><|end_message|>" -}}
++                {%- elif part.type in ("audio", "input_audio", "audio_url") -%}
++                    {{- rtok ~ "<|content_audio_input|><|unused_200053|><|audio_end|><|end_message|>" -}}
++                {%- else -%}
++                    {{- raise_exception("Unsupported content part type: " ~ part.type) -}}
++                {%- endif -%}
++            {%- endfor -%}
++        {%- endif -%}
++
++        {%- if message.role == "assistant" and message.tool_calls -%}
++            {%- for tc in message.tool_calls -%}
++                {%- set fn = tc.function -%}
++                {%- if fn.name is not defined or fn.name is not string -%}
++                    {{- raise_exception("tool call function name must be a string") -}}
++                {%- endif -%}
++                {%- set args = fn.arguments if fn.arguments is defined and fn.arguments else {} -%}
++                {%- if args is string -%}
++                    {{- raise_exception("tool call arguments must be a parsed object, not a JSON string; canonicalize upstream") -}}
++                {%- endif -%}
++                {%- if args is not mapping -%}
++                    {{- raise_exception("tool call arguments must be an object") -}}
++                {%- endif -%}
++                {{- "<|message_model|>" ~ fn.name ~ "<|content_invoke_tool_json|>" -}}
++                {{- '{"name":' ~ (fn.name | tojson(sort_keys=true, separators=(",", ":"))) ~ ',"args":' -}}
++                {{- (args | tojson(sort_keys=true, separators=(",", ":"))) -}}
++                {{- "}<|end_message|>" -}}
++            {%- endfor -%}
++        {%- endif -%}
++
++        {%- if message.role == "assistant" -%}
++            {{- "<|content_model_end_sampling|>" -}}
++        {%- endif -%}
++    {%- endif -%}
++{%- endfor -%}
++
++{%- if not state.effort_emitted -%}
++    {{- emit_thinking_effort() -}}
++{%- endif -%}
++
++{%- if add_generation_prompt -%}
++    {{- "<|message_model|>" -}}
++{%- endif -%}
+diff --git a/src/llama-grammar.cpp b/src/llama-grammar.cpp
+index ea9e1c3b3c..da88abae8c 100644
+--- a/src/llama-grammar.cpp
++++ b/src/llama-grammar.cpp
+@@ -456,16 +456,18 @@ size_t llama_grammar_trigger_pattern::find(const std::string & input) const {
+     };
+ 
+     if (!pattern.empty() && pattern.front() == '^' && pattern.back() == '$') {
+         // match against the entire input
+         std::smatch match;
+         if (std::regex_match(input, match, regex)) {
+             return find_start_pos(match);
+         }
++        // some regex implementations match ^/$ at line breaks
++        return std::string::npos;
+     }
+ 
+     // search anywhere
+     std::smatch match;
+     if (std::regex_search(input, match, regex)) {
+         return find_start_pos(match);
+     }
+ 
+diff --git a/tests/test-chat.cpp b/tests/test-chat.cpp
+index c06e374068..d0be997bd9 100644
+--- a/tests/test-chat.cpp
++++ b/tests/test-chat.cpp
+@@ -5702,16 +5702,112 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+             .tools({ python_tool })
+             .expect_tool_calls({
+                 // custom delimiter: the payload itself contains )"
+                 { "python", R"JSON({"code":"print('hey')"})JSON", "" },
+             })
+             .run();
+     }
+ 
++    // Inkling 1 and 2
++    for (const int version : { 1, 2 }) {
++        auto tst = peg_tester(version == 1 ? "models/templates/thinkingmachines-Inkling.jinja" :
++                                             "models/templates/thinkingmachines-Inkling-2-Small.jinja", detailed_debug);
++
++        // Inkling 1 has the first header in the generation prompt, Inkling 2 writes it
++        const std::string H = "<|message_model|>";
++        const std::string P = version == 1 ? "" : H;
++        const std::string E = "<|end_message|>";
++        const std::string CALL = "special_function<|content_invoke_tool_json|>{\"name\":\"special_function\",\"args\":{\"arg1\":1}}" + E;
++
++        // Content only
++        tst.test(P + "<|content_text|>Hello, world!\nWhat's up?" + E)
++            .expect(message_assist)
++            .run();
++
++        // Thinking block, then content block
++        tst.test(P + "<|content_thinking|>I'm thinking" + E + H + "<|content_text|>Hello, world!\nWhat's up?" + E)
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .expect(simple_assist_msg("Hello, world!\nWhat's up?", "I'm thinking"))
++            .run();
++
++        // Without reasoning extraction, the thinking block stays in the content
++        tst.test(P + "<|content_thinking|>I'm thinking" + E + H + "<|content_text|>Hello, world!\nWhat's up?" + E)
++            .reasoning_format(COMMON_REASONING_FORMAT_NONE)
++            .expect_content("<|content_thinking|>I'm thinking" + E + "Hello, world!\nWhat's up?")
++            .run();
++
++        // Cut by the token limit, in thinking and in content
++        tst.test(P + "<|content_thinking|>I was still thinking")
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .expect_reasoning("I was still thinking")
++            .run();
++        tst.test(P + "<|content_thinking|>I'm thinking" + E + H + "<|content_text|>Hello, wor")
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .expect(simple_assist_msg("Hello, wor", "I'm thinking"))
++            .run();
++
++        // Single tool call
++        tst.test(P + CALL)
++            .tools({ special_function_tool })
++            .expect_tool_calls({
++                { "special_function", R"({"arg1":1})", "" },
++            })
++            .expect_rules({ "tool-0" })
++            .run();
++
++        // Thinking, content, then a tool call
++        tst.test(P + "<|content_thinking|>I should call it" + E + H + "<|content_text|>On it." + E + H + CALL)
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .tools({ special_function_tool })
++            .expect(simple_assist_msg("On it.", "I should call it", "special_function", R"({"arg1":1})", ""))
++            .run();
++
++        // Tools given, but the model answers with content
++        tst.test(P + "<|content_thinking|>No tool needed" + E + H + "<|content_text|>Hello, world!\nWhat's up?" + E)
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .tools({ special_function_tool })
++            .expect(simple_assist_msg("Hello, world!\nWhat's up?", "No tool needed"))
++            .run();
++
++        // Parallel tool calls, one block each
++        tst.test(P + CALL + H +
++                 "special_function_with_opt<|content_invoke_tool_json|>{\"name\":\"special_function_with_opt\",\"args\":{\"arg1\":1,\"arg2\":2}}" + E)
++            .parallel_tool_calls(true)
++            .tools({ special_function_tool, special_function_tool_with_optional_param })
++            .expect_tool_calls({
++                { "special_function", R"({"arg1":1})", "" },
++                { "special_function_with_opt", R"({"arg1":1,"arg2":2})", "" },
++            })
++            .run();
++
++        // The block closer inside a string argument does not end the block
++        tst.test(P + "python<|content_invoke_tool_json|>{\"name\":\"python\",\"args\":{\"code\":\"print('<|end_message|>')\"}}" + E)
++            .tools({ python_tool })
++            .expect_tool_calls({
++                { "python", R"JSON({"code":"print('<|end_message|>')"})JSON", "" },
++            })
++            .run();
++
++        // Forced tool call
++        tst.test(P + "<|content_thinking|>I should call it" + E + H + CALL)
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .tool_choice(COMMON_CHAT_TOOL_CHOICE_REQUIRED)
++            .tools({ special_function_tool })
++            .expect(simple_assist_msg("", "I should call it", "special_function", R"({"arg1":1})", ""))
++            .run();
++
++        // Response format
++        tst.test(P + "<|content_thinking|>I'm thinking" + E + H + "<|content_text|>{\"amount\": 123.45}" + E)
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .json_schema(invoice_schema)
++            .expect(simple_assist_msg("{\"amount\": 123.45}", "I'm thinking"))
++            .run();
++    }
++
+     // Kimi-K2-Thinking tests - custom parser
+     // Unique feature: tool call ID embeds function name as functions.<name>:<counter>
+     {
+         auto tst = peg_tester("models/templates/Kimi-K2-Thinking.jinja", detailed_debug);
+ 
+         // Basic content only
+         tst.test("Hello, world!\nWhat's up?").expect(message_assist).run();
+ 
