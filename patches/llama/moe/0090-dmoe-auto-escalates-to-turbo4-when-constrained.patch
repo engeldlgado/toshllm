@@ -1,0 +1,503 @@
+diff --git a/common/tosh-plan.cpp b/common/tosh-plan.cpp
+index c5e774e..c0fa5e9 100644
+--- a/common/tosh-plan.cpp
++++ b/common/tosh-plan.cpp
+@@ -1025,7 +1025,14 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+     // experts on the host lose more than the head gains: every reserve, the head's last, is
+     // tried for the GPU modes before any of them settles for whole layers on the host.
+     // Pass 0 tries the GPU modes, pass 1 the same with turbo4 where allowed, pass 2 adds the host.
+-    for (size_t pass = 0; pass < 3 && sel == nullptr; ++pass) {
++    // When pass 0 only fits in a constrained dmoe plan (lowered display reserve, dropped MTP head,
++    // or starved expert arena), pass 1 also tests turbo4 for a better plan.
++    const double reserve_without_head_pref = mtp_mib > 0 ? reserves[n_with_head] : reserve_pref;
++    const double max_share = env_mib("TOSH_AUTO_MTP_ARENA_SHARE", 0.20);
++    tosh_plan p0_plan;
++    tosh_plan_candidate p0_cand;
++    bool have_p0 = false;
++    for (size_t pass = 0; pass < 3 && (sel == nullptr || (pass == 1 && have_p0)); ++pass) {
+     const bool turbo = pass == 1;
+     if (turbo) {
+         if (!turbo_fallback || force == "legacy") continue;
+@@ -1034,9 +1041,16 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+             probe_kv(kvs.size() - 1);
+             turbo_probed = true;
+         }
++        if (have_p0) {
++            sel = nullptr;
++            p.mtp_head_dropped = false;
++            p.mtp_head_arena   = false;
++            p.fallback.clear();
++            p.reason.clear();
++        }
+     }
+     const ggml_type ka = turbo ? GGML_TYPE_TURBO4_0 : kvs[0];
+-    const ggml_type kb = !turbo && kvs.size() > 1 ? kvs[1] : GGML_TYPE_COUNT;
++    const ggml_type kb = !turbo && kvs.size() > 1 && kvs[1] != GGML_TYPE_TURBO4_0 ? kvs[1] : GGML_TYPE_COUNT;
+     for (size_t ri = 0; ri < reserves.size(); ++ri) {
+         const double R = reserves[ri];
+         evaluate(R);
+@@ -1068,7 +1082,6 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+             sel = pick_dmoe();
+             // with mixed execution the head's VRAM comes out of the expert arena, and past this share
+             // the experts it pushes to the host cost more than its drafts save
+-            static const double max_share = env_mib("TOSH_AUTO_MTP_ARENA_SHARE", 0.20);
+             if (sel && !head_off && mtp_mib > 0 && max_share > 0) {
+                 // the probes above already hold the head's context, so the arena without it comes from
+                 // a probe of the model as it loads without the head
+@@ -1093,13 +1106,24 @@ bool tosh_plan_apply(common_params & params, tosh_plan * out) {
+             if (sel) p.reason = "mixed execution is not available here; expert layers go to the host";
+         }
+         if (sel) {
+-            if (turbo) p.reason = "only a turbo4 cache keeps the experts on the GPU: faster than on the host, at some quality cost";
++            if (turbo && !have_p0) {
++                p.reason = "only a turbo4 cache keeps the experts on the GPU: faster than on the host, at some quality cost";
++            }
+             p.mtp_head_dropped = head_off;
+             const double R_used = p.mtp_head_arena ? reserves[n_with_head] : R;
+             if (R_used < reserves[p.mtp_head_dropped ? n_with_head : 0]) p.fallback = string_format("reserve lowered to %.1f GiB", R_used/1024);
+             break;
+         }
+     }
++    if (pass == 0 && sel != nullptr && turbo_fallback && force != "legacy" && force != "full" &&
++        tosh_plan_dmoe_should_try_turbo4(p, *sel, reserve_pref, reserve_without_head_pref)) {
++        p0_plan = p;
++        p0_cand = *sel;
++        have_p0 = true;
++    }
++    if (turbo && have_p0) {
++        tosh_plan_resolve_turbo_pass(p, sel, p0_plan, p0_cand, reserve_pref, reserve_without_head_pref, max_share);
++    }
+     }
+ 
+     if (sel == nullptr) {
+@@ -1367,3 +1391,121 @@ void tosh_plan_report_load(const char * result, const char * detail) {
+         fclose(fp);
+     }
+ }
++
++static bool tosh_plan_dmoe_tiny_arena(double arena_mib, double bank_mib) {
++    return arena_mib < std::min(2048.0, 0.25 * bank_mib);
++}
++
++double tosh_plan_reserve_deficit(
++        const tosh_plan & plan,
++        double            reserve_with_head_pref,
++        double            reserve_without_head_pref) {
++    const double target = plan.mtp_head_dropped ? reserve_without_head_pref : reserve_with_head_pref;
++    return std::max(0.0, target - plan.reserve_mib);
++}
++
++bool tosh_plan_dmoe_should_try_turbo4(
++        const tosh_plan           & p0_plan,
++        const tosh_plan_candidate & p0_cand,
++        double                      reserve_with_head_pref,
++        double                      reserve_without_head_pref) {
++    if (p0_cand.mode != "dmoe") return false;
++    return tosh_plan_reserve_deficit(p0_plan, reserve_with_head_pref, reserve_without_head_pref) > 1.0 ||
++           p0_plan.mtp_head_dropped ||
++           tosh_plan_dmoe_tiny_arena(p0_cand.arena_mib, p0_plan.bank_mib);
++}
++
++bool tosh_plan_turbo_beats_p0(
++        const tosh_plan           & p1_plan,
++        const tosh_plan_candidate * p1_sel,
++        const tosh_plan           & p0_plan,
++        const tosh_plan_candidate & p0_cand,
++        double                      reserve_with_head_pref,
++        double                      reserve_without_head_pref,
++        std::string               * reason_out,
++        double                      mtp_arena_share) {
++    if (p1_sel == nullptr || !p1_sel->valid) return false;
++    if (p1_sel->mode != "full_gpu" && p1_sel->mode != "dmoe") return false;
++    // Never discard the MTP head when Pass 0 kept it.
++    if (p1_plan.mtp_head_dropped && !p0_plan.mtp_head_dropped) return false;
++
++    const double def0 = tosh_plan_reserve_deficit(p0_plan, reserve_with_head_pref, reserve_without_head_pref);
++    const double def1 = tosh_plan_reserve_deficit(p1_plan, reserve_with_head_pref, reserve_without_head_pref);
++    // Display reserve deficit must never worsen in any branch.
++    if (def1 > def0 + 1.0) return false;
++
++    if (p1_sel->mode == "full_gpu") {
++        if (reason_out) *reason_out = "turbo4 cache fits the full model on the GPU, at some quality cost";
++        return true;
++    }
++
++    if (p1_sel->ubatch < p0_cand.ubatch) return false;
++
++    const double kc0 = p0_cand.kv_mib + p0_cand.compute_mib;
++    const double kc1 = p1_sel->kv_mib + p1_sel->compute_mib;
++
++    const bool mtp_saved = !p1_plan.mtp_head_dropped && p0_plan.mtp_head_dropped;
++    if (mtp_saved) {
++        // Strip the MTP head budget from p1_plan.reserve_mib so display headroom is compared on equal
++        // footing: require preserved display reserve, kv+compute savings, and arena cost <= mtp_arena_share.
++        const double mtp_budget = std::max(0.0, reserve_with_head_pref - reserve_without_head_pref);
++        const double disp0 = p0_plan.reserve_mib;
++        const double disp1 = std::max(0.0, p1_plan.reserve_mib - mtp_budget);
++        const double keep_share = 1.0 - std::clamp(mtp_arena_share, 0.0, 1.0);
++        const bool arena_preserved = p1_sel->arena_mib >= keep_share * p0_cand.arena_mib;
++        const bool display_kept    = disp1 >= disp0 - 1.0;
++        if (kc1 <= kc0 + 1.0 && arena_preserved && display_kept) {
++            if (reason_out) *reason_out = "turbo4 cache keeps the MTP draft head on the GPU, at some quality cost";
++            return true;
++        }
++        return false;
++    }
++
++    if (def1 + 1.0 < def0) {
++        const double recovered = def0 - def1;
++        if (kc1 <= kc0 + 1.0 && p1_sel->arena_mib + recovered >= p0_cand.arena_mib - 1.0) {
++            if (reason_out) {
++                const bool full = def1 <= 1.0;
++                *reason_out = p1_sel->ubatch > p0_cand.ubatch
++                    ? (full ? "turbo4 cache restores full VRAM headroom and batch capacity for the expert arena, at some quality cost"
++                            : "turbo4 cache improves VRAM headroom and batch capacity for the expert arena, at some quality cost")
++                    : (full ? "turbo4 cache restores full VRAM headroom for the expert arena, at some quality cost"
++                            : "turbo4 cache improves VRAM headroom for the expert arena, at some quality cost");
++            }
++            return true;
++        }
++        return false;
++    }
++
++    if (tosh_plan_dmoe_tiny_arena(p0_cand.arena_mib, p0_plan.bank_mib) &&
++        kc1 <= kc0 + 1.0 &&
++        p1_sel->arena_mib - p0_cand.arena_mib >= std::max(512.0, 0.20 * p0_cand.arena_mib)) {
++        if (reason_out) *reason_out = "turbo4 cache substantially expands the constrained expert arena, at some quality cost";
++        return true;
++    }
++    return false;
++}
++
++bool tosh_plan_resolve_turbo_pass(
++        tosh_plan                 & p,
++        const tosh_plan_candidate *& sel,
++        const tosh_plan           & p0_plan,
++        const tosh_plan_candidate & p0_cand,
++        double                      reserve_with_head_pref,
++        double                      reserve_without_head_pref,
++        double                      mtp_arena_share) {
++    std::string turbo_reason;
++    if (tosh_plan_turbo_beats_p0(p, sel, p0_plan, p0_cand, reserve_with_head_pref, reserve_without_head_pref, &turbo_reason, mtp_arena_share)) {
++        p.reason = turbo_reason;
++        return true;
++    }
++    p = p0_plan;
++    sel = nullptr;
++    for (const auto & c : p.candidates) {
++        if (c.mode == p0_cand.mode && c.kv == p0_cand.kv && c.ubatch == p0_cand.ubatch) {
++            sel = &c;
++            break;
++        }
++    }
++    return false;
++}
+diff --git a/common/tosh-plan.h b/common/tosh-plan.h
+index 6072ead..717a1a6 100644
+--- a/common/tosh-plan.h
++++ b/common/tosh-plan.h
+@@ -125,6 +125,39 @@ const char * tosh_plan_state_name(tosh_plan_state s);
+ const char * tosh_plan_mode_name(tosh_plan_mode m);
+ std::string  tosh_plan_json(const tosh_plan & plan);
+ 
++// Pure selection predicates for constrained Pass 0 -> Turbo4 escalation, exposed for unit tests.
++double tosh_plan_reserve_deficit(
++    const tosh_plan & plan,
++    double            reserve_with_head_pref,
++    double            reserve_without_head_pref);
++
++bool tosh_plan_dmoe_should_try_turbo4(
++    const tosh_plan           & p0_plan,
++    const tosh_plan_candidate & p0_cand,
++    double                      reserve_with_head_pref,
++    double                      reserve_without_head_pref);
++
++bool tosh_plan_turbo_beats_p0(
++    const tosh_plan           & p1_plan,
++    const tosh_plan_candidate * p1_sel,
++    const tosh_plan           & p0_plan,
++    const tosh_plan_candidate & p0_cand,
++    double                      reserve_with_head_pref,
++    double                      reserve_without_head_pref,
++    std::string               * reason_out      = nullptr,
++    double                      mtp_arena_share = 0.20);
++
++// Finalizes Pass 1 against Pass 0: updates p.reason when Turbo4 wins, or restores p0_plan and
++// rebinds sel to p.candidates when Turbo4 loses. Returns true iff Turbo4 was kept.
++bool tosh_plan_resolve_turbo_pass(
++    tosh_plan                 & p,
++    const tosh_plan_candidate *& sel,
++    const tosh_plan           & p0_plan,
++    const tosh_plan_candidate & p0_cand,
++    double                      reserve_with_head_pref,
++    double                      reserve_without_head_pref,
++    double                      mtp_arena_share = 0.20);
++
+ // Plans and applies the result to params. Returns false when planning is off or not needed, and
+ // when no plan exists: then out->state is TOSH_PLAN_UNSUPPORTED and the model must not be loaded.
+ bool tosh_plan_apply(common_params & params, tosh_plan * out = nullptr);
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index b8033bd..01e2bab 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -186,6 +186,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+     llama_build_and_test(test-unicode.cpp  LABEL behavior  LINK llama)
+     llama_build_and_test(test-sampling.cpp  LABEL behavior  LINK llama)
+     llama_build_and_test(test-reasoning-budget.cpp  LABEL behavior)
++    llama_build_and_test(test-tosh-plan.cpp         LABEL behavior)
+     llama_build_and_test(test-grammar-parser.cpp  LABEL behavior  LINK llama)
+     llama_build_and_test(test-grammar-integration.cpp  LABEL behavior)
+     llama_build_and_test(test-llama-grammar.cpp  LABEL behavior  LINK llama)
+diff --git a/tests/test-tosh-plan.cpp b/tests/test-tosh-plan.cpp
+new file mode 100644
+index 0000000..cb16d68
+--- /dev/null
++++ b/tests/test-tosh-plan.cpp
+@@ -0,0 +1,247 @@
++#include "tosh-plan.h"
++
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include <cassert>
++#include <cstdio>
++#include <string>
++
++static tosh_plan make_plan(double reserve_mib, double bank_mib = 19098.0, bool mtp_dropped = false) {
++    tosh_plan p;
++    p.reserve_mib = reserve_mib;
++    p.bank_mib = bank_mib;
++    p.min_arena_mib = 597.0;
++    p.mtp_head_dropped = mtp_dropped;
++    return p;
++}
++
++static tosh_plan_candidate make_cand(const char * mode, ggml_type kv, int ubatch, double arena_mib, double kv_mib, double compute_mib, bool valid = true) {
++    tosh_plan_candidate c;
++    c.mode = mode;
++    c.kv = kv;
++    c.ubatch = ubatch;
++    c.arena_mib = arena_mib;
++    c.kv_mib = kv_mib;
++    c.compute_mib = compute_mib;
++    c.valid = valid;
++    return c;
++}
++
++int main() {
++    constexpr double R_PREF = 768.0;
++    constexpr double R_WITH_MTP = 1536.0;
++    constexpr double R_NO_MTP = 768.0;
++
++    // 1. Display reserve recovered without bloat in kv+compute or smaller ubatch (32K-like & 16K-like)
++    {
++        tosh_plan p0 = make_plan(512.0);
++        tosh_plan_candidate c0 = make_cand("dmoe", GGML_TYPE_Q8_0, 512, 735.0, 594.0, 558.0);
++        assert(tosh_plan_dmoe_should_try_turbo4(p0, c0, R_PREF, R_PREF));
++
++        tosh_plan p1 = make_plan(768.0);
++        tosh_plan_candidate c1 = make_cand("dmoe", GGML_TYPE_TURBO4_0, 512, 630.0, 421.0, 558.0);
++        std::string reason;
++        assert(tosh_plan_turbo_beats_p0(p1, &c1, p0, c0, R_PREF, R_PREF, &reason));
++        assert(reason.find("headroom") != std::string::npos);
++        assert(reason.find("batch capacity") == std::string::npos);
++        assert(reason.find("quality cost") != std::string::npos);
++
++        // 16K-like: reserve restored + larger ubatch
++        tosh_plan_candidate c1_1k = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 664.0, 211.0, 618.0);
++        assert(tosh_plan_turbo_beats_p0(p1, &c1_1k, p0, c0, R_PREF, R_PREF, &reason));
++        assert(reason.find("headroom and batch capacity") != std::string::npos);
++        assert(reason.find("quality cost") != std::string::npos);
++
++        // Partial reserve improvement (def1 > 1.0): never claim "full" VRAM headroom
++        tosh_plan p0_deep = make_plan(512.0);
++        tosh_plan p1_partial = make_plan(640.0);
++        tosh_plan_candidate c1_partial = make_cand("dmoe", GGML_TYPE_TURBO4_0, 512, 610.0, 421.0, 558.0);
++        assert(tosh_plan_turbo_beats_p0(p1_partial, &c1_partial, p0_deep, c0, /*R_PREF=*/1024.0, /*R_NO_MTP=*/1024.0, &reason));
++        assert(reason.find("improves VRAM headroom") != std::string::npos);
++        assert(reason.find("full VRAM headroom") == std::string::npos);
++    }
++
++    // 2. Display reserve deficit worsened by turbo4 must always reject even with huge arena boost
++    {
++        tosh_plan p0 = make_plan(768.0);
++        tosh_plan_candidate c0 = make_cand("dmoe", GGML_TYPE_Q8_0, 512, 650.0, 594.0, 558.0);
++
++        tosh_plan p1 = make_plan(512.0);
++        tosh_plan_candidate c1 = make_cand("dmoe", GGML_TYPE_TURBO4_0, 512, 1600.0, 421.0, 558.0);
++        assert(!tosh_plan_turbo_beats_p0(p1, &c1, p0, c0, R_PREF, R_PREF));
++    }
++
++    // 3. Reserve recovery rejected if compute spike blows past Pass 0 kv+compute or shrinks ubatch
++    {
++        tosh_plan p0 = make_plan(512.0);
++        tosh_plan_candidate c0 = make_cand("dmoe", GGML_TYPE_Q8_0, 1024, 700.0, 300.0, 500.0);
++
++        tosh_plan p1 = make_plan(768.0);
++        // Smaller ubatch rejected
++        tosh_plan_candidate c1_small_ub = make_cand("dmoe", GGML_TYPE_TURBO4_0, 512, 700.0, 150.0, 400.0);
++        assert(!tosh_plan_turbo_beats_p0(p1, &c1_small_ub, p0, c0, R_PREF, R_PREF));
++
++        // Larger kv+compute footprint rejected even at higher reserve
++        tosh_plan_candidate c1_heavy = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 650.0, 200.0, 700.0);
++        assert(!tosh_plan_turbo_beats_p0(p1, &c1_heavy, p0, c0, R_PREF, R_PREF));
++    }
++
++    // 4. Short-context full-reserve lossless F16 with ub=512 (8K/4K-like) must not silently downgrade to turbo4
++    {
++        tosh_plan p0 = make_plan(768.0);
++        tosh_plan_candidate c0 = make_cand("dmoe", GGML_TYPE_F16, 512, 641.0, 223.0, 558.0);
++
++        tosh_plan p1 = make_plan(768.0);
++        tosh_plan_candidate c1_small_gain = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 786.0, 111.0, 618.0);
++        assert(!tosh_plan_turbo_beats_p0(p1, &c1_small_gain, p0, c0, R_PREF, R_PREF));
++
++        // 10% arena loss in exchange for ub=1024 must also reject
++        tosh_plan_candidate c1_loss = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 610.0, 111.0, 700.0);
++        assert(!tosh_plan_turbo_beats_p0(p1, &c1_loss, p0, c0, R_PREF, R_PREF));
++    }
++
++    // 5. Starved tiny arena rescued by >= max(512, 20%) at full reserve succeeds
++    {
++        tosh_plan p0 = make_plan(768.0);
++        tosh_plan_candidate c0 = make_cand("dmoe", GGML_TYPE_F16, 512, 600.0, 1400.0, 558.0);
++        assert(tosh_plan_dmoe_should_try_turbo4(p0, c0, R_PREF, R_PREF));
++
++        tosh_plan p1 = make_plan(768.0);
++        tosh_plan_candidate c1 = make_cand("dmoe", GGML_TYPE_TURBO4_0, 512, 1250.0, 420.0, 558.0);
++        std::string reason;
++        assert(tosh_plan_turbo_beats_p0(p1, &c1, p0, c0, R_PREF, R_PREF, &reason));
++        assert(reason.find("expands the constrained expert arena") != std::string::npos);
++        assert(reason.find("quality cost") != std::string::npos);
++    }
++
++    // 6. 16-32 GB GPU with large arena (< 25% of huge bank, but >= 2048 MiB) must not trigger turbo4 escalation
++    {
++        tosh_plan p16 = make_plan(768.0, 45000.0);
++        tosh_plan_candidate c16 = make_cand("dmoe", GGML_TYPE_F16, 1024, 7440.0, 2560.0, 600.0);
++        assert(!tosh_plan_dmoe_should_try_turbo4(p16, c16, R_PREF, R_PREF));
++
++        tosh_plan p32 = make_plan(768.0, 60000.0);
++        tosh_plan_candidate c32 = make_cand("dmoe", GGML_TYPE_F16, 1024, 14000.0, 2560.0, 600.0);
++        assert(!tosh_plan_dmoe_should_try_turbo4(p32, c32, R_PREF, R_PREF));
++
++        // Even directly evaluated in turbo_beats_p0, large arena stays protected
++        tosh_plan_candidate c32_t4 = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 15843.0, 717.0, 600.0);
++        assert(!tosh_plan_turbo_beats_p0(p32, &c32_t4, p32, c32, R_PREF, R_PREF));
++
++        // But if force=dmoe lowered reserve on a full-bank GPU, turbo4 IS still checked
++        tosh_plan p_fullbank_low = make_plan(512.0, 12000.0);
++        tosh_plan_candidate c_fullbank = make_cand("dmoe", GGML_TYPE_F16, 1024, 12000.0, 1200.0, 558.0);
++        assert(tosh_plan_dmoe_should_try_turbo4(p_fullbank_low, c_fullbank, R_PREF, R_PREF));
++    }
++
++    // 7. MTP head: keeping MTP cannot trade away display reserve or ubatch, nor accept dropping MTP
++    {
++        tosh_plan p0_dropped = make_plan(768.0, 19098.0, /*mtp_dropped=*/true);
++        tosh_plan_candidate c0 = make_cand("dmoe", GGML_TYPE_F16, 1024, 1050.0, 800.0, 600.0);
++        assert(tosh_plan_dmoe_should_try_turbo4(p0_dropped, c0, R_WITH_MTP, R_NO_MTP));
++
++        // Illegal MTP save: lowers display reserve (1536 - 1280 = 256 deficit > 0) and halves ubatch
++        tosh_plan p1_bad_res = make_plan(1280.0, 19098.0, /*mtp_dropped=*/false);
++        tosh_plan_candidate c1_bad_ub = make_cand("dmoe", GGML_TYPE_TURBO4_0, 512, 900.0, 300.0, 500.0);
++        assert(!tosh_plan_turbo_beats_p0(p1_bad_res, &c1_bad_ub, p0_dropped, c0, R_WITH_MTP, R_NO_MTP));
++
++        tosh_plan p1_good = make_plan(1536.0, 19098.0, /*mtp_dropped=*/false);
++        // Same ubatch, full display reserve, but arena drop >20% (< 840 MiB) -> reject
++        tosh_plan_candidate c1_collapsed = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 800.0, 300.0, 600.0);
++        assert(!tosh_plan_turbo_beats_p0(p1_good, &c1_collapsed, p0_dropped, c0, R_WITH_MTP, R_NO_MTP));
++
++        // Keeping MTP without saving kv+compute (kc1 > kc0) -> reject
++        tosh_plan_candidate c1_kc_worse = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 900.0, 900.0, 600.0);
++        assert(!tosh_plan_turbo_beats_p0(p1_good, &c1_kc_worse, p0_dropped, c0, R_WITH_MTP, R_NO_MTP));
++
++        // Valid MTP save at default 0.20: display reserve preserved (1536-768=768 >= 768),
++        // ubatch intact, kv+compute saved, <=20% arena cost -> accept
++        tosh_plan_candidate c1_ok = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 850.0, 300.0, 600.0);
++        std::string reason;
++        assert(tosh_plan_turbo_beats_p0(p1_good, &c1_ok, p0_dropped, c0, R_WITH_MTP, R_NO_MTP, &reason, 0.20));
++        assert(reason.find("MTP draft head") != std::string::npos);
++        assert(reason.find("quality cost") != std::string::npos);
++
++        // Configured TOSH_AUTO_MTP_ARENA_SHARE changes acceptance threshold:
++        // - at 0.10 (must keep >= 945 MiB), 850 MiB rejects, 950 MiB accepts
++        assert(!tosh_plan_turbo_beats_p0(p1_good, &c1_ok, p0_dropped, c0, R_WITH_MTP, R_NO_MTP, &reason, 0.10));
++        tosh_plan_candidate c1_strict = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 950.0, 300.0, 600.0);
++        assert(tosh_plan_turbo_beats_p0(p1_good, &c1_strict, p0_dropped, c0, R_WITH_MTP, R_NO_MTP, &reason, 0.10));
++        // - at 0.30 (must keep >= 735 MiB), 750 MiB accepts (would fail 0.20)
++        tosh_plan_candidate c1_loose = make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 750.0, 300.0, 600.0);
++        assert(!tosh_plan_turbo_beats_p0(p1_good, &c1_loose, p0_dropped, c0, R_WITH_MTP, R_NO_MTP, &reason, 0.20));
++        assert(tosh_plan_turbo_beats_p0(p1_good, &c1_loose, p0_dropped, c0, R_WITH_MTP, R_NO_MTP, &reason, 0.30));
++
++        // Pass 1 dropping MTP when Pass 0 kept it -> reject
++        tosh_plan p0_kept = make_plan(1536.0, 19098.0, /*mtp_dropped=*/false);
++        tosh_plan p1_dropped = make_plan(768.0, 19098.0, /*mtp_dropped=*/true);
++        assert(!tosh_plan_turbo_beats_p0(p1_dropped, &c1_ok, p0_kept, c0, R_WITH_MTP, R_NO_MTP));
++    }
++
++    // 8. Full-GPU promotion gets non-dmoe reason and non-dmoe / nullptr guards hold
++    {
++        tosh_plan p0 = make_plan(768.0);
++        tosh_plan_candidate c0 = make_cand("dmoe", GGML_TYPE_F16, 512, 1800.0, 900.0, 558.0);
++        tosh_plan p1 = make_plan(768.0);
++        tosh_plan_candidate c_full = make_cand("full_gpu", GGML_TYPE_TURBO4_0, 512, 0.0, 300.0, 558.0);
++        std::string reason;
++        assert(tosh_plan_turbo_beats_p0(p1, &c_full, p0, c0, R_PREF, R_PREF, &reason));
++        assert(reason.find("fits the full model on the GPU") != std::string::npos);
++        assert(reason.find("expert arena") == std::string::npos);
++        assert(reason.find("quality cost") != std::string::npos);
++
++        assert(!tosh_plan_turbo_beats_p0(p1, nullptr, p0, c0, R_PREF, R_PREF));
++        assert(!tosh_plan_dmoe_should_try_turbo4(p0, make_cand("full_gpu", GGML_TYPE_F16, 512, 0.0, 100.0, 100.0), R_PREF, R_PREF));
++        assert(!tosh_plan_dmoe_should_try_turbo4(p0, make_cand("legacy_offload", GGML_TYPE_F16, 512, 0.0, 100.0, 100.0), R_PREF, R_PREF));
++    }
++
++    // 9. Resolve pass transition: winning updates reason cleanly; losing or nullptr restores p0 state,
++    //    fallback, candidates, and rebinds sel without leaving GGML_TYPE_TURBO4_0 selected (no KV_TURBO4_AUTO).
++    {
++        tosh_plan p0 = make_plan(768.0);
++        p0.reason = "the requested context and the reserve fit; experts take what is left";
++        p0.fallback = "p0 fallback intact";
++        p0.candidates = { make_cand("dmoe", GGML_TYPE_F16, 512, 641.0, 223.0, 558.0) };
++        const tosh_plan_candidate p0_cand = p0.candidates[0];
++
++        // Losing Pass 1 (short-context ub=1024 with small gain): rolls back to p0 cleanly
++        tosh_plan p_lose = make_plan(768.0);
++        p_lose.reason.clear();
++        p_lose.fallback.clear();
++        p_lose.candidates = { make_cand("dmoe", GGML_TYPE_TURBO4_0, 1024, 786.0, 111.0, 618.0) };
++        const tosh_plan_candidate * sel = &p_lose.candidates[0];
++        assert(!tosh_plan_resolve_turbo_pass(p_lose, sel, p0, p0_cand, R_PREF, R_PREF));
++        assert(sel != nullptr);
++        assert(sel >= p_lose.candidates.data() && sel < p_lose.candidates.data() + p_lose.candidates.size());
++        assert(sel->kv == GGML_TYPE_F16);
++        assert(sel->ubatch == 512);
++        assert(p_lose.reason == p0.reason);
++        assert(p_lose.fallback == p0.fallback);
++
++        // Pass 1 sel == nullptr: rolls back to p0 cleanly
++        tosh_plan p_null = make_plan(768.0);
++        p_null.candidates.clear();
++        sel = nullptr;
++        assert(!tosh_plan_resolve_turbo_pass(p_null, sel, p0, p0_cand, R_PREF, R_PREF));
++        assert(sel != nullptr && sel->kv == GGML_TYPE_F16);
++        assert(p_null.reason == p0.reason);
++
++        // Winning Pass 1: updates p.reason and keeps Turbo4 selected
++        tosh_plan p0_low = make_plan(512.0);
++        p0_low.candidates = { make_cand("dmoe", GGML_TYPE_Q8_0, 512, 735.0, 594.0, 558.0) };
++        const tosh_plan_candidate p0_low_cand = p0_low.candidates[0];
++
++        tosh_plan p_win = make_plan(768.0);
++        p_win.candidates = { make_cand("dmoe", GGML_TYPE_TURBO4_0, 512, 630.0, 421.0, 558.0) };
++        sel = &p_win.candidates[0];
++        assert(tosh_plan_resolve_turbo_pass(p_win, sel, p0_low, p0_low_cand, R_PREF, R_PREF));
++        assert(sel != nullptr && sel->kv == GGML_TYPE_TURBO4_0);
++        assert(p_win.reason.find("restores full VRAM headroom") != std::string::npos);
++        assert(p_win.fallback.empty());
++    }
++
++    std::printf("test-tosh-plan: all assertions passed\n");
++    return 0;
++}
