@@ -423,7 +423,7 @@ private struct AgentRunContext {
     let temperature: Double
     let maxTokens: Int
     let system: String
-    let thinking: Bool
+    var thinking: Bool
     let sampling: ChatSamplingSettings
     let modalities: ModelModalities?
     var remainingTurns: Int
@@ -445,6 +445,13 @@ final class ChatStore: ObservableObject {
     /// Room for the medium reasoning budget and an answer after it.
     nonisolated static let defaultMaxTokens = 8_192
 
+    /// Minimum visible-answer reserve preserved when clamping a reasoning budget inside `maxTokens`.
+    nonisolated static let reasoningAnswerReserve = 768
+
+    /// Empty-response recovery prompt sent on a single no-tools, no-thinking finalization pass.
+    nonisolated static let emptyResponseFinalizationNote =
+        "Provide the final answer directly based on the conversation and any prior tool results, without further internal reasoning or tool calls."
+
     nonisolated static func reasoningBudget(for effort: String) -> Int? {
         switch effort {
         case "minimal": 128
@@ -453,6 +460,38 @@ final class ChatStore: ObservableObject {
         case "high": 8_192
         default: nil
         }
+    }
+
+    /// Caps a finite reasoning budget so `maxTokens` keeps room for a visible answer.
+    nonisolated static func clampedReasoningBudget(
+        for effort: String,
+        maxTokens: Int,
+        reserve: Int = reasoningAnswerReserve
+    ) -> Int? {
+        guard let budget = reasoningBudget(for: effort) else { return nil }
+        guard maxTokens > 0 else { return budget }
+        let effectiveReserve = maxTokens > reserve ? reserve : max(1, maxTokens / 2)
+        return min(budget, max(0, maxTokens - effectiveReserve))
+    }
+
+    /// Returns true when an empty visible response warrants one no-tools, no-thinking finalization retry.
+    nonisolated static func shouldAutoFinalizeEmptyResponse(
+        wasServerAgentTurn: Bool = false,
+        wasCancelled: Bool,
+        didReportError: Bool,
+        shouldDeliverQueued: Bool,
+        hasVisibleAnswer: Bool,
+        hasToolCalls: Bool,
+        hasClosing: Bool,
+        alreadyFinalizing: Bool,
+        hadReasoning: Bool,
+        inAgentLoop: Bool,
+        finishReason: String?
+    ) -> Bool {
+        guard !wasServerAgentTurn else { return false }
+        guard !wasCancelled, !didReportError, !shouldDeliverQueued else { return false }
+        guard !hasVisibleAnswer, !hasToolCalls, !hasClosing, !alreadyFinalizing else { return false }
+        return hadReasoning || inAgentLoop || finishReason == "stop" || finishReason == "length"
     }
     private static var configuredAgentTurnLimit: Int {
         max(1, UserDefaults.standard.object(forKey: SettingsKeys.chatAgenticMaxTurns) as? Int ?? 10)
@@ -985,8 +1024,10 @@ final class ChatStore: ObservableObject {
 
         // Reasoning off can come from the toggle or a typed /no_think; a typed
         // switch overrides the toggle for this turn.
+        // Single-shot finalization rounds disable thinking so they emit a visible answer.
         var reasoningOff = !thinking || sampling.reasoningEffort == "off"
-        if let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
+        if agentRun?.finalizing != true,
+           let last = history.lastIndex(where: { ($0["role"] as? String) == "user" }) {
             let typed = Self.messageText(history[last]["content"])
             if typed.contains("/no_think") { reasoningOff = true }
             else if typed.contains("/think") { reasoningOff = false }
@@ -1280,7 +1321,7 @@ final class ChatStore: ObservableObject {
                         kwargs["reasoning_effort"] = sampling.reasoningEffort
                     }
                     body["chat_template_kwargs"] = kwargs
-                    if let budget = Self.reasoningBudget(for: sampling.reasoningEffort) {
+                    if let budget = Self.clampedReasoningBudget(for: sampling.reasoningEffort, maxTokens: maxTokens) {
                         body["thinking_budget_tokens"] = budget
                     }
                     body["reasoning_control"] = true
@@ -1451,21 +1492,6 @@ final class ChatStore: ObservableObject {
                                   agentDeclined: declined)
                     return (false, true)
                 }
-                if !wasCancelled && !didReportError && hadReasoning && !hasVisibleAnswer
-                    && finalToolCalls.isEmpty && closing == nil {
-                    store?.lastError = Self.emptyResponseMessage(finishReason: finalFinishReason)
-                } else if !wasCancelled && !didReportError && hasVisibleAnswer && finalToolCalls.isEmpty
-                            && finalFinishReason == "length" && !answer.hasSuffix("incomplete._")
-                            && !answer.hasSuffix("incompleta._") {
-                    // an answer cut at its token limit must not read as a finished one, nor one the context cut
-                    // as cut by its limit: Continue would not fit
-                    store?.lastError = Self.cutByContext(usage: finalUsage, maxTokens: maxTokens,
-                                                         context: Self.contextLimitSetting())
-                        ? Self.contextCutMessage() : Self.cutAnswerMessage()
-                } else if !wasCancelled && !didReportError && !hasVisibleAnswer && !hadReasoning
-                            && finalToolCalls.isEmpty && closing == nil {
-                    store?.lastError = Self.noAnswerMessage()
-                }
                 store?.lastTurnUsedServerAgent = wasAgentTurn
                 if wasAgentTurn, let used = ((finalMeta?["context"] as? [String: Any])?["used"] as? NSNumber)?.intValue {
                     store?.setContextUsed(used, for: convID)
@@ -1511,8 +1537,44 @@ final class ChatStore: ObservableObject {
                     followUp = nextAgentRun
                     followUp?.instruction = note
                     followUp?.finalizing = true
+                } else if Self.shouldAutoFinalizeEmptyResponse(
+                    wasServerAgentTurn: wasAgentTurn,
+                    wasCancelled: wasCancelled,
+                    didReportError: didReportError,
+                    shouldDeliverQueued: shouldDeliverQueued,
+                    hasVisibleAnswer: hasVisibleAnswer,
+                    hasToolCalls: !finalToolCalls.isEmpty,
+                    hasClosing: closing != nil,
+                    alreadyFinalizing: agentRun?.finalizing == true,
+                    hadReasoning: hadReasoning,
+                    inAgentLoop: agentRun != nil,
+                    finishReason: finalFinishReason
+                ) {
+                    AppLog.chat.notice("empty visible response triggers single-shot finalization pass (finish_reason=\(finalFinishReason ?? "nil", privacy: .public), had_reasoning=\(hadReasoning))")
+                    followUp = nextAgentRun
+                    followUp?.thinking = false
+                    followUp?.instruction = Self.emptyResponseFinalizationNote
+                    followUp?.finalizing = true
                 }
-                if followUp != nil { shown = "" }
+                if followUp == nil {
+                    if !wasCancelled && !didReportError && hadReasoning && !hasVisibleAnswer
+                        && finalToolCalls.isEmpty && closing == nil {
+                        store?.lastError = Self.emptyResponseMessage(finishReason: finalFinishReason)
+                    } else if !wasCancelled && !didReportError && hasVisibleAnswer && finalToolCalls.isEmpty
+                                && finalFinishReason == "length" && !answer.hasSuffix("incomplete._")
+                                && !answer.hasSuffix("incompleta._") {
+                        // an answer cut at its token limit must not read as a finished one, nor one the context cut
+                        // as cut by its limit: Continue would not fit
+                        store?.lastError = Self.cutByContext(usage: finalUsage, maxTokens: maxTokens,
+                                                             context: Self.contextLimitSetting())
+                            ? Self.contextCutMessage() : Self.cutAnswerMessage()
+                    } else if !wasCancelled && !didReportError && !hasVisibleAnswer && !hadReasoning
+                                && finalToolCalls.isEmpty && closing == nil {
+                        store?.lastError = Self.noAnswerMessage()
+                    }
+                } else {
+                    shown = ""
+                }
                 store?.finish(conversation: convID, text: shown, speed: finalSpeed,
                               mtpAccept: finalAccept, timings: finalTimings,
                               toolCalls: finalToolCalls, interim: round.interim)
@@ -3014,8 +3076,12 @@ struct NativeChatView: View {
         contextLimit > 0 && Double(maxTokens) / Double(contextLimit) > 0.5
     }
 
-    private var reasoningFillsMaxTokens: Bool {
-        thinkingEnabled && (ChatStore.reasoningBudget(for: reasoningEffort) ?? 0) >= maxTokens
+    private var clampedReasoningBudget: Int? {
+        guard thinkingEnabled,
+              let raw = ChatStore.reasoningBudget(for: reasoningEffort),
+              let clamped = ChatStore.clampedReasoningBudget(for: reasoningEffort, maxTokens: maxTokens),
+              clamped < raw else { return nil }
+        return clamped
     }
 
     /// Levels the loaded model's template validates; the usual four when it
@@ -3047,7 +3113,7 @@ struct NativeChatView: View {
     private func reasoningEffortLabel(_ level: String) -> String {
         switch level {
         case "none", "no_think": loc.t("Sin razonamiento", "No reasoning")
-        case "minimal": loc.t("Mínimo · sin presupuesto", "Minimal · no budget")
+        case "minimal": loc.t("Mínimo · 128 tokens", "Minimal · 128 tokens")
         case "low": loc.t("Bajo · 512 tokens", "Low · 512 tokens")
         case "medium": loc.t("Medio · 2.048 tokens", "Medium · 2,048 tokens")
         case "high": loc.t("Alto · 8.192 tokens", "High · 8,192 tokens")
@@ -4033,9 +4099,9 @@ struct NativeChatView: View {
                             "This limit reserves more than half the context for a single response."),
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
-            } else if reasoningFillsMaxTokens {
-                Label(loc.t("El razonamiento puede gastar todo este límite y cortar la respuesta.",
-                            "Reasoning can use up this whole limit and cut the answer."),
+            } else if let capped = clampedReasoningBudget {
+                Label(loc.t("El presupuesto de razonamiento se limita a \(capped.formatted()) tokens para dejar margen a la respuesta.",
+                            "Reasoning budget is capped at \(capped.formatted()) tokens to reserve room for the answer."),
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }

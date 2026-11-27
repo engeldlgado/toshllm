@@ -97,4 +97,82 @@ final class ChatCapabilityTests: XCTestCase {
         XCTAssertEqual(ReasoningEffortDetector.closest(to: "minimal", in: ridge), "low")
         XCTAssertNil(ReasoningEffortDetector.closest(to: "brisk", in: ridge))
     }
+
+    func testClampedReasoningBudgetPreservesAnswerReserve() {
+        // default maxTokens (8192) clamps "high" (8192) to keep room for the answer.
+        XCTAssertEqual(ChatStore.clampedReasoningBudget(for: "high", maxTokens: 8_192), 7_424)
+        XCTAssertEqual(ChatStore.clampedReasoningBudget(for: "medium", maxTokens: 8_192), 2_048)
+        XCTAssertEqual(ChatStore.clampedReasoningBudget(for: "low", maxTokens: 8_192), 512)
+        XCTAssertEqual(ChatStore.clampedReasoningBudget(for: "minimal", maxTokens: 8_192), 128)
+        // Small T9-like turn budgets still leave room for visible output.
+        XCTAssertEqual(ChatStore.clampedReasoningBudget(for: "high", maxTokens: 4_096), 3_328)
+        XCTAssertEqual(ChatStore.clampedReasoningBudget(for: "high", maxTokens: 512), 256)
+        // Open/off levels remain nil.
+        XCTAssertNil(ChatStore.clampedReasoningBudget(for: "default", maxTokens: 8_192))
+        XCTAssertNil(ChatStore.clampedReasoningBudget(for: "off", maxTokens: 8_192))
+    }
+
+    func testAutoFinalizeEmptyResponseTriggersAtMostOnceForEmptyStopOrThinkingCut() {
+        // Triggers after empty reasoning cutoff or empty stop.
+        XCTAssertTrue(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: true, inAgentLoop: false,
+            finishReason: "length"
+        ))
+        XCTAssertTrue(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: false, inAgentLoop: true,
+            finishReason: "stop"
+        ))
+        XCTAssertTrue(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: false, inAgentLoop: false,
+            finishReason: "stop"
+        ))
+        // Guarded against loops, visible answers, tool calls, cancellations, and transport drops.
+        XCTAssertFalse(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: true, hadReasoning: true, inAgentLoop: true,
+            finishReason: "stop"
+        ))
+        XCTAssertFalse(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: true, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: true, inAgentLoop: false,
+            finishReason: "stop"
+        ))
+        XCTAssertFalse(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: true, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: true, inAgentLoop: false,
+            finishReason: "tool_calls"
+        ))
+        XCTAssertFalse(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: false, inAgentLoop: false,
+            finishReason: nil
+        ))
+    }
+
+    func testAutoFinalizeEmptyResponseSkipsServerAgentTurnsEvenAfterReasoningOrStop() {
+        XCTAssertFalse(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasServerAgentTurn: true,
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: true, inAgentLoop: true,
+            finishReason: "stop"
+        ))
+        XCTAssertFalse(ChatStore.shouldAutoFinalizeEmptyResponse(
+            wasServerAgentTurn: true,
+            wasCancelled: false, didReportError: false, shouldDeliverQueued: false,
+            hasVisibleAnswer: false, hasToolCalls: false, hasClosing: false,
+            alreadyFinalizing: false, hadReasoning: false, inAgentLoop: false,
+            finishReason: "length"
+        ))
+    }
 }
