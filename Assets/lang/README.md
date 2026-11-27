@@ -36,14 +36,14 @@ hand.
 |---|---|---|
 | Spanish (Español) | `es` | Built-in (100%) |
 | English (English) | `en` | Built-in (100%) |
-| Italian (Italiano) | `it` | 100% (2074/2077) |
+| Italian (Italiano) | `it` | 99% (2074/2077) |
 | German (Deutsch) | `de` | not started |
 | French (Français) | `fr` | not started |
 | Portuguese (Português) | `pt` | not started |
-| Chinese (Simplified) (简体中文) | `zh` | 100% (2074/2077) |
-| Japanese (日本語) | `ja` | 100% (2074/2077) |
+| Chinese (Simplified) (简体中文) | `zh` | 99% (2074/2077) |
+| Japanese (日本語) | `ja` | 99% (2074/2077) |
 | Korean (한국어) | `ko` | not started |
-| Russian (Русский) | `ru` | 100% (2074/2077) |
+| Russian (Русский) | `ru` | 99% (2074/2077) |
 | Hindi (हिन्दी) | `hi` | not started |
 | Turkish (Türkçe) | `tr` | not started |
 | Dutch (Nederlands) | `nl` | not started |
