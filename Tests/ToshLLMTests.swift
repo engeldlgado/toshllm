@@ -1353,15 +1353,292 @@ final class ServerSettingsTests: XCTestCase {
     func testServerDefaultsForRequestsThatBringNone() {
         var s = makeSettings()
         XCTAssertFalse(s.arguments.contains("--chat-template-kwargs"), "the model's own default adds nothing")
+        XCTAssertFalse(s.arguments.contains("--reasoning"))
+        XCTAssertFalse(s.arguments.contains("--reasoning-effort"))
         XCTAssertFalse(s.arguments.contains("-n"))
+        let defaultIni = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+        XCTAssertFalse(defaultIni.contains("chat-template-kwargs ="))
+        XCTAssertFalse(defaultIni.contains("reasoning ="))
+        XCTAssertFalse(defaultIni.contains("reasoning-effort ="))
+
         s.defaultReasoning = "off"
         s.defaultMaxTokens = 4096
         var args = s.arguments
-        XCTAssertEqual(args[args.firstIndex(of: "--chat-template-kwargs")! + 1], #"{"enable_thinking":false}"#)
+        XCTAssertFalse(args.contains("--chat-template-kwargs"))
+        XCTAssertEqual(args[args.firstIndex(of: "--reasoning")! + 1], "off")
+        XCTAssertFalse(args.contains("--reasoning-effort"))
         XCTAssertEqual(args[args.firstIndex(of: "-n")! + 1], "4096")
+        let offIni = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+        XCTAssertTrue(offIni.contains("reasoning = off"))
+        XCTAssertFalse(offIni.contains("reasoning-effort ="))
+        XCTAssertFalse(offIni.contains("chat-template-kwargs ="))
+
         s.defaultReasoning = "high"
         args = s.arguments
-        XCTAssertEqual(args[args.firstIndex(of: "--chat-template-kwargs")! + 1], #"{"enable_thinking":true,"reasoning_effort":"high"}"#)
+        XCTAssertFalse(args.contains("--chat-template-kwargs"))
+        XCTAssertEqual(args[args.firstIndex(of: "--reasoning")! + 1], "on")
+        XCTAssertEqual(args[args.firstIndex(of: "--reasoning-effort")! + 1], "high")
+        let highIni = s.routerPresetINI(modelPaths: ["/models/dense-4b.gguf"], ncmoeByPath: [:])
+        XCTAssertTrue(highIni.contains("reasoning = on"))
+        XCTAssertTrue(highIni.contains("reasoning-effort = high"))
+        XCTAssertFalse(highIni.contains("chat-template-kwargs ="))
+
+        let routerOpts = ServerSettings.routerPresetOptions("--reasoning on --reasoning-effort medium")
+        XCTAssertEqual(routerOpts.preset.map { "\($0.key)=\($0.value)" },
+                       ["reasoning=on", "reasoning-effort=medium"])
+        XCTAssertEqual(routerOpts.rest, [])
+        let shortOpts = ServerSettings.routerPresetOptions("-rea off")
+        XCTAssertEqual(shortOpts.preset.map { "\($0.key)=\($0.value)" }, ["reasoning=off"])
+        XCTAssertEqual(shortOpts.rest, [])
+    }
+
+    func testSlotSavePathFollowsDynamicMoeAndFullGPU() throws {
+        let model = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tosh-slot-dmoe-\(UUID().uuidString).gguf")
+        try writeMinimalMoEGGUF(model)
+        defer { try? FileManager.default.removeItem(at: model) }
+
+        var s = makeSettings()
+        s.modelPath = model.path
+        s.cacheTypeK = "q8_0"
+        s.cacheTypeV = "turbo4"
+        s.dynamicMoeEnabled = true
+        s.executionMode = "auto"
+        s.autoKVMode = "auto"
+
+        XCTAssertTrue(s.usesAutoPlan)
+        XCTAssertEqual(s.slotKVSignature, "auto-auto-v",
+                       "Dynamic MoE must ignore manual ctk/ctv before preview resolves KV")
+        XCTAssertTrue(s.slotCacheDir.path.hasSuffix("/slots/\(s.port)/auto-auto-v"))
+
+        s.executionMode = "dmoe"
+        s.autoKVMode = "turbo4"
+        XCTAssertTrue(s.usesAutoPlan)
+        XCTAssertEqual(s.slotKVSignature, "turbo4-turbo4-v")
+
+        s.executionMode = "auto"
+        s.autoKVMode = "auto"
+        s.plannedKV = "q8_0"
+        XCTAssertEqual(s.slotKVSignature, "q8_0-q8_0-v")
+
+        s.plannedKV = "bogus"
+        s.autoKVMode = "q8_0"
+        XCTAssertEqual(s.slotKVSignature, "q8_0-q8_0-v")
+
+        s.loadVision = false
+        XCTAssertEqual(s.slotKVSignature, "q8_0-q8_0")
+
+        s.loadVision = true
+        s.executionMode = "full"
+        s.autoKVMode = "turbo4"
+        XCTAssertEqual(s.slotKVSignature, "turbo4-turbo4-v",
+                       "manual Full GPU uses autoKVMode rather than idle ctk/ctv")
+
+        s.dynamicMoeEnabled = false
+        s.cacheTypeK = "q8_0"
+        s.cacheTypeV = "q4_0"
+        XCTAssertEqual(s.slotKVSignature, "q8_0-q4_0-v")
+
+        s.faAmd = true
+        s.persistCache = true
+        let args = s.arguments
+        XCTAssertEqual(args[args.firstIndex(of: "--slot-save-path")! + 1], s.slotCacheDir.path)
+
+        var fullRouter = makeSettings()
+        fullRouter.routerMode = true
+        fullRouter.dynamicMoeEnabled = true
+        fullRouter.executionMode = "full"
+        fullRouter.autoKVMode = "turbo4"
+        fullRouter.cacheTypeK = "f16"
+        fullRouter.cacheTypeV = "f16"
+        fullRouter.faAmd = true
+        fullRouter.persistCache = true
+        let fullIni = fullRouter.routerPresetINI(modelPaths: [model.path], ncmoeByPath: [:])
+        let alias = ServerSettings.routerAlias(for: model.path)
+        XCTAssertTrue(fullIni.contains("slot-save-path = \(fullRouter.slotCacheDir.appendingPathComponent(alias).path)"))
+        XCTAssertTrue(fullIni.contains("flash-attn = on"))
+        XCTAssertTrue(fullIni.contains("cache-type-k = turbo4"))
+        XCTAssertTrue(fullIni.contains("cache-type-v = turbo4"))
+    }
+
+    func testStartupBannerReportsEffectiveFlashAttention() throws {
+        let model = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tosh-banner-dmoe-\(UUID().uuidString).gguf")
+        try writeMinimalMoEGGUF(model)
+        defer { try? FileManager.default.removeItem(at: model) }
+
+        var dmoe = makeSettings()
+        dmoe.modelPath = model.path
+        dmoe.flashAttn = "auto"
+        dmoe.dynamicMoeEnabled = true
+        dmoe.executionMode = "auto"
+        dmoe.autoKVMode = "auto"
+        XCTAssertTrue(dmoe.usesAutoPlan)
+        XCTAssertEqual(dmoe.effectiveFlashAttn, "1")
+        let dmoeBanner = ServerController.startupBanner(settings: dmoe)
+        XCTAssertTrue(dmoeBanner.contains("fa=1"), dmoeBanner)
+        XCTAssertFalse(dmoeBanner.contains("fa=auto"), dmoeBanner)
+
+        var manualQuant = makeSettings()
+        manualQuant.flashAttn = "auto"
+        manualQuant.cacheTypeK = "q8_0"
+        XCTAssertEqual(manualQuant.effectiveFlashAttn, "1")
+        XCTAssertTrue(ServerController.startupBanner(settings: manualQuant).contains("fa=1"))
+
+        var manualFull = makeSettings()
+        manualFull.dynamicMoeEnabled = true
+        manualFull.executionMode = "full"
+        manualFull.autoKVMode = "turbo4"
+        manualFull.cacheTypeK = "f16"
+        manualFull.cacheTypeV = "f16"
+        let fullBanner = ServerController.startupBanner(settings: manualFull)
+        XCTAssertTrue(fullBanner.contains("fa=1"), fullBanner)
+        XCTAssertTrue(fullBanner.contains("ctk=turbo4 ctv=turbo4"), fullBanner)
+
+        var manualF16Amd = makeSettings()
+        manualF16Amd.flashAttn = "off"
+        manualF16Amd.faAmd = true
+        manualF16Amd.cacheTypeK = "f16"
+        manualF16Amd.cacheTypeV = "f16"
+        XCTAssertFalse(manualF16Amd.kvNeedsFlashAttention)
+        XCTAssertEqual(manualF16Amd.effectiveFlashAttn, "auto")
+        XCTAssertTrue(ServerController.startupBanner(settings: manualF16Amd).contains("fa=auto"))
+
+        var manualF16Off = manualF16Amd
+        manualF16Off.faAmd = false
+        XCTAssertEqual(manualF16Off.effectiveFlashAttn, "off")
+        XCTAssertTrue(ServerController.startupBanner(settings: manualF16Off).contains("fa=off"))
+    }
+
+    func testRouterPresetReasoningGroupOverride() {
+        let modelPath = "/models/override-reasoning-\(UUID().uuidString).gguf"
+        defer { ServerSettings.setExtraArgs("", forModel: modelPath) }
+
+        var high = makeSettings()
+        high.defaultReasoning = "high"
+        ServerSettings.setExtraArgs("--reasoning off", forModel: modelPath)
+        let offIni = high.routerPresetINI(modelPaths: [modelPath], ncmoeByPath: [:])
+        XCTAssertTrue(offIni.contains("reasoning = off"))
+        XCTAssertFalse(offIni.contains("reasoning = on"))
+        XCTAssertFalse(offIni.contains("reasoning-effort ="), "disabling reasoning drops global effort")
+
+        ServerSettings.setExtraArgs("--reasoning on", forModel: modelPath)
+        let onIni = high.routerPresetINI(modelPaths: [modelPath], ncmoeByPath: [:])
+        XCTAssertTrue(onIni.contains("reasoning = on"))
+        XCTAssertTrue(onIni.contains("reasoning-effort = high"),
+                      "explicit reasoning=on keeps global reasoning-effort")
+
+        ServerSettings.setExtraArgs("--reasoning auto", forModel: modelPath)
+        let autoIni = high.routerPresetINI(modelPaths: [modelPath], ncmoeByPath: [:])
+        XCTAssertTrue(autoIni.contains("reasoning = auto"))
+        XCTAssertFalse(autoIni.contains("reasoning-effort ="))
+
+        ServerSettings.setExtraArgs("--reasoning-effort low", forModel: modelPath)
+        let lowIni = high.routerPresetINI(modelPaths: [modelPath], ncmoeByPath: [:])
+        XCTAssertTrue(lowIni.contains("reasoning = on"), "effort refinement keeps global reasoning=on")
+        XCTAssertTrue(lowIni.contains("reasoning-effort = low"))
+        XCTAssertFalse(lowIni.contains("reasoning-effort = high"))
+
+        var off = makeSettings()
+        off.defaultReasoning = "off"
+        let effortOnlyIni = off.routerPresetINI(modelPaths: [modelPath], ncmoeByPath: [:])
+        XCTAssertTrue(effortOnlyIni.contains("reasoning-effort = low"))
+        XCTAssertFalse(effortOnlyIni.contains("reasoning = off"), "effort override drops global reasoning=off")
+
+        ServerSettings.setExtraArgs(#"--chat-template-kwargs {"enable_thinking":false}"#, forModel: modelPath)
+        let kwargsIni = high.routerPresetINI(modelPaths: [modelPath], ncmoeByPath: [:])
+        XCTAssertFalse(kwargsIni.contains("reasoning ="))
+        XCTAssertFalse(kwargsIni.contains("reasoning-effort ="))
+    }
+
+    func testSlotCacheDirResolvesProfilesActiveServerAndValidatedModelPlan() throws {
+        let suiteName = "ToshLLMTests.slotProfile.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        let testPort = 58921
+        let modelA = FileManager.default.temporaryDirectory.appendingPathComponent("tosh-slot-a-\(UUID().uuidString).gguf")
+        let modelB = FileManager.default.temporaryDirectory.appendingPathComponent("tosh-slot-b-\(UUID().uuidString).gguf")
+        try writeMinimalMoEGGUF(modelA)
+        try writeMinimalMoEGGUF(modelB)
+        let slotRoot = AppSupport.directory.appendingPathComponent("slots/\(testPort)")
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            ServerSettings.setActiveSettings(nil, forPort: testPort)
+            try? FileManager.default.removeItem(at: AutoMemoryPlan.planURL(port: testPort))
+            AutoMemoryPlan.recordModel("", port: testPort)
+            try? FileManager.default.removeItem(at: modelA)
+            try? FileManager.default.removeItem(at: modelB)
+            try? FileManager.default.removeItem(at: slotRoot)
+        }
+
+        defaults.set(8080, forKey: SettingsKeys.port)
+        defaults.set("f16", forKey: SettingsKeys.cacheTypeK)
+        defaults.set("f16", forKey: SettingsKeys.cacheTypeV)
+
+        var secSettings = makeSettings()
+        secSettings.port = testPort
+        secSettings.modelPath = modelA.path
+        secSettings.cacheTypeK = "q8_0"
+        secSettings.cacheTypeV = "f16"
+        var secProfile = secSettings.makeProfile(name: "Secondary")
+        secProfile.pinned = [Profile.Pin.model, Profile.Pin.kv]
+        let encoded = try JSONEncoder().encode([secProfile])
+        defaults.set(encoded, forKey: ServerManager.multiServerProfilesKey)
+
+        let secDir = ServerSettings.slotCacheDir(port: testPort, defaults: defaults)
+        XCTAssertTrue(secDir.path.hasSuffix("/slots/\(testPort)/q8_0-f16-v"), secDir.path)
+
+        let planJSON = #"{"plan_schema_version":1,"state":"DMOE_BOUNDED_HOST","mode":"dmoe_bounded","reason":"r","fallback":"","kv":"turbo4","n_ctx":16384,"ubatch":512,"ncmoe":0,"reserve_mib":768,"arena_mib":1200,"min_arena_mib":546,"projected_private_mib":1,"projected_free_mib":800,"vram_total_mib":8192,"vram_free_mib":7000,"host_required_mib":1,"host_ram_mib":40960,"host_available_mib":1,"host_reserve_mib":1,"bank_mib":17000,"mlock":"required","dispersion":"normal","candidates":[]}"#
+        try Data(planJSON.utf8).write(to: AutoMemoryPlan.planURL(port: testPort))
+        AutoMemoryPlan.recordModel(modelA.path, port: testPort)
+        XCTAssertEqual(AutoMemoryPlan.readPlan(port: testPort, forModel: modelA.path)?.kv, "turbo4")
+        XCTAssertNil(AutoMemoryPlan.readPlan(port: testPort, forModel: modelB.path),
+                     "saved plan must not validate against a different model with matching nCtx")
+
+        defaults.set(modelA.path, forKey: SettingsKeys.modelPath)
+        defaults.set(testPort, forKey: SettingsKeys.port)
+        defaults.set(16384, forKey: SettingsKeys.ctx)
+        defaults.set(true, forKey: SettingsKeys.dynamicMoeEnabled)
+        defaults.set("auto", forKey: SettingsKeys.executionMode)
+        defaults.set("auto", forKey: SettingsKeys.autoKVMode)
+
+        let plannedDir = ServerSettings.slotCacheDir(port: testPort, defaults: defaults)
+        XCTAssertTrue(plannedDir.path.hasSuffix("/slots/\(testPort)/turbo4-turbo4-v"), plannedDir.path)
+
+        defaults.set(modelB.path, forKey: SettingsKeys.modelPath)
+        let switchedModelDir = ServerSettings.slotCacheDir(port: testPort, defaults: defaults)
+        XCTAssertTrue(switchedModelDir.path.hasSuffix("/slots/\(testPort)/auto-auto-v"), switchedModelDir.path)
+
+        var liveAuto = makeSettings()
+        liveAuto.port = testPort
+        liveAuto.modelPath = modelA.path
+        liveAuto.dynamicMoeEnabled = true
+        liveAuto.executionMode = "auto"
+        liveAuto.autoKVMode = "auto"
+        liveAuto.plannedKV = nil
+        ServerSettings.setActiveSettings(liveAuto, forPort: testPort)
+        XCTAssertTrue(ServerSettings.slotCacheDir(port: testPort).path.hasSuffix("/slots/\(testPort)/auto-auto-v"),
+                      "live server with nil plannedKV must keep its launch path even if a plan file exists on disk")
+
+        var live = makeSettings()
+        live.port = testPort
+        live.cacheTypeK = "q8_0"
+        live.cacheTypeV = "q8_0"
+        ServerSettings.setActiveSettings(live, forPort: testPort)
+        XCTAssertTrue(ServerSettings.slotCacheDir(port: testPort).path.hasSuffix("/slots/\(testPort)/q8_0-q8_0-v"))
+        ServerSettings.setActiveSettings(nil, forPort: testPort)
+        XCTAssertFalse(ServerSettings.slotCacheDir(port: testPort).path.hasSuffix("/slots/\(testPort)/q8_0-q8_0-v"))
+
+        let tmpSlots = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tosh-slots-scan-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmpSlots) }
+        try FileManager.default.createDirectory(at: tmpSlots.appendingPathComponent("8080/f16-f16-v"),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tmpSlots.appendingPathComponent("8081/turbo4-turbo4-v"),
+                                                withIntermediateDirectories: true)
+        let scanned = Set(ServerSettings.existingSlotCacheDirs(under: tmpSlots).map {
+            "\($0.deletingLastPathComponent().lastPathComponent)/\($0.lastPathComponent)"
+        })
+        XCTAssertEqual(scanned, ["8080/f16-f16-v", "8081/turbo4-turbo4-v"])
     }
 
     func testVisionModelDisablesCacheReuseAndDetectsMultimodal() throws {

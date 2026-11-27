@@ -318,4 +318,13 @@ extension ServerSettings {
             if let v = p.routerModelsMax { routerModelsMax = v }
         }
     }
+
+    /// Overlays either pinned fields (modern per-server profiles) or a full legacy snapshot.
+    mutating func applyProfile(_ p: Profile) {
+        if let pinned = p.pinned {
+            applyPinned(p, Set(pinned))
+        } else {
+            apply(p)
+        }
+    }
 }
