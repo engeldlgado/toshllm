@@ -157,6 +157,8 @@ struct ServerSettings {
     var dynamicMoeLeanRAM: Bool = false
     /// Set by the controller from the preview before launch; nil until then.
     var plannedMode: String? = nil
+    /// Active KV cache type chosen by Dynamic MoE preview (`f16`, `q8_0`, `turbo4`); nil until preview runs.
+    var plannedKV: String? = nil
     /// The retry after Dynamic MoE could not lock its expert bank plans without it.
     var planWithoutDMoE: Bool = false
     /// The plan a llama-bench run follows under Dynamic MoE; llama-bench does not plan itself.
@@ -244,24 +246,111 @@ struct ServerSettings {
         }
     }
 
-    /// Directory where one server's per-conversation KV slot files live. Namespaced
-    /// by port so independent servers don't overwrite each other's slot 0 / prefix
-    /// files in a shared folder.
-    static func slotCacheDir(port: Int) -> URL {
-        let dir = AppSupport.directory.appendingPathComponent("slots/\(port)/\(slotKVSignature())")
+    /// Directory where this configuration's per-conversation KV slot files live.
+    /// Namespaced by port and active KV layout so independent servers or quant modes
+    /// never collide in a shared folder.
+    var slotCacheDir: URL {
+        let dir = AppSupport.directory.appendingPathComponent("slots/\(port)/\(slotKVSignature)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
-    /// A slot only restores into an identical KV layout; separate folders per type
-    /// turn a quant change into a cold prefill instead of a failed restore.
-    private static func slotKVSignature() -> String {
-        let d = UserDefaults.standard
+    /// Active KV layout signature matched against the engine runtime: Dynamic MoE
+    /// reads its resolved plan (or explicit `autoKVMode`) and ignores manual `ctk`/`ctv`,
+    /// while manual / full-GPU runs follow `launchKV`.
+    var slotKVSignature: String {
+        let k: String
+        let v: String
+        if usesAutoPlan {
+            let resolved: String
+            if let pk = plannedKV, Self.kvCacheTypes.contains(pk) {
+                resolved = pk
+            } else if autoKVMode != "auto", Self.kvCacheTypes.contains(autoKVMode) {
+                resolved = autoKVMode
+            } else {
+                resolved = "auto"
+            }
+            k = resolved
+            v = resolved
+        } else {
+            let kv = launchKV
+            k = Self.sanitizedKV(kv.k, default: "f16")
+            v = Self.sanitizedKV(kv.v, default: "f16")
+        }
         // a slot holding media only restores with a projector loaded, so vision state splits it too
-        let vision = d.object(forKey: SettingsKeys.loadVision) as? Bool ?? true
-        return "\(sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeK), default: "f16"))"
-             + "-\(sanitizedKV(d.string(forKey: SettingsKeys.cacheTypeV), default: "f16"))"
-             + (vision ? "-v" : "")
+        return "\(k)-\(v)" + (loadVision ? "-v" : "")
+    }
+
+    private static let activeSettingsLock = NSLock()
+    nonisolated(unsafe) private static var activeSettingsByPort: [Int: ServerSettings] = [:]
+
+    /// Registers or clears the exact launch settings of the live server instance on `port`.
+    static func setActiveSettings(_ settings: ServerSettings?, forPort port: Int) {
+        activeSettingsLock.lock()
+        defer { activeSettingsLock.unlock() }
+        if let settings {
+            activeSettingsByPort[port] = settings
+        } else {
+            activeSettingsByPort.removeValue(forKey: port)
+        }
+    }
+
+    static func activeSettings(forPort port: Int) -> ServerSettings? {
+        activeSettingsLock.lock()
+        defer { activeSettingsLock.unlock() }
+        return activeSettingsByPort[port]
+    }
+
+    /// Resolves effective settings for `port`: uses the running instance's launched settings when
+    /// active against the shared store, else global defaults or the matching multi-server profile.
+    static func settings(forPort port: Int, defaults d: UserDefaults = .standard) -> ServerSettings {
+        if d === UserDefaults.standard, let live = activeSettings(forPort: port) {
+            return live
+        }
+        var s = fromDefaults(d)
+        if s.port == port { return s }
+        if let data = d.data(forKey: ServerManager.multiServerProfilesKey),
+           let profiles = try? JSONDecoder().decode([Profile].self, from: data),
+           let profile = profiles.first(where: { $0.port == port }) {
+            s.applyProfile(profile)
+            return s
+        }
+        s.port = port
+        return s
+    }
+
+    /// Directory where one server's per-conversation KV slot files live using its effective
+    /// configuration (and the model-validated Dynamic MoE plan for `port` when KV is `auto`).
+    static func slotCacheDir(port: Int) -> URL {
+        slotCacheDir(port: port, defaults: .standard)
+    }
+
+    static func slotCacheDir(port: Int, defaults d: UserDefaults,
+                             planLoader: (Int, String) -> AutoMemoryPlan? = AutoMemoryPlan.readPlan(port:forModel:)) -> URL {
+        // A running engine's --slot-save-path is fixed at launch: never replace nil plannedKV
+        // with a plan written later onto disk.
+        if d === UserDefaults.standard, let live = activeSettings(forPort: port) {
+            return live.slotCacheDir
+        }
+        var s = settings(forPort: port, defaults: d)
+        if s.usesAutoPlan, s.autoKVMode == "auto", s.plannedKV == nil,
+           let plan = planLoader(port, s.modelPath),
+           !plan.isUnsupported, plan.nCtx == s.ctx {
+            s.plannedKV = plan.kv
+        }
+        return s.slotCacheDir
+    }
+
+    /// Every KV-layout slot folder already present on disk (`slots/<port>/<kv-signature>`).
+    /// Reads directory entries without creating folders.
+    static func existingSlotCacheDirs(under root: URL = AppSupport.directory.appendingPathComponent("slots")) -> [URL] {
+        let fm = FileManager.default
+        guard let ports = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) else {
+            return []
+        }
+        return ports.flatMap { portDir in
+            (try? fm.contentsOfDirectory(at: portDir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
+        }
     }
 
     /// Slot directory of the primary server (the one the native chat talks to).
@@ -293,7 +382,7 @@ struct ServerSettings {
         if routerMode { return routerArguments }
         // Quantized KV requires FA, so it stays forced. Elsewhere the AMD kernel rides
         // on "auto": an explicit "1" would drop uncovered models to the CPU fallback.
-        let faValue = kvNeedsFlashAttention ? "1" : (effectiveFaAmd ? "auto" : flashAttn)
+        let faValue = effectiveFlashAttn
         var args = [
             "-m", modelPath,
             "-ngl", nglArgument,
@@ -357,10 +446,12 @@ struct ServerSettings {
         if uiMcpProxy { args.append("--ui-mcp-proxy") }
         args += unauthenticatedToolsArguments(toolsEnabled: agentToolsEnabled || !sympyArguments.isEmpty || uiMcpProxy)
         if persistCache && effectiveFaAmd {
-            args += ["--slot-save-path", Self.slotCacheDir(port: port).path]
+            args += ["--slot-save-path", slotCacheDir.path]
         }
         if reasoningInline { args += ["--reasoning-format", "none"] }
-        if let kwargs = defaultTemplateKwargs { args += ["--chat-template-kwargs", kwargs] }
+        for (key, value) in defaultReasoningOptionPairs {
+            args += ["--\(key)", value]
+        }
         if defaultMaxTokens > 0 { args += ["-n", String(defaultMaxTokens)] }
         if apiKeyEnabled { args += ["--api-key", Keychain.apiKey()] }
         // A compatible downloaded DFlash draft takes precedence over embedded MTP.
@@ -504,7 +595,7 @@ struct ServerSettings {
     /// shared engine config plus per-path ncmoe/mmproj/MTP and the model's own extra arguments.
     func routerPresetINI(modelPaths: [String], ncmoeByPath: [String: Int]) -> String {
         // Same FA policy as `arguments`: force only for quantized KV.
-        let faValue = kvNeedsFlashAttention ? "on" : (effectiveFaAmd ? "auto" : flashAttn)
+        let faValue = effectiveFlashAttn == "1" ? "on" : effectiveFlashAttn
         var seenAliases = Set<String>()
         var sections: [String] = []
         for path in modelPaths.sorted() {
@@ -528,8 +619,9 @@ struct ServerSettings {
             }
             if jinja || mmproj != nil { lines.append("jinja = true") }
             lines.append("reasoning-preserve = false")
-            if cacheTypeK != "f16" { lines.append("cache-type-k = \(cacheTypeK)") }
-            if cacheTypeV != "f16" { lines.append("cache-type-v = \(cacheTypeV)") }
+            let kv = launchKV
+            if kv.k != "f16" { lines.append("cache-type-k = \(kv.k)") }
+            if kv.v != "f16" { lines.append("cache-type-v = \(kv.v)") }
             lines.append("cache-ram = \(cacheRAM)")
             if cacheReuse && mmproj == nil { lines.append("cache-reuse = 256") }
             if parallelSlots > 0 { lines.append("parallel = \(parallelSlots)") }
@@ -537,12 +629,14 @@ struct ServerSettings {
             if isSplitting { lines.append("split-mode = \(effectiveSplitMode)") }
             if persistCache && effectiveFaAmd {
                 // the engine rejects a slot path that isn't an existing directory
-                let slotDir = Self.slotCacheDir(port: port).appendingPathComponent(alias)
+                let slotDir = slotCacheDir.appendingPathComponent(alias)
                 try? FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
                 lines.append("slot-save-path = \(slotDir.path)")
             }
             if reasoningInline { lines.append("reasoning-format = none") }
-            if let kwargs = defaultTemplateKwargs { lines.append("chat-template-kwargs = \(kwargs)") }
+            for (key, value) in defaultReasoningOptionPairs {
+                lines.append("\(key) = \(value)")
+            }
             if defaultMaxTokens > 0 { lines.append("n-predict = \(defaultMaxTokens)") }
             if let selection = dflashSelection(modelPath: path, ncmoe: ncmoeByPath[path] ?? 0) {
                 lines.append("model-draft = \(selection.draft)")
@@ -566,9 +660,20 @@ struct ServerSettings {
             }
             let own = Self.routerPresetOptions(Self.extraArgs(forModel: path)).preset
             let ownKeys = Set(own.map(\.key))
+            let reasoningOverride = own.first(where: { $0.key == "reasoning" })?.value.lowercased()
+            let dropsEffort = ownKeys.contains("chat-template-kwargs")
+                || reasoningOverride == "off" || reasoningOverride == "auto"
+            let dropsReasoning = ownKeys.contains("chat-template-kwargs") || ownKeys.contains("reasoning-effort")
             lines.removeAll { line in
                 guard let eq = line.range(of: " = ") else { return false }
-                return ownKeys.contains(String(line[..<eq.lowerBound]))
+                let key = String(line[..<eq.lowerBound])
+                if ownKeys.contains(key) { return true }
+                if key == "reasoning-effort" && dropsEffort { return true }
+                if key == "reasoning" && (ownKeys.contains("chat-template-kwargs")
+                                          || (dropsReasoning && line == "reasoning = off")) {
+                    return true
+                }
+                return false
             }
             lines += own.map { "\($0.key) = \($0.value)" }
             sections.append(lines.joined(separator: "\n"))
@@ -588,6 +693,7 @@ struct ServerSettings {
         "ngld": "gpu-layers-draft", "spec-draft-ngl": "gpu-layers-draft", "n-gpu-layers-draft": "gpu-layers-draft",
         "ctkd": "cache-type-k-draft", "spec-draft-type-k": "cache-type-k-draft",
         "ctvd": "cache-type-v-draft", "spec-draft-type-v": "cache-type-v-draft",
+        "rea": "reasoning",
     ]
 
     /// Options a model's section can carry. The engine refuses the whole preset over a key it does not know,
@@ -601,7 +707,7 @@ struct ServerSettings {
         "gpu-layers-draft", "cache-type-k-draft", "cache-type-v-draft",
         "temp", "top-k", "top-p", "min-p", "repeat-penalty", "presence-penalty", "frequency-penalty", "seed",
         "n-predict", "chat-template", "chat-template-file", "chat-template-kwargs", "jinja", "no-jinja",
-        "reasoning-format", "reasoning-budget", "rope-scaling", "rope-scale", "rope-freq-base", "yarn-orig-ctx",
+        "reasoning", "reasoning-effort", "reasoning-format", "reasoning-budget", "rope-scaling", "rope-scale", "rope-freq-base", "yarn-orig-ctx",
         "lora", "dynamic-moe",
     ]
 
@@ -971,8 +1077,7 @@ struct ServerSettings {
     }
 
     /// Reads persisted settings (same keys as the views' @AppStorage).
-    static func fromDefaults() -> ServerSettings {
-        let d = UserDefaults.standard
+    static func fromDefaults(_ d: UserDefaults = .standard) -> ServerSettings {
         func int(_ key: String, _ def: Int) -> Int { d.object(forKey: key) == nil ? def : d.integer(forKey: key) }
         func bool(_ key: String, _ def: Bool) -> Bool { d.object(forKey: key) == nil ? def : d.bool(forKey: key) }
         return ServerSettings(
@@ -1088,12 +1193,19 @@ struct ServerSettings {
         guard routerMode || Self.modelIsMoE(at: modelPath) else { return nil }
         return ubatch
     }
-    /// Template defaults for requests that set none; the request's own kwargs override them key by key.
-    var defaultTemplateKwargs: String? {
+    /// Effective Flash Attention flag passed to `llama-server` (`1` when quantized KV
+    /// or Dynamic MoE requires it, `auto` for the AMD kernel elsewhere, else the user setting).
+    var effectiveFlashAttn: String {
+        kvNeedsFlashAttention ? "1" : (effectiveFaAmd ? "auto" : flashAttn)
+    }
+
+    /// Native `--reasoning` / `--reasoning-effort` defaults for requests that set none;
+    /// replaces deprecated `--chat-template-kwargs {"enable_thinking":...}` CLI overrides.
+    var defaultReasoningOptionPairs: [(key: String, value: String)] {
         switch defaultReasoning {
-        case "off": return #"{"enable_thinking":false}"#
-        case "low", "medium", "high": return #"{"enable_thinking":true,"reasoning_effort":"\#(defaultReasoning)"}"#
-        default: return nil
+        case "off": return [("reasoning", "off")]
+        case "low", "medium", "high": return [("reasoning", "on"), ("reasoning-effort", defaultReasoning)]
+        default: return []
         }
     }
     /// The engine plans memory: MoE models under Auto or forced Dynamic MoE, on one GPU.
@@ -1673,7 +1785,8 @@ final class ServerManager: ObservableObject {
     /// The instance the chat and benchmark act on.
     @Published var activeID: UUID
 
-    private static let storeKey = "multiServerProfiles"
+    nonisolated static let multiServerProfilesKey = "multiServerProfiles"
+    private static var storeKey: String { multiServerProfilesKey }
     private var pendingPersist: Task<Void, Never>?
 
     private init() {
@@ -1808,11 +1921,7 @@ final class ServerController: ObservableObject {
     func effectiveSettings() -> ServerSettings {
         guard let profile else { return .fromDefaults() }
         var s = ServerSettings.fromDefaults()
-        if let pinned = profile.pinned {
-            s.applyPinned(profile, Set(pinned))
-        } else {
-            s.apply(profile)
-        }
+        s.applyProfile(profile)
         return s
     }
 
@@ -1858,6 +1967,11 @@ final class ServerController: ObservableObject {
     private var healthTask: Task<Void, Never>?
     private var dflashMemoryTask: Task<Void, Never>?
     private var launchedSettings: ServerSettings?
+    private func clearActiveLaunch() {
+        let port = launchedSettings?.port ?? currentPort
+        launchedSettings = nil
+        ServerSettings.setActiveSettings(nil, forPort: port)
+    }
     private var lastStoppedPID: Int32?
     /// After a projector load failure, makes the next launch drop `--mmproj`
     /// (text-only). Reset on every fresh `start()`.
@@ -2038,6 +2152,7 @@ final class ServerController: ObservableObject {
                     return
                 }
                 planned.plannedMode = plan.mode
+                planned.plannedKV = plan.kv
                 self?.autoPlan = plan
             }
             self?.launch(planned)
@@ -2086,6 +2201,8 @@ final class ServerController: ObservableObject {
         consume("\n[ToshLLM] \(problem ?? "Dynamic MoE did not start") — replanning without it\n")
         var retry = settings
         retry.planWithoutDMoE = true
+        retry.plannedMode = nil
+        retry.plannedKV = nil
         stop()
         Task { [weak self] in
             for _ in 0..<40 {
@@ -2148,7 +2265,8 @@ final class ServerController: ObservableObject {
             : settings.manualFullGPU ? "memory=full-gpu (manual)"
             : "ncmoe=\(settings.ncmoe)"
         // the plan sets the cache type itself, so the keys/values pickers would only mislead here
-        let kvLine = settings.usesAutoPlan ? "" : " ctk=\(settings.cacheTypeK) ctv=\(settings.cacheTypeV)"
+        let kv = settings.launchKV
+        let kvLine = settings.usesAutoPlan ? "" : " ctk=\(kv.k) ctv=\(kv.v)"
         var gpuSel = settings.multiGPU ? "split-all" : (settings.gpuIndex >= 0 ? "index \(settings.gpuIndex)" : "default (macOS picks)")
         if settings.isSplitting { gpuSel += " · split-mode \(settings.effectiveSplitMode)" }
         if settings.tensorSplitDowngraded {
@@ -2162,7 +2280,7 @@ final class ServerController: ObservableObject {
          GPUs detected:
         \(gpus.isEmpty ? "    (none)" : gpus)
          GPU select: \(gpuSel) | force-VRAM-buffers: \(env["GGML_METAL_SHARED_BUFFERS_DISABLE"] == "1" ? "yes" : "no")
-         settings: ngl=\(settings.nglArgument) \(moeLine) ctx=\(settings.ctx) fa=\(settings.flashAttn)\(kvLine) cacheRAM=\(settings.cacheRAM)
+         settings: ngl=\(settings.nglArgument) \(moeLine) ctx=\(settings.ctx) fa=\(settings.effectiveFlashAttn)\(kvLine) cacheRAM=\(settings.cacheRAM)
          dflash : \(settings.routerMode ? "per-model router plan" : settings.dflashPlanSummary)
          env: \(envLine)
          args: \(redact(settings.arguments).joined(separator: " "))
@@ -2214,6 +2332,7 @@ final class ServerController: ObservableObject {
                 // A process we already replaced (stop → start) must not touch
                 // the new engine's state, health watch or PID lockfile.
                 guard self.process === proc else { return }
+                self.clearActiveLaunch()
                 self.healthTask?.cancel()
                 self.stopDiscovery()
                 EngineLock.remove(pid: proc.processIdentifier)
@@ -2267,15 +2386,26 @@ final class ServerController: ObservableObject {
         if let plan = autoPlan {
             consume("[ToshLLM] memory plan: \(AutoMemoryText.summary(plan, runtime: nil)) | \(AutoMemoryText.reason(plan))\n")
         }
+        if settings.usesAutoPlan {
+            let recorded = try? String(contentsOf: AutoMemoryPlan.planModelURL(port: settings.port), encoding: .utf8)
+            if recorded != settings.modelPath {
+                AutoMemoryPlan.clearPlan(port: settings.port)
+            }
+        }
         do {
             try p.run()
             process = p
+            if settings.usesAutoPlan {
+                AutoMemoryPlan.recordModel(settings.modelPath, port: settings.port)
+            }
+            ServerSettings.setActiveSettings(settings, forPort: settings.port)
             EngineLock.add(pid: p.processIdentifier)
             // A fresh engine starts with empty KV slots; tell the chat so it
             // re-restores the active conversation's persisted cache on next turn.
             NotificationCenter.default.post(name: .engineDidStart, object: nil)
             watchHealth(port: settings.port)
         } catch {
+            clearActiveLaunch()
             state = .failed("No se pudo lanzar: \(error.localizedDescription)")
         }
     }
@@ -2382,7 +2512,11 @@ final class ServerController: ObservableObject {
             // handler's guard skips its own removal.
             EngineLock.remove(pid: pid)
             let prewarm = prewarmActive
-            let port = currentPort
+            let port = launchedSettings?.port ?? currentPort
+            let slotFileName = prewarm
+                ? (launchedSettings?.slotCacheDir ?? ServerSettings.slotCacheDir(port: port))
+                    .appendingPathComponent("external.bin").lastPathComponent
+                : ""
             // SIGKILL fallback in case the deferred terminate stalls: the engine's
             // working set has to be freed.
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 6) {
@@ -2395,8 +2529,7 @@ final class ServerController: ObservableObject {
                 // launch can restore the fixed external-client prefix. Best-effort,
                 // bounded; terminate runs even if the save fails or times out.
                 Task.detached {
-                    await ServerController.slotAction("save", port: port,
-                                                      file: ServerController.externalSlotFile(port: port).lastPathComponent)
+                    await ServerController.slotAction("save", port: port, file: slotFileName)
                     p.terminate()
                 }
             } else {
@@ -2406,6 +2539,7 @@ final class ServerController: ObservableObject {
             EngineLock.remove(pid: pid)
         }
         process = nil
+        clearActiveLaunch()
         state = .stopped
         startedAt = nil
     }
@@ -2421,7 +2555,16 @@ final class ServerController: ObservableObject {
         activeDflashModelPath = nil
         dflashAcceptance = nil
         stopDiscovery()
-        defer { process = nil; state = .stopped }
+        let port = launchedSettings?.port ?? currentPort
+        let slotFileName = prewarmActive
+            ? (launchedSettings?.slotCacheDir ?? ServerSettings.slotCacheDir(port: port))
+                .appendingPathComponent("external.bin").lastPathComponent
+            : ""
+        defer {
+            process = nil
+            clearActiveLaunch()
+            state = .stopped
+        }
         guard let p = process else {
             if let pid = lastStoppedPID { EngineLock.remove(pid: pid) }
             return
@@ -2431,9 +2574,7 @@ final class ServerController: ObservableObject {
         Self.reapChildren(of: pid)
         EngineLock.remove(pid: pid)
         if prewarmActive {
-            Self.slotSaveBlocking(port: currentPort,
-                                  file: Self.externalSlotFile(port: currentPort).lastPathComponent,
-                                  timeout: 10)
+            Self.slotSaveBlocking(port: port, file: slotFileName, timeout: 10)
         }
         p.terminate()
         var waited = 0
@@ -2491,9 +2632,11 @@ final class ServerController: ObservableObject {
 
     /// Restore the saved external-client prefix into slot 0 (only if a file exists).
     private func restoreExternalSlot(port: Int) async {
+        let slotFile = (launchedSettings?.slotCacheDir ?? ServerSettings.slotCacheDir(port: port))
+            .appendingPathComponent("external.bin")
         guard prewarmActive,
-              FileManager.default.fileExists(atPath: Self.externalSlotFile(port: port).path) else { return }
-        await Self.slotAction("restore", port: port, file: Self.externalSlotFile(port: port).lastPathComponent)
+              FileManager.default.fileExists(atPath: slotFile.path) else { return }
+        await Self.slotAction("restore", port: port, file: slotFile.lastPathComponent)
     }
 
     private var isFailed: Bool { if case .failed = state { return true }; return false }

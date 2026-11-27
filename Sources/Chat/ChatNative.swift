@@ -692,11 +692,20 @@ final class ChatStore: ObservableObject {
         conversations.removeAll { $0.id == c.id }
         if currentID == c.id { currentID = conversations.first?.id }
         if conversations.isEmpty { newConversation() }
-        // Drop its persisted KV slot file too, and forget it if it was loaded.
-        try? FileManager.default.removeItem(
-            at: ServerSettings.primarySlotCacheDir.appendingPathComponent(Self.slotFile(c.id)))
+        // Drop its persisted KV slot file across any port/KV folder, and forget it if loaded.
+        Self.removeSlotFiles(named: [Self.slotFile(c.id)])
         if slotConvID == c.id { slotConvID = nil }
         save()
+    }
+
+    private static func removeSlotFiles(named names: [String]) {
+        guard !names.isEmpty else { return }
+        let fm = FileManager.default
+        for dir in ServerSettings.existingSlotCacheDirs() {
+            for name in names {
+                try? fm.removeItem(at: dir.appendingPathComponent(name))
+            }
+        }
     }
 
     /// The live store, so the settings window (which has no access to the chat
@@ -707,13 +716,14 @@ final class ChatStore: ObservableObject {
     /// outlive the chat window, and then nothing holds them in memory.
     static func eraseStoredConversations() {
         try? FileManager.default.removeItem(at: AppSupport.directory.appendingPathComponent("conversations.json"))
-        let slots = ServerSettings.primarySlotCacheDir
-        guard let files = try? FileManager.default.contentsOfDirectory(at: slots,
-                                                                      includingPropertiesForKeys: nil)
-        else { return }
-        for f in files where f.pathExtension == "bin"
-            && UUID(uuidString: f.deletingPathExtension().lastPathComponent) != nil {
-            try? FileManager.default.removeItem(at: f)
+        for slots in ServerSettings.existingSlotCacheDirs() {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: slots,
+                                                                          includingPropertiesForKeys: nil)
+            else { continue }
+            for f in files where f.pathExtension == "bin"
+                && UUID(uuidString: f.deletingPathExtension().lastPathComponent) != nil {
+                try? FileManager.default.removeItem(at: f)
+            }
         }
     }
 
@@ -726,10 +736,7 @@ final class ChatStore: ObservableObject {
         agentContext = nil
         queuedMessage = nil
         task?.cancel()
-        for c in conversations {
-            try? FileManager.default.removeItem(
-                at: ServerSettings.primarySlotCacheDir.appendingPathComponent(Self.slotFile(c.id)))
-        }
+        Self.removeSlotFiles(named: conversations.map { Self.slotFile($0.id) })
         conversations.removeAll()
         slotConvID = nil
         currentID = nil
@@ -1893,7 +1900,7 @@ final class ChatStore: ObservableObject {
     func prepareSlot(convID: UUID, port: Int) async {
         guard slotPersistEnabled, slotConvID != convID else { return }
         // No file yet (new conversation or KV layout change): skip the failing restore.
-        let file = ServerSettings.primarySlotCacheDir.appendingPathComponent(Self.slotFile(convID))
+        let file = ServerSettings.slotCacheDir(port: port).appendingPathComponent(Self.slotFile(convID))
         guard FileManager.default.fileExists(atPath: file.path) else { slotConvID = convID; return }
         await slotAction("restore", convID: convID, port: port)
         slotConvID = convID
@@ -1905,18 +1912,21 @@ final class ChatStore: ObservableObject {
         await slotAction("save", convID: convID, port: port)
     }
 
-    /// Drop slot files with no matching conversation (deleted while disabled, or
-    /// left over). Bounds disk use to the conversations that still exist.
+    /// Drop slot files with no matching conversation across any port/KV folder
+    /// (deleted while disabled, or left over). Bounds disk use while keeping external.bin.
     private func pruneOrphanSlots() {
-        let dir = ServerSettings.primarySlotCacheDir
-        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         let ids = Set(conversations.map { $0.id.uuidString })
-        for f in files where f.pathExtension == "bin" {
-            let base = f.deletingPathExtension().lastPathComponent
-            // Only prune per-conversation slot files (named by UUID); leave other
-            // files like the external-client prefix (external.bin) untouched.
-            guard UUID(uuidString: base) != nil else { continue }
-            if !ids.contains(base) { try? FileManager.default.removeItem(at: f) }
+        for dir in ServerSettings.existingSlotCacheDirs() {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+                continue
+            }
+            for f in files where f.pathExtension == "bin" {
+                let base = f.deletingPathExtension().lastPathComponent
+                // Only prune per-conversation slot files (named by UUID); leave other
+                // files like the external-client prefix (external.bin) untouched.
+                guard UUID(uuidString: base) != nil else { continue }
+                if !ids.contains(base) { try? FileManager.default.removeItem(at: f) }
+            }
         }
     }
 

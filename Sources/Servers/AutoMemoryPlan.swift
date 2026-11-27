@@ -112,8 +112,28 @@ struct AutoMemoryPlan: Decodable, Equatable {
         return dir.appendingPathComponent("plan-\(port).json")
     }
 
+    static func planModelURL(port: Int) -> URL {
+        URL(fileURLWithPath: planURL(port: port).path + ".model")
+    }
+
     static func runtimeURL(port: Int) -> URL {
         URL(fileURLWithPath: planURL(port: port).path + ".runtime")
+    }
+
+    /// Associates the persisted plan file for `port` with the model it was planned for so
+    /// switching models at the same context size cannot reuse an outdated plan's KV cache.
+    static func recordModel(_ modelPath: String, port: Int) {
+        let url = planModelURL(port: port)
+        guard !modelPath.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try? modelPath.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    static func clearPlan(port: Int) {
+        try? FileManager.default.removeItem(at: planURL(port: port))
+        try? FileManager.default.removeItem(at: planModelURL(port: port))
     }
 
     private static let decoder: JSONDecoder = {
@@ -140,7 +160,11 @@ struct AutoMemoryPlan: Decodable, Equatable {
                 let out = Pipe()
                 p.standardOutput = out
                 p.standardError = FileHandle.nullDevice
-                guard (try? p.run()) != nil else { cont.resume(returning: nil); return }
+                guard (try? p.run()) != nil else {
+                    clearPlan(port: settings.port)
+                    cont.resume(returning: nil)
+                    return
+                }
                 let timer = DispatchWorkItem { if p.isRunning { p.terminate() } }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 180, execute: timer)
                 let data = out.fileHandleForReading.readDataToEndOfFile()
@@ -148,13 +172,28 @@ struct AutoMemoryPlan: Decodable, Equatable {
                 timer.cancel()
                 let line = String(decoding: data, as: UTF8.self)
                     .split(separator: "\n").last(where: { $0.hasPrefix("{") }).map(String.init)
-                cont.resume(returning: line.flatMap { decode(Data($0.utf8)) })
+                let plan = line.flatMap { decode(Data($0.utf8)) }
+                if plan != nil {
+                    recordModel(settings.modelPath, port: settings.port)
+                } else {
+                    clearPlan(port: settings.port)
+                }
+                cont.resume(returning: plan)
             }
         }
     }
 
     static func readPlan(port: Int) -> AutoMemoryPlan? {
         (try? Data(contentsOf: planURL(port: port))).flatMap(decode)
+    }
+
+    /// Reads the saved plan for `port` only when its recorded sidecar confirms it was
+    /// generated for `modelPath`.
+    static func readPlan(port: Int, forModel modelPath: String) -> AutoMemoryPlan? {
+        guard !modelPath.isEmpty,
+              let recorded = try? String(contentsOf: planModelURL(port: port), encoding: .utf8),
+              recorded == modelPath else { return nil }
+        return readPlan(port: port)
     }
 }
 
