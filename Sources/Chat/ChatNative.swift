@@ -892,7 +892,6 @@ final class ChatStore: ObservableObject {
               sampling: ChatSamplingSettings = ChatSamplingSettings(),
               modalities: ModelModalities? = nil) {
         guard !generating, let i = currentIndex else { return }
-        lastError = nil
         pendingAgentContinuation = nil
         queuedMessage = nil
         agentContext = nil
@@ -939,6 +938,7 @@ final class ChatStore: ObservableObject {
                         agentDeclined: Bool = false) {
         generating = true
         generatingConvID = conversations[i].id
+        lastError = nil
         live.reset()
         // The user can switch or delete conversations mid-stream; the result
         // must land in the one this request started from, found by id.
